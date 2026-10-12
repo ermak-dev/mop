@@ -203,7 +203,9 @@ def text(v):
         if v.get("owner_note"):
             out += f"; {v['owner_note']}"
         if wait:
-            out += f", idle: {v.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
+            # Причина ошибки наблюдения (#574) -- вместо безымянного «не
+            # дождался»: узел сказал, чем кончилось ожидание.
+            out += f", idle: {v.get('idle_error') or v.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
         if v.get("notify"):
             out += "; will notify when it frees up"
     elif v["kind"] == "local" and wait:

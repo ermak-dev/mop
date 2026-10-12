@@ -41,6 +41,7 @@ if __name__ == "__main__":
     sys.exit(program.main(sys.argv[1:]))
 
 import asyncio  # noqa: E402
+import base64
 import json
 import os
 import re
@@ -300,21 +301,66 @@ def _last_json(out):
     return None
 
 
+# Страж владения в шелле передачи (#review574-1): подготовка и передача --
+# два шелла, и между ними владение могло уйти (force). Гасим передачу ДО
+# session.py, нечему стартовать под чужой identity; марку знает только
+# session_json, мастера читают готовое слово.
+_LOST_OWNERSHIP = "mop574-lost-ownership"
+
+
+def _guarded_send(name, undo, req):
+    """Шелл передачи со стражем владения (#review574-1). -> строка.
+
+    session.py send -- под предусловием «в файле аренды всё ещё наша
+    запись» (как у _unclaim, #189): чужой захват между подготовкой и
+    передачей гасит передачу раньше, чем сообщение уйдёт в тело. Без
+    захвата (self-declared, повторный send своего) -- стража нет: файл
+    может быть и чужим, политика self-declared -- аренды не касается."""
+    if not undo:
+        return _session_cmd("send", clone_dir(name), req["message"],
+                            "--priority", req.get("priority", "next"),
+                            "--from-name", req.get("from_name", "mop"),
+                            "--wait", 0)
+    q = shlex.quote
+    path, _owner, mine, _generation = undo
+    # Страж гасит передачу ДО session.py (exit 0 -- об ошибке говорит марка,
+    # не код: код -- про сам шелл): сообщение обязано не уйти в тело.
+    return (f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] '
+            f"|| {{ echo {_LOST_OWNERSHIP}; exit 0; }}; "
+            + _session_cmd("send", clone_dir(name), req["message"],
+                           "--priority", req.get("priority", "next"),
+                           "--from-name", req.get("from_name", "mop"),
+                           "--wait", 0))
+
+
 async def session_json(name, script, timeout=20):
     """Ответ session.py, который печатает JSON (send, wait-idle).
 
-    Тишина тела (код None) помечена timeout (#574): v_send отличает
-    «не доехало достоверно» от «неизвестно» -- второе не откатывает ни
-    аренду, ни identity: сообщение могло дойти, и откат испортил бы
-    чужой ход."""
+    Страж владения погасил передачу (#review574-1) -- подтверждённая
+    недоставка с понятной причиной: владение ушло между подготовкой и
+    передачей, откатывать пару можно и нужно.
+
+    Тишина тела (код None) и ответ без итоговой JSON-строки (разрыв
+    транспорта: мусор ssh, обрыв соединения) -- исход НЕОПРЕДЕЛЁННЫЙ, и
+    оба помечены timeout (#review574-7): v_send отличает «не доехало
+    достоверно» (структурированный {"error": …} от session.py) от «не
+    известно, доехало ли» -- второе не откатывает ни аренду, ни identity:
+    сообщение могло дойти, и откат испортил бы чужой ход. Подтверждённый
+    отказ -- только структурированный ответ session.py, угадывание по
+    строкам мусора -- не способ."""
     out, code = await bsh(name, script, timeout)
+    if _LOST_OWNERSHIP in out.splitlines():
+        return {"error": f"{name}: the lease was taken over before the message "
+                         f"was handed off"}
     if code is None:
         return {"error": f"{name}: the body did not answer in {timeout}s",
                 "timeout": True}
     got = _last_json(out)
     if got is not None:
         return got
-    return {"error": out.strip() or f"session.py exit {code}"}
+    return {"error": (out.strip() or f"session.py exit {code}")
+            + " — no parsable answer, delivery unknown",
+            "timeout": True}
 
 
 async def facts(name):
@@ -596,12 +642,11 @@ async def _unclaim(name, undo):
 
 
 def _identity_of(claims, generation):
-    """Прежняя identity захвата из реестра (#574). -> профиль | None |
-    «поля нет»-маркер.
+    """Прежний снимок захвата из реестра (#574). -> снимок | «поля нет»-маркер.
 
     Маркер MISSING -- identity при этом захвате не трогали (self-declared
-    владелец, захват без установки): восстановления тоже нет. Профиль или
-    None из четвёртого поля -- снимок шелла установки."""
+    владелец, захват без установки): восстановления тоже нет. Снимок из
+    четвёртого поля -- {'identity': …, 'hooks': …} от шелла установки."""
     got = claims.get(generation)
     if got is None or len(got) < 4:
         return _NO_IDENTITY_TOUCH
@@ -624,14 +669,15 @@ async def _restore_identity(name, undo, claims, generation):
 
     Что восстанавливать -- снимок в реестре, а не новый вопрос серверу:
     удалённый профиль к моменту отката мог измениться, а прежнее состояние
-    обязано вернуться согласованным -- той парой, что стояла в клоне на
-    момент установки нашей. Цепочка та же, что у файла (#573): проваленные
-    звенья перепрыгиваем, восстанавливаем снимок звена, на котором
-    остановились. Экран тот же: живой или завершённый захват поверх --
-    identity не трогаем, это уже чужая пара. Снятие и установка -- один
-    identity_script: снимок печатается ДО записи, чужие хуки и hooksPath
-    он не трогает, а страж прежнего владельца вернётся вместе с профилем.
-    Ошибка шелла -- неудача отката с причиной (#181), не молчание."""
+    обязано вернуться согласованным -- той парой и теми хуками, что стояли
+    в клоне на момент установки нашей. Цепочка та же, что у файла (#573):
+    проваленные звенья перепрыгиваем, восстанавливаем снимок звена, на
+    котором остановились. Экран тот же: живой или завершённый захват поверх
+    -- identity не трогаем, это уже чужая пара. Снимок не читан -- прежнее
+    состояние неизвестно: «восстановить пустоту» нельзя, отказ с причиной
+    (#181); клон остаётся под последней поставленной identity, и разбирать
+    это оператору, а не молча перезаписывать. Ошибка шелла -- неудача
+    отката с причиной, без строк снимка."""
     path, _owner, mine, _gen = undo
     g = generation
     while _predecessor(claims, g) is not None:
@@ -639,12 +685,15 @@ async def _restore_identity(name, undo, claims, generation):
         if claims[prev][0] != "failed":
             break
         g = prev
-    want = _identity_of(claims, g)
-    if want is _NO_IDENTITY_TOUCH:
+    snap = _identity_of(claims, g)
+    if snap is _NO_IDENTITY_TOUCH:
         return None
-    out, code = await bsh(name, identity_script(clone_dir(name), path, mine, want))
+    script = _restore_script(clone_dir(name), path, mine, snap)
+    if script is None:
+        return "git identity not restored: the prior state snapshot is unreadable"
+    out, code = await bsh(name, script)
     if code != 0:
-        return f"git identity not restored: {why(out, code)}"
+        return f"git identity not restored: {_why_marked(out, code)}"
     return None
 
 
@@ -744,10 +793,14 @@ exit 0
 """
 
 
-def _hooks_dir(clone):
-    """Шелл: каталог хуков клона в $hooks; клона нет -- выход без ошибки."""
-    return (f"hooks=$(git -C {shlex.quote(clone)} rev-parse --absolute-git-dir 2>/dev/null)"
-            f"/hooks; [ \"$hooks\" != /hooks ] || exit 0; ")
+def _hooks_var(clone):
+    """Шелл: каталог хуков клона в $hooks. Нет git-каталога -- $hooks пуст.
+
+    Без выхода из скрипта: пустой $hooks (значение «/hooks») -- управлять
+    хуками нельзя, и скрипт говорит об этом строкой, а не молча выходит:
+    выход здесь резал бы и установку identity, что стоит раньше."""
+    return (f"hooks=$(git -C {shlex.quote(clone)} rev-parse --absolute-git-dir "
+            f"2>/dev/null)/hooks; ")
 
 
 def _ours(f):
@@ -755,17 +808,144 @@ def _ours(f):
     return f"sed -n 2p {f} | grep -qxF {shlex.quote(OWNER_GUARD)}"
 
 
+# Снимок прежнего состояния клона (#574, #review574-2..5). Каждый ключ
+# identity -- присутствие и значение ОТДЕЛЬНО: «ключа нет» и «ключ пуст» --
+# разные состояния, и восстанавливать их надо по-разному. Свои хуки стража --
+# тремя состояниями: A (не было), F (чужой), O (наш: режим и тело). Чужие
+# хуки и core.hooksPath в снимок не входят -- их не трогаем вовсе. Нет
+# строки -- секция не читана (старый/чужой шелл): «не читано» -- не «пусто».
+def _snap_lines(out):
+    """Строки снимка identity из вывода identity_script. -> {ключ: значение}.
+
+    Значение None -- ключа не было (метка «-»); строка -- фактическое
+    значение, пустое включительно."""
+    got = {}
+    for line in out.splitlines():
+        for key in ("name", "email"):
+            mark = f"mop574-{key}\t"
+            if line.startswith(mark):
+                value = line[len(mark):]
+                got[key] = None if value == "-" else value
+    return got
+
+
+def _hook_lines(out):
+    """Строки снимка своих хуков. -> {хук: (A|F|O, режим, тело)}.
+
+    Режим и тело -- только у O; A и F различить обязан сам факт состояния.
+    Нераспознанная строка -- «?»: снимок повреждён, восстановление его не
+    примет."""
+    got = {}
+    for line in out.splitlines():
+        for h in GUARDED_HOOKS:
+            mark = f"mop574-hook-{h}\t"
+            if not line.startswith(mark):
+                continue
+            state, _, tail = line[len(mark):].partition("\t")
+            if state in ("A", "F"):
+                got[h] = (state, None, None)
+            elif state == "O":
+                mode, _, b64 = tail.partition("\t")
+                try:
+                    got[h] = ("O", mode, base64.b64decode(b64).decode())
+                except (ValueError, UnicodeDecodeError):
+                    got[h] = ("?", None, None)
+            else:
+                got[h] = ("?", None, None)
+    return got
+
+
+def _snapshot(out):
+    """Полный снимок прежнего состояния клона. -> {'identity': …, 'hooks': …}.
+
+    Секция None -- не читана (меток нет): восстановление обязано отказаться,
+    а не «восстановить пустоту». identity читана, когда есть обе её метки;
+    hooks -- когда есть метка каждого стража."""
+    ident = _snap_lines(out)
+    ident = ident if set(ident) == {"name", "email"} else None
+    hooks = _hook_lines(out)
+    hooks = hooks if set(hooks) == set(GUARDED_HOOKS) else None
+    return {"identity": ident, "hooks": hooks}
+
+
+def _why_marked(out, code):
+    """Причина отказа шелла без строк снимка (#review574-5).
+
+    Метки mop574-* несут прежнюю пару и тела хуков -- диагностике они не
+    нужны, а в журнале им не место: причина отказа -- про сам отказ."""
+    clean = "\n".join(l for l in out.splitlines() if not l.startswith("mop574-"))
+    return why(clean, code)
+
+
+def _unset(git, key, back=""):
+    """Шелл: снять ключ, терпя его отсутствие (#review574-3).
+
+    Код 5 -- ключа нет, это успех снятия; 255 (config.lock занят) и прочие
+    ненулевые -- отказ записи: остановиться ДО установки нового, откатив
+    применённое (back), -- сообщение под неподтверждённой подготовкой не
+    уходит."""
+    fail = f"{{ {back}exit 1; }}" if back else "exit 1"
+    return f"{git} --unset-all user.{key} || [ $? -eq 5 ] || {fail}; "
+
+
+def _restore_script(clone, path, mine, snap):
+    """Скрипт восстановления прежней пары и своих хуков из снимка. Чистая.
+
+    Только пока в файле аренды наша запись (#189). Каждый ключ -- по своему
+    присутствию в снимке: был -- вернуть значение (пустое включительно), не
+    был -- снять. Свои хуки -- по состоянию: A -- снести наши (их не было),
+    O -- воссоздать с прежним режимом и телом, F -- не трогать (чужой и
+    тогда, и теперь). Секция identity не читана -- восстановление
+    невозможно: вернуть «пустоту» вместо прежней пары хуже, чем оставить
+    как есть и отказаться с причиной."""
+    if snap["identity"] is None:
+        return None
+    q = shlex.quote
+    parts = [f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] '
+             f"|| exit 0; "]
+    git = f"git -C {q(clone)} config --local"
+    for key in ("name", "email"):
+        value = snap["identity"][key]
+        parts.append(_unset(git, key))
+        if value is not None:
+            parts.append(f"{git} user.{key} {q(value)} || exit 1; ")
+    if snap["hooks"] is not None:
+        parts.append(_hooks_var(clone))
+        for h in GUARDED_HOOKS:
+            v = h.replace("-", "_")
+            f = f"$hooks/{h}"
+            state, mode, body = snap["hooks"][h]
+            if state == "O":
+                b64 = base64.b64encode(body.encode()).decode()
+                parts.append(f'if [ -e {f} ] && ! {_ours(chr(34) + f + chr(34))}; then '
+                             f'echo "hook {h} is not ours anymore, kept"; else '
+                             f'printf %s {q(b64)} | base64 -d > {f}.mop && '
+                             f'chmod {mode} {f}.mop && mv -f {f}.mop {f} || exit 1; fi; ')
+            elif state == "A":
+                parts.append(f'[ -f {f} ] && {_ours(chr(34) + f + chr(34))} '
+                             f'&& rm -f {f}; ')
+    parts.append("exit 0")
+    return "".join(parts)
+
+
 def identity_script(clone, path, mine, profile):
     """Скрипт: identity владельца в клон (repo-local) или снять её. Чистая.
 
     Только пока в файле аренды наша запись (как _unclaim, #189): пока шла
     доставка и вопрос серверу, аренду мог забрать другой, и его identity
-    перетирать нельзя. Снятие отсутствующего ключа -- не ошибка.
+    перетирать нельзя.
 
-    Прежняя identity печатается метками mop574-name/email ДО записи (#574):
-    один шелл -- снимок и установка, восстанавливать провалившаяся доставка
-    будет тем же скриптом с прежним профилем, а не новым вопросом серверу,
-    чей ответ к тому моменту мог измениться.
+    Прежнее состояние печатается метками mop574-* ДО первой записи
+    (#review574-4/5): один шелл -- снимок и установка, разделить их нельзя.
+    Присутствие каждого ключа метится отдельно («-» -- ключа нет; пустая
+    строка -- ключ есть и пуст), свои хуки -- состояниями A/F/O с режимом и
+    телом. Чужие хуки и core.hooksPath в снимок не входят -- их не трогаем.
+
+    Установка атомарна (#review574-2): точка отказа после частичной записи
+    откатывает уже применённое теми же переменными, что напечатал снимок,
+    и останавливается ДО установки нового. Снятие отсутствующего ключа
+    (код 5) -- успех, отказ записи (255, config.lock) -- ошибка, и отказ
+    называет причину (#181) без строк снимка.
 
     Вместе с identity -- страж владельца (#313), хуки GUARDED_HOOKS. Чужой
     хук (без метки) не перезаписывается; core.hooksPath задан -- git
@@ -774,24 +954,59 @@ def identity_script(clone, path, mine, profile):
     q = shlex.quote
     guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
     git = f"git -C {q(clone)} config --local"
-    snap = "".join(
-        f"printf 'mop574-{k}\\t%s\\n' \"$({git} user.{k} 2>/dev/null)\"; " for k in ("name", "email"))
+    # Снимок прежней пары: присутствие отдельно от значения; в те же
+    # переменные v_* смотрит откат частичной установки ниже.
+    read = "".join(
+        f"v_{k}=$({git} user.{k} 2>/dev/null) || v_{k}=-; "
+        f"printf 'mop574-{k}\\t%s\\n' \"$v_{k}\"; " for k in ("name", "email"))
+    # Снимок своих хуков: A/F/O, у O -- режим и тело; переменные st_/m_
+    # смотрит тот же откат. Дефис в имени хука в переменную не входит --
+    # потому индексы с подчёркиванием.
+    snap_hooks = "".join(
+        f'f_{h.replace("-", "_")}="$hooks/{h}"; '
+        f'if [ "$hooks" != /hooks ] && [ -e "$f_{h.replace("-", "_")}" ]; then '
+        f'if {_ours(chr(34) + "$f_" + h.replace("-", "_") + chr(34))}; then '
+        f'st_{h.replace("-", "_")}=O; m_{h.replace("-", "_")}='
+        f'$(stat -c %a "$f_{h.replace("-", "_")}"); '
+        f'printf \'mop574-hook-{h}\\tO\\t%s\\t%s\\n\' '
+        f'"$m_{h.replace("-", "_")}" "$(base64 -w0 "$f_{h.replace("-", "_")}")"; '
+        f'else st_{h.replace("-", "_")}=F; printf \'mop574-hook-{h}\\tF\\n\'; fi; '
+        f'else st_{h.replace("-", "_")}=A; printf \'mop574-hook-{h}\\tA\\n\'; fi; '
+        for h in GUARDED_HOOKS)
+    # Откат частичной установки: прежняя пара и свои хуки по переменным
+    # снимка. Лучшее усилие (`|| :`): мы уже отказываем, и неудача отката
+    # не должна прятать исходную причину отказа.
+    v = [h.replace("-", "_") for h in GUARDED_HOOKS]
+    back = "".join(
+        f"{git} --unset-all user.{k} || :; "
+        f'[ "$v_{k}" = - ] || {git} user.{k} "$v_{k}" || :; '
+        for k in ("name", "email"))
+    back += "".join(
+        f'[ "$st_{x}" = A ] && [ -f "$f_{x}" ] '
+        f'&& {_ours(chr(34) + "$f_" + x + chr(34))} && rm -f "$f_{x}" || :; '
+        f'[ "$st_{x}" = O ] && chmod "$m_{x}" "$f_{x}" || :; '
+        for x in v)
     if profile:
-        install = "".join(
-            f'f="$hooks/{h}"; if [ -e "$f" ] && ! {_ours(chr(34) + "$f" + chr(34))}; then '
+        set_new = (f"{git} user.name {q(profile['name'])} && "
+                   f"{git} user.email {q(profile['email'])} "
+                   f"|| {{ {back}exit 1; }}; ")
+        manage = 'mkdir -p "$hooks"; ' + "".join(
+            f'if [ -e "$f_{x}" ] && ! {_ours(chr(34) + "$f_" + x + chr(34))}; then '
             f'echo "owner guard skipped: the project has its own {h}"; else '
-            f'printf %s {q(owner_hook())} > "$f.mop" && chmod 755 "$f.mop" && '
-            f'mv -f "$f.mop" "$f" || exit 1; fi; ' for h in GUARDED_HOOKS)
-        return guard + snap + (f"{git} user.name {q(profile['name'])} && "
-                               f"{git} user.email {q(profile['email'])} || exit 1; "
-                               + _hooks_dir(clone)
-                               + f'if [ -n "$(git -C {q(clone)} config core.hooksPath)" ]; then '
-                               f'echo "owner guard skipped: core.hooksPath is set"; exit 0; fi; '
-                               f'mkdir -p "$hooks"; ' + install + "exit 0")
-    remove = "".join(f'f="$hooks/{h}"; [ -f "$f" ] && {_ours(chr(34) + "$f" + chr(34))} '
-                     f'&& rm -f "$f"; ' for h in GUARDED_HOOKS)
-    return guard + snap + (f"{git} --unset-all user.name; {git} --unset-all user.email; "
-                           + _hooks_dir(clone) + remove + "exit 0")
+            f'printf %s {q(owner_hook())} > "$f_{x}.mop" && chmod 755 "$f_{x}.mop" && '
+            f'mv -f "$f_{x}.mop" "$f_{x}" || {{ {back}exit 1; }}; fi; '
+            for h, x in zip(GUARDED_HOOKS, v))
+    else:
+        set_new = _unset(git, "name", back) + _unset(git, "email", back)
+        manage = "".join(
+            f'[ -f "$f_{x}" ] && {_ours(chr(34) + "$f_" + x + chr(34))} '
+            f'&& rm -f "$f_{x}"; ' for x in v)
+    skip = (f'if [ -n "$(git -C {q(clone)} config core.hooksPath)" ]; then '
+            f'echo "owner guard skipped: core.hooksPath is set"; '
+            f'elif [ "$hooks" = /hooks ]; then '
+            f'echo "owner guard skipped: no git directory"; '
+            f'else {manage}fi; ')
+    return guard + _hooks_var(clone) + read + snap_hooks + set_new + skip + "exit 0"
 
 
 def _identity_snapshot(out):
@@ -817,13 +1032,19 @@ async def _install_identity(conn, name, login, undo):
 
     Зовут под замком папета вслед за _claim: захват, identity, доставка --
     и только тогда чужой send. Ошибка шелла -- неудача подготовки: задание
-    не уходит под неверной identity, и отказ называет причину (#181)."""
+    не уходит под неверной identity, и отказ называет причину (#181) без
+    строк снимка. Снимок не читан (меток нет) -- подготовки тоже нет:
+    прежнее состояние неизвестно, и доставлять под ним нельзя."""
     profile, missing = await owner_profile(conn, name, login)
     path, _owner, mine, _generation = undo  # поколение -- только откату (#573)
     out, code = await bsh(name, identity_script(clone_dir(name), path, mine, profile))
+    snap = _snapshot(out)
     if code != 0:
-        return None, f"git identity not set: {why(out, code)}", None
-    snap = _identity_snapshot(out)
+        # Точка отказа уже откатила применённое внутри шелла (по переменным
+        # снимка, #review574-2); здесь -- только причина, без прежней пары.
+        return None, f"git identity not set: {_why_marked(out, code)}", None
+    if snap["identity"] is None:
+        return None, "git identity not set: the prior state snapshot is unreadable", None
     if profile:
         # Пропуск стража (#313) -- тем же текстом, что сказал скрипт.
         skipped = "; ".join(l.strip() for l in out.splitlines() if "skipped" in l)
@@ -840,49 +1061,56 @@ async def v_send(conn, req):
     мастера. Отсюда push без опроса — и без потока внутри MCP-сервера, который
     раньше ждал простоя, сидя в аллокации.
 
-    Порядок #574: захват -> identity -> доставка. Прежняя identity стоит в
-    клоне, пока тело получает первое сообщение, и весь ход идёт под
-    именем подтверждённого владельца, а не прежнего. Ожидание простоя
-    (до IDLE_WAIT) -- ВНЕ критической секции: доставка уходит с --wait 0,
-    простой ждёт отдельный глагол session.py wait-idle, и ошибка ожидания --
-    не недоставка уже доставленного."""
+    Порядок #574: захват -> identity -> доставка. Короткая секция замка
+    закрывает подготовку и подтверждает владение; сама передача стоит вне
+    замка, но СТРАЖЕМ ВЛАДЕНИЯ в том же шелле (#review574-1, вторая ветка
+    матрицы): пока A готовился и стоял у передачи, B(force) мог взять
+    владение -- тогда страж видит в файле чужую запись и гасит передачу ДО
+    session.py: сообщение не уходит под чужой identity, A получает отказ
+    «владение ушло» и согласованный откат. Так замок остаётся коротким
+    (окно -- вопрос профилю и шелл установки, не 600 секунд простоя, и
+    гонки #573/#189 живут как жили), а окно между подготовкой и передачей
+    всё равно закрыто -- самим файлом аренды, а не длительностью замка.
+    Ожидание простоя -- отдельный глагол session.py wait-idle, и ошибка
+    ожидания -- не недоставка уже доставленного."""
     name = req["name"]
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
     me, verified = lease.caller(req)
+    script = None
     async with _owner_locks.setdefault(name, asyncio.Lock()):
         refused, undo, note = await _claim(name, req)
         if refused:
             return {"error": refused}
-        # Захват -> identity -> доставка: всё под одним замком, окно --
-        # вопрос профилю (IDENTITY_WAIT) и один шелл, не 600 секунд простоя.
-        # Ошибка подготовки -- отказ ДО доставки: задание не уходит под
-        # неверной identity (снимок и запись неразделимы, откатывать нечего).
-        snap = None
+        # Захват -> identity -> подготовленный шелл передачи: под одним
+        # коротким замком. Ошибка подготовки -- отказ ДО доставки: задание
+        # не уходит под неверной identity, и неудача отката захвата едет с
+        # отказом (#181), а не молчит.
         if undo and verified:
             inote, failed, snap = await _install_identity(conn, name, me, undo)
             if failed:
-                await _unclaim(name, undo)
-                return {"error": f"{name}: {failed}"}
+                undone = await _unclaim(name, undo)
+                return {"error": "; ".join(filter(None, (
+                    f"{name}: {failed}",
+                    f"owner not restored: {undone}" if undone else None)))}
             note = "; ".join(filter(None, (note, inote)))
-            # Снимок в реестр: профиль -- вернуть пару, None -- снять («или
-            # никакой», #167). Снимок печатает сам шелл установки -- до
-            # записи, и пара неразделима с установкой.
+            # Снимок в реестр: прежняя пара и свои хуки тем же шеллом
+            # установки, до записи новой. Профиль -- вернуть пару, None --
+            # снять («или никакой», #167).
             _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
-    # Цель — клон, а не сокет: session.py резолвит сессию сам, внутри тела, где
-    # только и лежат её файлы. Снаружи сокет контейнерного папета не виден.
-    out = await session_json(name, _session_cmd(
-        "send", clone_dir(name), req["message"],
-        "--priority", req.get("priority", "next"),
-        "--from-name", req.get("from_name", "mop"),
-        "--wait", 0), timeout=20)
+        script = _guarded_send(name, undo, req)
+    # Передача -- ВНЕ замка: замок короткий, долгая пауза чужого send не
+    # стоит за нашим окном подготовки. Окно между подготовкой и передачей
+    # закрыто не длительностью замка, а стражем владения в самом шелле
+    # (#review574-1): чужой захват между ними гасит передачу до session.py.
+    out = await session_json(name, script, timeout=20)
     if out.get("error"):
         indeterminate = out.get("timeout")
-        # Под тем же замком, что и claim (#189): иначе между сравнением и
-        # записью отката вклинился бы чужой send. Предчека поколения нет:
-        # провал обязан попасть в реестр исходов (#573) даже тогда, когда
-        # записи отката не будет -- чужой живой захват поверх не отменяет
-        # того, что наш захват провалился, и поздний откат младшего захвата
-        # перепрыгнет нашу запись именно по этой отметке.
+        # Откат -- снова под замком (#189): между сравнением и записью
+        # чужой claim не вклинится. Предчека поколения нет: провал обязан
+        # попасть в реестр исходов (#573) даже тогда, когда записи отката
+        # не будет -- чужой живой захват поверх не отменяет того, что наш
+        # захват провалился. Транспортно-неопределённый исход -- без
+        # отката: сообщение могло дойти.
         failed = None
         if undo and not indeterminate:
             async with _owner_locks.setdefault(name, asyncio.Lock()):
@@ -890,9 +1118,9 @@ async def v_send(conn, req):
         if failed:
             out["error"] += f"; owner not restored: {failed}"
         return out
-    # Доставка доехала -- откат этому захвату больше не приедет: завершаем
-    # его и держим реестр контекстом возможных откатов, без истории
-    # завершённых отправок (#573). Под тем же замком, что и реестр.
+    # Доставка доехала -- откат этому захвату больше не приедет:
+    # завершаем его и держим реестр контекстом возможных откатов, без
+    # истории завершённых отправок (#573).
     if undo:
         async with _owner_locks.setdefault(name, asyncio.Lock()):
             _settle(undo[0], undo[3])

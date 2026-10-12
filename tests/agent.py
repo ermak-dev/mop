@@ -1607,23 +1607,35 @@ def check_git_identity_167(c):
 # SOLUTION: identity ставится ДО доставки, в короткой критической секции
 # вместе с захватом аренды (вопрос серверу + один шелл, потолок
 # IDENTITY_WAIT+bsh): confirmed владелец получает свою identity либо явное
-# её отсутствие, но не identity прежнего владельца. Ожидание простоя (до
-# 600с) живёт ВНЕ секции: доставка уходит с --wait 0, простой ждёт отдельный
-# глагол session.py wait-idle, и ошибка ожидания -- не недоставка уже
-# отправленного: msg_id стоит, откатов нет. Подтверждённая недоставка
-# согласованно возвращает прежнее состояние identity (снимок ставится в
-# реестр #573 тем же шеллом, что пишет новую; восстановление -- по цепочке
-# предшественников, как у файла, и не вычисляется заново по изменившемуся
-# удалённому профилю); чужие hooks/core.hooksPath не перетираются. Ошибка
-# подготовки identity -- отказ ДО доставки, захват не берётся; не пускать
-# задание под неверной identity важнее, чем доставить вовремя. Смена
-# identity -- только подтверждённому caller (#207): self-declared владелец
-# identity не трогает вовсе.
+# её отсутствие, но не identity прежнего владельца. Сама передача -- вне
+# замка, но со стражем владения в том же шелле (review-матрица #574):
+# пока A готовился, B(force) мог взять владение -- страж гасит передачу до
+# session.py («the lease was taken over»), откат идёт согласованно, и
+# задание не стартует под чужой identity; замок остаётся коротким, гонки
+# #573/#189 живут как жили. Снимок прежнего состояния -- по каждому ключу
+# присутствие и значение отдельно («нет» != «пусто»), свои хуки стража --
+# состояниями A/F/O с режимом и телом; печатает его тот же шелл до записи,
+# восстановление -- по цепочке предшественников реестра #573, не новым
+# вопросом серверу; чужие hooks/core.hooksPath не трогаются. Установка
+# атомарна: точка отказа откатывает применённое по переменным снимка и
+# останавливается до установки нового; снятие отсутствующего ключа (код 5)
+# -- успех, отказ записи (config.lock) -- ошибка до доставки. Диагностика
+# не несёт строк снимка. Подтверждённая недоставка (структурированный
+# {"error"} от session.py или марка стража) откатывает пару; тишина тела и
+# ответ без JSON (разрыв транспорта) -- исход неизвестен: помечен timeout,
+# откатов нет. Ожидание простоя (до 600с) -- отдельный глагол session.py
+# wait-idle вне замка; ошибка ожидания -- не недоставка (msg_id стоит,
+# причина едет полем idle_error до мастера через общий вердикт). Ошибка
+# подготовки identity -- отказ ДО доставки; не пускать задание под неверной
+# identity важнее, чем доставить вовремя. Смена identity -- только
+# подтверждённому caller (#207): self-declared владелец identity не трогает
+# вовсе.
 # STATUS: FIXED — see #574
 def check_identity_before_delivery_574(c):
     """git и шелл настоящие: скрипты агента исполняются bash'ем над
     временными клонами с настоящими user.name/email и hooks."""
     import asyncio
+    import shlex
     import subprocess
     import tempfile
     from mop.common import lease
@@ -1658,6 +1670,7 @@ def check_identity_before_delivery_574(c):
             if r.returncode == 0:
                 got[key] = r.stdout.strip()
         return got
+    real_session_json = agent.session_json
 
     def hooks(d):
         h = os.path.join(d, ".git", "hooks")
@@ -1879,6 +1892,200 @@ def check_identity_before_delivery_574(c):
                      or os.path.exists(os.path.join(d, ".githooks"))),
                 f"reply {got!r}, hooks {hooks(d)}")
         del seen, waits
+
+        # ── матрица review574: семь поведенческих отказов на 5f13fe2 ──────
+
+        # R1. Замок держит подготовку коротко, передача -- вне замка со
+        # стражем владения в том же шелле: A подготовил identity и задержался
+        # у передачи, B(force) взял владение и доставил, A продолжил --
+        # страж гасит передачу A ДО session.py (не оба msg_id, не старт под
+        # чужой petr-identity), отказ A называет ушедшее владение, и A
+        # откатывает свою пару, не трогая записавшуюся пару B.
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        b_done = asyncio.Event()
+        a_at_handoff = asyncio.Event()
+        at_handoff = {}
+        real_session_json_574 = real_session_json
+        # Страж владения -- в самом шелле передачи, и проверяется он
+        # настоящим bash'ем: session.py в скрипте подменяется на echo (его
+        # ответ подставляется строкой), всё прочее -- guard, сравнение,
+        # чтение файла -- исполняется как есть.
+        py = f"python3 {shlex.quote(agent.DRIVER.SESSION_PY)}"
+
+        async def bsh_r1(name, script, timeout=20):
+            if "session.py send" not in script and py not in script:
+                return await bash(name, script, timeout)
+            run = script.replace(py, "echo") + ('; echo \'{"msg_id": "m-r1"}\'')
+            if "from-name a" in script:
+                a_at_handoff.set()
+                await b_done.wait()
+                path = os.path.join(state["clone"], lease.FILE)
+                at_handoff["owner"] = (open(path).read()
+                                       if os.path.exists(path) else None)
+            else:
+                at_handoff["b_ident"] = ident(state["clone"])
+            return await bash(name, run, timeout)
+        agent.bsh = bsh_r1
+        agent.session_json = real_session_json_574
+
+        async def ra():
+            return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                             "_caller": "olga", "from_name": "a"})
+
+        async def rb():
+            # B стартует строго после того, как A дошёл до передачи: владение
+            # уходит именно в этом окне, не «когда-нибудь».
+            await a_at_handoff.wait()
+            got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                            "_caller": "petr", "from_name": "b",
+                                            "force": True})
+            b_done.set()
+            return got
+
+        async def r1():
+            return await asyncio.gather(ra(), rb())
+        agent._owner_locks, agent._lease_generations = {}, {}
+        agent._lease_claims, agent._lease_holder = {}, {}
+        ra_out, rb_out = asyncio.run(r1())
+        # В момент передачи A владение уже petr: страж обязан был увидеть
+        # это и погасить передачу -- msg_id нет, отказ называет причину.
+        c.check("R1 a sender that lost the lease mid-prep is refused, not delivered",
+                not (not rb_out.get("msg_id")
+                     or not ra_out.get("error")
+                     or at_handoff.get("owner") != "petr\t1000\n"
+                     or "taken over" not in ra_out["error"]
+                     or ident(state["clone"]) != profiles["petr"]),
+                f"a {ra_out!r}, b {rb_out!r}, at handoff {at_handoff!r}, "
+                f"identity {ident(state['clone'])}")
+        agent.bsh = bash
+
+        # R2. Fused shell не атомарен: name записался, email отказал. Откат
+        # обязан вернуть фактическую прежнюю пару по валидному снимку, а не
+        # «откатывать нечего»; причина неудачи отката едет с отказом (#181).
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+
+        def half_broken(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            # точка отказа -- установка email: всё до неё исполнено
+            return real.replace(
+                f"config --local user.email {shlex.quote(profile['email'])}",
+                "config --local user.email; false") if profile else real
+        agent.identity_script = half_broken
+        agent.session_json = deliver
+        got = send(_caller="olga")
+        agent.identity_script = real_identity_script
+        c.check("R2 broken half-install rolls the prior pair back",
+                not (not got.get("error")
+                     or ident(state["clone"]) != profiles["petr"]),
+                f"reply {got!r}, identity {ident(state['clone'])}")
+
+        # R3. Профиль None + отказ записи (--unset-all под config.lock):
+        # подготовка не подтверждена -- сообщение не доставляется, прежняя
+        # identity остаётся, отказ называет причину, а не «clone has none».
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        lock = os.path.join(state["clone"], ".git", "config.lock")
+        open(lock, "w").close()
+        sent[:] = []
+        agent.session_json = deliver_spy
+        got = send(_caller="ivan")
+        os.remove(lock)
+        c.check("R3 unset failure refuses before delivery",
+                not (not got.get("error") or sent
+                     or ident(state["clone"]) != profiles["petr"]
+                     or "clone has none" in (got.get("owner_note") or "")),
+                f"reply {got!r}, delivered {sent!r}, "
+                f"identity {ident(state['clone'])}")
+
+        # R4. Снимок хранит присутствие каждого ключа отдельно: локальное
+        # имя без почты -- не «пары нет», после достоверной недоставки имя
+        # обязано вернуться на место.
+        state["clone"] = clone()
+        subprocess.run(["git", "-C", state["clone"], "config", "--local",
+                        "user.name", "Half Old"], check=True)
+        rearm()
+        agent.session_json = undelivered
+        got = send(_caller="olga", force=True)
+        c.check("R4 a half identity restores its present half",
+                not (not got.get("error")
+                     or ident(state["clone"]) != {"name": "Half Old"}),
+                f"reply {got!r}, identity {ident(state['clone'])}")
+
+        # R5. Свои guards входят в снимок: их не было до установки --
+        # после достоверной недоставки их быть не должно; права/содержимое
+        # прежних своих -- на месте. Диагностика не печатает содержимое.
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        agent.session_json = undelivered
+        got = send(_caller="olga", force=True)
+        c.check("R5 restore leaves no guards that were absent before",
+                not (not got.get("error") or hooks(state["clone"])),
+                f"reply {got!r}, hooks {hooks(state['clone'])}")
+        # ...и наоборот: свой guard был (с нашей меткой) -- вернулся на
+        # место с прежним режимом доступа.
+        state["clone"] = clone(profiles["petr"])
+        hook_path = os.path.join(state["clone"], ".git", "hooks", "pre-commit")
+        os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+        with open(hook_path, "w") as f:
+            f.write(agent.owner_hook())
+        os.chmod(hook_path, 0o700)
+        rearm()
+        agent.session_json = undelivered
+        got = send(_caller="olga", force=True)
+        c.check("R5 a prior own guard returns with its mode",
+                not (not got.get("error")
+                     or open(hook_path).read() != agent.owner_hook()
+                     or (os.stat(hook_path).st_mode & 0o777) != 0o700),
+                f"reply {got!r}, mode {oct(os.stat(hook_path).st_mode & 0o777)}")
+
+        # R6. Причина неудачи ожидания простоя доезжает до вызывающего
+        # через общую операцию и форматтер (проверка в tests/channel.py,
+        # здесь -- транспорт: поле не теряется на выходе v_send).
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+
+        async def broken_idle(name, cmd, timeout=20):
+            if "wait-idle" in cmd:
+                return {"error": "idle observation failed"}
+            return {"msg_id": "m-r6"}
+        agent.session_json = broken_idle
+        got = send(_caller="olga", wait=30)
+        c.check("R6 an idle error keeps the delivery and names the reason",
+                not (not got.get("msg_id") or not got.get("idle_error")),
+                f"reply {got!r}")
+
+        # R7. Разрыв транспорта (код 255 без итогового JSON) -- потеря
+        # ответа, не доказанная недоставка: контекст остаётся за пославшим,
+        # причина едёт с отказом. Откат только по структурированному
+        # «доставлено не было».
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        # сломанная R6 заглушка не годится: здесь путь идёт через настоящий
+        # session_json над мусорным ответом bsh.
+        agent.session_json = real_session_json
+        calls_255 = {"n": 0}
+
+        async def torn_transport(name, cmd, timeout=20):
+            calls_255["n"] += 1
+            return ("ssh: connect to host: Connection reset by peer", 255)
+        # session_json не зовётся -- bsh отдаёт мусор; подменяем сам bsh
+        # для команды send (printf-запись аренды и identity пусть работают).
+        real_bsh = bash
+
+        async def bsh_255(name, script, timeout=20):
+            if "session.py send" in script:
+                return await torn_transport(name, script, timeout)
+            return await real_bsh(name, script, timeout)
+        agent.bsh = bsh_255
+        got = send(_caller="olga")
+        agent.bsh = bash
+        c.check("R7 a torn transport keeps the context, no rollback",
+                not (not got.get("error")
+                     or ident(state["clone"]) != profiles["olga"]
+                     or not os.path.exists(os.path.join(state["clone"], lease.FILE))),
+                f"reply {got!r}, identity {ident(state['clone'])}")
 
 
 # ── факт state: исход хода едет мастеру (#224) ───────────────────────────

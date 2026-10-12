@@ -362,6 +362,13 @@ def main():
         s.answers["request"] = {"msg_id": "m1"}
         c.expect("mcp wait not idle", mcp.send(PUPPET, "hi", wait_seconds=30),
                  "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s")
+        # #574: ошибка наблюдения простоя -- не молчаливое «не дождался»:
+        # узел называет причину, и она доезжает тем же вердиктом.
+        s.answers["request"] = {"msg_id": "m1", "idle": None,
+                                "idle_error": "idle observation failed"}
+        c.expect("mcp idle error keeps the reason",
+                 mcp.send(PUPPET, "hi", wait_seconds=30),
+                 "pu-mop-9: delivered (msg_id=m1), idle: idle observation failed")
         mcp.send(PUPPET, "hi", wait_seconds=9999)
         c.expect("mcp wait clamped", s.calls[-1][3]["wait"], 600)
         mcp.send(PUPPET, "hi", wait_seconds=-5)
@@ -499,6 +506,9 @@ def main():
             ({"kind": "puppet", "to": PUPPET, "error": OWNED}, f"pu-mop-9: NOT DELIVERED — {OWNED}"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "wait": 30},
              "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s"),
+            ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "wait": 30,
+              "idle": None, "idle_error": "idle observation failed"},
+             "pu-mop-9: delivered (msg_id=m1), idle: idle observation failed"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "notify": True},
              "pu-mop-9: delivered (msg_id=m1); will notify when it frees up"),
             ({"kind": "local", "to": "s1", "dead": True}, "s1: inbox not listening — session is dead"),

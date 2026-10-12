@@ -525,8 +525,11 @@ def send_to_puppet(transport, node, name, message, priority="next", wait=0,
          "notify": extra.get("notify", False)}
     if "error" in r:
         return dict(v, error=r["error"])
+    # idle_error (#574): ошибка наблюдения простоя -- не молчаливое «не
+    # дождался»: узел называет причину, и она едет тем же вердиктом до
+    # мастера, не новым полем, которое никто не читает.
     return dict(v, msg_id=r.get("msg_id"), owner_note=r.get("owner_note"),
-                idle=r.get("idle"))
+                idle=r.get("idle"), idle_error=r.get("idle_error"))
 
 
 def _clamp_wait(seconds, ceiling=600):
