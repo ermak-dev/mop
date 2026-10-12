@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
 from mop.common import bus, busnames, config, ops, puppets, state
+from mop.common.domain import Alloc
 from mop.server import adminapi, opworker, web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
@@ -98,20 +99,47 @@ def _safety_of(target, owner):
     """Предикат #460 для run: свежие факты и занятость под target gate.
 
     -> (predикат | None, отказ | None). Отказ -- готовая причина для
-    вердикта run'а: контекст цели не собрался (спека, узел) -- «не знаю»
-    не значит «можно», действие не исполняется вовсе. Проект -- из origin
-    спеки, не из имени; факты -- глаголом state узла работающей
-    аллокации; занятость -- статус сессии из того же ответа узла, что
-    ростер (#501)."""
+    вердикта run'а: контекст цели не собрался (спека, аллокация, узел) --
+    «не знаю» не значит «можно», действие не исполняется вовсе.
+    Субъект -- ПРОЕКТ ЦЕЛИ (#498): префетч едет тем же адресным
+    транспортом, что и эффект воркера, а не субъектом процесса --
+    проектному веб-процессу belongs-отказ ответил бы до того, как
+    известен origin. Кандидат проекта -- из ростера (резолвер); спека
+    подтверждает его origin'ом, и только тогда узел. Узел -- последней
+    аллокации в любом статусе (#377): легитимный wipe -- по
+    остановленному, «не работающую» префетч не спрашивает. Сессию и
+    факты клона спрашивает state, пока tmux жив; остановленной цели
+    state фактов клона не даёт -- их доносит глагол clone (#40). Занятость
+    -- общий вердикт сессии (#501, _state_from_session): всё, что не
+    free и не hung, -- живая работа, и незнакомое слово статуса тоже;
+    hung/offline -- сессии нет, рестарт им и лечится, это не работа."""
+    transport = opworker.default_transport(RESOLVER)
     try:
-        spec = puppets._cluster("spec", name=target) or {}
+        project = RESOLVER(target)
+        spec = transport("spec", name=target) or {}
         origin = (spec.get("meta") or {}).get("origin")
-        project = ops.target_project(origin)
-        node = puppets.node_of(target)
+        if not origin:
+            return None, (f"{target}: carries no origin — whose target it is "
+                          f"cannot be told, and acting on it is not for the web")
+        if ops.target_project(origin) != project:
+            # Ростер мог соврать (поздний meta-фикс), а спека авторитетна:
+            # едем проектом владельца origin, не первой догадкой резолвера.
+            project = ops.target_project(origin)
+        alloc = Alloc.from_dict(transport("alloc", name=target).get("alloc"))
+        if not alloc or not alloc.node:
+            raise LookupError(f"{target}: no allocation — node unknown")
+        node = alloc.node
         got = bus.request(node, "state", name=target, project=project)
-        busy = state._session_state((got or {}).get("session")) in ("busy", "shell")
+        # Ошибка state -- уже ответ «не знаю», safety откажет ею; глагол
+        # clone -- не обход ошибки, а дорога к фактам остановленной цели
+        # (#40: state фактов клона без tmux не даёт, clone даёт).
+        if not isinstance(got, dict) or not (got.get("clone") or got.get("error")):
+            got = bus.request(node, "clone", name=target, project=project)
     except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
         return None, f"{target}: cannot inspect it before acting — {e}"
+    st = state._session_state((got or {}).get("session"))
+    busy = (st is not None
+            and state._state_from_session(st, None).kind not in ("free", "hung"))
 
     def predicate(name, _project, **_):
         return ops.safety(name, project, owner=owner, facts=got,
