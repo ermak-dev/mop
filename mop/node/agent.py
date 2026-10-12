@@ -147,26 +147,52 @@ def clone_probe(d):
 
     `--not --remotes` здесь не случайность: upstream рабочей ветки бывает
     прибит к origin/master, и тогда `@{u}..` считает влитое неотправленным.
-    На этих числах стоит решение мастера о диспатче."""
+    На этих числах стоит решение мастера о диспатче.
+
+    Проба fail-closed (#564): отказ обязательной команды роняет её (exit 1),
+    а не маскируется нулём. `git status | wc -l` на побитом репозитории
+    печатает пустоту -- и она читалась нулём грязи (код конвейера -- это код
+    wc, а не git-а, поэтому считаем после захвата: `$(...)` несёт код git);
+    пустой `rev-list` от `2>/dev/null` -- нулём неотправленного. Уборка
+    получала «чистый клон» там, где git не мог прочесть репозиторий вовсе
+    (мусорный HEAD, битый index). Обязательных команд две: status и
+    rev-list; rev-list запасной (`--all`) считает и без HEAD --
+    unborn-репозиторий (ветка без коммитов) -- здоровый случай, а не
+    сломанный. Грань названа: клон с удалённым ref ветки git сам читает
+    как unborn («No commits yet»), и висячий коммит виден только fsck --
+    проба это не различает и не должна: несохранённое она видит, а
+    тяжёлый fsck в пробе ростера не место. Остальные команды (branch,
+    config, remote) необязательны: их отказ -- пустое поле, а не
+    неизвестный клон."""
     return (f'cd {d} 2>/dev/null || exit 0; '
             f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
             f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
             f'echo "home=$(git config mop.home 2>/dev/null)"; '
             f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
-            f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
-            f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
+            f'st=$(git status --porcelain 2>/dev/null) || exit 1; '
+            f'dirty=0; [ -n "$st" ] && dirty=$(printf \'%s\\n\' "$st" | wc -l); '
+            f'ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null '
+            f'|| git rev-list --count --all 2>/dev/null) || exit 1; '
+            f'echo "dirty=$dirty"; echo "ahead=$ahead"; '
             f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
 
 
 def clone_facts_of(out):
     """Вывод clone_probe -> CloneFacts.to_dict() либо None (клона нет или
-    числа не прочитались)."""
+    числа не прочитались).
+
+    Пустые dirty/ahead -- не нули, а неполные данные (#564): обязательная
+    команда не ответила, и клон обязан читаться неизвестным -- у
+    потребителя это «keep», а не «clean». До #564 пустой ahead читался
+    нулём (`or 0`), и побитый клон получал разрешение на уборку."""
     kv = fsutil.read_kv(out, raw=True)
     if "dirty" not in kv:
         return None
     try:
-        dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
+        dirty, ahead = int(kv.get("dirty") or -1), int(kv.get("ahead") or -1)
     except ValueError:
+        return None
+    if dirty < 0 or ahead < 0:
         return None
     # Кто ведёт задание (#161): сырая запись, живость считает мастер. По
     # шине -- словарём (#204, #266), обратно его читает CloneFacts.from_dict.
