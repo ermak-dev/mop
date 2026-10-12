@@ -1029,6 +1029,135 @@ def main():
     c.check("#569 the lane survives a crashed effect",
             third.is_set(), (got_boom, third.is_set()))
 
+    # ── #569, ревью: окно между start и первой инструкцией нитки ──────
+    # HYPOTHESIS: держатель регистрировался ПЕРВОЙ инструкцией самой
+    # нитки эффекта (_park в ride): между thread.start() и её выполнением
+    # планировщик может держать нитку сколь угодно долго, и всё это окно
+    # полоса пуста -- run ответил unknown, placeholder вызывающего снят,
+    # и B той же цели начинает мутацию, после чего A ожывает и пишет
+    # уже поверх неё (исходный дефект, только окно другое). Допущенная,
+    # но ещё не исполняющаяся операция -- не свободная цель. SOLUTION:
+    # резервирование существует ДО старта нитки и переживает её ответ:
+    # держатель -- событие операции, занятое с drain'а и снятое finally
+    # самой нитки (или вызывающим, если старт не удался). RESULT: смысл
+    # проверки -- порядок мутаций при задержке ПЕРВОЙ инструкции нитки
+    # (обёртка ride над _wait_effect), не порядок ответов.
+    gate1 = threading.Event()
+    real_wait = opworker.Worker._wait_effect
+
+    def held_wait(self, ride, *a, **kw):
+        def delayed():
+            gate1.wait(10)
+            return ride()
+        return real_wait(self, delayed, *a, **kw)
+
+    with patched(opworker.Worker, _wait_effect=held_wait):
+        a1 = lane_api.submit("restart", "pu-mop-5", {}, ADMIN)
+        got_a1 = settled(lane_api, a1["id"])
+    c.check("#569 an unstarted effect thread still answers unknown in finite time",
+            got_a1.get("status") == "unknown", got_a1)
+    b1 = lane_api.submit("update", "pu-mop-5", {"fresh": True}, ADMIN)
+    got_b1 = settled(lane_api, b1["id"])
+    c.check("#569 an admitted but unstarted effect holds the lane",
+            got_b1.get("status") == "refused"
+            and "update:pu-mop-5" not in mutations, (got_b1, mutations))
+    other5 = lane_api.submit("restart", "pu-mop-6", {}, ADMIN)
+    got_o5 = settled(lane_api, other5["id"])
+    c.check("#569 another target runs while an unstarted effect holds its lane",
+            got_o5.get("status") == "succeeded"
+            and "restart:pu-mop-6" in mutations, (got_o5, mutations))
+    gate1.set()
+    deadline5 = time.monotonic() + 5
+    while ("restart:pu-mop-5" not in mutations
+           and time.monotonic() < deadline5):
+        time.sleep(0.02)
+    later5 = lane_api.submit("update", "pu-mop-5", {"fresh": True}, ADMIN)
+    got_l5 = settled(lane_api, later5["id"])
+    c.check("#569 the unstarted effect mutates before the next op once it runs",
+            "restart:pu-mop-5" in mutations
+            and "update:pu-mop-5" in mutations
+            and mutations.index("restart:pu-mop-5")
+            < mutations.index("update:pu-mop-5")
+            and got_l5.get("status") in opworker.TERMINAL,
+            (got_l5, mutations))
+
+    # ── #569, ревью: identity полосы add -- origin, как у адаптера ─────
+    # HYPOTHESIS: ключ полосы в воркере был target or None -- пустое имя
+    # add выключало полосу совсем, и два add одного origin мутировали
+    # вперегонки, хотя адаптер считает их одной целью (effective_target:
+    # origin для targetless). Расходящееся правило двух слоёв -- та же
+    # гонка на другой границе. SOLUTION: одна точка правила -- lane_key
+    # (target, а для операции без цели origin из params), и адаптер, и
+    # воркер считают полосу ею: add одного origin -- одна полоса, двух
+    # разных -- независимые.
+    class AddLane(Recorder):
+        """Транспорт add: первый же глагол -- мутация; hold держит её."""
+
+        def __init__(self, tag, hold, mutations):
+            super().__init__()
+            self.tag, self.hold, self.mutations = tag, hold, mutations
+            self.answers["add"] = {"ok": True, "name": "pu-add-1"}
+
+        def __call__(self, verb, **fields):
+            if verb == "add":
+                self.mutations.append(self.tag)
+                self.hold.wait(10)
+            return super().__call__(verb, **fields)
+
+    add_hold = threading.Event()
+    add_mutations = []
+    add_seq = [0]
+
+    def add_executor(action, target, params, who):
+        add_seq[0] += 1
+        tr = AddLane(f"add{add_seq[0]}:{params.get('origin')}",
+                     lane_free if add_seq[0] != 1 else add_hold,
+                     add_mutations)
+        return lambda: add_w.run(action, target or "", params,
+                                 (who or (None,))[0], transport=tr)
+
+    add_w = opworker.Worker(
+        effect_timeout=0.5, observe_wait=0,
+        sleep=lambda s: time.sleep(0.02),
+        registry=lambda: {"git@example.test:g/one.git",
+                          "git@example.test:g/two.git"},
+        workspace=lambda origin: ("", None))
+    add_ops = adminapi.Operations()
+    opworker.register(add_ops)
+    add_api = adminapi.Api(add_ops, origin="https://pool.example",
+                           who=ADMIN, executor=add_executor)
+
+    origin_one = {"origin": "git@example.test:g/one.git"}
+    origin_two = {"origin": "git@example.test:g/two.git"}
+    a2 = add_api.submit("add", None, origin_one, ADMIN)
+    got_a2 = settled(add_api, a2["id"])
+    c.check("#569 a hung add answers unknown in finite time",
+            got_a2.get("status") == "unknown", got_a2)
+    b2 = add_api.submit("add", None, origin_one, ADMIN)
+    got_b2 = settled(add_api, b2["id"])
+    c.check("#569 two adds of one origin share the lane",
+            got_b2.get("status") == "refused"
+            and "add2:git@example.test:g/one.git" not in add_mutations,
+            (got_b2, add_mutations))
+    o2 = add_api.submit("add", None, origin_two, ADMIN)
+    got_o2 = settled(add_api, o2["id"])
+    c.check("#569 an add of another origin is not blocked by the held one",
+            "add3:git@example.test:g/two.git" in add_mutations,
+            (got_o2, add_mutations))
+    add_hold.set()
+    deadline6 = time.monotonic() + 5
+    while ("add1:git@example.test:g/one.git" not in add_mutations
+           and time.monotonic() < deadline6):
+        time.sleep(0.02)
+    l2 = add_api.submit("add", None, origin_one, ADMIN)
+    got_l2 = settled(add_api, l2["id"])
+    c.check("#569 the held add finishes before the next add of that origin",
+            "add1:git@example.test:g/one.git" in add_mutations
+            and "add4:git@example.test:g/one.git" in add_mutations
+            and add_mutations.index("add1:git@example.test:g/one.git")
+            < add_mutations.index("add4:git@example.test:g/one.git"),
+            (got_l2, add_mutations))
+
     return c.report("opworker")
 
 
