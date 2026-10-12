@@ -1717,7 +1717,9 @@ def check_timeouts_171(c):
                 ("admit", "keys", standing, lambda: pve.admit(name, False)),
                 ("push_many", "unpack", standing,
                  lambda: pve.push_many(name, [(f"{pve.HOME}/.claude.json", b"{}")])),
-                ("destroy", "destroy", standing, lambda: pve.destroy(name))):
+                # #568: мутирующий глагол сноса сменился на destroy-body;
+                # таймаут его -- тот же отказ, что был у destroy.
+                ("destroy", "destroy-body", standing, lambda: pve.destroy(name))):
             pve._hostname = stand
             pve.sh = fake_sh(fail)
             r = asyncio.run(fn())
