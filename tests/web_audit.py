@@ -73,13 +73,16 @@ def audit_of(emits, op_id):
 
 
 def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
-             spec_origin=ORIGIN, block_restart=None, add_name="pu-aud-add-1"):
+             spec_origin=ORIGIN, block_restart=None, add_name="pu-aud-add-1",
+             state_error=None, block_alloc=None):
     """Подмена ТОЛЬКО шины: глаголы сервиса кластера, узла и публикация.
 
     Как настоящей службе: spec/alloc/projects/roster -- чтения, restart --
     мутация со сдвигом счётчика (наблюдение #464 видит сигнал сразу),
     add -- доверенный ответ с именем созданного папета. block_restart
-    держит эффект рестарта до отпуска -- сценарий unknown (#497/#569)."""
+    держит эффект рестарта до отпуска -- сценарий unknown (#497/#569);
+    block_alloc держит ПРЕФЕТЧ после подтверждённой спеки (ревью 2 #575),
+    state_error бросает узловой state ПОСЛЕ подтверждения спеки."""
     if restarts is None:
         restarts = [7]
     webmod._ROSTER_CACHE[0] = 0.0      # кэш резолвера -- модульный
@@ -91,6 +94,8 @@ def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
             return {"meta": {} if spec_origin is False
                     else {"origin": spec_origin}}
         if verb == "alloc":
+            if block_alloc is not None:
+                block_alloc.wait(10)
             return {"alloc": {"ID": "a1", "JobID": fields.get("name"),
                               "NodeName": "node-a",
                               "ClientStatus": "running",
@@ -114,6 +119,8 @@ def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
 
     def request(node, verb, **fields):
         if verb == "state":
+            if state_error is not None:
+                raise state_error
             return {"present": True, "session": "idle 1 1",
                     "clone": {"cur": "master", "def": "master",
                               "dirty": clone_dirty, "ahead": 0,
@@ -185,7 +192,7 @@ def main():
             and rec3.get("status") == "refused"
             and rec3.get("op") == op3["id"]
             and rec3.get("project") is None
-            and subj3 is None, (got3, rec3, subj3))
+            and subj3 == bus.ADMIN, (got3, rec3, subj3))
 
     # ── send: проект из origin спеки, принципал -- HTTP ────────────────
     with fake_bus(emits), \
@@ -242,13 +249,122 @@ def main():
             and rec6.get("op") == op6["id"]
             and subj6 == TARGET_PROJECT, (got6, rec6, subj6))
 
+    # ── ревью 2 #575: контекст -- в момент факта, не после возврата ────
+    # HYPOTHESIS: имя и проект аудита брались из вердикта воркера, а
+    # вердикта нет у gate-отказов ({"status": "refused"} без name),
+    # у зависшего префетча (unknown до возврата prepare) и у краха
+    # эффекта; подтверждённый спекой проект умирал на ЛЮБОЙ позднейшей
+    # ошибке префетча, отказ реестра add выдумывал проект из
+    # незарегистрированного origin. SOLUTION: одно внутреннее completion
+    # из записи приёма (login, target) и подтверждённого контекста
+    # (проект фиксируется В МОМЕНТ подтверждения спекой, переживёт и
+    # отказ, и зависание); публичный кадр -- проекция из него; тема
+    # неизвестного проекта -- явная нейтральная admin.
+    # RESULT: имя цели живёт у refused/failed/unknown, проект -- после
+    # BusError узла и зависшего alloc, add незарегистрированного origin
+    # без проекта в нейтральной теме, крах после префетча не теряет
+    # контекст; запись проходит реальный full_entry.
+
+    # 1) gate-отказ (dirty): имя цели -- из записи приёма
+    with fake_bus(emits, clone_dirty=3):
+        op7 = webmod.ADMINAPI.submit("restart", "pu-aud-21", {}, ADMIN)
+        got7 = settled(webmod.ADMINAPI, op7["id"])
+        wait_audit(emits, op7["id"])
+    rec7, subj7 = audit_of(emits, op7["id"])
+    c.check("#575 a gate refusal keeps the target name in the audit",
+            got7.get("status") == "refused" and rec7 is not None
+            and rec7.get("name") == "pu-aud-21"
+            and rec7.get("status") == "refused"
+            and rec7.get("project") == TARGET_PROJECT
+            and subj7 == TARGET_PROJECT, (got7, rec7, subj7))
+
+    # 2) узел упал ПОСЛЕ подтверждения спеки: проект жив
+    with fake_bus(emits, state_error=bus.BusError("node down")):
+        op8 = webmod.ADMINAPI.submit("restart", "pu-aud-22", {}, ADMIN)
+        got8 = settled(webmod.ADMINAPI, op8["id"])
+        wait_audit(emits, op8["id"])
+    rec8, _ = audit_of(emits, op8["id"])
+    c.check("#575 a node error after the spec keeps the confirmed project",
+            got8.get("status") == "refused" and rec8 is not None
+            and rec8.get("project") == TARGET_PROJECT
+            and rec8.get("name") == "pu-aud-22", (got8, rec8))
+
+    # 3) add незарегистрированного origin: реестр отверг -- проекта нет
+    fast_refuse = opworker.Worker(effect_timeout=5, observe_wait=0,
+                                  sleep=lambda s: time.sleep(0.02),
+                                  registry=lambda: set(),
+                                  workspace=lambda origin: ("", None))
+    with patched(webmod, WORKER=fast_refuse), \
+            fake_bus(emits):
+        op9 = webmod.ADMINAPI.submit(
+            "add", None, {"origin": "git@example.test:g/unregistered.git"},
+            ADMIN)
+        got9 = settled(webmod.ADMINAPI, op9["id"])
+        wait_audit(emits, op9["id"])
+    rec9, subj9 = audit_of(emits, op9["id"])
+    c.check("#575 a refused registry gate invents no project",
+            got9.get("status") == "refused" and rec9 is not None
+            and rec9.get("project") is None
+            and rec9.get("name") is None
+            and subj9 == bus.ADMIN, (got9, rec9, subj9))
+
+    # 4) спека подтверждена, alloc висит до unknown: контекст жив
+    alloc_gate = threading.Event()
+    fast2 = opworker.Worker(effect_timeout=0.5, observe_wait=0,
+                            sleep=lambda s: time.sleep(0.02),
+                            registry=lambda: {ORIGIN},
+                            workspace=lambda origin: ("", None))
+    with patched(webmod, WORKER=fast2), \
+            fake_bus(emits, block_alloc=alloc_gate):
+        op10 = webmod.ADMINAPI.submit("restart", "pu-aud-23", {}, ADMIN)
+        got10 = settled(webmod.ADMINAPI, op10["id"])
+        wait_audit(emits, op10["id"])
+        alloc_gate.set()   # отпустить префетч ВНУТРИ подмены шины
+    rec10, _ = audit_of(emits, op10["id"])
+    c.check("#575 a hung prefetch after the spec keeps name and project",
+            got10.get("status") == "unknown" and rec10 is not None
+            and rec10.get("project") == TARGET_PROJECT
+            and rec10.get("name") == "pu-aud-23"
+            and rec10.get("status") == "unknown", (got10, rec10))
+
+    # 5) крах эффекта ПОСЛЕ успешного префетча: контекст не исчезает
+    class Exploding:
+        """Воркер, чей эффект падает после подтверждённого префетча."""
+
+        def run(self, verb, target, params, login, prepare=None, **kw):
+            prepare()
+            raise RuntimeError("effect blew up")
+
+    with patched(webmod, WORKER=Exploding()), \
+            fake_bus(emits):
+        op11 = webmod.ADMINAPI.submit("restart", "pu-aud-24", {}, ADMIN)
+        got11 = settled(webmod.ADMINAPI, op11["id"])
+        wait_audit(emits, op11["id"])
+    rec11, _ = audit_of(emits, op11["id"])
+    c.check("#575 an effect crash after the preflight keeps the context",
+            got11.get("status") == "failed" and rec11 is not None
+            and rec11.get("project") == TARGET_PROJECT
+            and rec11.get("name") == "pu-aud-24"
+            and rec11.get("status") == "failed", (got11, rec11))
+
+    # 6) запись аудита проходит реальный full_entry журнала
+    from mop.server import web as srvweb
+    entry = srvweb.full_entry({**(rec7 or {}), "at": time.time()})
+    c.check("#575 the audit record survives the real journal entry",
+            entry.get("op") == op7["id"]
+            and entry.get("status") == "refused"
+            and entry.get("principal") == "anton"
+            and entry.get("project") == TARGET_PROJECT, entry)
+
     # ── утечки: payload и сырые ошибки не едут ни в аудит, ни в кадры ──
     blob_audit = json.dumps([f for f, _ in emits], ensure_ascii=False)
     blob_frames = json.dumps(frames, ensure_ascii=False)
     c.check("#575 no payload or raw error reaches the audit or the frames",
             not any(mark in blob for mark in ("audit-secret-1",
                                               "body-secret-1",
-                                              "work in the clone")
+                                              "work in the clone",
+                                              "unregistered",
+                                              "node down")
                     for blob in (blob_audit, blob_frames))
             and all("error" not in f for f, _ in emits),
             (blob_audit, blob_frames))
