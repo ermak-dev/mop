@@ -46,7 +46,8 @@ def check_control_boundary(c, text):
     c.check("#559 secrets are never printed", bool(re.search(
         r"never (?:print|echo)[^.]*(?:secret|key|\.env)", text, re.I)))
     c.check("#445 profile gate", "mcp__mop__profile" in text)
-    c.check("#445 master claim without branch", "--no-branch" in text)
+    c.check("#560 claiming a ticket never switches the master's working copy",
+            bool(re.search(r"claim[^.]*never switch", text, re.I)))
 
 
 def check_tools(c, text):
@@ -58,11 +59,33 @@ def check_tools(c, text):
     # мастера (исключение #450), названным словами, без списка имён.
     c.check("#515 no developer tool may be taught to the master",
             "mcp__mop__dev_" not in text)
-    c.check("#515 tracker and CI stay on the master's CLI (#450)",
-            "mop dev bug" in text and "mop dev ci" in text)
+    # #560: прежний страж #515 требовал в тексте `mop dev bug` и
+    # `mop dev ci` -- это трекер и CI самого проекта mop. Скилл общий для
+    # любого проекта пула: CLI проекта в нём не называется вовсе, процесс
+    # поставки мастер берёт из правил проекта или у оператора.
+    c.check("#560 the skill names no project's own development CLI",
+            "mop dev" not in text)
     for stale in ("puppet(action=", "doctor(", "mop attach", "mop secret",
                   "mop server deploy", "mop server doctor", "mop mcp --check"):
         c.check(f"#445 no obsolete master operation: {stale}", stale not in text)
+
+
+# HYPOTHESIS (#560): скилл писался на проекте mop и выдал его трекер, CI и
+# правила (gate #544, язык тикетов, готовность эпика) за общий протокол:
+# мастер другого проекта собирал бы очередь из трекера mop.
+# SOLUTION: очередь, трекер, CI, раскатка и закрытие -- по процессу
+# поставки из правил проекта или по запросам оператора; специфика mop --
+# в CLAUDE.md mop, не в скилле.
+# RESULT: RED на скилле a1d152f, GREEN после обобщения.
+# STATUS: FIXED — see #560
+def check_project_process(c, text):
+    text = " ".join(text.split())
+    c.check("#560 the queue comes from the project's delivery rules or the operator",
+            bool(re.search(r"queue[^.]*(?:project's rules|delivery process)[^.]*operator",
+                           text, re.I)))
+    c.check("#560 no rule of one project is spelled as the skill's own",
+            not re.search(r"\bfor mop\b|\bin mop\b", text, re.I))
+    c.check("#560 no tracker issue of one project is cited", not re.search(r"#\d+", text))
 
 
 def check_landing(c, text):
@@ -84,6 +107,7 @@ def main():
     c = Checks()
     check_control_boundary(c, text)
     check_tools(c, text)
+    check_project_process(c, text)
     check_landing(c, text)
     return c.report("master_skill")
 

@@ -53,10 +53,9 @@ force pushes — run only on the operator's explicit direction, and a
 hard-to-reverse step is confirmed first. Never print secrets, keys or
 `.env` values: count or test for a key, do not echo it.
 
-The tracker and CI are always the master's CLI: `mop dev bug …` and
-`mop dev ci …` from its working copy, because the tracker's coordinates
-resolve from that copy's git origin. They are deliberately not MCP tools
-(#515).
+The tracker, CI and rollout belong to the project and are named in its
+rules — its CLAUDE.md or equivalent. The master runs whatever commands those
+rules name, from its own working copy; the puppet does not touch them.
 
 ## Step 0 — learn the project and profile
 
@@ -70,12 +69,15 @@ teams' merges. A nonempty branch from the profile is the operator's choice,
 even if the repository rules name another default. State the project and
 integration branch back to the operator in your first message.
 
-Read the project's rules: the tracker vocabulary,
-ticket language, branch naming, epic target, permitted pool size, landing
-token policy and **the exact gate** (where its full suite and dist checks
-run — in CI on the integration head, or locally on the merged tree). If
-tickets live only in the operator's head, say so and stop. The tracker and CI
-are the master's work; the puppet does not use them.
+Read the project's rules for its delivery process: where the queue lives
+and the commands of its tracker, ticket shape, language and labels, branch
+naming, epic target, permitted pool size, landing token policy, **the exact
+gate** (where its full suite and dist checks run — in CI on the integration
+head, or locally on the merged tree) and how a change rolls out. If the
+rules name no tracker, the operator's requests are the queue: say so,
+restate each request in the operator's terms and confirm it before
+dispatch. The tracker and CI are the master's work; the puppet does not use
+them.
 
 Several masters per project are legal. `mcp__mop__agents` shows this project's
 puppets and the OWNER column. A `send` makes you owner of that puppet's
@@ -160,50 +162,44 @@ One clone = one branch = one ticket. The puppet builds in the clone's default
 build directory, not an improvised path or a cross-clone shared cache. Its
 working branch is the ticket claim; create it before edits.
 
-## Tracker and CI workflow
+## Queue, tracker and CI
 
-The tracker and CI are **the master's CLI** (`mop dev bug …`, `mop dev ci …`
-from the shell, #450/#515): the tracker's coordinates resolve from the
-working copy's git origin, so the CLI always lands in this project's
-tracker. Discover vocabulary with `mop dev bug labels`, search possible
-duplicates with `mop dev bug list`, inspect a ticket with `mop dev bug show`,
-and read epic relationships with `mop dev bug epic`. A new unit of work gets
-its own issue before implementation, via `mop dev bug new`; edit its evidence
-and scope with `mop dev bug edit`, or leave a comment with `mop dev bug
-comment`. Use `mop dev bug relabel` for permitted labels, never to set/clear
-`status::wip` by hand: claim only after approval with **`mop dev bug start
---no-branch`**, so the master's shared checkout is never switched; close with
-`mop dev bug close --comment "…"` after verified rollout. Keep exactly one
-`status::`, `sev::`, and `component::` label. Titles, bodies and comments use
-the project's required language; in mop they are Russian. A ticket body names
-reproduction, expected/actual, evidence, confirmed cause when known and
-proposed work. One defect per issue; check for duplicates first. Neither a
-dead node nor a full disk is a tracker defect.
+Gather the queue the way the project's rules describe its delivery process,
+or take it from the operator's requests. Use the tracker and CI commands the
+rules name. Whatever the tool, the habits are the same:
 
-Before claiming an open ticket, rebuild the set from live
-`mop dev bug list` and `mop dev bug show`, not a saved snapshot.
-Where available, use `mop dev bug evidence` to determine whether a
-branch or implementing merge already exists. Its evidence is not proof of a
-fix: read the ticket and the puppet's report, and distinguish instrumentation,
-incomplete work and incidental issue mentions from a fix. If the CLI is
-unavailable and you cannot establish the status through it, stop and ask the
-operator. An epic itself is not dispatchable work: its component tickets and
-trigger must be explicit before it can land. Their readiness is governed by
-the project's rules — for mop: each task accepted, integrated into the epic
-branch, its required CI green; issue closure and rollout evidence are
-tracked separately, not preconditions of the epic merge.
+- Rebuild the open set from the live tracker before claiming, not from a
+  saved snapshot. Where the tracker can show a ticket's existing branches or
+  merges, check them; that evidence is not proof of a fix — read the ticket
+  and the puppet's report, and tell instrumentation, incomplete work and
+  incidental mentions from a fix.
+- A new unit of work gets its own ticket before implementation, in the
+  shape and language the rules require: reproduction, expected and actual,
+  evidence, the confirmed cause when known, the proposed work. One defect per
+  ticket; search for duplicates first. A dead node or a full disk is an
+  action on a machine, not a ticket.
+- Claim only after approval, the way the rules prescribe and in a way that
+  never switches the master's shared working copy. Where the tracker stamps
+  work-in-progress markers itself, do not set or clear them by hand.
+- An epic itself is not dispatchable work: its component tickets and trigger
+  must be explicit, and their readiness for the epic merge is what the
+  project's rules say it is.
+- Close a ticket after verified rollout, citing the fix and merge commits,
+  the guarding test, what remains and what was actually verified.
 
-The integration pipeline belongs to the master. Use `mop dev ci list` and
-`mop dev ci show` to track it, `mop dev ci why` and `mop dev ci log` to
-explain failure, and `mop dev ci retry` for a cancelled/failed run when
-project rules warrant it. Consecutive pushes may cancel prior runs; ensure
-the integration head has a pipeline that actually ran, not merely a last
-cancelled one. Do not stretch landings apart to save cancelled runs. Report
-CI failures and unverified rollouts honestly; do not claim green from a
-puppet's source reading or an old run. A red pipeline on the integration
-head stops new landings into it until the failure is understood and fixed,
-or the change is reverted by agreement — it never blocks independent work
-in issue branches.
+If the rules name no tracker and the operator has not said where the queue
+lives, ask. If the named tracker or its commands are unavailable and the
+status cannot be established, stop and ask the operator.
+
+The integration pipeline belongs to the master. Track it, explain a failure
+from its job logs, and retry a cancelled or failed run when the rules allow.
+Consecutive pushes may cancel prior runs; ensure the integration head has a
+pipeline that actually ran, not merely a last cancelled one. Do not stretch
+landings apart to save cancelled runs. Report CI failures and unverified
+rollouts honestly; do not claim green from a puppet's source reading or an
+old run. A red pipeline on the integration head stops new landings into it
+until the failure is understood and fixed, or the change is reverted by
+agreement — it never blocks independent work in issue branches.
 
 ## Triage
 
@@ -321,12 +317,11 @@ token, do not take one: Git rejects the losing push and the puppet redoes
 the merge and gate. Landing permission is still explicit.
 
 On the merged tree the puppet runs **all checks the project rules demand**.
-For mop, that means the narrow checks available locally; its full strict
-suite and `web:dist` gate the landing in CI on the pushed merge SHA (#544)
-— a green pipeline on that exact SHA, not a local full run, is what the
-landing rests on, and a stale or cancelled pipeline is not success. Other
-projects may demand a local full suite on the merged tree; read their rules
-before specifying the gate. Confirm that no competing run uses the clone's
+Where the rules put the full suite in CI, the narrow checks available
+locally precede the push, and a green pipeline on the pushed merge SHA —
+not a local full run — is what the landing rests on; a stale or cancelled
+pipeline is not success. Where the rules demand a local full suite on the
+merged tree, it runs there before the push. Confirm that no competing run uses the clone's
 build directory, run phases sequentially, and treat missing or ambiguous
 completion markers as unverified, not green. A compile-capable lint step
 need not be duplicated by a separate compile. Keep a warm landing clone
@@ -334,9 +329,9 @@ where practical, but never weaken required tests for speed. The puppet
 reports the full fix and merge shas, checks actually run, and the
 remaining work; the master does not infer completion from a process exit.
 
-Close or transfer via `mop dev bug close --comment "…"` **after rollout is
-verified**, citing the fix/merge commits, the
-guarding test, what remains, and actual verification. If rollout or CI is
+Close or transfer the ticket in the project's tracker **after rollout is
+verified**, citing the fix and merge commits, the guarding test, what
+remains and what was actually verified. If rollout or CI is
 still pending, leave the issue open and say so. A merged or pushed fix is not
 by itself a deployment. Where CI deploys, watch its deploy job rather than
 deploying by hand; a manual deploy or a server repair runs only on the
