@@ -2546,20 +2546,23 @@ def check_llm_alias_gone_546(c, can_render):
 
 # ── #565: destroy сверяет ожидаемое имя тела ────────────────────────────
 # HYPOTHESIS (#565): глагол destroy принимает один VMID и проверяет лишь
-# префикс pu- (check_host), а VMID -- хеш имени (vmid_of). При коллизии имён
-# (ensure ловит её на подъёме, но не при сносе) cleanup упавшего тела B с
-# VMID занятого живого тела A уничтожает A: сверять не с кем, ожидаемое имя
-# в вызов не приехало.
+# префикс pu- (check_host по файлу конфига, conf_hostname), а VMID -- хеш
+# имени (vmid_of). При коллизии имён (ensure ловит её на подъёме, но не при
+# сносе) cleanup упавшего тела B с VMID занятого живого тела A уничтожает
+# A: сверять не с кем, ожидаемое имя в вызов не приехало.
 # SOLUTION: новый глагол destroy-body <vmid> <expected-name>. Имя стоящего
-# тела -- `pct config` (тот же источник, что у прежнего destroy), точное
-# сравнение перед любой мутацией. Отсутствие тела обёртка различает от
-# нечитаемого состояния двумя независимыми свидетелями: номера нет в
-# `pct list` -- идемпотентный успех; `pct config` или `pct list` упали --
-# отказ fail-closed, без stop/destroy. Прежний destroy (сборка и образы,
-# имя знает сам плейбук) не меняется.
-# RESULT: RED на b9dfc2a -- глагола destroy-body нет, «удаление» чужого
-# имени проходит (stop+destroy другого pu- контейнера), нечитаемое
-# состояние молча считается отсутствием.
+# тела -- `pct config` с точным сравнением перед любой мутацией. Отсутствие
+# тела обёртка различает от нечитаемого состояния: номера нет в `pct list`
+# -- идемпотентный успех; `pct config` или `pct list` упали -- отказ
+# fail-closed, без stop/destroy. Прежний destroy (сборка и образы, имя
+# знает сам плейбук) не меняется и проверяется прежним успехом по VMID:
+# путь conf_hostname на время теста подменяется одной контролируемой
+# заменой /etc/pve/lxc/ на каталог фикстур, чтобы стенд не зависел от
+# машины и не читал настоящие конфиги гипервизора.
+# RESULT: RED на b9dfc2a -- глагола destroy-body нет, и падают ровно
+# кейсы нового глагола (отказ вместо удаления, отсутствие вместо отказа
+# при нечитаемом ростере); прежний destroy при этом проходит, как и
+# должен: дефект был в нехватке контракта, а не в нём.
 # STATUS: FIXED — see #565
 def check_pve_destroy_body_565(c, can_render):
     if not can_render:
@@ -2572,18 +2575,36 @@ def check_pve_destroy_body_565(c, can_render):
     src = open(os.path.join(DEPLOY, "roles", "pve", "templates", "mop-pve.j2"),
                encoding="utf-8").read()
     with tempfile.TemporaryDirectory() as d:
+        # Фикстуры конфигов для conf_hostname: прежний destroy (и только он)
+        # читает hostname из /etc/pve/lxc/<vmid>.conf напрямую (#138). Путь
+        # абсолютный, и подменяется он одной заменой в ОТРЕНДЕРЕННОМ тестовом
+        # скрипте -- production-шаблон не меняется. Подстановок ровно одна:
+        # исчезни путь из шаблона, проверка заметит.
+        conf_dir = os.path.join(d, "lxc")
+        os.makedirs(conf_dir)
+        # 9101 -- «наш» pu-mop-1; 9102 -- чужое pu-other-3, жертва, которую
+        # снёс бы чужой cleanup, будь проверка только по префиксу.
+        for vmid, host in (("9101", "pu-mop-1"), ("9102", "pu-other-3")):
+            with open(os.path.join(conf_dir, f"{vmid}.conf"), "w") as f:
+                f.write(f"arch: amd64\nhostname: {host}\ncores: 2\n")
         wrapper = render(src, {"pve_vmid_min": "9000",
                                "pve_facts": {"vmid_max": 9999},
                                "MOP_USER": "mopuser"})
+        real, fake = "/etc/pve/lxc/", conf_dir + "/"
         c.check("#565 the wrapper renders with the role's substitutions",
                 wrapper.startswith("#!/bin/bash"), wrapper[:40])
+        n_paths = wrapper.count(real)
+        c.check("#565 exactly one /etc/pve/lxc/ path to substitute",
+                n_paths == 1, f"{n_paths} in the template")
+        if n_paths:
+            wrapper = wrapper.replace(real, fake)
+        c.check("#565 no absolute /etc/pve path remains in the stand",
+                "/etc/pve" not in wrapper, "left as is")
 
-        # Подставной pct: журнал вызовов, каталог конфигов и ростер. 9101 --
-        # «наше» тело pu-mop-1, 9102 -- чужое pu-other-3 (жертва, которую
-        # снёс бы чужой cleanup, будь проверка только по префиксу). Реакции
-        # pct как у настоящего: config несуществующего -- код 2, ростер --
-        # таблица VMID'ов; PCT_CONFIG_FAIL/PCT_LIST_FAIL делают чтение
-        # нечитаемым (любой ненулевой код, не только «нет такого CT»).
+        # Подставной pct: журнал вызовов, конфиги и ростер. Реакции как у
+        # настоящего: config несуществующего -- код 2, ростер -- таблица
+        # VMID'ов; PCT_CONFIG_FAIL/PCT_LIST_FAIL делают чтение нечитаемым
+        # (любой ненулевой код, не только «нет такого CT»).
         calls = os.path.join(d, "calls")
         pct = os.path.join(d, "pct")
         conf = {"9101": "hostname: pu-mop-1\ncores: 2\n",
@@ -2686,28 +2707,39 @@ def check_pve_destroy_body_565(c, can_render):
         c.check("#565 roster read error -> no mutation",
                 not mutated(), ran())
 
-        # Доводы валидации: без имени, не-число, вне диапазона, имя не pu-.
+        # Доводы валидации: без имени, не-число, вне диапазона, имя не pu-,
+        # недопустимый символ в имени. Отказ каждого -- ДО любого вызова pct:
+        # журнал пуст целиком, не «без stop/destroy».
         for args, why_not in ((("destroy-body", "9001"), "one argument"),
                           (("destroy-body", "abc", "pu-mop-1"), "vmid not a number"),
                           (("destroy-body", "8000", "pu-mop-1"), "vmid outside the range"),
-                          (("destroy-body", "9101", "other-1"), "name not pu-")):
+                          (("destroy-body", "9101", "other-1"), "name not pu-"),
+                          (("destroy-body", "9101", "pu-mo p-1"), "name with a space")):
             clear()
             r = run(*args)
             c.check(f"#565 invalid call ({why_not}) -> refusal",
                     r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
-        c.check("#565 invalid calls never mutate",
-                not mutated(), ran())
+            c.check(f"#565 invalid call ({why_not}) -> pct never called",
+                    ran() == "", ran())
 
         # Прежний destroy сборки не тронут: плейбук зовёт его без имени, и он
-        # по-прежнему сносит по одному VMID после проверки префикса.
-        # Проверки имени он читает из /etc/pve/lxc напрямую (conf_hostname,
-        # #138) -- путь абсолютный, изолировать его в каталоге нельзя,
-        # поэтому проверяется отказ на отсутствующем файле: префиксную
-        # проверку destroy проходит только с настоящим конфигом гипервизора.
+        # по-прежнему сносит по одному VMID после префиксной проверки --
+        # настоящим прежним успехом, на изолированных фикстурах конфигов.
         clear()
         r = run("destroy", "9102")
-        c.check("#565 the build's destroy still refuses unknown bodies",
-                r.returncode != 0 and "destroy 9102" not in ran(),
+        c.check("#565 the build's destroy still succeeds by vmid alone",
+                r.returncode == 0
+                and [l for l in ran().splitlines()
+                     if not l.startswith("config")]
+                == ["stop 9102", "destroy 9102 --force 1 --purge 1"],
+                f"rc={r.returncode} stderr={r.stderr!r} calls={ran()!r}")
+
+        # Прежний destroy на отсутствующем теле -- идемпотентный успех:
+        # конфига в фикстурах нет, pct config отвечает кодом 2.
+        clear()
+        r = run("destroy", "9997")
+        c.check("#565 the build's destroy stays idempotent on absence",
+                r.returncode == 0 and ran() == "config 9997\n",
                 f"rc={r.returncode} stderr={r.stderr!r} calls={ran()!r}")
 
         # Новый глагол заявлен в подсказке об отказе.
