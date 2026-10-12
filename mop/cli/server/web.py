@@ -118,10 +118,11 @@ UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
                           "update", "model"))
 
 
-def _safety_of(target, owner):
+def _safety_of(target, owner, audit=None):
     """Предикат #460 для run: свежие факты и занятость под target gate.
 
-    -> (predикат, транспорт, None) | (None, None, отказ). Транспорт --
+    -> (predикат, транспорт, None, проект) | (None, None, отказ, None).
+    Транспорт --
     подтверждённый проектом цели: эффект воркера едет им же, а не
     глобальным резолвером, чья догадка могла быть stale. Отказ --
     готовая причина для вердикта run'а: контекст цели не собрался
@@ -156,8 +157,14 @@ def _safety_of(target, owner):
         if not origin:
             return (None, None, f"{target}: carries no origin — whose target it "
                                 f"is cannot be told, and acting on it is not "
-                                f"for the web")
+                                f"for the web", None)
         confirmed = ops.target_project(origin)
+        if audit is not None:
+            # Контекст аудита (#575): спека подтвердила проект --
+            # фиксируем В МОМЕНТ ФАКТА, до любых позднейших ошибок
+            # префетча/узла (BusError state, зависший alloc, крах
+            # эффекта): подтверждённое из аудита не исчезает.
+            audit["project"] = confirmed
         if confirmed != project:
             # Ростер мог соврать (поздний meta-фикс), а спека авторитетна:
             # перевязываем транспорт подтверждённым проектом, а не только
@@ -181,7 +188,8 @@ def _safety_of(target, owner):
             got = extra if isinstance(extra, dict) and extra.get("error") \
                 else {**got, "clone": (extra or {}).get("clone")}
     except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
-        return None, None, f"{target}: cannot inspect it before acting — {e}"
+        return (None, None,
+                f"{target}: cannot inspect it before acting — {e}", None)
     st = state._session_state((got or {}).get("session"))
     if st is not None:
         busy = state._state_from_session(st, None).kind not in ("free", "hung")
@@ -194,12 +202,30 @@ def _safety_of(target, owner):
         return ops.safety(name, project, owner=owner, facts=got,
                           busy=busy, disruptive=disruptive)
 
-    return predicate, transport, None
+    # Четвёртый элемент (#575) -- подтверждённый проект цели: спека
+    # подтвердила origin, аудиту нужен факт, а не вторая прогулка.
+    return predicate, transport, None, project
 
 
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
     name = target or ""
+    # Контекст аудита операции (#575): словарь на всю жизнь операции.
+    # Имя existing-target глаголов -- из записи приёма (известно ДО
+    # любых ворот: gate-отказ, unknown, крах -- имя цели не теряется);
+    # проект -- подтверждённый факт В МОМЕНТ подтверждения (спека/реестр
+    # add), он переживает любую позднейшую ошибку. Финальный вердикт
+    # доопределяет: add называет созданного папета, send/add везут
+    # проект из своего подтверждённого контекста. Вердикт не перебивает
+    # подтверждённое: только заполняет пустое.
+    audit = {"name": (name if name else None), "project": None}
+    # Регистрация ДО старта эффекта (#575): контекст живёт с записи
+    # приёма и переживает всё -- ворота, зависание, крах. Вне потока
+    # операции (прямые вызовы в проверках) current_op None -- контекст
+    # остаётся локальным словарём замыканий.
+    op_id = ADMINAPI.current_op()
+    if op_id is not None:
+        ADMINAPI.audit_context(op_id, audit)
     if action in UNSAFE_VERBS and name:
         # Сбор фактов #566 -- не фон и не подготовка до полосы: это
         # ЧАСТЬ локального workflow операции (#569), и едет она внутрь
@@ -207,10 +233,42 @@ def _execute(action, target, params, who):
         # же полосой цели. Висящий префетч держит полосу, как и эффект,
         # -- и отпускается тем же порядком мутаций, а не раньше ответа.
         owner = login
-        return lambda: WORKER.run(action, name, params, login,
-                                  prepare=lambda: _safety_of(name, owner))
-    return lambda: WORKER.run(action, name, params, login,
-                              transport=opworker.default_transport(RESOLVER))
+
+        def prepare():
+            pred, tr, refusal, _ctx = _safety_of(name, owner, audit=audit)
+            return pred, tr, refusal
+
+        def effect():
+            got = WORKER.run(action, name, params, login, prepare=prepare,
+                             context=audit)
+            # Вердикт доопределяет контекст (#575): проект эффекта (send
+            # с собственным резолвом) достовернее догадки префетча, имя
+            # existing-target цели уже в контексте из записи приёма.
+            if isinstance(got, dict):
+                if got.get("project"):
+                    audit["project"] = got["project"]
+                if got.get("name"):
+                    audit["name"] = got["name"]
+            return got
+        return effect
+    return lambda: audit_context(
+        WORKER.run(action, name, params, login,
+                   transport=opworker.default_transport(RESOLVER),
+                   context=audit), audit)
+
+def audit_context(verdict, audit):
+    """Довести контекст аудита (#575) фактами вердикта и вернуть вердикт.
+
+    Targetless-ветка _execute (send/add): вердикт несёт подтверждённые
+    имя/проект -- отправляем их в контекст, адаптер строит завершение
+    из записи приёма и контекста, не из публичного кадра."""
+    if isinstance(verdict, dict):
+        if verdict.get("project"):
+            audit["project"] = verdict["project"]
+        if verdict.get("name"):
+            audit["name"] = verdict["name"]
+    return verdict
+
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
@@ -234,23 +292,42 @@ class _LiveApi(adminapi.Api):
 
 ADMINAPI = _LiveApi(OPS, origin=None, executor=_execute)
 
-# Терминал операции (#499): SSE-кадр operation в /events и аудит-запись
-# ops.record в журнал шины -- подписка listen_events кладёт её в
-# COLLECTOR (/api/journal), событие уходит и остальным мастерам.
+# Терминал операции (#499): SSE-кадр operation в /events. Публичный кадр
+# узкий {id, action, target, status, error?}: ни login, ни проекта.
 def _on_operation(frame):
     payload = json.dumps(frame, ensure_ascii=False)
     with _OP_LOCK:
         _OP_FRAMES.append(payload)
         del _OP_FRAMES[:-100]
     COLLECTOR.kick()
+
+
+# Аудит завершения (#575) -- внутренняя проекция адаптера, не публичный
+# кадр: проверенный принципал HTTP-сессии, id операции, терминальный
+# исход, имя из доверенного вердикта и проект из подтверждённого
+# контекста эффекта (спека/Meta.origin, реестр add). ops.record едет на
+# шину темой проекта записи -- поле и тема не противоречат друг другу;
+# подписка listen_events кладёт запись в COLLECTOR (/api/journal), и
+# событие уходит остальным мастерам. Payload и сырые ошибки сюда не
+# попадают; отказ публикации -- тишина: журнал вторичен и вердикт не
+# роняет.
+def _on_audit(event):
     try:
-        bus.emit(ops.record(frame.get("action"), frame.get("target"),
-                            None, frame.get("login")))
+        # Тема -- проект записи; не подтвердился -- ЯВНАЯ нейтральная
+        # admin (#575, ревью): project=None у emit фактически берёт
+        # субъект процесса (bus.PROJECT), что не гарантированно
+        # нейтрально на проектном веб-процессе.
+        bus.emit(ops.record(event.get("action"), event.get("name"),
+                            event.get("project"), event.get("login"),
+                            op=event.get("id"),
+                            status=event.get("status")),
+                 project=event.get("project") or bus.ADMIN)
     except Exception:
         pass  # журнал вторичен: тишина не роняет вердикт
 
 
 ADMINAPI.on_terminal(_on_operation)
+ADMINAPI.on_completion(_on_audit)
 
 
 class Gateway:

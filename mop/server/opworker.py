@@ -280,16 +280,21 @@ def _wrap_model(target, login, model, now=None, sleep=None, observe_wait=30):
         observe_wait=observe_wait))
 
 
-def _wrap_send(target, login, message):
+def _wrap_send(target, login, message, context=None):
     """Доставка от HTTP-принципала: факты и проект не берутся из запроса."""
     if not login or not isinstance(target, str) or not target.startswith(puppets.JOB_PREFIX):
         return ops.outcome(ops.REFUSED, target, error="send needs an authenticated actor and a puppet target")
+    project = None   # подтверждается спекой ниже; отказ до -- честный None
     try:
         spec = puppets._cluster("spec", name=target) or {}
         origin = (spec.get("meta") or {}).get("origin")
         if not origin:
             return ops.outcome(ops.REFUSED, target, error="cannot determine the target project")
         project = ops.target_project(origin)
+        if context is not None:
+            # Аудит-факт (#575): спека подтвердила проект ДО доставки --
+            # зависшая доставка его больше не отнимает.
+            context["project"] = project
         if not project or project == bus.ADMIN:
             return ops.outcome(ops.REFUSED, target, error="cannot determine the target project")
         node = puppets.node_of(target)
@@ -300,23 +305,33 @@ def _wrap_send(target, login, message):
         facts = node_call(node, "state", name=target)
         safe, why = ops.safety(target, project, owner=login, facts=facts)
         if not safe:
-            return ops.outcome(ops.REFUSED, target, error=why)
+            return ops.outcome(ops.REFUSED, target, error=why,
+                               project=project)
     except (bus.BusError, bus.Refused, LookupError):
-        return ops.outcome(ops.REFUSED, target, error="cannot inspect the target before sending")
+        # Проект уже подтверждён спекой -- везём его аудиту (#575)
+        return ops.outcome(ops.REFUSED, target,
+                           error="cannot inspect the target before sending",
+                           project=project)
     try:
         # У веб-чата нет инбокса на шине: from_name не выдаёт выдуманный
         # адрес за ответный. HTTP-принципал едет владельцем, force запрещён.
         got = ops.send_to_puppet(node_call, node, target, message, owner=login, force=False)
     except bus.Refused as e:
-        return ops.outcome(ops.REFUSED, target, error=str(e))
+        return ops.outcome(ops.REFUSED, target, error=str(e),
+                           project=project)
     except Exception:
         # Запрос мог дойти до сокета до потери ответа: повторять нельзя.
-        return ops.outcome(ops.UNKNOWN, target, error="message delivery could not be confirmed")
+        return ops.outcome(ops.UNKNOWN, target,
+                           error="message delivery could not be confirmed",
+                           project=project)
     if got.get("error"):
-        return ops.outcome(ops.REFUSED, target, error=got["error"])
+        return ops.outcome(ops.REFUSED, target, error=got["error"],
+                           project=project)
     if not isinstance(got.get("msg_id"), str) or not got["msg_id"].strip():
-        return ops.outcome(ops.UNKNOWN, target, error="message delivery could not be confirmed")
-    return ops.outcome(ops.REGISTERED, target)
+        return ops.outcome(ops.UNKNOWN, target,
+                           error="message delivery could not be confirmed",
+                           project=project)
+    return ops.outcome(ops.REGISTERED, target, project=project)
 
 
 # Регистрация disruptive (#460): снос клона, джоба или тела под занятой
@@ -387,7 +402,7 @@ class Worker:
 
     # ── исполнение ──────────────────────────────────────────────────────
     def run(self, verb, target, params, login, transport=None,
-            safety=None, role="admin", prepare=None):
+            safety=None, role="admin", prepare=None, context=None):
         """Исполнить операцию -> вердикт-словарь #476 ({status, error, ...}).
 
         Роль -- ДО первого эффекта: не admin -- отказ, эффектов нет.
@@ -402,6 +417,11 @@ class Worker:
         эффект, -- иначе его bus-запрос держал бы полосу цели без срока.
         transport -- глаголы сервиса кластера (#496/#498); воркер своего
         не строит. Вердикт синхронен: поток операции даёт адаптер (#499).
+        context (#575) -- словарь аудита операции: эффекты (send/add)
+        кладут в него подтверждённые факты (проект спеки/реестра,
+        доверенное имя регистрации) В МОМЕНТ факта, до зависания
+        позднейших шагов; словарь принадлежит вызову, не воркеру, --
+        параллельные операции его не смешивают.
         Полоса цели (#569): срок #497 ограничивает ОТВЕТ, не жизнь
         эффекта -- нитка эффекта переживает таймаут и остаётся держателем
         полосы (rider). run той же цели сперва ждёт живых хвостов в
@@ -426,7 +446,8 @@ class Worker:
                                     disruptive=verb in DISRUPTIVE)
                 if not ok:
                     return {"status": "refused", "error": why}
-            return self._effect(verb, target, params or {}, login, gate_tr)
+            return self._effect(verb, target, params or {}, login, gate_tr,
+                                context)
 
         # Резервирование полосы существует ДО старта нитки эффекта и
         # переживает её ответ (#569, ревью): между start() и выполнением
@@ -622,7 +643,7 @@ class Worker:
                 return False
             self._sleep(0.1)
 
-    def _effect(self, verb, target, params, login, transport):
+    def _effect(self, verb, target, params, login, transport, context=None):
         """Вызов библиотечного workflow #458: воркер не держит копий.
 
         Рестарт -- наблюдаемым режимом (#464): снимок берёт сама операция
@@ -642,11 +663,23 @@ class Worker:
             origin, fields = add_request(params)
             why = self._registry_refusal(origin)
             if why:
+                # Реестр ОТВЕРГ просьбу (ревью 2 #575): projectName из
+                # незарегистрированного origin -- выдумка, его в аудите
+                # нет; тема публикации -- нейтральная admin.
                 return ops.outcome(ops.REFUSED, None, error=why)
             target = origin
+            # Проект решает реестр: он УЖЕ подтвердил origin (#575),
+            # чистая функция без сети. Факт -- В МОМЕНТ подтверждения,
+            # до зависания placement.
+            project = ops.target_project(origin)
+            if context is not None:
+                context["project"] = project
             text, sent = self._source(origin)
-            return ops.add(transport, origin, (text, sent),
-                           branch=params.get("branch"))
+            got = ops.add(transport, origin, (text, sent),
+                          branch=params.get("branch"), context=context)
+            if isinstance(got, dict):
+                got.setdefault("project", project)
+            return got
         if verb == "update":
             fields = update_request(params)
             spec = transport("spec", name=target) or {}
@@ -674,7 +707,7 @@ class Worker:
         if fn is None:
             raise RuntimeError(f"no library operation for {verb}")
         if verb == "send":
-            return fn(target, login, send_request(params))
+            return fn(target, login, send_request(params), context=context)
         return fn(target, login)
 
     def _source(self, origin):
