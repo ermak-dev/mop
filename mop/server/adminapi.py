@@ -262,6 +262,9 @@ class Api:
         # цель -> семафор: одна операция на цель, вторая ждёт (#497).
         self._gates = {}
         self._on_terminal = []
+        # Внутренний аудит завершения (#575): отдельная проекция от
+        # публичного кадра /events.
+        self._on_completion = []
 
     # ─── роль: перечитывается на каждом запросе ────────────────────────
     def _admin(self, who=None, asked=False):
@@ -438,12 +441,40 @@ class Api:
                   file=sys.stderr, flush=True)
         for cb in list(self._on_terminal):
             cb(frame)
+        # Внутреннее событие завершения (#575) -- проекция, ОТДЕЛЬНАЯ от
+        # публичного кадра: аудит шины, а не дашборд. Принципал -- login
+        # из ЗАПИСИ ПРИЁМА (проверенная личность HTTP-сессии, не payload),
+        # исход -- терминальный статус, имя -- из доверенного вердикта
+        # (add называет созданного папета, а не входную targetless
+        # просьбу). Проект сюда НЕ входит: его подтверждённое значение
+        # знает эффект (спека/Meta.origin, реестр add), и задача
+        # принадлежит эффекту, не адаптеру -- вторая проекция ниже
+        # собирает его без прогулки по сети после завершения.
+        audit = dict(frame)
+        audit["login"] = record["login"]
+        if isinstance(verdict, dict):
+            # Факты вердикта из подтверждённого контекста эффекта:
+            # имя (add называет созданного) и проект (спека/реестр).
+            name = verdict.get("name")
+            if isinstance(name, str) and name:
+                audit["name"] = name
+            audit["project"] = verdict.get("project")
+        for cb in list(self._on_completion):
+            cb(audit)
 
     def on_terminal(self, callback):
         """Крючок терминала (#499): кадр {id, action, target, status,
         error?} -- в SSE /events (#424) и в журнал службы. Payload в кадре
         нет; причина -- закрытая фраза result_error, не сырой error."""
         self._on_terminal.append(callback)
+
+    def on_completion(self, callback):
+        """Крючок внутреннего аудита завершения (#575): событие {id,
+        action, target, status, error?, login, name?} -- источник
+        ops.record на шину. Публичный кадр /events шире не становится:
+        login и project в него не попадают; сюда они доходят из записей
+        адаптера, а не из payload запроса."""
+        self._on_completion.append(callback)
 
     # ─── GET результата ────────────────────────────────────────────────
     def result(self, op_id, who):

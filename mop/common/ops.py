@@ -596,11 +596,20 @@ def safety(name, project, owner=None, facts=None, busy=False,
     return True, None
 
 
-def record(verb, name, project, principal, sender="mop-web"):
+def record(verb, name, project, principal, sender="mop-web",
+           op=None, status=None):
     """Аудит-запись операции воркера (#476): принципал HTTP и сервис --
     отдельные поля, payload сообщения -- НЕ входит (ключи не хранятся).
 
     owner_note и события шины сохраняются воркером отдельно; здесь только
-    сама запись: кто из людей велел, какой сервис исполнил, что и над кем."""
-    return {"event": "op", "verb": verb, "name": name, "project": project,
-            "principal": principal, "sender": sender}
+    сама запись: кто из людей велел, какой сервис исполнил, что и над кем.
+    op/status (#575) -- связка с операцией веба: id из приёма адаптера и
+    терминальный исход; отсутствуют -- запись не из веб-конвейера (или
+    исход неизвестен вовсе), прежние читатели формы не замечают."""
+    out = {"event": "op", "verb": verb, "name": name, "project": project,
+           "principal": principal, "sender": sender}
+    if op is not None:
+        out["op"] = op
+    if status is not None:
+        out["status"] = status
+    return out
