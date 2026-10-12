@@ -101,6 +101,15 @@ def check_node_check_321(c):
 # мутации ловятся каждая своей половиной: запись ПОСЛЕ шагов снятия -- 4
 # отказа (учёт половин), clear до try -- 7 (учёт + затирание), отказ
 # подъёма, затирающий исходный, -- 7 (видны оба отказа).
+# Ревью: два пробела в сохранении исходного. (1) ненулевой rc -- тоже
+# исходный неуспех: rc 17 исчезал за отказом подъёма; теперь в причине
+# «image bake failed (rc 17)» рядом со строкой отказа подъёма. (2)
+# контрольный поток не становится RuntimeError: KeyboardInterrupt/SystemExit
+# выходят своим типом с дописанной строкой подъёма -- иначе верхний слой
+# ловил бы обычную ошибку и продолжал работу после отмены. Оба -- RED
+# ровно на них (1 и 2 отказа), мутации: вырезанная rc-ветка -- 1,
+# RuntimeError вместо типа исходного -- 2. Обычное исключение + отказ
+# подъёма -- прежний контракт обоих сообщений.
 # STATUS: FIXED — see #570
 class RefusingNomad(FakeNomad):
     """FakeNomad, чей register отказывает поимённо: подъём снятого папета
@@ -159,7 +168,7 @@ def run_570(rows, meta, stop_refuses=(), wipe_refuses=(), register_refuses=(),
             result = image.build("git@h:g/p.git", {"project": "p"}, force=force,
                                  on_step=steps.append, api=api)
             err = None
-        except Exception as e:  # noqa: BLE001 -- исход прогона и есть предмет проверки
+        except BaseException as e:  # noqa: BLE001 -- контрольный поток тоже исход прогона
             result, err = None, e
     return {"result": result, "err": err, "api": api, "steps": steps,
             "baked": len(baked)}
@@ -223,6 +232,38 @@ def check_clear_recovery_570(c):
             str(r["err"]))
     c.expect("#570 the one whose raising worked is raised",
              sorted(r["api"].jobs), ["pu-p-2"])
+
+    # bake вернул ненулевой rc, и подъём отказал: НЕНУЛЕВОЙ rc -- тоже
+    # исходный неуспех, а не «исходного нет» -- код сборки не должен
+    # исчезать за отказом подъёма (ревью #570: rc 17 пропадал целиком).
+    r = run_570(rows_570(("pu-p-1", "n1")), pool, bake_rc=17,
+                register_refuses=("pu-p-1",))
+    c.check("#570 a failed bake rc survives a restore failure: both the rc and the raising refusal are visible",
+            isinstance(r["err"], RuntimeError) and "image bake failed (rc 17)" in str(r["err"])
+            and "not raised again: Nomad refused pu-p-1" in str(r["err"]),
+            str(r["err"]))
+    c.expect("#570 the failed rc did not turn into a result", r["result"], None)
+
+    # Контрольный поток (KeyboardInterrupt/SystemExit) при живом отказе
+    # подъёма не становится обычной ошибкой: тип первичного обязан выйти
+    # тем же типом, иначе верхний слой поймает RuntimeError и продолжит
+    # работу после отмены. Диагностика подъёма доезжает заметной.
+    for control in (KeyboardInterrupt("cancelled by operator"),
+                    SystemExit("stopping for the night")):
+        r = run_570(rows_570(("pu-p-1", "n1")), pool, bake_raises=control,
+                    register_refuses=("pu-p-1",))
+        c.check(f"#570 {type(control).__name__} with a restore failure: the control-flow exception leaves with its own type",
+                type(r["err"]) is type(control) and "not raised again: Nomad refused pu-p-1" in str(r["err"]),
+                (type(r["err"]).__name__, str(r["err"])))
+
+    # Обычное исключение + отказ подъёма: прежний контракт -- оба сообщения.
+    r = run_570(rows_570(("pu-p-1", "n1")), pool,
+                bake_raises=RuntimeError("ansible exploded"),
+                register_refuses=("pu-p-1",))
+    c.check("#570 an ordinary failure with a restore failure: still both messages",
+            isinstance(r["err"], RuntimeError) and "ansible exploded" in str(r["err"])
+            and "not raised again: Nomad refused pu-p-1" in str(r["err"]),
+            str(r["err"]))
 
     # Успех: прежний итог, мета -- прежняя.
     r = run_570(rows_570(("pu-p-1", "n1", "feat/a"), ("pu-p-2", "n2")), pool)

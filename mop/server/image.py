@@ -11,7 +11,6 @@
 import json
 import os
 import subprocess
-import sys
 
 from ..common import config, manifest, puppets, state
 from ..common.domain import Alloc, JobMeta
@@ -221,6 +220,7 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
     step("stopping the project's bodies")
     gone = []
     original = None
+    rc = None
     try:
         # clear под той же защитой, что и bake (#570): его список -- здесь,
         # и отказ посреди снятия поднимает уже снятых.
@@ -235,10 +235,17 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
         try:
             restore(gone, api=api)
         except Exception as e:  # noqa: BLE001 -- дописать, а не затереть исходный отказ
-            # Исходного отказа может не быть вовсе (плейбук вернул rc, и
-            # restore -- единственная неудача): тогда его причина и едет.
+            # Ненулевой rc -- такой же исходный неуспех, как исключение
+            # (ревью #570: rc 17 пропадал за отказом подъёма).
+            if rc is not None and rc != 0:
+                raise RuntimeError(f"image bake failed (rc {rc})\n{e}") from None
+            # Контрольный поток (KeyboardInterrupt/SystemExit) остаётся
+            # собой: RuntimeError наверху поймали бы и продолжили работу
+            # после отмены. Его текст и несёт диагностику подъёма --
+            # пере-raise проходит через except-ветку с уже дописанной
+            # строкой.
             if original is not None:
-                raise RuntimeError(f"{original}\n{e}") from None
+                raise type(original)(f"{original}\n{e}") from None
             raise
     if rc == 0:
         step("announcing the image to the nodes")
