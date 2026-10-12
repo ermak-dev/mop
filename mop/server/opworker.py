@@ -342,40 +342,87 @@ class Worker:
         # Реестр заведённых проектов (callable -> set origin'ов): gate add
         # (#470). None -- не подключён, add отказывает (fail closed).
         self._registry = registry
+        # Полосы целей (#569): target -> живые нитки-держатели эффектов.
+        # Слот живёт до фактического конца нитки; см. _limited/_drain.
+        self._lanes = {}
+        self._lanes_lock = threading.Lock()
 
     # ── исполнение ──────────────────────────────────────────────────────
     def run(self, verb, target, params, login, transport=None,
-            safety=None, role="admin"):
+            safety=None, role="admin", prepare=None):
         """Исполнить операцию -> вердикт-словарь #476 ({status, error, ...}).
 
         Роль -- ДО первого эффекта: не admin -- отказ, эффектов нет.
         safety -- ops.safety-подобный предикат ДО эффекта; None -- общий
-        слой сам решает (send проверяет facts своейafety-функцией).
+        слой сам решает (send проверяет facts своей safety-функцией).
+        prepare -- сборка предиката и транспорта ИЗ ЖИВОЙ ШИНЫ (#566):
+        вызывается внутри срока эффекта (#569), до ворот и эффекта;
+        (safety, transport, None) | (None, None, отказ) -- отказ до
+        эффекта, с причиной, без мутаций. Что собирает prepare, то и
+        исполняется: префетч -- часть локального workflow, а не фоновая
+        подготовка, и виснуть он обязан под тем же дедлайном, что и
+        эффект, -- иначе его bus-запрос держал бы полосу цели без срока.
         transport -- глаголы сервиса кластера (#496/#498); воркер своего
-        не строит. Вердикт синхронен: поток операции даёт адаптер (#499),
-        сюда приходит уже свободная цель (семафор адаптера отпирает
-        исполнение)."""
+        не строит. Вердикт синхронен: поток операции даёт адаптер (#499).
+        Полоса цели (#569): срок #497 ограничивает ОТВЕТ, не жизнь
+        эффекта -- нитка эффекта переживает таймаут и остаётся держателем
+        полосы (rider). run той же цели сперва ждёт живых хвостов в
+        пределах того же срока; не дождался -- отказ: эффект начат не
+        был, это не «цель свободна» и не автоповтор. Ответ ограничен
+        терпением + сроком эффекта, вечного accepted нет."""
         if role != "admin":
             return {"status": "refused", "error": "admin only"}
-        if safety is not None:
-            ok, why = safety(target, self._project_of(verb, target),
-                             owner=login,
-                             disruptive=verb in DISRUPTIVE)
-            if not ok:
-                return {"status": "refused", "error": why}
+
+        def whole():
+            # Весь локальный workflow одной ниткой под одним сроком:
+            # сбор фактов (#566), ворота, эффект. Что-то одно висит --
+            # дедлайн терминирует ответ, нитка остаётся держателем полосы.
+            gate_pred, gate_tr = safety, transport
+            if prepare is not None:
+                gate_pred, gate_tr, refusal = prepare()
+                if refusal is not None:
+                    return {"status": "refused", "error": refusal}
+            if gate_pred is not None:
+                ok, why = gate_pred(target, self._project_of(verb, target),
+                                    owner=login,
+                                    disruptive=verb in DISRUPTIVE)
+                if not ok:
+                    return {"status": "refused", "error": why}
+            return self._effect(verb, target, params or {}, login, gate_tr)
+
+        # Placeholder закрывает окно между drain и парковкой нитки
+        # эффекта: без него второй run той же цели проходил drain в этом
+        # зазоре и начинал эффект параллельно первому. Placeholder живёт
+        # до ответа run и снимается в finally: держатель остаётся только
+        # у живой нитки эффекта, пережившей срок.
+        target_key = target or None
+        caller = threading.current_thread()
+        if target_key is not None:
+            with self._lanes_lock:
+                self._lanes.setdefault(target_key, set()).add(caller)
         try:
-            verdict = self._limited(
-                lambda: self._effect(verb, target, params or {}, login,
-                                     transport))
+            if not self._drain(target_key, ignore={caller}):
+                return {"status": "refused", "error":
+                        f"{target}: the previous operation on this target "
+                        f"is still finishing; this one did not start"}
+            verdict = self._limited(whole, target=target_key)
         except _TimedOut as e:
             # Срок вышел, а не эффект отказал (#497): он мог дойти до
             # цели -- исход неизвестен, повтор автоматом запрещён
-            # (#476: unknown не failed), цель свободна.
+            # (#476: unknown не failed). Хвост эффекта держит полосу
+            # цели (#569): пока нитка жива, следующая операция этой цели
+            # не начинается -- неизвестность не превращается в «свободно».
             return {"status": "unknown", "error": str(e)}
         except ValueError as e:
             # Валидация params (add/update/model/send_request) -- отказ
             # приёма, не сбой: кривой запрос не оставляет «оно сломалось».
             return {"status": "refused", "error": str(e)}
+        finally:
+            if target_key is not None:
+                self._unpark(target_key, holder=caller)
+        if isinstance(verdict, dict) and verdict.get("status") in TERMINAL:
+            # Готовый вердикт статуса (отказ ворот/префетча) -- как есть.
+            return dict(verdict)
         try:
             if isinstance(verdict, dict) and verdict.get("outcome"):
                 kind = verdict.get("outcome")
@@ -387,28 +434,68 @@ class Worker:
             return {"status": "failed", "error": str(e)}
         return {"status": "partial"}
 
-    def _limited(self, effect):
-        """Эффект под сроком (#497): вернувшемуся -- его ответ, молчащему --
-        исключение _TimedOut, которое run терминирует честным unknown.
+    def _limited(self, effect, target=None):
+        """Эффект под сроком ответа (#497, #569): вернувшемуся -- его
+        результат, молчащему -- _TimedOut, которое run терминирует
+        честным unknown.
 
-        Эффект ходит в шину без своего таймаута: адресат-узел умер -- поток
-        стоит в bus-запросе вечно. С #499 цель держит семафор адаптера, и
-        зависший эффект запирал бы её навсегда; дедлайн возвращает run
-        вердиктом unknown, семафор адаптера освобождается в его finally.
-        Сам поток эффекта НЕ убиваем: Python этого не умеет; он остаётся
-        демоном и умирает с процессом службы. Цели он больше не держит,
-        так что зомби-нитка одной зависшей операции не запирает другие
-        операции по цели.
-        """
-        box = []
+        Эффект ходит в шину без своего таймаута: адресат-узел умер --
+        поток стоит в bus-запросе вечно. Срок #497 возвращает run вердикт
+        unknown за конечное время. Но срок отвечает за ОТВЕТ, не за жизнь
+        эффекта (#569): пока нитка эффекта жива, она ещё может писать
+        цель, и полоса обязана оставаться занятой ею -- прежний контракт
+        «цели он больше не держит» отпускал семафор адаптера, и следующая
+        операция мутировала до того, как старая закончила. Держатель
+        полосы -- сама нитка эффекта: занимает слот цели ПЕРВЫМ своим
+        действием и снимает себя в finally -- честно завершившийся эффект
+        (успех, отказ, крах) полосу освобождает сразу, переживший срок --
+        ровно до фактического конца, и следующая операция той же цели
+        ждёт его в _drain. Убить Python-нитку нельзя: она остаётся
+        демоном и умирает с процессом. Пустой target (add без цели)
+        держателя не заводит: полосы без имени нет."""
+        if target is None:
+            return self._wait_effect(effect)
 
         def ride():
+            self._park(target)
             try:
-                box.append((False, effect()))
+                return effect()
+            finally:
+                self._unpark(target)
+
+        return self._wait_effect(ride)
+
+    def _park(self, target):
+        """Нитка эффекта занимает слот цели (держатель полосы, #569)."""
+        with self._lanes_lock:
+            self._lanes.setdefault(target, set()).add(
+                threading.current_thread())
+
+    def _unpark(self, target, holder=None):
+        """Снять нитку из слота цели; пустой слот убирается. holder --
+        та нитка, чьё место снимаем (по умолчанию текущая): placeholder
+        run снимает себя, не задевая живую нитку эффекта."""
+        with self._lanes_lock:
+            slot = self._lanes.get(target)
+            if slot is not None:
+                slot.discard(holder or threading.current_thread())
+                if not slot:
+                    self._lanes.pop(target, None)
+
+    def _wait_effect(self, ride):
+        """Ждать эффекта под дедлайном ответа (#497).
+
+        ride занимает и отпускает полосу сам: пережившее срок остаётся
+        держателем, а здесь видны только эффект и срок."""
+        box = []
+
+        def carry():
+            try:
+                box.append((False, ride()))
             except Exception as e:      # тоже результат: его ждёт run
                 box.append((True, e))
 
-        worker = threading.Thread(target=ride, daemon=True,
+        worker = threading.Thread(target=carry, daemon=True,
                                   name="mop-op-effect")
         worker.start()
         deadline = self._now() + self.effect_timeout
@@ -421,6 +508,31 @@ class Worker:
         if err:
             raise value
         return value
+
+    def _drain(self, target, ignore=frozenset()):
+        """Ждать конца живых хвостов цели (#569) в пределах срока эффекта.
+
+        -> True -- полоса свободна, эффект можно начинать; False -- хвост
+        пережил терпение: отказ без эффекта, с именем причины в run.
+        Терпение -- срок эффекта: ответ операции остаётся ограниченным
+        (терпение + собственный срок), вечного accepted нет. Хвост не
+        обязан умирать к сроку: он держит полосу до фактического конца,
+        следующий run повторит drain. Мёртвые нитки слот не держат.
+        ignore -- нитки своего вызова (placeholder run): их слот --
+        ожидаемая занятость, а не хвост."""
+        if target is None:
+            return True
+        deadline = self._now() + self.effect_timeout
+        while True:
+            with self._lanes_lock:
+                slot = self._lanes.get(target)
+                live = [t for t in (slot or ())
+                        if t.is_alive() and t not in ignore]
+            if not live:
+                return True
+            if self._now() >= deadline:
+                return False
+            self._sleep(0.1)
 
     def _effect(self, verb, target, params, login, transport):
         """Вызов библиотечного workflow #458: воркер не держит копий.

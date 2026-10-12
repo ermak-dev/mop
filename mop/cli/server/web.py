@@ -85,12 +85,15 @@ RESOLVER = _resolve_project
 
 # Исполнитель #499: эффект операции -- воркер run тем же транспортом,
 # что CLI (#496/#498); поток на операцию даёт адаптер (adminapi), сюда
-# приходит уже свободная цель. Личность -- (login, role) HTTP-сессии.
-# Действие с целью проходит обязательный ops.safety (#566): воркер зовёт
-# предикат ДО эффекта, но факты и занятость собирает ЭТА обвязка, из
-# живых источников, -- сам по себе предикат их не спрашивает, а без
-# фактов инвариант #460 молчит. Add -- без цели (его ворота -- реестр
-# #470), send -- за своими воротами _wrap_send: оба идут без предиката.
+# приходит цель, свободная по семафору адаптера. Полосу цели держит
+# воркер (#569): переживший срок эффект остаётся держателем до
+# фактического конца, следующая операция ждёт его там (drain). Личность
+# -- (login, role) HTTP-сессии. Действие с целью проходит обязательный
+# ops.safety (#566): сбор фактов -- prepare ВНУТРИ срока эффекта, до
+# ворот и эффекта; факты и занятость собирает ЭТА обвязка, из живых
+# источников, -- сам по себе предикат их не спрашивает, а без фактов
+# инвариант #460 молчит. Add -- без цели (его ворота -- реестр #470),
+# send -- за своими воротами _wrap_send: оба идут без предиката.
 UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
                           "update", "model"))
 
@@ -177,13 +180,17 @@ def _safety_of(target, owner):
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
     name = target or ""
-    safety, transport = None, opworker.default_transport(RESOLVER)
     if action in UNSAFE_VERBS and name:
-        safety, transport, refusal = _safety_of(name, login)
-        if safety is None:
-            return lambda: {"status": "refused", "error": refusal}
+        # Сбор фактов #566 -- не фон и не подготовка до полосы: это
+        # ЧАСТЬ локального workflow операции (#569), и едет она внутрь
+        # срока эффекта воркера (prepare), под тем же дедлайном и той
+        # же полосой цели. Висящий префетч держит полосу, как и эффект,
+        # -- и отпускается тем же порядком мутаций, а не раньше ответа.
+        owner = login
+        return lambda: WORKER.run(action, name, params, login,
+                                  prepare=lambda: _safety_of(name, owner))
     return lambda: WORKER.run(action, name, params, login,
-                              transport=transport, safety=safety)
+                              transport=opworker.default_transport(RESOLVER))
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
