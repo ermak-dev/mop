@@ -318,16 +318,16 @@ the merge and gate. Landing permission is still explicit.
 
 On the merged tree the puppet runs **all checks the project rules demand**.
 Where the rules put the full suite in CI, the narrow checks available
-locally precede the push, and a green pipeline on the pushed merge SHA —
-not a local full run — is what the landing rests on; a stale or cancelled
+locally precede the push, and a green pipeline on the pushed merge SHA — not
+a local full run — is what the landing rests on; a stale or cancelled
 pipeline is not success. Where the rules demand a local full suite on the
 merged tree, it runs there before the push. Confirm that no competing run
-uses the clone's build directory, run phases sequentially, and treat
-missing or ambiguous completion markers as unverified, not green. A compile-capable lint step
-need not be duplicated by a separate compile. Keep a warm landing clone
-where practical, but never weaken required tests for speed. The puppet
-reports the full fix and merge shas, checks actually run, and the
-remaining work; the master does not infer completion from a process exit.
+uses the clone's build directory, run phases sequentially, and treat missing
+or ambiguous completion markers as unverified, not green. A compile-capable
+lint step need not be duplicated by a separate compile. Keep a warm landing
+clone where practical, but never weaken required tests for speed. The puppet
+reports the full fix and merge shas, checks actually run, and the remaining
+work; the master does not infer completion from a process exit.
 
 Close or transfer the ticket in the project's tracker **after rollout is
 verified**, citing the fix and merge commits, the guarding test, what
