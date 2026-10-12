@@ -98,67 +98,89 @@ UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
 def _safety_of(target, owner):
     """Предикат #460 для run: свежие факты и занятость под target gate.
 
-    -> (predикат | None, отказ | None). Отказ -- готовая причина для
-    вердикта run'а: контекст цели не собрался (спека, аллокация, узел) --
-    «не знаю» не значит «можно», действие не исполняется вовсе.
+    -> (predикат, транспорт, None) | (None, None, отказ). Транспорт --
+    подтверждённый проектом цели: эффект воркера едет им же, а не
+    глобальным резолвером, чья догадка могла быть stale. Отказ --
+    готовая причина для вердикта run'а: контекст цели не собрался
+    (спека, аллокация, узел) -- «не знаю» не значит «можно», действие
+    не исполняется вовсе.
     Субъект -- ПРОЕКТ ЦЕЛИ (#498): префетч едет тем же адресным
     транспортом, что и эффект воркера, а не субъектом процесса --
     проектному веб-процессу belongs-отказ ответил бы до того, как
     известен origin. Кандидат проекта -- из ростера (резолвер); спека
-    подтверждает его origin'ом, и только тогда узел. Узел -- последней
-    аллокации в любом статусе (#377): легитимный wipe -- по
-    остановленному, «не работающую» префетч не спрашивает. Сессию и
-    факты клона спрашивает state, пока tmux жив; остановленной цели
-    state фактов клона не даёт -- их доносит глагол clone (#40). Занятость
-    -- общий вердикт сессии (#501, _state_from_session): всё, что не
-    free и не hung, -- живая работа, и незнакомое слово статуса тоже;
-    hung/offline -- сессии нет, рестарт им и лечится, это не работа."""
+    подтверждает его origin'ом, и подтверждённый проект ПЕРЕВЯЗЫВАЕТ
+    транспорт своей связкой резолвера -- иначе alloc и эффект
+    продолжали бы ехать первой догадкой ростера, и stale-кандидат
+    оставлял мутацию на субъекте процесса. Узел -- последней аллокации
+    в любом статусе (#377): легитимный wipe -- по остановленному.
+    Свидетельство сессии -- ответ state, и он не заменяется целиком:
+    fallback на глагол clone берёт у него ТОЛЬКО факты клона, и только
+    для подтверждённо остановленной цели (present False: state фактов
+    клона без tmux не даёт, #40) -- живой или неразобранный ответ
+    fallback'ом не подменяется, неизвестность сессии не становится
+    idle. Занятость -- общий вердикт сессии (#501): слово статуса
+    разобралось -- всё, что не free и не hung, живая работа, и
+    незнакомое слово тоже; не разобралось или её нет -- жив ли tmux
+    (present) решает, и живый ответ без строки сессии -- занят. Флаг
+    disruptive предикат передаёт ops.safety как пришёл от run:
+    model/update сессию не убивают (#468) и не получают ложный отказ
+    над живой чистой целью."""
     transport = opworker.default_transport(RESOLVER)
     try:
         project = RESOLVER(target)
         spec = transport("spec", name=target) or {}
         origin = (spec.get("meta") or {}).get("origin")
         if not origin:
-            return None, (f"{target}: carries no origin — whose target it is "
-                          f"cannot be told, and acting on it is not for the web")
-        if ops.target_project(origin) != project:
+            return (None, None, f"{target}: carries no origin — whose target it "
+                                f"is cannot be told, and acting on it is not "
+                                f"for the web")
+        confirmed = ops.target_project(origin)
+        if confirmed != project:
             # Ростер мог соврать (поздний meta-фикс), а спека авторитетна:
-            # едем проектом владельца origin, не первой догадкой резолвера.
-            project = ops.target_project(origin)
+            # перевязываем транспорт подтверждённым проектом, а не только
+            # локальную переменную -- дальше едут alloc, узел и эффект.
+            transport = opworker.default_transport(lambda _name: confirmed)
+            project = confirmed
         alloc = Alloc.from_dict(transport("alloc", name=target).get("alloc"))
         if not alloc or not alloc.node:
             raise LookupError(f"{target}: no allocation — node unknown")
         node = alloc.node
         got = bus.request(node, "state", name=target, project=project)
         # Ошибка state -- уже ответ «не знаю», safety откажет ею; глагол
-        # clone -- не обход ошибки, а дорога к фактам остановленной цели
-        # (#40: state фактов клона без tmux не даёт, clone даёт).
-        if not isinstance(got, dict) or not (got.get("clone") or got.get("error")):
-            got = bus.request(node, "clone", name=target, project=project)
+        # clone -- не обход ошибки, а дорога к фактам ПОДТВЕРЖДЁННО
+        # остановленной цели. Берём у него только клон: present/session
+        # ответа state -- свидетельство сессии, и оно не стирается.
+        if (isinstance(got, dict) and got.get("present") is False
+                and not got.get("clone") and not got.get("error")):
+            extra = bus.request(node, "clone", name=target, project=project)
+            got = {**got, "clone": (extra or {}).get("clone")}
     except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
-        return None, f"{target}: cannot inspect it before acting — {e}"
+        return None, None, f"{target}: cannot inspect it before acting — {e}"
     st = state._session_state((got or {}).get("session"))
-    busy = (st is not None
-            and state._state_from_session(st, None).kind not in ("free", "hung"))
+    if st is not None:
+        busy = state._state_from_session(st, None).kind not in ("free", "hung")
+    else:
+        # Строки сессии нет или не разобралась: жив ли tmux -- единственное
+        # свидетельство; жив -- занята (не idle), мёртв -- сессии нет.
+        busy = (got or {}).get("present") is not False
 
-    def predicate(name, _project, **_):
+    def predicate(name, _project, disruptive=True, **_):
         return ops.safety(name, project, owner=owner, facts=got,
-                          busy=busy, disruptive=True)
+                          busy=busy, disruptive=disruptive)
 
-    return predicate, None
+    return predicate, transport, None
 
 
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
     name = target or ""
-    safety = None
+    safety, transport = None, opworker.default_transport(RESOLVER)
     if action in UNSAFE_VERBS and name:
-        safety, refusal = _safety_of(name, login)
+        safety, transport, refusal = _safety_of(name, login)
         if safety is None:
             return lambda: {"status": "refused", "error": refusal}
     return lambda: WORKER.run(action, name, params, login,
-                              transport=opworker.default_transport(RESOLVER),
-                              safety=safety)
+                              transport=transport, safety=safety)
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
