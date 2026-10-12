@@ -321,9 +321,9 @@ Where the rules put the full suite in CI, the narrow checks available
 locally precede the push, and a green pipeline on the pushed merge SHA —
 not a local full run — is what the landing rests on; a stale or cancelled
 pipeline is not success. Where the rules demand a local full suite on the
-merged tree, it runs there before the push. Confirm that no competing run uses the clone's
-build directory, run phases sequentially, and treat missing or ambiguous
-completion markers as unverified, not green. A compile-capable lint step
+merged tree, it runs there before the push. Confirm that no competing run
+uses the clone's build directory, run phases sequentially, and treat
+missing or ambiguous completion markers as unverified, not green. A compile-capable lint step
 need not be duplicated by a separate compile. Keep a warm landing clone
 where practical, but never weaken required tests for speed. The puppet
 reports the full fix and merge shas, checks actually run, and the
