@@ -4,10 +4,14 @@ import os
 import re
 import sys
 
+import hermetic  # noqa: F401 -- настройки не с этой машины (#209)
 from _lib import Checks
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 SKILL = os.path.join(ROOT, "mop", "skills", "master", "SKILL.md")
+sys.path.insert(0, ROOT)
+
+from mop.common import state  # noqa: E402
 
 
 # HYPOTHESIS: прежний скилл учит мастера управлять пулом и трекером из shell,
@@ -88,6 +92,26 @@ def check_project_process(c, text):
     c.check("#560 no tracker issue of one project is cited", not re.search(r"#\d+", text))
 
 
+# HYPOTHESIS (#561): таблица состояний скилла поплыла от state.py: в ней
+# было несуществующее `not logged in` и не было `starting`, `FAILED: …`,
+# `HUNG (no answer)` -- мастер не узнавал то, что показывает состав пула.
+# SOLUTION: каждый вид из state._SHOW (кроме «other» -- незнакомый статус,
+# показанный как есть) обязан быть назван в скилле своим началом строки;
+# вид login строит единственный источник -- «login expired».
+# RESULT: RED на скилле 1054724, GREEN после сокращения и сверки.
+# STATUS: FIXED — see #561
+def check_states(c, text):
+    mark, branch = "\x00", "\x01"
+    for kind, show in state._SHOW.items():
+        if kind == "other":
+            continue
+        shown = "login expired" if kind == "login" else show(mark, branch)
+        head = shown.split(mark)[0].split(branch)[0].rstrip(" (:")
+        c.check(f"#561 the skill names the {kind!r} roster state as `{head}`",
+                f"`{head}" in text, head)
+    c.check("#561 no roster state the code cannot show", "not logged in" not in text)
+
+
 def check_landing(c, text):
     text = " ".join(text.split())
     c.check("#445 integrated full suite takes project-rule precedence",
@@ -108,6 +132,7 @@ def main():
     check_control_boundary(c, text)
     check_tools(c, text)
     check_project_process(c, text)
+    check_states(c, text)
     check_landing(c, text)
     return c.report("master_skill")
 
