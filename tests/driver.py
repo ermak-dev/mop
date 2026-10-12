@@ -1121,6 +1121,10 @@ def main():
         check_clone_lock_195(c)
     except Exception as e:
         c.fail("check_clone_lock_195", f"{type(e).__name__}: {e}")
+    try:
+        check_destroy_exact_owner_568(c)
+    except Exception as e:
+        c.fail("check_destroy_exact_owner_568", f"{type(e).__name__}: {e}")
 
     try:
         check_body_memory_197(c)
@@ -1998,6 +2002,133 @@ def check_pve_facts(c):
         got = (r.returncode, r.stdout, r.stderr)
     c.expect("mop server pve-facts", got,
             json.loads(json.dumps(pve.facts(9000, project="mop", listing=listing))))
+
+
+# ── #568: destroy передаёт ожидаемое имя, consumer контракта #565 ───────
+# HYPOTHESIS (#568): pve.destroy(name) зовёт _pve('destroy', vmid) без
+# имени. Обёртка с #565 даёт глагол destroy-body <vmid> <expected-name>,
+# но драйвер -- единственный потребитель сноса живых тел -- им не пользуется:
+# при коллизии имён cleanup упавшего тела B по-прежнему может снести живое
+# тело A под тем же VMID.
+# SOLUTION: destroy зовёт destroy-body с именем из вызова; несовпадение
+# имени, ошибка чтения, таймаут и «нет такого глагола» (старая обёртка) --
+# отказ с причиной, без Gone, без _forget_host_key и без fallback на
+# прежний destroy. Успех и подтверждённое отсутствие -- Gone и очистка
+# known_hosts, как раньше; имя, не прошедшее valid_name, отказывает до
+# транспорта.
+# RESULT: RED на fa28f4e -- драйвер шлёт «destroy <vmid>» без имени
+# (spy видит старый глагол), коллизию и «нет такого глагола» не отличает
+# от успеха.
+# STATUS: FIXED — see #568
+def check_destroy_exact_owner_568(c):
+    import asyncio
+    from mop.driver import pve
+
+    name, stranger = "pu-mop-1", "pu-other-9"
+    vmid = pve.vmid_of(name)
+
+    # Шпион транспорта: сценарии (список (out, code) по порядку, последний
+    # повторяется) плюс журнал команд. destroy-body один -- мутация одна.
+    def spy(answers):
+        calls = []
+
+        async def sh(script, timeout=20, prefix=()):
+            calls.append(script)
+            if "destroy" in script.split() or "destroy-body" in script.split():
+                out, code = answers[0] if len(answers) == 1 else answers[len(calls) - 1] \
+                    if len(calls) <= len(answers) else answers[-1]
+                return out, code
+            return "", 0
+        return sh, calls
+
+    def run(sh):
+        with restored(pve, "sh", "_forget_host_key"):
+            forgotten = []
+            pve.sh = sh
+
+            async def forget(name_):
+                forgotten.append(name_)
+            pve._forget_host_key = forget
+            return asyncio.run(pve.destroy(name)), forgotten
+
+    # Успешный снос: глагол с именем, Gone с прежним проводом, ключ хоста
+    # забыт. Команда обёртки приходит одной строкой: sudo -n mop-pve
+    # destroy-body <vmid> <имя> -- сверяется хвост, без разбора экранирования.
+    sh, calls = spy([("", 0)])
+    r, forgotten = run(sh)
+    c.check("#568 success -> the verb carries the expected name",
+            any(f"destroy-body {vmid} {name}".split()
+                == s.split()[s.split().index("destroy-body"):]
+                if "destroy-body" in s.split() else False for s in calls)
+            or [s for s in calls if "destroy-body" in s] == [], calls)
+    c.check("#568 success -> the old nameless verb is gone",
+            not any(s.split()[0].endswith("destroy") or " destroy " in s + " "
+                    for s in calls), calls)
+    c.check("#568 success -> Gone as before",
+            r == {"destroyed": vmid, "target": f"body {vmid}"}, r)
+    c.check("#568 success -> the host key is forgotten", len(forgotten) == 1,
+            forgotten)
+
+    # Подтверждённое отсутствие: обёртка отвечает успехом -- Gone и очистка,
+    # как раньше (повторный прогон уборки -- не отказ).
+    sh, calls = spy([("", 0)])
+    r, forgotten = run(sh)
+    c.check("#568 confirmed absence -> still Gone and cleanup",
+            r == {"destroyed": vmid, "target": f"body {vmid}"} and len(forgotten) == 1,
+            (r, forgotten))
+
+    # Коллизия: под VMID стоит чужое имя -- отказ с обоими именами, ни Gone,
+    # ни очистки known_hosts, ни fallback.
+    sh, calls = spy([(f"mop-pve: container {vmid} is named {stranger}, "
+                      f"not {name} — not removing\n", 64)])
+    r, forgotten = run(sh)
+    c.check("#568 collision -> refusal naming both",
+            bool(r.get("error")) and stranger in r["error"] and name in r["error"], r)
+    c.check("#568 collision -> no Gone", "destroyed" not in r, r)
+    c.check("#568 collision -> no host-key cleanup", forgotten == [], forgotten)
+    c.check("#568 collision -> no fallback to the nameless verb",
+            not any(" destroy " in s + " " for s in calls), calls)
+
+    # Ошибка чтения состояния: отказ с причиной обёртки, без Gone и очистки.
+    sh, calls = spy([(f"mop-pve: cannot read the roster of {vmid}: "
+                      "state unknown, nothing removed\n", 64)])
+    r, forgotten = run(sh)
+    c.check("#568 read error -> refusal with the wrapper's reason",
+            bool(r.get("error")) and "state unknown" in r["error"], r)
+    c.check("#568 read error -> no Gone, no cleanup",
+            "destroyed" not in r and forgotten == [], (r, forgotten))
+
+    # Таймаут: «не успел» -- не «снёс» (#171), без Gone и очистки.
+    sh, calls = spy([("", None)])
+    r, forgotten = run(sh)
+    c.check("#568 timeout -> refusal naming the wait",
+            bool(r.get("error")) and "timed out" in r["error"], r)
+    c.check("#568 timeout -> no Gone, no cleanup",
+            "destroyed" not in r and forgotten == [], (r, forgotten))
+
+    # Старая обёртка: глагола нет -- отказ с её причиной, БЕЗ fallback на
+    # прежний destroy: снос по номеру без имени и есть дефект #565.
+    sh, calls = spy([("mop-pve: no such verb destroy-body; available: list "
+                      "capacity create clone size memory net bootstrap keys "
+                      "start stop template destroy exec push unpack\n", 64)])
+    r, forgotten = run(sh)
+    c.check("#568 old wrapper -> refusal, no fallback",
+            bool(r.get("error")) and "no such verb" in r["error"], r)
+    c.check("#568 old wrapper -> nothing was destroyed",
+            "destroyed" not in r and forgotten == [] and
+            not any(" destroy " in s + " " for s in calls), (r, forgotten, calls))
+
+    # Имя, не прошедшее проверку, -- отказ до транспорта: ни одной команды.
+    with restored(pve, "sh"):
+        sent = []
+
+        async def no_sh(script, timeout=20, prefix=()):
+            sent.append(script)
+            return "", 0
+        pve.sh = no_sh
+        r = asyncio.run(pve.destroy("not a name"))
+        c.check("#568 invalid name -> refusal before any transport",
+                bool(r.get("error")) and sent == [], (r, sent))
 
 
 if __name__ == "__main__":
