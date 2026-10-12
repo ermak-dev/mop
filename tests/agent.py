@@ -153,8 +153,11 @@ CLONE_PROBE_347 = (
     'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
     'st=$(git status --porcelain 2>/dev/null) || exit 1; '
     'dirty=0; [ -n "$st" ] && dirty=$(printf \'%s\\n\' "$st" | wc -l); '
-    'ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null '
-    '|| git rev-list --count --all 2>/dev/null) || exit 1; '
+    'unborn=$(git rev-parse --verify -q --end-of-options HEAD 2>/dev/null '
+    '|| echo y); '
+    'if [ "$unborn" = y ]; then ahead=$(git rev-list --count --all 2>/dev/null); '
+    'else ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null); fi; '
+    '[ -n "$ahead" ] || exit 1; '
     'echo "dirty=$dirty"; echo "ahead=$ahead"; '
     'echo "owner=$(head -1 .git/mop-owner 2>/dev/null)"')
 CLONE_OUT_347 = [
@@ -192,25 +195,30 @@ def check_clone_probe_347(c):
 
 # ── #564: ошибки обязательных команд -- «не знаю», а не нули ──────────────
 # HYPOTHESIS: проба глотала отказы обязательных git-команд: пустой вывод
-# `git status` считался нулём (`| wc -l` маскирует отказ), пустой `rev-list`
-# -- нулём (`kv.get("ahead") or 0`), и побитый клон (мусорный .git/HEAD,
-# унесённый ref) читался «clean» -- разрешение на уборку клона с работой.
-# Проба обязана быть fail-closed: отказ обязательной команды -- unknown
-# (факты None, у потребителя «keep»), и никакой обязательный отказ не
-# превращается в ноль.
-# SOLUTION: каждая обязательная команда роняет пробу (`|| exit 1` после
-# status и rev-list), а парсер обязана видеть непустые dirty и ahead:
-# `wc -l` -- только статус 0, пустой ahead -- неполные данные. Здоровый
-# (unborn: rev-list по HEAD отказывает, но коммиты есть) выживает явно:
-# считаем и то, что не в remotes, но есть вовсе.
-# STATUS: RED — see #564
+# `git status` считался нулём (`| wc -l` маскирует отказ: код конвейера --
+# код wc, а не git-а), пустой `rev-list` -- нулём (`kv.get("ahead") or 0`),
+# и побитый клон (мусорный .git/HEAD, битый index) читался «clean» --
+# разрешение на уборку клона с работой.
+# SOLUTION: каждая обязательная команда роняет пробу; парсер обязан видеть
+# непустые dirty и ahead. Unborn -- единственный случай, когда rev-list по
+# HEAD отказывает законно, и он доказывается своей проверкой состояния
+# (rev-parse --verify), а не лечится запасным запросом при любой ошибке:
+# born-клон с упавшим rev-list обязан читать unknown, а не «--all как
+# будто ahead». Грань названа: клон с удалённым ref ветки git сам читает
+# как unborn («No commits yet»), висячий коммит виден только fsck -- проба
+# это не различает и не должна: несохранённое она видит, а тяжёлый fsck в
+# пробе ростера не место.
+# STATUS: FIXED — see #564
 def check_clone_probe_fail_closed_564(c):
-    """Шелл и git настоящие: проба гоняет bash'ем над временным клоном
-    (driver.sh на узле), без пуда."""
+    """Шелл и git настоящие: проба гоняет настоящим шеллом над временным
+    клоном (driver.sh, как на узле), командлет -- тоже настоящий; пул не
+    нужен, всё read-only."""
+    import asyncio
     import subprocess
     import tempfile
     from mop.common.domain import CloneFacts
     root = tempfile.mkdtemp(prefix="mop-test-564-")
+    from _lib import patched_env
 
     def repo(broken=None):
         """Клон с одним коммитом и untracked work.txt; broken портит .git."""
@@ -237,13 +245,12 @@ def check_clone_probe_fail_closed_564(c):
                 f.write("not an index\n")
         return d
 
-    async def facts(d):
+    async def facts(d, env=None):
         """Факты клона настоящей пробой: как их читает агент на узле."""
         from mop import driver
-        out, _ = await driver.sh(agent.clone_probe(d))
+        out, _ = await driver.sh(agent.clone_probe(d), env=env)
         return agent.clone_facts_of(out)
 
-    import asyncio
     healthy = asyncio.run(facts(repo()))
     c.check("#564 a healthy clone with work reads dirty and ahead",
             not (not healthy or healthy.get("dirty") != 1 or healthy.get("ahead") != 1),
@@ -254,6 +261,27 @@ def check_clone_probe_fail_closed_564(c):
     index = asyncio.run(facts(repo("index")))
     c.check("#564 a broken index: unknown, not clean",
             index is None, repr(index))
+
+    # Отказ обязательной команды на born-клоне -- unknown, а не число от
+    # запасного запроса: обёртка над git валит ровно `rev-list ... HEAD`,
+    # `--all` бы прошёл -- и его ответ не должен читаться как ahead.
+    # Воспроизводит дыру первого варианта фикса: `|| rev-list --all` подставлял
+    # «все коммиты» при любой ошибке обязательного запроса.
+    wrap = os.path.join(root, "bin")
+    os.makedirs(wrap, exist_ok=True)
+    real = shutil_which("git")
+    if real:
+        with open(os.path.join(wrap, "git"), "w") as f:
+            f.write('#!/bin/sh\nif [ "$1" = rev-list ] && [ "$3" = HEAD ]; then\n'
+                    '  echo "forced rev-list failure" >&2; exit 128\nfi\n'
+                    f'exec {real} "$@"\n')
+        os.chmod(os.path.join(wrap, "git"), 0o755)
+        born = repo()
+        env = dict(os.environ, PATH=wrap + os.pathsep + os.environ["PATH"])
+        got = asyncio.run(facts(born, env=env))
+        c.check("#564 a born clone with a failed rev-list reads unknown, "
+                "not --all as ahead", got is None, repr(got))
+
     # Unborn-репозиторий -- здоровый: один untracked, ветка без коммитов,
     # считать нечего, но и ошибки нет. Факты собираются, dirty = 1.
     unborn = tempfile.mkdtemp(dir=root)
@@ -282,6 +310,40 @@ def check_clone_probe_fail_closed_564(c):
     probe = agent.clone_probe("/x")
     c.check("#564 the probe must fail on a mandatory command's failure",
             "|| exit 1" in probe and "|| exit 1;" in probe, probe)
+    # Запасной счёт -- только доказанному unborn, не любой ошибке.
+    c.check("#564 the fallback count must be gated on the unborn check",
+            "rev-parse --verify" in probe, probe)
+
+    # Командлет, как его зовёт сторож: повреждённый HEAD с несохранённым
+    # файлом обязан получить отказ уборки (exit 3), а не «clean». Тут
+    # настоящий clone_work.main -- тот самый код, что решает судьбу клона.
+    import importlib
+    clone_work = importlib.import_module("mop.cli.driver.clone-work")
+    home = tempfile.mkdtemp(dir=root)
+    os.makedirs(os.path.join(home, "puppets"))
+    broken_dir = os.path.join(home, "puppets", "pu-review-1")
+    os.rename(repo("head"), broken_dir)
+    import io
+    import contextlib
+    out = io.StringIO()
+    with patched_env(**{"HOME": home}), contextlib.redirect_stdout(out):
+        rc = clone_work.main([broken_dir])
+    c.expect("#564 clone-work on a broken clone with uncommitted work: keep",
+             (rc, out.getvalue().strip()), (3, "no session, clone unreadable"))
+    # Здоровый клон с несохранённым -- тоже keep, но по-другому: работа
+    # названа, различие читается в причине.
+    work_dir = os.path.join(home, "puppets", "pu-review-2")
+    os.rename(repo(), work_dir)
+    out = io.StringIO()
+    with patched_env(**{"HOME": home}), contextlib.redirect_stdout(out):
+        rc = clone_work.main([work_dir])
+    c.check("#564 clone-work on a healthy clone with work: keep, work named",
+            rc == 3 and "clone holds work" in out.getvalue(), (rc, out.getvalue()))
+
+
+def shutil_which(name):
+    import shutil
+    return shutil.which(name)
 
 
 # ── write: дом подставляет узел (#279) ───────────────────────────────────

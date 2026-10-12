@@ -156,14 +156,11 @@ def clone_probe(d):
     пустой `rev-list` от `2>/dev/null` -- нулём неотправленного. Уборка
     получала «чистый клон» там, где git не мог прочесть репозиторий вовсе
     (мусорный HEAD, битый index). Обязательных команд две: status и
-    rev-list; rev-list запасной (`--all`) считает и без HEAD --
-    unborn-репозиторий (ветка без коммитов) -- здоровый случай, а не
-    сломанный. Грань названа: клон с удалённым ref ветки git сам читает
-    как unborn («No commits yet»), и висячий коммит виден только fsck --
-    проба это не различает и не должна: несохранённое она видит, а
-    тяжёлый fsck в пробе ростера не место. Остальные команды (branch,
-    config, remote) необязательны: их отказ -- пустое поле, а не
-    неизвестный клон."""
+    rev-list. Единственный законный отказ rev-list по HEAD -- unborn-ветка
+    (коммитов нет), и он доказывается своей проверкой (rev-parse --verify),
+    а не подменой запроса: born-клон с упавшим rev-list -- unknown, а не
+    «--all как будто ahead». Остальные команды (branch, config, remote)
+    необязательны: их отказ -- пустое поле, а не неизвестный клон."""
     return (f'cd {d} 2>/dev/null || exit 0; '
             f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
             f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
@@ -171,8 +168,11 @@ def clone_probe(d):
             f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
             f'st=$(git status --porcelain 2>/dev/null) || exit 1; '
             f'dirty=0; [ -n "$st" ] && dirty=$(printf \'%s\\n\' "$st" | wc -l); '
-            f'ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null '
-            f'|| git rev-list --count --all 2>/dev/null) || exit 1; '
+            f'unborn=$(git rev-parse --verify -q --end-of-options HEAD 2>/dev/null '
+            f'|| echo y); '
+            f'if [ "$unborn" = y ]; then ahead=$(git rev-list --count --all 2>/dev/null); '
+            f'else ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null); fi; '
+            f'[ -n "$ahead" ] || exit 1; '
             f'echo "dirty=$dirty"; echo "ahead=$ahead"; '
             f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
 
