@@ -74,7 +74,8 @@ def audit_of(emits, op_id):
 
 def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
              spec_origin=ORIGIN, block_restart=None, add_name="pu-aud-add-1",
-             state_error=None, block_alloc=None):
+             state_error=None, block_alloc=None, block_send=None,
+             block_place=None):
     """Подмена ТОЛЬКО шины: глаголы сервиса кластера, узла и публикация.
 
     Как настоящей службе: spec/alloc/projects/roster -- чтения, restart --
@@ -85,6 +86,7 @@ def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
     state_error бросает узловой state ПОСЛЕ подтверждения спеки."""
     if restarts is None:
         restarts = [7]
+    registered = []                    # выданные add-имена (block_place)
     webmod._ROSTER_CACHE[0] = 0.0      # кэш резолвера -- модульный
     webmod._ROSTER_CACHE[1] = {}
 
@@ -96,6 +98,11 @@ def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
         if verb == "alloc":
             if block_alloc is not None:
                 block_alloc.wait(10)
+            if block_place is not None and registered:
+                # Ответ регистрации уже дал доверенное имя; ПОСЛЕ него
+                # placement висит -- ревью 3 #575 (timeout у add).
+                block_place.wait(10)
+                return {}
             return {"alloc": {"ID": "a1", "JobID": fields.get("name"),
                               "NodeName": "node-a",
                               "ClientStatus": "running",
@@ -109,6 +116,7 @@ def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
             restarts[0] += 1
             return {"ok": True}
         if verb == "add":
+            registered.append(add_name)
             return {"ok": True, "name": add_name}
         if verb == "projects":
             return {"names": [TARGET_PROJECT]}
@@ -126,6 +134,10 @@ def fake_bus(emits, restarts=None, clone_dirty=0, clone_owner=None,
                               "dirty": clone_dirty, "ahead": 0,
                               "owner": clone_owner}}
         if verb == "send":
+            if block_send is not None:
+                # Спека уже подтвердила проект, доставка висит -- ревью 3
+                # #575 (timeout у send).
+                block_send.wait(10)
             return {"msg_id": "message-1"}
         raise AssertionError(verb)
 
@@ -355,6 +367,127 @@ def main():
             and entry.get("status") == "refused"
             and entry.get("principal") == "anton"
             and entry.get("project") == TARGET_PROJECT, entry)
+
+    # ── ревью 3 #575: контекст send/add -- в момент факта, не по вердикту ──
+    # HYPOTHESIS: send/add заполняли контекст аудита только после
+    # возврата Worker.run -- timeout (#497/#569) съедал уже полученные
+    # факты: у send спека подтвердила проект ДО зависшей доставки, у add
+    # реестр подтвердил origin и RPC уже вернул доверенное имя ДО
+    # зависшего placement, а аудит читал None/None.
+    # SOLUTION: тот же per-op контекст дотянуть внутрь эффектов send/add:
+    # проект фиксируется при подтверждении спеки/реестра, созданное имя --
+    # при доверенном ответе регистрации; вердикт по-прежнему только
+    # заполняет пустое. Контекст живёт в замыкании фабрики (не в общем
+    # поле WORKER), параллельные операции его не смешивают.
+    # RESULT: timeout-исходы несут имя/проект; параллельные операции
+    # разных проектов не путают контексты; публичная проекция узкая.
+
+    # 1) send: спека подтверждена, доставка висит до unknown
+    send_gate = threading.Event()
+    fast3 = opworker.Worker(effect_timeout=0.5, observe_wait=0,
+                            sleep=lambda s: time.sleep(0.02),
+                            registry=lambda: {ORIGIN},
+                            workspace=lambda origin: ("", None))
+    with patched(webmod, WORKER=fast3), \
+            fake_bus(emits, block_send=send_gate), \
+            patched(puppets,
+                    _cluster=lambda verb, **kw: {"meta": {"origin": ORIGIN}},
+                    node_of=lambda name: "node-a"):
+        op12 = webmod.ADMINAPI.submit("send", "pu-aud-31",
+                                      {"message": "hung-send"}, ADMIN)
+        got12 = settled(webmod.ADMINAPI, op12["id"])
+        wait_audit(emits, op12["id"])
+        send_gate.set()   # отпустить доставку ВНУТРИ подмены шины
+    rec12, _ = audit_of(emits, op12["id"])
+    c.check("#575 a hung send after the spec keeps name and project",
+            got12.get("status") == "unknown" and rec12 is not None
+            and rec12.get("name") == "pu-aud-31"
+            and rec12.get("project") == TARGET_PROJECT
+            and rec12.get("status") == "unknown", (got12, rec12))
+
+    # 2) add: имя получено, placement висит до unknown
+    place_gate = threading.Event()
+    fast4 = opworker.Worker(effect_timeout=0.5, observe_wait=0,
+                            sleep=lambda s: time.sleep(0.02),
+                            registry=lambda: {ORIGIN},
+                            workspace=lambda origin: ("", None))
+    with patched(webmod, WORKER=fast4), \
+            fake_bus(emits, block_place=place_gate,
+                     add_name="pu-aud-made-32"):
+        op13 = webmod.ADMINAPI.submit("add", None, {"origin": ORIGIN}, ADMIN)
+        got13 = settled(webmod.ADMINAPI, op13["id"])
+        wait_audit(emits, op13["id"])
+        place_gate.set()   # отпустить placement ВНУТРИ подмены шины
+    rec13, _ = audit_of(emits, op13["id"])
+    c.check("#575 a hung add after the name keeps name and project",
+            got13.get("server") if False else got13.get("status") == "unknown"
+            and rec13 is not None
+            and rec13.get("name") == "pu-aud-made-32"
+            and rec13.get("project") == TARGET_PROJECT
+            and rec13.get("status") == "unknown", (got13, rec13))
+
+    # 3) параллельные операции разных проектов: контексты не смешиваются
+    OTHER = "git@example.test:g/other.git"
+    OTHER_PROJECT = puppets.project_of(OTHER)
+    swap = {"origin": ORIGIN}   # спека отвечает по имени цели
+
+    def spec_swap(verb, project=None, **fields):
+        if verb == "spec":
+            return {"meta": {"origin": swap["origin"]}}
+        return call_cluster_audit(verb, project, **fields)
+    call_cluster_audit = None  # заполняется ниже после fake_bus
+
+    par_emits = []
+    fast5 = opworker.Worker(effect_timeout=5, observe_wait=0,
+                            sleep=lambda s: time.sleep(0.02),
+                            registry=lambda: {ORIGIN, OTHER},
+                            workspace=lambda origin: ("", None))
+
+    def par_call_cluster(verb, project=None, **fields):
+        if verb == "spec":
+            # целевая спека отвечает origin своей цели (по name)
+            named = fields.get("name")
+            origin = ORIGIN if named == "pu-par-1" else OTHER
+            return {"meta": {"origin": origin}}
+        if verb == "alloc":
+            return {"alloc": {"ID": "a1", "JobID": fields.get("name"),
+                              "NodeName": "node-a", "ClientStatus": "running",
+                              "task": {"state": "running", "restarts": 7,
+                                       "exit": None, "next_s": None,
+                                       "failed": False}}}
+        if verb == "restart":
+            return {"ok": True}
+        if verb == "projects":
+            return {"names": [TARGET_PROJECT, OTHER_PROJECT]}
+        if verb == "roster":
+            return {"items": []}
+        return {}
+
+    def par_request(node, verb, **fields):
+        if verb == "state":
+            return {"present": True, "session": "idle 1 1",
+                    "clone": {"cur": "master", "def": "master",
+                              "dirty": 0, "ahead": 0, "owner": None}}
+        raise AssertionError(verb)
+
+    def par_emit(fields, project=None):
+        par_emits.append((dict(fields or {}), project))
+
+    with patched(webmod, WORKER=fast5), \
+            patched(bus, call_cluster=par_call_cluster,
+                    request=par_request, emit=par_emit):
+        a = webmod.ADMINAPI.submit("restart", "pu-par-1", {}, ADMIN)
+        b = webmod.ADMINAPI.submit("restart", "pu-par-2", {}, ADMIN)
+        wait_audit(par_emits, a["id"])
+        wait_audit(par_emits, b["id"])
+    ra, sa = audit_of(par_emits, a["id"])
+    rb, sb = audit_of(par_emits, b["id"])
+    c.check("#575 parallel ops of different projects keep their contexts",
+            ra is not None and rb is not None
+            and ra.get("project") == TARGET_PROJECT
+            and rb.get("project") == OTHER_PROJECT
+            and sa == TARGET_PROJECT and sb == OTHER_PROJECT,
+            (ra, rb, sa, sb))
 
     # ── утечки: payload и сырые ошибки не едут ни в аудит, ни в кадры ──
     blob_audit = json.dumps([f for f, _ in emits], ensure_ascii=False)
