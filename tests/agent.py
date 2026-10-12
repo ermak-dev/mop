@@ -218,7 +218,6 @@ def check_clone_probe_fail_closed_564(c):
     import tempfile
     from mop.common.domain import CloneFacts
     root = tempfile.mkdtemp(prefix="mop-test-564-")
-    from _lib import patched_env
 
     def repo(broken=None):
         """Клон с одним коммитом и untracked work.txt; broken портит .git."""
@@ -318,27 +317,24 @@ def check_clone_probe_fail_closed_564(c):
     # файлом обязан получить отказ уборки (exit 3), а не «clean». Тут
     # настоящий clone_work.main -- тот самый код, что решает судьбу клона.
     import importlib
+    from _lib import run_command
     clone_work = importlib.import_module("mop.cli.driver.clone-work")
     home = tempfile.mkdtemp(dir=root)
     os.makedirs(os.path.join(home, "puppets"))
     broken_dir = os.path.join(home, "puppets", "pu-review-1")
     os.rename(repo("head"), broken_dir)
-    import io
-    import contextlib
-    out = io.StringIO()
-    with patched_env(**{"HOME": home}), contextlib.redirect_stdout(out):
-        rc = clone_work.main([broken_dir])
+    with patched_env(HOME=home):
+        out, err, rc = run_command(clone_work.main, [broken_dir])
     c.expect("#564 clone-work on a broken clone with uncommitted work: keep",
-             (rc, out.getvalue().strip()), (3, "no session, clone unreadable"))
+             (rc, out.strip()), (3, "no session, clone unreadable"))
     # Здоровый клон с несохранённым -- тоже keep, но по-другому: работа
     # названа, различие читается в причине.
     work_dir = os.path.join(home, "puppets", "pu-review-2")
     os.rename(repo(), work_dir)
-    out = io.StringIO()
-    with patched_env(**{"HOME": home}), contextlib.redirect_stdout(out):
-        rc = clone_work.main([work_dir])
+    with patched_env(HOME=home):
+        out, err, rc = run_command(clone_work.main, [work_dir])
     c.check("#564 clone-work on a healthy clone with work: keep, work named",
-            rc == 3 and "clone holds work" in out.getvalue(), (rc, out.getvalue()))
+            rc == 3 and "clone holds work" in out, (rc, out))
 
 
 def shutil_which(name):
