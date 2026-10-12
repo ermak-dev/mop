@@ -11,6 +11,7 @@
 import json
 import os
 import subprocess
+import sys
 
 from ..common import config, manifest, puppets, state
 from ..common.domain import Alloc, JobMeta
@@ -138,25 +139,34 @@ def project_rows(project, api=None):
     return rows
 
 
-def clear(project, force=False, api=None, node=None):
+def clear(project, force=False, api=None, node=None, account=None):
     """Остановить папетов проекта на контейнерных узлах и снести их тела.
     -> [{name, origin, node}] — кого поднять заново после сборки.
     Отказ по занятым — RuntimeError из plan_clear, до первого останова.
-    node -- только на этом узле (#280)."""
+    node -- только на этом узле (#280).
+
+    account -- список вызывающего, куда каждый намеченный попадает ДО
+    первого шага снятия (#570). Снос многошаговый -- снять джоб → дождаться
+    останова → снести тело, -- и отказ на любом шаге оставляет папета уже
+    нестоящим: если запись о нём умирает вместе с исключением, поднять его
+    не сможет никто. build передаёт сюда свой список и держит clear под
+    той же защитой, что и bake."""
     api = api or nomad
     rows = project_rows(project, api=api)
     jobs = {r["name"]: (r["job"], r["node"]) for r in rows}
-    gone = []
+    gone = [] if account is None else account
     for name in plan_clear(rows, force, node):
         job, node = jobs[name]
         m = JobMeta.from_job(job)
+        # Ветка мастера (#256) едет с остальной метой (#265): без неё папет
+        # после сборки поднимался на origin/HEAD, а не на своей ветке.
+        # Запись -- до первого шага снятия (#570): половина снятого папета
+        # всё равно требует подъёма.
+        gone.append({"name": name, "origin": m.origin,
+                     "branch": m.branch, "node": node})
         api.deregister(name, purge=False)
         puppets._wait_stopped(name)
         puppets.wipe(node, name)
-        # Ветка мастера (#256) едет с остальной метой (#265): без неё папет
-        # после сборки поднимался на origin/HEAD, а не на своей ветке.
-        gone.append({"name": name, "origin": m.origin,
-                     "branch": m.branch, "node": node})
     return gone
 
 
@@ -196,19 +206,40 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
     старый образ на месте, и оставить их снятыми значило бы наказать проект
     за неудачную сборку дважды. Объявление — только после успеха.
 
+    Снятие -- часть той же защиты (#570): отказ wait/wipe посреди снятия
+    уносит с собой уже снятых, если список затронутых не переживёт
+    исключение. clear пишет каждого в список build'а до первого шага
+    снятия, а отказ восстановления дописывается к исходному, а не затирает
+    его. Только для отказа процесса: рухнувший сервер не поднимет никого,
+    durable-журнала здесь нет и не заводится.
+
     on_step — имя этапа вызывающему (сборщик шлёт его просителю, #123).
     api — Nomad (nomad.NomadApi, #275), по умолчанию живой."""
     step = on_step or (lambda _s: None)
     # Проверка узла -- один раз (#321): её же итог объявляет образ ниже.
     nodes = container_nodes(api or nomad, node) if node else None
     step("stopping the project's bodies")
-    gone = clear(got["project"], force, api=api, node=node)
+    gone = []
+    original = None
     try:
+        # clear под той же защитой, что и bake (#570): его список -- здесь,
+        # и отказ посреди снятия поднимает уже снятых.
+        clear(got["project"], force, api=api, node=node, account=gone)
         rc = bake(origin, got, out, fresh, on_line, node=node)
+    except BaseException as e:  # noqa: BLE001 -- запомнить и пустить дальше
+        original = e
+        raise
     finally:
         if gone:
             step("raising the project's puppets again")
-        restore(gone, api=api)
+        try:
+            restore(gone, api=api)
+        except Exception as e:  # noqa: BLE001 -- дописать, а не затереть исходный отказ
+            # Исходного отказа может не быть вовсе (плейбук вернул rc, и
+            # restore -- единственная неудача): тогда его причина и едет.
+            if original is not None:
+                raise RuntimeError(f"{original}\n{e}") from None
+            raise
     if rc == 0:
         step("announcing the image to the nodes")
     announced = announce(got["project"], api=api, node=node, nodes=nodes) if rc == 0 else []

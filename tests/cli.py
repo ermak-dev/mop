@@ -2324,7 +2324,14 @@ def check_output_182(c):
         got = {"project": "p", "asks": {"MOP_CORES": "8"}, "alien": [], "legacy": []}
         image.prepare = lambda origin, root: got
         gone = [{"name": "pu-p-1", "origin": "git@h:g/p.git", "llm": "claude", "node": "hyper"}]
-        image.clear = lambda project, force=False, api=None, node=None: list(gone)
+        # account (#570): заглушка clear заполняет список build'а, как
+        # настоящая, -- иначе restore не видит снятых и отказ register
+        # не проверяется вовсе.
+        def fake_clear(project, force=False, api=None, node=None, account=None):
+            out = [] if account is None else account
+            out.extend(gone)
+            return out
+        image.clear = fake_clear
         image.bake = lambda *a, **kw: 0
         image.announce = lambda project, api=None, node=None, nodes=None: [("hyper", "announced, serves p"),
                                           ("gpu", "not a container node"),

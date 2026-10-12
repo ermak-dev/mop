@@ -58,8 +58,10 @@ def check_node_check_321(c):
              [("agent1", "announced, serves other")])
 
     calls = []
-    with patched(image, clear=lambda project, force=False, api=None, node=None:
-                 calls.append(("clear", node)) or [],
+    # account (#570): заглушка clear берёт список build'а -- контракт тот же,
+    # что у настоящей.
+    with patched(image, clear=lambda project, force=False, api=None, node=None,
+                             account=None: calls.append(("clear", node)) or account,
                  bake=lambda *a, node=None, **kw: calls.append(("bake", node)) or 0,
                  restore=lambda gone, api=None: None):
         a = api()
@@ -84,9 +86,171 @@ def check_node_check_321(c):
                  ([("clear", None), ("bake", None)], ["agent1", "host1", "weird"]))
 
 
+# ── #570: отказ посреди снятия не оставляет снятых молча ───────────────
+# HYPOTHESIS: build звал clear до try, а clear записывал папета в gone
+# лишь после всех трёх шагов снятия: отказ wait/wipe ВТОРОГО папета уносил
+# из build исключение целиком, и УЖЕ СНЯТОГО первого не поднимал никто --
+# список затронутых погибал вместе с исключением, и молча.
+# SOLUTION: clear ведёт список затронутых списком вызывающего и записывает
+# каждого ДО первого шага снятия, а build держит clear под той же защитой,
+# что и bake: отказ посреди подготовки или сборки поднимает снятых и
+# доносит исходный отказ; отказ подъёма дописывается к исходному, а не
+# затирает его; нетронутые не поднимаются.
+# RESULT: RED на исходном коде -- 7 отказов, все по делу (снятые не
+# подняты, ветка потеряна, шага подъёма нет, отказ подъёма затёрт);
+# мутации ловятся каждая своей половиной: запись ПОСЛЕ шагов снятия -- 4
+# отказа (учёт половин), clear до try -- 7 (учёт + затирание), отказ
+# подъёма, затирающий исходный, -- 7 (видны оба отказа).
+# STATUS: FIXED — see #570
+class RefusingNomad(FakeNomad):
+    """FakeNomad, чей register отказывает поимённо: подъём снятого папета
+    обязан быть отказоспособным и в проверке, а не только в жизни."""
+
+    def __init__(self, *a, register_refuses=(), **kw):
+        super().__init__(*a, **kw)
+        self.register_refuses = set(register_refuses)
+
+    def register(self, job):
+        who = (job.get("Job") or job).get("ID")
+        if who in self.register_refuses:
+            raise RuntimeError(f"Nomad refused {who}")
+        super().register(job)
+
+
+def rows_570(*who, origin="git@h:g/p.git"):
+    """rows для project_rows: (имя, узел[, ветка]) -> свободные тела."""
+    from mop.server import spec
+    out = []
+    for name, node, *branch in who:
+        job = spec.job_spec(name, origin, branch=branch[0] if branch else None)["Job"]
+        out.append({"name": name, "node": node, "job": job, "container": True,
+                    "state": "free", "kind": "free"})
+    return out
+
+
+def run_570(rows, meta, stop_refuses=(), wipe_refuses=(), register_refuses=(),
+            bake_rc=0, bake_raises=None, force=False):
+    """Один прогон image.build над подделками: Nomad -- RefusingNomad,
+    остановка и снос тел -- заглушки шины, плейбук -- заглушка bake.
+    -> {result, err, api, steps, baked}."""
+    from mop.common import puppets
+
+    def wait(name):
+        if name in stop_refuses:
+            raise RuntimeError(f"allocation {name} won't stop -- node on fire")
+
+    def wipe(node, name, *a, **k):
+        if name in wipe_refuses:
+            raise RuntimeError(f"wipe of {name} on {node} refused -- agent said no")
+
+    baked = []
+
+    def bake_stub(*a, **k):
+        baked.append(1)
+        if bake_raises is not None:
+            raise bake_raises
+        return bake_rc
+
+    steps, api = [], RefusingNomad(meta=meta, register_refuses=register_refuses)
+    with patched(image, project_rows=lambda project, api=None: rows,
+                 bake=bake_stub), \
+            patched(puppets, _wait_stopped=wait, wipe=wipe):
+        try:
+            result = image.build("git@h:g/p.git", {"project": "p"}, force=force,
+                                 on_step=steps.append, api=api)
+            err = None
+        except Exception as e:  # noqa: BLE001 -- исход прогона и есть предмет проверки
+            result, err = None, e
+    return {"result": result, "err": err, "api": api, "steps": steps,
+            "baked": len(baked)}
+
+
+def check_clear_recovery_570(c):
+    pool = {"n1": {"mop_driver": "pve"}, "n2": {"mop_driver": "pve"}}
+    raising = "raising the project's puppets again"
+
+    # Сбой сноса второго из двух: первый уже снят -- обязан подняться.
+    r = run_570(rows_570(("pu-p-1", "n1", "feat/a"), ("pu-p-2", "n2")), pool,
+                wipe_refuses=("pu-p-2",))
+    c.expect("#570 wipe failure of the second: the original refusal reaches the caller",
+             str(r["err"]), "wipe of pu-p-2 on n2 refused -- agent said no")
+    c.expect("#570 wipe failure of the second: both touched puppets are raised again",
+             sorted(r["api"].jobs), ["pu-p-1", "pu-p-2"])
+    c.check("#570 wipe failure of the second: the accounted branch travels through",
+            ((r["api"].jobs.get("pu-p-1") or {}).get("Meta") or {}).get("branch") == "feat/a",
+            r["api"].jobs.get("pu-p-1"))
+    c.check("#570 wipe failure of the second: bake never ran, the raising step did show",
+            r["baked"] == 0 and raising in r["steps"], (r["baked"], r["steps"]))
+
+    # Ошибка ожидания после deregister: снятый по джобу тоже учтён.
+    r = run_570(rows_570(("pu-p-1", "n1"), ("pu-p-2", "n2")), pool,
+                stop_refuses=("pu-p-2",))
+    c.expect("#570 wait failure after deregister: the original refusal reaches the caller",
+             str(r["err"]), "allocation pu-p-2 won't stop -- node on fire")
+    c.expect("#570 wait failure after deregister: the half-cleared one is raised again too",
+             sorted(r["api"].jobs), ["pu-p-1", "pu-p-2"])
+
+    # Третий, до которого не дошли: не сносится и не поднимается.
+    r = run_570(rows_570(("pu-p-1", "n1"), ("pu-p-2", "n2"), ("pu-p-3", "other")),
+                pool, wipe_refuses=("pu-p-2",))
+    c.expect("#570 a puppet past the failure is neither cleared nor raised",
+             (sorted(r["api"].jobs),
+              [a[1] for a in r["api"].calls if a[0] == "deregister"]),
+             (["pu-p-1", "pu-p-2"], ["pu-p-1", "pu-p-2"]))
+
+    # Отказ плейбука: снятые поднимаются, отказ доходит как есть.
+    r = run_570(rows_570(("pu-p-1", "n1")), pool,
+                bake_raises=RuntimeError("ansible-playbook exploded"))
+    c.expect("#570 bake failure: the original refusal reaches the caller",
+             str(r["err"]), "ansible-playbook exploded")
+    c.expect("#570 bake failure: the cleared puppet is raised again",
+             sorted(r["api"].jobs), ["pu-p-1"])
+
+    # rc плейбука: подъём при любом исходе, объявление -- только после успеха.
+    r = run_570(rows_570(("pu-p-1", "n1")), pool, bake_rc=3)
+    c.expect("#570 bake rc: the puppet is raised and the build is not passed off as good",
+             (r["err"], r["result"]["rc"], r["result"]["announced"],
+              sorted(r["api"].jobs)),
+             (None, 3, [], ["pu-p-1"]))
+
+    # Отказ подъёма не затирает исходный отказ: видны оба.
+    r = run_570(rows_570(("pu-p-1", "n1"), ("pu-p-2", "n2")), pool,
+                wipe_refuses=("pu-p-2",), register_refuses=("pu-p-1",))
+    c.check("#570 both the wipe refusal and the raising refusal are visible",
+            isinstance(r["err"], RuntimeError)
+            and "wipe of pu-p-2 on n2 refused" in str(r["err"])
+            and "not raised again: Nomad refused pu-p-1" in str(r["err"]),
+            str(r["err"]))
+    c.expect("#570 the one whose raising worked is raised",
+             sorted(r["api"].jobs), ["pu-p-2"])
+
+    # Успех: прежний итог, мета -- прежняя.
+    r = run_570(rows_570(("pu-p-1", "n1", "feat/a"), ("pu-p-2", "n2")), pool)
+    c.expect("#570 a successful build: the result as before",
+             (r["err"], r["result"]["rc"],
+              [p["name"] for p in r["result"]["gone"]], r["result"]["announced"],
+              r["baked"]),
+             (None, 0, ["pu-p-1", "pu-p-2"],
+              [("n1", "announced, serves p"), ("n2", "announced, serves p")], 1))
+    c.expect("#570 a successful build: gone carries the meta",
+             r["result"]["gone"][0],
+             {"name": "pu-p-1", "origin": "git@h:g/p.git", "branch": "feat/a", "node": "n1"})
+
+    # Занятый папет: отказ до первого останова, никого не подняли.
+    busy = rows_570(("pu-p-1", "n1"), ("pu-p-2", "n2"))
+    busy[1]["kind"] = "busy"
+    r = run_570(busy, pool)
+    c.check("#570 a busy puppet still refuses before the first stop",
+            isinstance(r["err"], RuntimeError) and "pu-p-2" in str(r["err"])
+            and "not free" in str(r["err"]), str(r["err"]))
+    c.expect("#570 the refusal deregistered and raised no one",
+             (r["api"].calls, r["steps"]), ([], ["stopping the project's bodies"]))
+
+
 def main():
     c = Checks()
     check_node_check_321(c)
+    check_clear_recovery_570(c)
     extra = image.extra_vars("git@h:g/proj.git", GOT)
     want = {"mop_project": "proj", "mop_origin": "git@h:g/proj.git",
             "mop_project_asks": {"MOP_MEM_MB": "2048"},
