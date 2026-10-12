@@ -2016,6 +2016,320 @@ def _no_lock_534():
     return _PassThrough()
 
 
+# ── #567: одновременный add одного проекта ──────────────────────────────
+# HYPOTHESIS: глаголы сервиса идут в потоках петли, а _add делает
+# limit/count → name → workspace → register раздельно и без замка: два add
+# одного проекта оба читают пустой список джобов, оба выбирают
+# pu-<проект>-1, и вторая регистрация перезаписывает спеку первой -- чужой
+# мастер получает чужую ветку; другой interleaving (count второго до
+# регистрации первого) проводит оба мимо последнего слота квоты.
+# _projects_lock здесь не защитил бы и не должен: он про реестр, а реестр
+# add не пишет.
+# SOLUTION: ворота по проекту держат count→name→workspace→register одним
+# куском; project_limit и project_delete берут те же ворота внутри
+# _projects_lock -- порядок замков один (реестровый снаружи, ворота
+# внутри), инверсии нет; независимые проекты заперты каждый своим замком,
+# долгого общего замка нет. Граница гарантии -- один процесс cluster.
+# STATUS: #567 (красный прогон; реализация следует)
+import threading  # noqa: E402
+
+ALPHA567 = "git@h:g/alpha.git"
+BETA567 = "git@h:g/beta.git"
+PLAY567 = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
+BRANCH567 = {"one": "feature/one", "two": "feature/two"}
+
+
+class _RacyNomad567(FakeNomad):
+    """Номад с барьером: все четыре чтения обоих потоков ЗАВЕРШЕНЫ до
+    любой регистрации. У каждого add ровно два чтения списка (count и
+    name); регистрация ждёт, пока каждое чтение не только пришло, но и
+    прочитало список -- иначе GIL успевает впустить чужую регистрацию
+    между барьером и чтением, и гонка недетерминирована. Так оба add
+    выбирают имя по пустому списку -- всегда, не по везению."""
+
+    READS = 4  # два add по два чтения (count, name)
+
+    def __init__(self):
+        super().__init__()
+        self._m = threading.Lock()
+        self._done = 0                     # чтения, прочитай список
+        self._all_read = threading.Event()  # все четыре чтения завершены
+
+    def get_jobs(self, prefix, meta=False):
+        got = super().get_jobs(prefix, meta)
+        with self._m:
+            self._done += 1
+            if self._done == self.READS:
+                self._all_read.set()
+        return got
+
+    def register(self, spec):
+        if not self._all_read.wait(timeout=10):
+            raise TimeoutError("racy nomad: reads never finished")
+        super().register(spec)
+
+
+class _OverflowNomad567(FakeNomad):
+    """Переполнение последнего слота: count второго -- ДО регистрации
+    первого, name второго -- ПОСЛЕ. Живой pu-alpha-1 уже есть, лимит 2:
+    без ворот оба проходят count=1<2 и регистрируют -2 и -3 -- три живых
+    джоба при потолке два, с разными именами. Порядок держат события:
+    регистрация первого ждёт count второго, name второго ждёт регистрации
+    первого -- цикла нет, оба порядка обязаны случиться."""
+
+    def __init__(self):
+        super().__init__(jobs={"pu-alpha-1": {"ID": "pu-alpha-1", "Status": "run"}})
+        self._m = threading.Lock()
+        self._reads = {}
+        self._t1 = None
+        self._t2_counted = threading.Event()     # второй посчитал живых
+        self._t1_registered = threading.Event()  # первый зарегистрировал
+
+    def _seen(self, extra=()):
+        return [{"ID": "pu-alpha-1", "Status": "run"}, *extra]
+
+    def get_jobs(self, prefix, meta=False):
+        with self._m:
+            me = threading.get_ident()
+            if self._t1 is None:
+                self._t1 = me
+            self._reads[me] = self._reads.get(me, 0) + 1
+            first, n = me == self._t1, self._reads[me]
+        if first:
+            return self._seen()
+        if n == 1:
+            # count второго: только семя, регистрации первого ещё нет
+            self._t2_counted.set()
+            return self._seen()
+        if not self._t1_registered.wait(timeout=10):
+            raise TimeoutError("overflow nomad: the first register never came")
+        return self._seen(extra=[{"ID": "pu-alpha-2", "Status": "run"}])
+
+    def register(self, spec):
+        with self._m:
+            first = threading.get_ident() == self._t1
+        if first:
+            if not self._t2_counted.wait(timeout=10):
+                raise TimeoutError("overflow nomad: the second count never came")
+            super().register(spec)
+            self._t1_registered.set()
+        else:
+            super().register(spec)
+
+
+def _no_gate_567():
+    """Ворота-пустышка: вызов как _project_gate(name), защиты нет --
+    сценарий гонки отключает ворота, как _no_lock_534 отключал замок."""
+    class _PassThrough:
+        def __call__(self, name):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    return _PassThrough()
+
+
+@contextlib.contextmanager
+def _add_env_567(entries, api):
+    """Среда глагола add: снимок реестра, каталог bootstrap, Nomad-заглушка.
+
+    entries -- [(origin, limit|None)] снимка; api подменяет живой Nomad
+    дефолтом контекстной переменной: поток обработчика наследует дефолт, а
+    не контекст потока-родителя. -> каталог bootstrap (файлы workspace)."""
+    import contextvars
+    d = tempfile.mkdtemp(prefix="mop-test-567r-")
+    boot = tempfile.mkdtemp(prefix="mop-test-567w-")
+    try:
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            json.dump({"version": 1,
+                       "projects": [{"origin": o} if l is None
+                                    else {"origin": o, "limit": l}
+                                    for o, l in entries]}, f)
+
+        def stub_spec(name, origin, cont=False, branch=None, node=None):
+            return {"Job": {"ID": name, "Meta": {"origin": origin, "branch": branch}}}
+        cv = contextvars.ContextVar("nomad_api", default=api)
+        with patched(cluster.projects, SNAPSHOT_DIR=d), \
+                patched(_bootstrap, ROOT=boot), \
+                patched(cluster.spec, job_spec=stub_spec), \
+                patched(cluster, _API=cv):
+            yield boot
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(boot, ignore_errors=True)
+
+
+def check_add_race_567(c):
+    """Одновременный add: имена, спеки, квота, независимость, сговор с
+    реестровыми глаголами. Сценарии 1-2 (ворота отключены) документируют
+    гонку и остаются зелёными всегда; сценарии 3+ требуют ворота и красные
+    до реализации."""
+    def adds(requests, project="alpha"):
+        """Одновременные answer(add) в потоках. -> {тег: ответ} | None."""
+        out = {}
+
+        def run(tag, req):
+            out[tag] = cluster.answer(project, {**req, "verb": "add"})
+        ts = [threading.Thread(target=run, args=(t, r)) for t, r in requests.items()]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=15)
+            if t.is_alive():
+                c.fail("#567 a racing add hung", "join timed out")
+                return None
+        return out
+
+    def two(origin=ALPHA567):
+        return {"one": {"origin": origin, "branch": BRANCH567["one"], "workspace": PLAY567},
+                "two": {"origin": origin, "branch": BRANCH567["two"], "workspace": PLAY567}}
+
+    # 1. Гонка без ворот: барьер держит регистрации до всех чтений -- оба
+    # add видят пустой список, берут одно имя, вторая регистрация затирает
+    # спеку первой (жив один джоб, ветка одного из мастеров потеряна).
+    fake = _RacyNomad567()
+    with _add_env_567([(ALPHA567, 2)], fake), \
+            patched(cluster, _project_gate=_no_gate_567()):
+        out = adds(two())
+    if out is None:
+        return
+    names = sorted(v["name"] for v in out.values() if v.get("ok"))
+    c.check("#567 without the gate both adds take the same name -- the race reproduces",
+            len(out) == 2 and all(v.get("ok") for v in out.values())
+            and len(names) == 2 and names[0] == names[1],
+            f"answers: {out}, jobs: {sorted(fake.jobs)}")
+    c.check("#567 without the gate one live job remains: the first spec was overwritten",
+            sorted(fake.jobs) == ["pu-alpha-1"], f"jobs: {sorted(fake.jobs)}")
+
+    # 2. Переполнение последнего слота без ворот: count второго до
+    # регистрации первого, имя -- после; три живых при потолке два.
+    fake = _OverflowNomad567()
+    with _add_env_567([(ALPHA567, 2)], fake), \
+            patched(cluster, _project_gate=_no_gate_567()):
+        out = adds(two())
+    if out is None:
+        return
+    c.check("#567 without the gate the last quota slot is exceeded",
+            len(out) == 2 and all(v.get("ok") for v in out.values())
+            and sorted(fake.jobs) == ["pu-alpha-1", "pu-alpha-2", "pu-alpha-3"],
+            f"answers: {out}, jobs: {sorted(fake.jobs)}, limit: 2")
+
+    # 3. Ворота проекта: без них гарантий нет -- красное до реализации.
+    gate = getattr(cluster, "_project_gate", None)
+    if not c.check("#567 add runs behind the project gate (count-name-workspace-register as one piece)",
+                   callable(gate), "cluster._project_gate отсутствует: гонка открыта"):
+        return
+
+    # 4. За воротами одновременные add одного проекта: разные имена, своя
+    # спека (ветка) и свой workspace у каждого.
+    fake = FakeNomad()
+    with _add_env_567([(ALPHA567, 2)], fake) as boot:
+        out = adds(two())
+        if out is None:
+            return
+        oks = {t: v for t, v in out.items() if v.get("ok")}
+        names = sorted(v["name"] for v in oks.values())
+        c.check("#567 behind the gate both adds pass with different names",
+                len(oks) == 2 and len(set(names)) == 2, f"answers: {out}")
+        for tag, ans in oks.items():
+            job = fake.jobs.get(ans["name"]) or {}
+            c.check(f"#567 the name of {tag} carries its branch and its workspace",
+                    (job.get("Meta") or {}).get("branch") == BRANCH567[tag]
+                    and os.path.exists(os.path.join(boot, f"{ans['name']}-tasks.yml")),
+                    f"answer: {ans}, job: {job}")
+
+    # 5. Последний слот: лимит 1, два одновременных add -- ровно один
+    # проходит, второй получает отказ про потолок, джоб один.
+    fake = FakeNomad()
+    with _add_env_567([(ALPHA567, 1)], fake):
+        out = adds(two())
+        if out is None:
+            return
+        oks = [v for v in out.values() if v.get("ok")]
+        refused = [v for v in out.values() if not v.get("ok")]
+        c.check("#567 behind the gate the last slot is not exceeded",
+                len(oks) == 1 and len(refused) == 1
+                and "limit" in refused[0].get("error", "")
+                and sorted(fake.jobs) == [oks[0]["name"]],
+                f"answers: {out}, jobs: {sorted(fake.jobs)}")
+
+    # 6. Ошибка регистрации освобождает ворота: следующий add того же
+    # проекта проходит, а не стоит навсегда.
+    class _OnceBroken(FakeNomad):
+        def __init__(self):
+            super().__init__()
+            self.broken = True
+
+        def register(self, spec):
+            if self.broken:
+                self.broken = False
+                raise RuntimeError("nomad is down for a moment")
+            super().register(spec)
+
+    fake = _OnceBroken()
+    with _add_env_567([(ALPHA567, None)], fake):
+        broken = cluster.answer("alpha", {"verb": "add", "origin": ALPHA567})
+        again = adds({"one": {"origin": ALPHA567}})
+        if again is None:
+            return
+        c.check("#567 a failed registration does not lock the project forever",
+                "error" in broken and again["one"].get("ok"),
+                f"broken: {broken}, again: {again}")
+
+    # 7. Независимость: ворота -- по проекту, свои совпадают от вызова к
+    # вызову, чужие разные; чужой проект не ждёт чужих ворот.
+    c.check("#567 the gate is per project: same name -- same gate, different -- different",
+            cluster._project_gate("alpha") is cluster._project_gate("alpha")
+            and cluster._project_gate("alpha") is not cluster._project_gate("beta"))
+    fake = FakeNomad()
+    with _add_env_567([(ALPHA567, None), (BETA567, None)], fake):
+        held = cluster._project_gate("alpha")
+        held.acquire()
+        try:
+            out = adds({"one": {"origin": BETA567}}, project="beta")
+            if out is None:
+                return
+            c.check("#567 another project works while this gate is held",
+                    out["one"].get("ok"), str(out))
+        finally:
+            held.release()
+        mine = adds({"one": {"origin": ALPHA567}})
+        if mine is None:
+            return
+        c.check("#567 the gated project passes after the gate is released",
+                mine["one"].get("ok"), str(mine))
+
+    # 8. Сговор с реестром: смена лимита и снятие проекта берут те же
+    # ворота внутри _projects_lock -- add не проскочит между чтением лимита
+    # и регистрацией. Порядок замков один: реестровый снаружи.
+    env = _Registry534()
+    try:
+        with env.patched_env():
+            real = cluster._project_gate
+            taken = []
+
+            @contextlib.contextmanager
+            def recording(name):
+                taken.append(name)
+                with real(name):
+                    yield
+            with patched(cluster, _project_gate=recording):
+                got = cluster.answer("admin", {"verb": "project_limit",
+                                               "name": "mop", "value": "3"})
+                c.check("#567 project_limit takes the project gate",
+                        got.get("ok") and taken == ["mop"], f"{got}, gates: {taken}")
+                taken.clear()
+                got = cluster.answer("admin", {"verb": "project_delete",
+                                               "name": "rudesktop"})
+                c.check("#567 project_delete takes the project gate",
+                        got.get("ok") and taken == ["rudesktop"], f"{got}, gates: {taken}")
+    finally:
+        env.cleanup()
+
+
 def main():
     c = Checks()
     check_join_config_404(c)
@@ -2033,6 +2347,7 @@ def main():
                   check_nomad_api_275, check_stderr_verb_333,
                   check_update_origin_365, check_nodes_api_375,
                   check_registry_verbs_534, check_concurrent_534,
+                  check_add_race_567,
                   ):
         check(c)
     return c.report("cluster")
