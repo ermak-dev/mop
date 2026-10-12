@@ -23,7 +23,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, ops, puppets
+from mop.common import bus, busnames, config, ops, puppets, state
 from mop.server import adminapi, opworker, web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
@@ -85,10 +85,52 @@ RESOLVER = _resolve_project
 # Исполнитель #499: эффект операции -- воркер run тем же транспортом,
 # что CLI (#496/#498); поток на операцию даёт адаптер (adminapi), сюда
 # приходит уже свободная цель. Личность -- (login, role) HTTP-сессии.
+# Действие с целью проходит обязательный ops.safety (#566): воркер зовёт
+# предикат ДО эффекта, но факты и занятость собирает ЭТА обвязка, из
+# живых источников, -- сам по себе предикат их не спрашивает, а без
+# фактов инвариант #460 молчит. Add -- без цели (его ворота -- реестр
+# #470), send -- за своими воротами _wrap_send: оба идут без предиката.
+UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
+                          "update", "model"))
+
+
+def _safety_of(target, owner):
+    """Предикат #460 для run: свежие факты и занятость под target gate.
+
+    -> (predикат | None, отказ | None). Отказ -- готовая причина для
+    вердикта run'а: контекст цели не собрался (спека, узел) -- «не знаю»
+    не значит «можно», действие не исполняется вовсе. Проект -- из origin
+    спеки, не из имени; факты -- глаголом state узла работающей
+    аллокации; занятость -- статус сессии из того же ответа узла, что
+    ростер (#501)."""
+    try:
+        spec = puppets._cluster("spec", name=target) or {}
+        origin = (spec.get("meta") or {}).get("origin")
+        project = ops.target_project(origin)
+        node = puppets.node_of(target)
+        got = bus.request(node, "state", name=target, project=project)
+        busy = state._session_state((got or {}).get("session")) in ("busy", "shell")
+    except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
+        return None, f"{target}: cannot inspect it before acting — {e}"
+
+    def predicate(name, _project, **_):
+        return ops.safety(name, project, owner=owner, facts=got,
+                          busy=busy, disruptive=True)
+
+    return predicate, None
+
+
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
-    return lambda: WORKER.run(action, target or "", params, login,
-                              transport=opworker.default_transport(RESOLVER))
+    name = target or ""
+    safety = None
+    if action in UNSAFE_VERBS and name:
+        safety, refusal = _safety_of(name, login)
+        if safety is None:
+            return lambda: {"status": "refused", "error": refusal}
+    return lambda: WORKER.run(action, name, params, login,
+                              transport=opworker.default_transport(RESOLVER),
+                              safety=safety)
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
