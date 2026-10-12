@@ -382,6 +382,13 @@ async def v_local(_conn, req):
 # замка в процессе достаточно.
 _owner_locks = {}
 
+# Поколения захвата аренды по пути файла (#573): монотонный счётчик в
+# процессе агента. Файл аренды пишет только агент, поэтому «наш захват» --
+# строго последний по этому пути; счётчик живёт дольше любого ожидания
+# доставки и переживает перезапуск процесса (для нового процесса любой
+# старый захват всё равно не откатывается -- undo в нём не бывает).
+_lease_generations = {}
+
 
 async def _claim(name, req):
     """Аренда задания перед доставкой. -> (отказ|None, откат|None, заметка|None).
@@ -404,7 +411,14 @@ async def _claim(name, req):
     # Таймаут -- не записано (#171): иначе «владелец есть», а файла нет.
     if code != 0:
         return f"{name}: owner not recorded: {why(out, code)}", None, None
-    return None, (path, owner, mine), note
+    # Поколение захвата (#573): один логин в одну секунду пишет байт в байт
+    # ту же строку, и равенство строк в откате не отличает свой захват от
+    # чужого успешного. Счётчик монотонен на путь аренды в этом процессе:
+    # файл аренды пишет только агент, замок сериализует его записи, поэтому
+    # «наш захват» -- это строго последний по этому пути. Файл не меняется,
+    # читатели прежние -- никакого перехода записей при rollout.
+    generation = _lease_generations[path] = _lease_generations.get(path, 0) + 1
+    return None, (path, owner, mine, generation), note
 
 
 async def _unclaim(name, undo):
@@ -418,14 +432,19 @@ async def _unclaim(name, undo):
     мог взять другой мастер (force), и откат вслепую перетёр бы его запись
     прежним владельцем или стёр бы файл -- его работа осталась бы ничьей.
     Чужая запись -- не наш откат: оставляем её и ничего не говорим. Зовут под
-    _owner_locks, так что между сравнением и записью чужого claim не бывает."""
-    path, owner, mine = undo
+    _owner_locks, так что между сравнением и записью чужого claim не бывает.
+    Равных строк мало (#573): один логин в одну секунду пишет ту же строку,
+    и потому «наш» захват -- поколение, а не байты: чужой захват по этому
+    пути поднял счётчик, наш уже не последний -- откат молча не твой."""
+    path, owner, mine, generation = undo
     body = owner.render() if owner else ""
     write = (f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
              if body else f"rm -f {shlex.quote(path)}")
     # $(cat) срезает конечный перевод строки -- сравниваем без него.
     out, code = await bsh(name, f'[ "$(cat {shlex.quote(path)} 2>/dev/null)" = '
                                 f'{shlex.quote(mine.rstrip(chr(10)))} ] || exit 0; {write}')
+    if code == 0 and _lease_generations.get(path) != generation:
+        return None  # захват уже не наш: поверх встал чужой, файла не трогали
     return why(out, code) if code != 0 else None
 
 
@@ -550,7 +569,7 @@ def identity_script(clone, path, mine, profile):
 async def _follow_owner(conn, name, login, undo):
     """Identity клона -- за проверенным владельцем. -> заметка мастеру."""
     profile, missing = await owner_profile(conn, name, login)
-    path, _, mine = undo
+    path, _, mine, _generation = undo  # поколение -- только откату (#573)
     async with _owner_locks.setdefault(name, asyncio.Lock()):
         out, code = await bsh(name, identity_script(clone_dir(name), path, mine, profile))
     if code != 0:
@@ -585,9 +604,10 @@ async def v_send(conn, req):
         "--wait", wait), timeout=wait + 20)
     if out.get("error"):
         # Под тем же замком, что и claim (#189): иначе между сравнением и
-        # записью отката вклинился бы чужой send.
+        # записью отката вклинился бы чужой send. Поколение проверяем до
+        # замка: захват чужой -- не наш откат, и замок занимать незачем.
         failed = None
-        if undo:
+        if undo and _lease_generations.get(undo[0]) == undo[3]:
             async with _owner_locks.setdefault(name, asyncio.Lock()):
                 failed = await _unclaim(name, undo)
         if failed:

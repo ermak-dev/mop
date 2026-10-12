@@ -628,6 +628,150 @@ def check_subject_173(c):
             not ("parts[1]" in text or "service.project_from_subject(" not in text))
 
 
+# ── одинаковый владелец в одну секунду -- разные захваты (#573) ──────────
+# HYPOTHESIS: _claim рендерит Owner(me, int(time.time())) и _unclaim
+# сравнивает всю строку. Две отправки одного логина в одну секунду пишут
+# байт в байт одно значение: A записал и ждёт доставки, B с force записал
+# поверх и доставил, доставка A падает -- и откат A («в файле всё ещё наша
+# запись» -- она и есть наша, строка та же) сносит аренду успешного B:
+# возвращает прежнего владельца или стирает файл, чей держатель только что
+# получил работу. Замок (#189) защищает сравнение/запись от вклинивания,
+# но значения не уникальны: равенство строк -- не равенство захвата.
+# Clock заморожен, Events рулят порядком -- уникальность обязана родиться
+# не из времени.
+# SOLUTION: захват нумеруется: монотонный счётчик на путь аренды в
+# процессе агента, у каждого _claim своё поколение, и откат условен по
+# поколению: своим бывает только последний захват этого пути. Файл на
+# диске не меняется вовсе (user\tat, Owner.render), чтение чужое --
+# прежним: никакой миграции и окна нечитаемости при rollout. Счётчик
+# в процессе живёт дольше любого ожидания доставки, короткий замок
+# через idle wait не держится.
+# STATUS: FIXED — see #573
+def check_same_owner_generation_573(c):
+    """Шелл и файл настоящие, как #189: сравнение-и-запись проверяется
+    как есть."""
+    import asyncio
+    import tempfile
+    from mop.common import lease
+    from mop.common.domain import Owner
+    root = tempfile.mkdtemp(prefix="mop-test-573-")
+    os.makedirs(os.path.join(root, ".git"))
+    path = os.path.join(root, lease.FILE)
+
+    async def facts(name):
+        text = open(path).read() if os.path.exists(path) else ""
+        owner = Owner.parse(text)
+        return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
+                "cur": "master", "def": "master"}
+
+    async def no_event(*a, **k):
+        return None
+
+    def owner_now():
+        return Owner.parse(open(path).read()) if os.path.exists(path) else None
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "session_json", "_event",
+                  "_owner_locks"), restored(agent.time, "time"):
+        agent.bsh, agent.clone_facts, agent._event = bash, facts, no_event
+        agent.clone_dir = lambda name: root
+        # Часы -- только аренды: verdict/Owner видят одну секунду на все
+        # захваты, остальное (события) времени не касается.
+        real_time = agent.time.time
+        agent.time.time = lambda: 1000
+        agent._owner_locks = {}
+        # A и B -- один логин в одну секунду: строки записи равны.
+        # A взял аренду и ждёт доставки; B берёт с force и доставляет;
+        # доставка A падает последней -- откат A не имеет права тронуть
+        # аренду успешного B.
+        async def race():
+            b_done = asyncio.Event()
+
+            async def deliver(name, cmd, timeout=20):
+                if "--from-name a " in cmd:
+                    await b_done.wait()
+                    return {"error": "not delivered"}
+                return {"msg_id": "m-b"}
+            agent.session_json = deliver
+
+            async def a():
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "erin", "from_name": "a"})
+
+            async def b():
+                while owner_now() is None:
+                    await asyncio.sleep(0.01)
+                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                                "owner": "erin", "from_name": "b",
+                                                "force": True})
+                b_done.set()
+                return got
+            return await asyncio.gather(a(), b())
+        ra, rb = asyncio.run(race())
+        c.check("same-owner race: a must fail, b must deliver",
+                not (not ra.get("error") or rb.get("error")), f"a {ra!r}, b {rb!r}")
+        c.check("same-owner race: the lease must stay with the second taker",
+                not (getattr(owner_now(), "user", None) != "erin"
+                     or owner_now().at != 1000), repr(owner_now()))
+
+        # Тот же провал и без force: простое перезаписи равной строкой при
+        # живой чужой аренде быть не должно, но и успешный B не должен
+        # остаться без аренды после отката A -- здесь A брал пустое, B
+        # взял поверх него, откат A обязан увидеть «в файле уже не мой
+        # захват», хоть байты и равны.
+        if os.path.exists(path):
+            os.remove(path)
+
+        async def race2():
+            b_done = asyncio.Event()
+
+            async def deliver(name, cmd, timeout=20):
+                if "--from-name a " in cmd:
+                    await b_done.wait()
+                    return {"error": "not delivered"}
+                return {"msg_id": "m-b"}
+            agent.session_json = deliver
+
+            async def a():
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "erin", "from_name": "a"})
+
+            async def b():
+                while owner_now() is None:
+                    await asyncio.sleep(0.01)
+                # Аренда A моложе окна и «своя» по логину -- B берёт её без
+                # force только потому, что владелец тот же логин.
+                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                                "owner": "erin", "from_name": "b"})
+                b_done.set()
+                return got
+            return await asyncio.gather(a(), b())
+        ra, rb = asyncio.run(race2())
+        c.check("same-owner no-force race: a must fail, b must deliver",
+                not (not ra.get("error") or rb.get("error")), f"a {ra!r}, b {rb!r}")
+        c.check("same-owner no-force race: the lease must stay with the second taker",
+                not (getattr(owner_now(), "user", None) != "erin"
+                     or owner_now().at != 1000), repr(owner_now()))
+
+        # Одинокий провал откатывает как прежде: к прежнему владельцу, а
+        # без него файл снимается. Поколение не должно сломать откат
+        # единственного захвата.
+        async def undelivered(name, cmd, timeout=20):
+            return {"error": "not delivered"}
+        agent.session_json = undelivered
+        stale = Owner("carol", 1000).render()
+        for before, want in ((None, None), (stale, stale)):
+            if before is None:
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                open(path, "w").write(before)
+            got = asyncio.run(agent.v_send(None, {"name": "pu-mop-1", "message": "z",
+                                                  "owner": "dave", "from_name": "d"}))
+            now = open(path).read() if os.path.exists(path) else None
+            c.check(f"single failed send over {before!r} rolls back as before",
+                    not (not got.get("error") or now != want),
+                    f"{got!r}, file {now!r}, wanted {want!r}")
+
+
 def check_unclaim_race_189(c):
     """HYPOTHESIS (#189): v_send ставит аренду под _owner_locks, а откат
     неудачной доставки делает ВНЕ замка и не глядя: второй мастер (force)
@@ -1350,7 +1494,7 @@ def check_owner_hook_313(c):
         agent.bsh, agent.owner_profile = bash, profile
         agent.clone_dir = lambda name: d
         note = asyncio.run(agent._follow_owner(None, "pu-mop-1", "olga",
-                                               (lf, None, "olga\t1\n")))
+                                               (lf, None, "olga\t1\n", 1)))
     c.check("#313 the master's note names the skipped guard",
             "olga@example.dev" in note and "skipped" in note, note)
 
@@ -1531,6 +1675,7 @@ def main():
                   check_write_home_279, check_addressed_write_312, check_write_fields_366,
                   check_clone_probe_fail_closed_564, check_clone_probe_347, check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
+                  check_same_owner_generation_573,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
                   check_usage_by_login_244, check_owner_gate_267,
