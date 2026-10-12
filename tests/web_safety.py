@@ -70,7 +70,7 @@ def facts(owner=None, dirty=0, session="idle 1 1", present=True):
 
 def execute(action, target, params, who=("anton", "admin"), state=None,
             clone=None, state_error=None, spec_error=None, origin=ORIGIN,
-            alloc="running", allocate=True):
+            alloc="running", allocate=True, in_roster=True):
     """Вердикт собранного исполнителя #566, подменена только шина.
 
     call_cluster -- глаголы сервиса кластера, и она держит субъекты
@@ -78,9 +78,13 @@ def execute(action, target, params, who=("anton", "admin"), state=None,
     проверках -- оператор), мутации -- только проект цели. Субъект
     каждого разрешённого вызова пишется в журнал полем _subject.
     alloc -- ClientStatus последней аллокации (complete -- остановленный
-    папет, #377), allocate=False -- аллокации нет. request -- глаголы
-    узла: clone -- факты клона (жив и при мёртвой сессии), state --
-    сессия, send -- доставка, wipe -- эффект.
+    папет, #377), allocate=False -- аллокации нет, in_roster=False --
+    имени нет в ростере (резолвер проекта бессилен: кандидат None, и
+    источник проекта -- только спека). request -- глаголы узла: clone --
+    ОТДЕЛЬНЫЙ ответ (не копия state: раунд 3 проверяет, что fallback не
+    стирает свидетельство сессии), state -- сессия, states/type -- эффект
+    model (#468, база уже на заказанной модели -- no-op без хода в TUI),
+    send -- доставка, wipe -- эффект.
     -> (вердикт, кластерные вызовы, узловые [(node, verb, fields)])."""
     cluster, node, restarts = [], [], [7]
     # Кэш резолвера -- модульный: без сброса один прогон файла решал бы
@@ -123,14 +127,17 @@ def execute(action, target, params, who=("anton", "admin"), state=None,
         if verb == "projects":
             return {"names": [TARGET_PROJECT]}
         if verb == "roster":
+            if not in_roster:
+                return {"items": []}
             return {"items": [{"job": {"ID": target,
                                        "Meta": {"origin": ORIGIN},
                                        "Type": "service"}}]}
         return {}
 
     def clone_answer():
-        # Глагол clone отвечает фактами клона и при мёртвой сессии (#40):
-        # остановленной цели их даёт он, не state.
+        # Глагол clone -- ОТДЕЛЬНЫЙ ответ узла (жив и при мёртвой сессии,
+        # #40): явный параметр важнее фактов из state, fallback по
+        # умолчанию -- те же факты, что в state.
         if clone is not None:
             return clone
         if state_error is not None:
@@ -145,6 +152,16 @@ def execute(action, target, params, who=("anton", "admin"), state=None,
             if state_error is not None:
                 raise state_error
             return state if verb == "state" else clone_answer()
+        if verb == "states":
+            # Эффект model (#468): база -- живая запись уже на заказанной
+            # модели, свежая -- no-op registered, без хода в TUI.
+            return {"puppets": {fields.get("names", [target])[0]: {
+                "present": True, "session": "busy 1 1",
+                "state": {"status": "busy", "alive": True, "listen": True,
+                          "sessionId": "s1", "model": params.get("model"),
+                          "model_at": time.time() - 5}}}}
+        if verb == "type":
+            return {"screen": ""}
         if verb == "send":
             return {"msg_id": "message-1"}
         if verb == "wipe":
@@ -303,6 +320,67 @@ def main():
     c.check("#566 the mutation rides the target's project",
             subjects_of(cluster, "restart") == [TARGET_PROJECT],
             subjects_of(cluster, "restart"))
+
+    # ── fallback не стирает свидетельство сессии (раунд 3) ───────────────
+    # state живой, но фактов клона в нём нет (None); clone отвечает факты.
+    # Замена ответа целиком теряла busy -- restart стрелял над работой.
+    got, cluster, node = execute(
+        "restart", target, {},
+        state={"present": True, "session": "busy 1 1", "clone": None},
+        clone={"clone": dict(CLEAN, owner=mine)})
+    c.check("#566 clone fallback keeps the live busy session refused",
+            got.get("status") == "refused"
+            and not mutations_of(cluster, node), (got, cluster, node))
+    # Невалидный/неизвестный state (None) -- не «нет фактов, спросим clone
+    # и верим ему»: неизвестность сессии не превращается в idle.
+    got, cluster, node = execute("restart", target, {}, state=None,
+                                 clone={"clone": dict(CLEAN, owner=mine)})
+    c.check("#566 an unknown state answer is not made idle by clone",
+            got.get("status") == "refused"
+            and not mutations_of(cluster, node), (got, cluster, node))
+    # Кривая строка сессии на живом ответе -- та же неизвестность: парсер
+    # вернул None, но present=True, сессия есть и она не idle.
+    got, cluster, node = execute(
+        "restart", target, {},
+        state={"present": True, "session": "bad-frame", "clone": None},
+        clone={"clone": dict(CLEAN, owner=mine)})
+    c.check("#566 a malformed session line stays busy, not idle",
+            got.get("status") == "refused"
+            and not mutations_of(cluster, node), (got, cluster, node))
+
+    # ── non-disruptive не получает ложного отказа (раунд 3) ──────────────
+    # model/update не убивают сессию (opworker.DISRUPTIVE их не держит):
+    # предикат обязан уважать disruptive воркера, не ставить True молча.
+    # Сессия жива и busy, клон чистый -- safety(по контракт) пускает.
+    for action, params in (("model", {"model": "glm-5.3"}),
+                           ("update", {"fresh": False})):
+        got, cluster, node = execute(action, target, params,
+                                     state=facts(owner=mine, session="busy 1 1"))
+        c.check(f"#566 {action} over a live busy clean session is not refused by the wiring",
+                got.get("status") != "refused" or "live" not in (got.get("error") or ""),
+                (action, got, cluster, node))
+    # Тот же вход у disruptive -- отказ словами о живой сессии: полог
+    # один, разница только во флаге, который воркер передаёт честно.
+    got, cluster, node = execute("restart", target, {},
+                                 state=facts(owner=mine, session="busy 1 1"))
+    c.check("#566 restart over the same busy session is refused as live",
+            got.get("status") == "refused"
+            and "live" in (got.get("error") or "")
+            and not mutations_of(cluster, node), (got, cluster, node))
+
+    # ── подтвердённый проект перевязывает транспорт (раунд 3) ────────────
+    # Имени нет в ростере (резолвер None), origin спеки называет проект:
+    # спека спрашивается операторским субъектом (roster-кандидата нет),
+    # подтверждённый проект ведёт alloc/узел/эффект -- прежний транспорт
+    # на кандидат None продолжил бы ехать субъектом процесса.
+    got, cluster, node = execute("restart", target, {}, in_roster=False,
+                                 state=facts(owner=mine))
+    asks = [f for _, v, f in node if v in ("state", "clone")]
+    c.check("#566 a stale roster candidate still lands the effect on the target's project",
+            got.get("status") == "succeeded"
+            and subjects_of(cluster, "restart") == [TARGET_PROJECT]
+            and all(f.get("project") == TARGET_PROJECT for f in asks),
+            (got, cluster, node))
 
     # ── владелец -- HTTP-принципал, не тело запроса ─────────────────────
     got, cluster, node = execute("restart", target, {}, state=facts(owner=mine),
