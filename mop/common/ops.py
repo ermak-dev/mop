@@ -95,12 +95,16 @@ def bootstrap_result(transport, name, marker, timeout, sleep, clock, step):
 # ─── операции ────────────────────────────────────────────────────────────
 def add(transport, origin, workspace, branch=None, ctx=None,
         sleep=time.sleep, clock=time.time, step=lambda s: None,
-        place_wait=PLACE_WAIT, bootstrap_wait=BOOTSTRAP_WAIT):
+        place_wait=PLACE_WAIT, bootstrap_wait=BOOTSTRAP_WAIT,
+        context=None):
     """Завести папета: регистрация, ожидание узла, итог bootstrap'а.
 
     transport -- глаголы сервиса кластера (call_cluster-подобный),
     workspace -- (текст, происхождение) тем же видом, что собирал командлет:
-    явный источник, а не чтение cwd операции. -> вердикт-словарь."""
+    явный источник, а не чтение cwd операции. -> вердикт-словарь.
+    context (#575) -- словарь аудита операции: доверенное имя из ответа
+    регистрации кладётся в него в момент ответа, до ожидания узла --
+    зависший placement имени больше не отнимает."""
     progress = []
     note = progress.append
     note("registering")
@@ -113,6 +117,8 @@ def add(transport, origin, workspace, branch=None, ctx=None,
     name = got.get("name")
     if not name:
         return _refused(name, "the service named no puppet", progress)
+    if context is not None and name:
+        context["name"] = name
     note(f"{name}: waiting for a node")
     deadline = clock() + place_wait
     node = None

@@ -239,7 +239,8 @@ def _execute(action, target, params, who):
             return pred, tr, refusal
 
         def effect():
-            got = WORKER.run(action, name, params, login, prepare=prepare)
+            got = WORKER.run(action, name, params, login, prepare=prepare,
+                             context=audit)
             # Вердикт доопределяет контекст (#575): проект эффекта (send
             # с собственным резолвом) достовернее догадки префетча, имя
             # existing-target цели уже в контексте из записи приёма.
@@ -252,7 +253,8 @@ def _execute(action, target, params, who):
         return effect
     return lambda: audit_context(
         WORKER.run(action, name, params, login,
-                   transport=opworker.default_transport(RESOLVER)), audit)
+                   transport=opworker.default_transport(RESOLVER),
+                   context=audit), audit)
 
 def audit_context(verdict, audit):
     """Довести контекст аудита (#575) фактами вердикта и вернуть вердикт.
