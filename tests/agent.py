@@ -153,10 +153,11 @@ CLONE_PROBE_347 = (
     'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
     'st=$(git status --porcelain 2>/dev/null) || exit 1; '
     'dirty=0; [ -n "$st" ] && dirty=$(printf \'%s\\n\' "$st" | wc -l); '
-    'unborn=$(git rev-parse --verify -q --end-of-options HEAD 2>/dev/null '
-    '|| echo y); '
-    'if [ "$unborn" = y ]; then ahead=$(git rev-list --count --all 2>/dev/null); '
-    'else ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null); fi; '
+    'git rev-parse --verify -q --end-of-options HEAD >/dev/null 2>&1; '
+    'case $? in '
+    '0) ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null) || exit 1;; '
+    '1) ahead=$(git rev-list --count --all 2>/dev/null) || exit 1;; '
+    '*) exit 1;; esac; '
     '[ -n "$ahead" ] || exit 1; '
     'echo "dirty=$dirty"; echo "ahead=$ahead"; '
     'echo "owner=$(head -1 .git/mop-owner 2>/dev/null)"')
@@ -204,10 +205,14 @@ def check_clone_probe_347(c):
 # HEAD отказывает законно, и он доказывается своей проверкой состояния
 # (rev-parse --verify), а не лечится запасным запросом при любой ошибке:
 # born-клон с упавшим rev-list обязан читать unknown, а не «--all как
-# будто ahead». Грань названа: клон с удалённым ref ветки git сам читает
-# как unborn («No commits yet»), висячий коммит виден только fsck -- проба
-# это не различает и не должна: несохранённое она видит, а тяжёлый fsck в
-# пробе ростера не место.
+# будто ahead». Отказ обязательной команды отличают по коду возврата, не по
+# пустому stdout: git может напечатать число и отказаться (обёртка ниже
+# печатает 0 и выходит 128), и проверка состояния различает законное
+# отсутствие HEAD (rc 1) от ошибки чтения репозитория (rc 128): `|| echo y`
+# превращал любую ошибку rev-parse в «unborn». Грань названа: клон с
+# удалённым ref ветки git сам читает как unborn («No commits yet»),
+# висячий коммит виден только fsck -- проба это не различает и не должна:
+# несохранённое она видит, а тяжёлый fsck в пробе ростера не место.
 # STATUS: FIXED — see #564
 def check_clone_probe_fail_closed_564(c):
     """Шелл и git настоящие: проба гоняет настоящим шеллом над временным
@@ -312,6 +317,32 @@ def check_clone_probe_fail_closed_564(c):
     # Запасной счёт -- только доказанному unborn, не любой ошибке.
     c.check("#564 the fallback count must be gated on the unborn check",
             "rev-parse --verify" in probe, probe)
+
+    # Отказ rev-list обязан ронять пробу по коду возврата, а не по пустому
+    # stdout: git может напечатать число и отказаться (fault injection:
+    # обёртка печатает 0 и выходит 128). Текущая проба доверилась цифре.
+    born2 = repo()
+    with open(os.path.join(wrap, "git"), "w") as f:
+        f.write('#!/bin/sh\nif [ "$1" = rev-list ] && [ "$3" = HEAD ]; then\n'
+                '  echo 0; exit 128\nfi\n'
+                f'exec {real} "$@"\n')
+    env2 = dict(os.environ, PATH=wrap + os.pathsep + os.environ["PATH"])
+    got = asyncio.run(facts(born2, env=env2))
+    c.check("#564 a numeric stdout with rev-list's rc 128 reads unknown",
+            got is None, repr(got))
+
+    # Ошибка проверки состояния (rev-parse) -- тоже unknown: `|| echo y`
+    # читал любой её отказ как «unborn» и звал запасной запрос. Git-контракт:
+    # 0 -- HEAD доказан (born), 1 -- HEAD законно нет (unborn), прочее --
+    # репозиторий не читается. Обёртка валит ровно rev-parse (rc 128), все
+    # счётные команды прошли бы -- «unborn» было бы ложным.
+    with open(os.path.join(wrap, "git"), "w") as f:
+        f.write('#!/bin/sh\nif [ "$1" = rev-parse ] && [ "$2" = --verify ]; then\n'
+                '  exit 128\nfi\n'
+                f'exec {real} "$@"\n')
+    got = asyncio.run(facts(born2, env=env2))
+    c.check("#564 a rev-parse operational failure reads unknown, not unborn",
+            got is None, repr(got))
 
     # Командлет, как его зовёт сторож: повреждённый HEAD с несохранённым
     # файлом обязан получить отказ уборки (exit 3), а не «clean». Тут

@@ -150,17 +150,21 @@ def clone_probe(d):
     На этих числах стоит решение мастера о диспатче.
 
     Проба fail-closed (#564): отказ обязательной команды роняет её (exit 1),
-    а не маскируется нулём. `git status | wc -l` на побитом репозитории
-    печатает пустоту -- и она читалась нулём грязи (код конвейера -- это код
-    wc, а не git-а, поэтому считаем после захвата: `$(...)` несёт код git);
-    пустой `rev-list` от `2>/dev/null` -- нулём неотправленного. Уборка
-    получала «чистый клон» там, где git не мог прочесть репозиторий вовсе
-    (мусорный HEAD, битый index). Обязательных команд две: status и
-    rev-list. Единственный законный отказ rev-list по HEAD -- unborn-ветка
-    (коммитов нет), и он доказывается своей проверкой (rev-parse --verify),
-    а не подменой запроса: born-клон с упавшим rev-list -- unknown, а не
-    «--all как будто ahead». Остальные команды (branch, config, remote)
-    необязательны: их отказ -- пустое поле, а не неизвестный клон."""
+    а не маскируется нулём -- и отказ отличает код возврата, не пустой
+    stdout: git может напечатать число и отказаться. `git status | wc -l`
+    на побитом репозитории печатает пустоту -- и она читалась нулём грязи
+    (код конвейера -- это код wc, а не git-а, поэтому считаем после захвата:
+    `$(...)` несёт код git); пустой `rev-list` от `2>/dev/null` -- нулём
+    неотправленного. Уборка получала «чистый клон» там, где git не мог
+    прочесть репозиторий вовсе (мусорный HEAD, битый index). Обязательных
+    команд три: status, проверка состояния и rev-list. Проверка состояния --
+    `rev-parse --verify` HEAD с кодом как приговором (#564): 0 -- HEAD
+    доказан (born), 1 -- HEAD законно нет (unborn, единственный случай,
+    когда rev-list по HEAD отказывает законно и считаются все коммиты),
+    прочее -- репозиторий не читается, unknown; «любой отказ проверки =
+    unborn» -- ошибка, оборачивающая сбой в ложное разрешение. Остальные
+    команды (branch, config, remote) необязательны: их отказ -- пустое
+    поле, а не неизвестный клон."""
     return (f'cd {d} 2>/dev/null || exit 0; '
             f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
             f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
@@ -168,10 +172,11 @@ def clone_probe(d):
             f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
             f'st=$(git status --porcelain 2>/dev/null) || exit 1; '
             f'dirty=0; [ -n "$st" ] && dirty=$(printf \'%s\\n\' "$st" | wc -l); '
-            f'unborn=$(git rev-parse --verify -q --end-of-options HEAD 2>/dev/null '
-            f'|| echo y); '
-            f'if [ "$unborn" = y ]; then ahead=$(git rev-list --count --all 2>/dev/null); '
-            f'else ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null); fi; '
+            f'git rev-parse --verify -q --end-of-options HEAD >/dev/null 2>&1; '
+            f'case $? in '
+            f'0) ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null) || exit 1;; '
+            f'1) ahead=$(git rev-list --count --all 2>/dev/null) || exit 1;; '
+            f'*) exit 1;; esac; '
             f'[ -n "$ahead" ] || exit 1; '
             f'echo "dirty=$dirty"; echo "ahead=$ahead"; '
             f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
