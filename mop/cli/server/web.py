@@ -40,13 +40,31 @@ COLLECTOR = web.Collector()
 SESSIONS = websession.SessionStore()
 RATE = websession.RateLimiter()
 
+def _registry_projects():
+    """Origin'ы реестра сервера (#571): один источник для списка формы
+    (#472/#486) и ворот add воркера (#470) -- снимок v1 глазами читателя
+    (#534: view_of), а не замороженная легаси-пара, которую writer #534
+    больше не пишет. Читать -- не менять; отказ читателя едет наружу
+    исключением: у формы его ловит существующая граница Api.projects
+    (503 фразой), у ворот воркера он становится failed-вердиктом с
+    причиной -- пустым множеством он не подменяется, пустота у ворот
+    была бы разрешением."""
+    from mop.common import projects as registry
+    from mop.common.projects import snapshot_origins, view_of
+    return set(snapshot_origins(view_of(registry.SNAPSHOT_DIR)))
+
+
 # Операции дашборда (#486): реестр -- та же точка стыковки, что у воркера
 # (opworker.register, #470/#471), исполнитель и адаптер -- рядом; Origin для
 # POST -- публичный https-origin установки (#415). Личность каждого запроса
 # адаптер берёт сам из handler.who (куки -> SESSIONS -> провайдер).
 OPS = adminapi.Operations()
 opworker.register(OPS)
-WORKER = opworker.Worker()
+# Ворота add (#470) получают источник реестра (#571): тот же, что у
+# списка формы, -- origin'ы реестра сервера, снимок v1 глазами читателя
+# (#534). Без него воркер отказывал каждый origin (fail closed на None),
+# и веб-add не работал вовсе.
+WORKER = opworker.Worker(registry=_registry_projects)
 
 # Кэш ростера для резолвера проекта (#498): [момент, {имя -> проект}].
 # #498 вёз функцию без этих определений -- первый же вызов резолвера
@@ -610,7 +628,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/models":
             return ADMINAPI.models(self)
         if path == "/api/admin/projects":
-            return ADMINAPI.projects(self, _registry_projects())
+            return ADMINAPI.projects(self, _registry_projects)
         if path.startswith("/api/admin/ops/"):
             return self._json(200, ADMINAPI.result(path.rsplit("/", 1)[-1], self.who))
         if path == "/llm/management.html":
@@ -747,16 +765,6 @@ def listen_events():
     except bus.BusError as e:
         with COLLECTOR._cond:
             COLLECTOR.errors["events"] = str(e)
-
-
-def _registry_projects():
-    """Реестр сервера для GET /api/admin/projects (#472/#486): набор
-    origin'ов, как его держит сервер; читать -- не менять."""
-    from mop.common import projects as registry
-    try:
-        return registry.read()
-    except Exception:
-        return set()
 
 
 def main(argv):
