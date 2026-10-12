@@ -53,6 +53,17 @@ _FROM_OUTCOME = {"registered": "succeeded", "accepted": "partial",
                  "unknown": "unknown"}
 
 
+def effective_target(action, target, params):
+    """Устойчивая идентичность операции и её полосы (#569): target, а
+    для операции без цели -- origin из params. Одна точка правила:
+    дедуп-ключ адаптера и полоса воркера считаются одной функцией, и
+    два add одного origin -- одна полоса (одна очередь к цели), разных
+    origin'ов -- независимые. Адаптер делегирует сюда."""
+    if target is None:
+        return (params or {}).get("origin")
+    return target
+
+
 def status_of(verdict):
     """Вердикт операции -> терминальный статус #476. Одна точка карты для
     обоих видов: вердикт воркера (status) и вердикт workflow #458
@@ -313,6 +324,33 @@ def _wrap_send(target, login, message):
 DISRUPTIVE = frozenset({"restart", "recycle", "delete", "wipe"})
 
 
+class _LaneToken:
+    """Токен-держатель полосы цели (#569). Заводится _reserve ДО старта
+    нитки эффекта; release идемпотентен и снимает токен из слота цели.
+    held -- флаг жизни: пока True, полоса занята этим токеном (нитка
+    эффекта ещё не кончилась), drain другой операции его ждёт. Пустой
+    токен (target None, lanes None) -- операция без полосы (add без
+    origin): release -- no-op."""
+
+    def __init__(self, target, lock=None, lanes=None):
+        self.target = target
+        self.held = True
+        self._lock, self._lanes = lock, lanes
+
+    def release(self):
+        """Снять себя из слота; повторный вызов -- no-op."""
+        if not self.held:
+            return
+        self.held = False
+        if self._lanes is not None:
+            with self._lock:
+                slot = self._lanes.get(self.target)
+                if slot is not None:
+                    slot.discard(self)
+                    if not slot:
+                        self._lanes.pop(self.target, None)
+
+
 class Worker:
     """Исполнение веб-операции: run(verb, target, params, login) -> вердикт.
 
@@ -390,22 +428,29 @@ class Worker:
                     return {"status": "refused", "error": why}
             return self._effect(verb, target, params or {}, login, gate_tr)
 
-        # Placeholder закрывает окно между drain и парковкой нитки
-        # эффекта: без него второй run той же цели проходил drain в этом
-        # зазоре и начинал эффект параллельно первому. Placeholder живёт
-        # до ответа run и снимается в finally: держатель остаётся только
-        # у живой нитки эффекта, пережившей срок.
-        target_key = target or None
-        caller = threading.current_thread()
-        if target_key is not None:
-            with self._lanes_lock:
-                self._lanes.setdefault(target_key, set()).add(caller)
+        # Резервирование полосы существует ДО старта нитки эффекта и
+        # переживает её ответ (#569, ревью): между start() и выполнением
+        # первой инструкции нитки планировщик может держать её сколь
+        # угодно долго, и всё это окно полоса обязана быть занята --
+        # допущенная, но ещё не исполняющаяся операция не есть свободная
+        # цель. Держатель -- токен операции (объект, не нитка):
+        # вызывающий занимает его до start, finally самой нитки снимает
+        # по фактическому концу эффекта; неуспешный старт снимает
+        # вызывающий. Слот == 1 всегда: одна операция -- один токен.
+        target_key = self._lane_key(verb, target, params)
+        token = self._reserve(target_key)
+        if not self._drain(target_key, ignore={token}):
+            token.release()
+            who = target_key if target_key is not None else "the target"
+            return {"status": "refused", "error":
+                    f"{who}: the previous operation on this target "
+                    f"is still finishing; this one did not start"}
+        # Снятие держателя -- ровно одно место: finally самой нитки
+        # эффекта (фактический конец, успех/отказ/крах/пережил срок);
+        # таймаут ответа его НЕ снимает -- хвост держит полосу. Не
+        # смогла стартовать -- снимает _limited (start бросил до ride).
         try:
-            if not self._drain(target_key, ignore={caller}):
-                return {"status": "refused", "error":
-                        f"{target}: the previous operation on this target "
-                        f"is still finishing; this one did not start"}
-            verdict = self._limited(whole, target=target_key)
+            verdict = self._limited(whole, target=target_key, token=token)
         except _TimedOut as e:
             # Срок вышел, а не эффект отказал (#497): он мог дойти до
             # цели -- исход неизвестен, повтор автоматом запрещён
@@ -417,9 +462,6 @@ class Worker:
             # Валидация params (add/update/model/send_request) -- отказ
             # приёма, не сбой: кривой запрос не оставляет «оно сломалось».
             return {"status": "refused", "error": str(e)}
-        finally:
-            if target_key is not None:
-                self._unpark(target_key, holder=caller)
         if isinstance(verdict, dict) and verdict.get("status") in TERMINAL:
             # Готовый вердикт статуса (отказ ворот/префетча) -- как есть.
             return dict(verdict)
@@ -434,7 +476,7 @@ class Worker:
             return {"status": "failed", "error": str(e)}
         return {"status": "partial"}
 
-    def _limited(self, effect, target=None):
+    def _limited(self, effect, target=None, token=None):
         """Эффект под сроком ответа (#497, #569): вернувшемуся -- его
         результат, молчащему -- _TimedOut, которое run терминирует
         честным unknown.
@@ -446,41 +488,61 @@ class Worker:
         цель, и полоса обязана оставаться занятой ею -- прежний контракт
         «цели он больше не держит» отпускал семафор адаптера, и следующая
         операция мутировала до того, как старая закончила. Держатель
-        полосы -- сама нитка эффекта: занимает слот цели ПЕРВЫМ своим
-        действием и снимает себя в finally -- честно завершившийся эффект
-        (успех, отказ, крах) полосу освобождает сразу, переживший срок --
-        ровно до фактического конца, и следующая операция той же цели
-        ждёт его в _drain. Убить Python-нитку нельзя: она остаётся
-        демоном и умирает с процессом. Пустой target (add без цели)
-        держателя не заводит: полосы без имени нет."""
+        полосы -- токен операции, занятый ДО старта нитки (окно между
+        start и первой инструкцией -- тоже занятая полоса, ревью #569):
+        finally самой нитки снимает его по фактическому концу -- честно
+        завершившийся эффект (успех, отказ, крах) полосу освобождает
+        сразу, переживший срок -- ровно до реального конца, и следующая
+        операция той же цели ждёт его в _drain. Нитку убить нельзя: она
+        остаётся демоном и умирает с процессом. Пустой ключ (add без
+        origin) держателя не заводит: полосы без имени нет."""
         if target is None:
-            return self._wait_effect(effect)
+            try:
+                return self._wait_effect(effect)
+            finally:
+                if token is not None:
+                    token.release()
 
         def ride():
-            self._park(target)
             try:
                 return effect()
             finally:
-                self._unpark(target)
+                # Фактический конец эффекта: токен снимает сама нитка --
+                # ответ run (успех/таймаут) тут ни при чём.
+                token.release()
 
-        return self._wait_effect(ride)
+        try:
+            return self._wait_effect(ride)
+        except _TimedOut:
+            # Хвост жив и держит полосу: снятия нет (см. ride выше).
+            raise
+        except BaseException:
+            # Старт не удался (start бросил до ride) -- держателя снимает
+            # вызывающий. Исключение самого эффекта приходит уже мёртвым
+            # нитками: release идемпотентен, повтор -- no-op.
+            token.release()
+            raise
 
-    def _park(self, target):
-        """Нитка эффекта занимает слот цели (держатель полосы, #569)."""
-        with self._lanes_lock:
-            self._lanes.setdefault(target, set()).add(
-                threading.current_thread())
+    def _lane_key(self, verb, target, params):
+        """Ключ полосы операции (#569) -- effective_target: одна точка
+        правила для воркера и адаптера. Пустое имя (add приходит как
+        "") -- нормализация к None: иначе все targetless-операции
+        делили бы одну полосу «»."""
+        return effective_target(None, target or None, params)
 
-    def _unpark(self, target, holder=None):
-        """Снять нитку из слота цели; пустой слот убирается. holder --
-        та нитка, чьё место снимаем (по умолчанию текущая): placeholder
-        run снимает себя, не задевая живую нитку эффекта."""
-        with self._lanes_lock:
-            slot = self._lanes.get(target)
-            if slot is not None:
-                slot.discard(holder or threading.current_thread())
-                if not slot:
-                    self._lanes.pop(target, None)
+    def _reserve(self, target_key):
+        """Токен-держатель полосы цели (#569): None-ключ -- пустой токен.
+
+        Токен -- объект операции, не нитка: занятый ДО старта нитки
+        эффекта, он закрывает и окно между start и первой инструкцией
+        (допущенная, но не исполняющаяся операция -- не свободная цель).
+        release идемпотентен: снимают и finally самой нитки по
+        фактическому концу, и вызывающий при неуспешном старте."""
+        token = _LaneToken(target_key, self._lanes_lock, self._lanes)
+        if target_key is not None:
+            with self._lanes_lock:
+                self._lanes.setdefault(target_key, set()).add(token)
+        return token
 
     def _wait_effect(self, ride):
         """Ждать эффекта под дедлайном ответа (#497).
@@ -517,9 +579,9 @@ class Worker:
         Терпение -- срок эффекта: ответ операции остаётся ограниченным
         (терпение + собственный срок), вечного accepted нет. Хвост не
         обязан умирать к сроку: он держит полосу до фактического конца,
-        следующий run повторит drain. Мёртвые нитки слот не держат.
-        ignore -- нитки своего вызова (placeholder run): их слот --
-        ожидаемая занятость, а не хвост."""
+        следующий run повторит drain. Снявший себя держатель из слота
+        исчезает. ignore -- токен своего вызова: его занятость --
+        ожидаемая, а не хвост."""
         if target is None:
             return True
         deadline = self._now() + self.effect_timeout
@@ -527,7 +589,7 @@ class Worker:
             with self._lanes_lock:
                 slot = self._lanes.get(target)
                 live = [t for t in (slot or ())
-                        if t.is_alive() and t not in ignore]
+                        if t.held and t not in ignore]
             if not live:
                 return True
             if self._now() >= deadline:

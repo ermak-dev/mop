@@ -84,6 +84,7 @@ import time
 import uuid
 
 from ..common import config, puppets
+from . import opworker
 from .opworker import TERMINAL, status_of
 
 # ─── лимиты ──────────────────────────────────────────────────────────────
@@ -340,12 +341,13 @@ class Api:
     # ─── приём и повторы ───────────────────────────────────────────────
     @staticmethod
     def effective_target(action, target, params):
-        """Устойчивая идентичность операции (#470): target, а для операции
-        без цели -- origin из params. Две подачи одного origin -- один
-        спор, подачи разных origin'ов друг другу не мешают."""
-        if target is None:
-            return params.get("origin")
-        return target
+        """Устойчивая идентичность операции (#470) и полосы цели (#569):
+        target, а для операции без цели -- origin из params. Правило
+        живёт в opworker.effective_target -- одной точке для дедуп-ключа
+        адаптера и полосы воркера: два слоя не могут разойтись. Две
+        подачи одного origin -- один спор, подачи разных origin'ов друг
+        другу не мешают."""
+        return opworker.effective_target(action, target or None, params)
 
     def submit(self, action, target, params, who):
         """Операция -> поток исполнения + запись результата. Повтор того же
