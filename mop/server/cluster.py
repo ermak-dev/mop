@@ -386,19 +386,35 @@ def _gated(fn):
 
 def _add(project, req):
     origin = req.get("origin")
-    # Лимит -- проекта из origin, а не просителя: оператор через admin
-    # заводит папета тому же проекту и упирается в тот же потолок. Реестр
-    # читается на каждый запрос: правка лимита доезжает без рестарта.
-    # Читатель снимка (#534): взгляд читателя, пишет его только глагол
-    # проектов -- непредставимая пара не прячет потолок действующего.
-    target = Project.of(origin, projects.snapshot_limits(_view()))
-    why = over_limit(target.name, _live_count(target.name), target.limit)
-    if why:
-        return {"error": why}
-    name = next_name(target.name)
-    # workspace -- до регистрации: первый подъём обязан его увидеть.
-    marker = store_workspace(bootstrap.ROOT, name, req)
-    _api().register(spec.job_spec(name, origin, branch=req.get("branch")))
+    # Ворота проекта (#567): лимит → count → name → workspace → register --
+    # одним куском, иначе два одновременных add выбирают одно имя, обходят
+    # квоту, а смена лимита врезается между чтением и регистрацией. Имя
+    # под ворота -- из origin тем же правилом, что и везде; реестр add не
+    # пишет, реестровый замок здесь не нужен.
+    with _project_gate(puppets.project_of(origin or "")):
+        # Наличие проекта -- внутри ворот и до всего (#567): удаление и
+        # завод врезаются в один проект, и add, стоявший у ворот, обязан
+        # увидеть снятый проект, а не регистрировать джоба отсутствующему.
+        # Раньше отсутствие читалось как unlimited -- дыра приёмки #567.
+        names = projects.snapshot_names(_view())
+        target_name = puppets.project_of(origin or "")
+        if target_name not in names:
+            return {"error": f"no project {target_name} in the registry; what the pool "
+                             f"serves: mop project list"}
+        # Лимит -- проекта из origin, а не просителя: оператор через admin
+        # заводит папета тому же проекту и упирается в тот же потолок.
+        # Реестр читается на каждый запрос: правка лимита доезжает без
+        # рестарта. Читатель снимка (#534): взгляд читателя, пишет его
+        # только глагол проектов -- непредставимая пара не прячет потолок
+        # действующего.
+        target = Project.of(origin, projects.snapshot_limits(_view()))
+        why = over_limit(target.name, _live_count(target.name), target.limit)
+        if why:
+            return {"error": why}
+        name = next_name(target.name)
+        # workspace -- до регистрации: первый подъём обязан его увидеть.
+        marker = store_workspace(bootstrap.ROOT, name, req)
+        _api().register(spec.job_spec(name, origin, branch=req.get("branch")))
     # Метка (#334) -- только когда клиент прислал происхождение: без неё
     # ответ байт в байт прежний.
     return {"ok": True, "name": name, "origin": origin,
@@ -667,6 +683,28 @@ def _client_config(req):
 # (её читает deploy до #540 и откат), но сервис её больше не пишет.
 _projects_lock = threading.Lock()
 
+# Ворота проекта (#567): add делает limit/count → name → workspace →
+# register раздельно, а глаголы идут в потоках петли -- два одновременных
+# add одного проекта оба читали пустой список джобов, оба выбирали
+# pu-<проект>-1, и вторая регистрация перезаписывала спеку первой; другой
+# interleating проводил обоих мимо последнего слота квоты. Ворота держат
+# всю цепочку одним куском -- по имени проекта: независимые проекты не
+# ждут друг друга. project_limit и project_delete берут те же ворота,
+# чтобы add не проскочил между чтением лимита и регистрацией; порядок
+# замков один -- реестровый снаружи, ворота внутри, инверсии нет.
+# Граница гарантии -- один процесс cluster.
+_project_gates = {}
+_gates_lock = threading.Lock()
+
+
+def _project_gate(name):
+    """Ворота имени проекта: один threading.Lock на проект, навсегда."""
+    with _gates_lock:
+        got = _project_gates.get(name)
+        if got is None:
+            got = _project_gates[name] = threading.Lock()
+        return got
+
 
 def _snapshot():
     """Снимок реестра для writer'а: миграция требует представимости в v1,
@@ -806,7 +844,9 @@ def _project_add(project, req):
 
 def _project_delete(project, req):
     name = req["name"]
-    with _projects_lock:
+    # Ворота проекта (#567) -- внутри реестрового замка, как у лимита:
+    # снятие проекта и завод папета ему больше не расходятся.
+    with _projects_lock, _project_gate(name):
         snap = _snapshot()
         new = projects.snapshot_without(snap, name)
         dropped = sorted(set(projects.snapshot_origins(snap))
@@ -840,7 +880,10 @@ def _project_limit(project, req):
     value = req.get("value")
     if value is not None:
         value = projects.parse_limit(str(value))
-    with _projects_lock:
+    # Ворота проекта (#567) -- внутри реестрового замка: add не проскочит
+    # между чтением лимита и регистрацией; порядок замков один (реестровый
+    # снаружи, ворота внутри), инверсии нет.
+    with _projects_lock, _project_gate(name):
         snap = _snapshot()
         if name not in projects.snapshot_names(snap):
             return {"error": f"no project {name} in the registry; what the pool "
