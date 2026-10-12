@@ -825,21 +825,24 @@ def main():
     c.check("#499 run fires the effect once",
             len(t499.effect_rpcs()) == 1, t499.calls)
 
-    # ── зависший эффект терминируется сроком (#497, форма run #499) ─────
+    # ── срок ответа и жизнь полосы цели -- разные вещи (#497 -> #569) ──
     # HYPOTHESIS: эффект ходит в шину без своего таймаута: адресат-узел
-    # мёртв -- bus-запрос стоит вечно. Воркер #476 держал таким эффектом
-    # полосу цели часами (#497); в #499 цель держит семафор адаптера, и
-    # без срока один зависший эффект запирал бы её навсегда. SOLUTION:
-    # дедлайн оборачивает эффект внутри run (_limited): эффекта-подмены
-    # не нужно, сам транспорт висит на гейте -- тот же зависший bus-
-    # запрос; срок вышел -- честный unknown «effect timed out» (эффект
-    # мог дойти, автоповтора нет и не было -- повтор это новый клик,
-    # #476), нитка эффекта остаётся демоном и цели больше не держит.
-    # Часы настоящие: замороженный now не дошёл бы до дедлайна, а эффект
-    # -- событие на настенных секундах. RESULT: проверка жила формой
-    # submit; с #499 адаптирована к контракту run, утверждение то же:
-    # терминал за конечный срок, цель свободна для следующей операции.
-    # STATUS: FIXED -- see #497, #499.
+    # мёртв -- bus-запрос стоит вечно. Дедлайн (#497) вернул run вердикт
+    # unknown за конечный срок -- но срок ответа выдали за жизнь полосы
+    # цели: _limited бросил _TimedOut, нитка эффекта осталась жива,
+    # адаптер отпер семафор в finally -- и следующая операция той же
+    # цели начинала мутацию, пока прежняя ещё могла писать (рестарт A
+    # висел в чтении alloc, очередь пропускала update B, чтение A
+    # очнулось и слало restart уже обновлённой цели). Прежняя проверка
+    # «после таймаута цель свободна» закрепляла ложь: свободен ОТВЕТ, а
+    # не полоса. SOLUTION (#569): нитка эффекта -- зарегистрированный
+    # держатель полосы (rider) до фактического конца; run той же цели
+    # сперва ждёт конца живых хвостов (терпение -- тот же срок эффекта,
+    # не вечное ожидание), не дождавшись -- отказ: эффект начат не был,
+    # это не «цель свободна» и не автоповтор. RESULT: порядок МУТАЦИЙ,
+    # не ответов: мутация A строго раньше мутации B той же цели; B не
+    # касается транспорта, пока хвост A жив; чужая цель проходит мимо;
+    # обычные успех и ошибка полосу освобождают сразу.
 
     class Stuck(Recorder):
         """Транспорт зависшего bus-запроса: alloc молчит до открытия."""
@@ -859,14 +862,171 @@ def main():
     c.check("#497 the timed-out verdict names its cause",
             "timed out" in (got.get("error") or ""), got)
     release.set()
-    # Цель свободна: терминал unknown вернулся в поток адаптера, тот
-    # отпирает семафор в finally (-- связка цели проверена в
-    # tests/adminapi.py); вторая операция по той же цели доходит до
-    # терминала, а не стоит вечным accepted.
-    got = hung.run("restart", "pu-mop-1", {}, login="anton",
-                   transport=Recorder(), safety=allow)
-    c.check("#497 after the timeout the target admits a new operation",
-            got.get("status") in opworker.TERMINAL, got)
+
+    # ── #569: интеграция воркера с адаптером -- полоса переживает срок ──
+    # Мутации пишутся в общий журнал с меткой операции: доказательство --
+    # порядок мутаций, а не порядок ответов. Lane ведёт себя как живой
+    # транспорт цели: alloc (чтение снимка) висит до release -- ровно
+    # точка зависания из дефекта; restart двигает счётчик рестартов,
+    # чтобы наблюдение сходилось, а не стояло неизвестностью.
+    class Lane(Recorder):
+        """Транспорт цели полосы: alloc висит до release, мутации --
+        в общий журнал с меткой; fail -- мутация падает после записи."""
+
+        def __init__(self, tag, release, mutations, fail=None, entered=None):
+            super().__init__()
+            self.tag, self.release = tag, release
+            self.mutations, self.fail = mutations, fail
+            self.entered = entered
+            # Своя копия задачи: счетчик двигает эта операция, не класс
+            self.answers["alloc"] = {"alloc": {
+                "ID": "a1", "ClientStatus": "running",
+                "task": {"state": "running", "restarts": 7, "exit": None,
+                         "next_s": None, "failed": False}}}
+            self.answers["spec"] = {"meta": {
+                "origin": "git@example.test:g/one.git"}}
+
+        def __call__(self, verb, **fields):
+            if self.entered is not None:
+                self.entered.set()
+            if verb == "alloc":
+                self.release.wait(10)
+            if verb in ("restart", "update"):
+                self.mutations.append(self.tag)
+                if verb == "restart":
+                    # НОВЫЙ словарь задачи: before (снимок ДО) держит
+                    # прежний объект, и счётчик в нём не двигается --
+                    # иначе наблюдение не видит сдвига и неизвестность
+                    # выходит ложная
+                    alloc = self.answers["alloc"]["alloc"]
+                    task = dict(alloc["task"])
+                    task["restarts"] = task.get("restarts", 0) + 1
+                    alloc["task"] = task
+                if self.fail:
+                    raise RuntimeError(self.fail)
+            if verb == "alloc":
+                # Ответ -- своя копия ДО уровня задачи: task_snapshot
+                # вынимает внутренний словарь по ссылке, и мелкая копия
+                # Recorder делила бы его с before
+                alloc = self.answers["alloc"]["alloc"]
+                return {"alloc": dict(alloc, task=dict(alloc["task"]))}
+            return super().__call__(verb, **fields)
+
+    def settled(api, op_id):
+        """Дождаться терминала записи адаптера (поток -- асинхронный)."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            got = api.result(op_id, ADMIN)
+            if got.get("status") in opworker.TERMINAL:
+                return got
+            time.sleep(0.02)
+        return api.result(op_id, ADMIN)
+
+    stuck = threading.Event()
+    lane_free = threading.Event()
+    lane_free.set()
+    mutations = []
+
+    def lane_executor(action, target, params, who):
+        release = stuck if target == "pu-mop-1" else lane_free
+        tr = Lane(f"{action}:{target}", release, mutations)
+        login = (who or (None,))[0]
+        return lambda: lane_w.run(action, target, params, login,
+                                  transport=tr, safety=allow)
+
+    lane_w = opworker.Worker(effect_timeout=0.5, observe_wait=0,
+                             sleep=lambda s: time.sleep(0.02),
+                             workspace=lambda origin: ("", None))
+    lane_ops = adminapi.Operations()
+    opworker.register(lane_ops)
+    lane_api = adminapi.Api(lane_ops, origin="https://pool.example",
+                            who=ADMIN, executor=lane_executor)
+
+    # A: рестарт завис в чтении alloc; ответ -- неизвестность за срок
+    a = lane_api.submit("restart", "pu-mop-1", {}, ADMIN)
+    got_a = settled(lane_api, a["id"])
+    c.check("#569 a timed-out operation answers unknown in finite time",
+            got_a.get("status") == "unknown", got_a)
+
+    # Чужая цель проходит мимо карантина: полоса одной цели не держит других
+    other = lane_api.submit("restart", "pu-mop-2", {}, ADMIN)
+    got_other = settled(lane_api, other["id"])
+    c.check("#569 a different target runs while the lane is quarantined",
+            got_other.get("status") == "succeeded"
+            and "restart:pu-mop-2" in mutations, (got_other, mutations))
+
+    # B: та же цель -- никакой мутации, пока хвост A жив; терминал за
+    # конечный срок (отказ), не вечное accepted и не молчание
+    b = lane_api.submit("update", "pu-mop-1", {"fresh": True}, ADMIN)
+    got_b = settled(lane_api, b["id"])
+    c.check("#569 the same target refuses while the old effect can still write",
+            got_b.get("status") == "refused"
+            and "update:pu-mop-1" not in mutations, (got_b, mutations))
+
+    # A очнулось по-настоящему: его мутация падает ДО мутации следующего
+    stuck.set()
+    later = lane_api.submit("update", "pu-mop-1", {"fresh": True}, ADMIN)
+    got_later = settled(lane_api, later["id"])
+    c.check("#569 after the old effect truly finishes the lane admits the next op",
+            got_later.get("status") in opworker.TERMINAL
+            and "update:pu-mop-1" in mutations, (got_later, mutations))
+    c.check("#569 the old effect's mutation lands strictly before the next one's",
+            "restart:pu-mop-1" in mutations
+            and "update:pu-mop-1" in mutations
+            and mutations.index("restart:pu-mop-1")
+            < mutations.index("update:pu-mop-1"), mutations)
+
+    # Хвост, переживший и чужое терпение, полосу держит и дальше: отказ
+    # не значит «свободно» -- следующая run не касается даже чтений цели
+    tail_stuck = threading.Event()
+    tail_w = opworker.Worker(effect_timeout=0.5, observe_wait=0,
+                             sleep=lambda s: time.sleep(0.02))
+    got_first = tail_w.run("restart", "pu-mop-1", {}, login="anton",
+                           transport=Lane("tail:a", tail_stuck, mutations),
+                           safety=allow)
+    c.check("#569 the drained verdict keeps the bounded cause of #497",
+            got_first.get("status") == "unknown"
+            and "timed out" in (got_first.get("error") or ""), got_first)
+    tail_entered = threading.Event()
+    got_tail = tail_w.run("restart", "pu-mop-1", {}, login="anton",
+                          transport=Lane("tail:b", threading.Event(),
+                                         mutations, entered=tail_entered),
+                          safety=allow)
+    c.check("#569 a surviving tail refuses the next run without touching the target",
+            got_tail.get("status") == "refused"
+            and not tail_entered.is_set(), (got_tail, tail_entered.is_set()))
+    tail_stuck.set()
+
+    # Обычные успех и ошибка полосу освобождают сразу: хвост остаётся
+    # только у пережившего срок, нормальный конец убирает держателя сам
+    rel_w = opworker.Worker(effect_timeout=2, observe_wait=0,
+                            sleep=lambda s: time.sleep(0.02))
+    got_ok = rel_w.run("restart", "pu-mop-3", {}, login="anton",
+                       transport=Lane("ok", lane_free, mutations),
+                       safety=allow)
+    c.check("#569 a normal success frees the lane",
+            got_ok.get("status") == "succeeded", got_ok)
+    second = threading.Event()
+    rel_w.run("restart", "pu-mop-3", {}, login="anton",
+              transport=Lane("ok:2", lane_free, mutations, entered=second),
+              safety=allow)
+    c.check("#569 the next operation on a cleanly finished target starts at once",
+            second.is_set(), second.is_set())
+    got_boom = {"status": "not reached"}
+    try:
+        got_boom = rel_w.run("restart", "pu-mop-4", {}, login="anton",
+                             transport=Lane("boom", lane_free, mutations,
+                                            fail="node gone"),
+                             safety=allow)
+    except RuntimeError as e:  # крах эффекта поднимается из run, как прежде
+        got_boom = {"status": "raised", "error": str(e)}
+    third = threading.Event()
+    rel_w.run("restart", "pu-mop-4", {}, login="anton",
+              transport=Lane("after-boom", lane_free, mutations,
+                             entered=third),
+              safety=allow)
+    c.check("#569 the lane survives a crashed effect",
+            third.is_set(), (got_boom, third.is_set()))
 
     return c.report("opworker")
 
