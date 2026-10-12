@@ -2528,6 +2528,11 @@ def check_add_limit_interleaving_567(c):
                            "add never reached register")
                     a.join(timeout=15)
                     return
+                # knock общий у любого acquire: сам add уже стукнул при
+                # входе в ворота. Стираем его ЗДЕСЬ, между подтверждённым
+                # register и стартом лимита -- wait_first ниже ждёт стука
+                # потока лимита (или его save), а не следа add.
+                knock.clear()
                 l = threading.Thread(target=run_limit)
                 l.start()
                 # Стук лимита в ворота -- либо, без координации, его запись:
