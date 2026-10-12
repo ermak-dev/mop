@@ -118,7 +118,7 @@ UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
                           "update", "model"))
 
 
-def _safety_of(target, owner):
+def _safety_of(target, owner, audit=None):
     """Предикат #460 для run: свежие факты и занятость под target gate.
 
     -> (predикат, транспорт, None, проект) | (None, None, отказ, None).
@@ -159,6 +159,12 @@ def _safety_of(target, owner):
                                 f"is cannot be told, and acting on it is not "
                                 f"for the web", None)
         confirmed = ops.target_project(origin)
+        if audit is not None:
+            # Контекст аудита (#575): спека подтвердила проект --
+            # фиксируем В МОМЕНТ ФАКТА, до любых позднейших ошибок
+            # префетча/узла (BusError state, зависший alloc, крах
+            # эффекта): подтверждённое из аудита не исчезает.
+            audit["project"] = confirmed
         if confirmed != project:
             # Ростер мог соврать (поздний meta-фикс), а спека авторитетна:
             # перевязываем транспорт подтверждённым проектом, а не только
@@ -204,6 +210,22 @@ def _safety_of(target, owner):
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
     name = target or ""
+    # Контекст аудита операции (#575): словарь на всю жизнь операции.
+    # Имя existing-target глаголов -- из записи приёма (известно ДО
+    # любых ворот: gate-отказ, unknown, крах -- имя цели не теряется);
+    # проект -- подтверждённый факт В МОМЕНТ подтверждения (спека/реестр
+    # add), он переживает любую позднейшую ошибку. Финальный вердикт
+    # доопределяет: add называет созданного папета, send/add везут
+    # проект из своего подтверждённого контекста. Вердикт не перебивает
+    # подтверждённое: только заполняет пустое.
+    audit = {"name": (name if name else None), "project": None}
+    # Регистрация ДО старта эффекта (#575): контекст живёт с записи
+    # приёма и переживает всё -- ворота, зависание, крах. Вне потока
+    # операции (прямые вызовы в проверках) current_op None -- контекст
+    # остаётся локальным словарём замыканий.
+    op_id = ADMINAPI.current_op()
+    if op_id is not None:
+        ADMINAPI.audit_context(op_id, audit)
     if action in UNSAFE_VERBS and name:
         # Сбор фактов #566 -- не фон и не подготовка до полосы: это
         # ЧАСТЬ локального workflow операции (#569), и едет она внутрь
@@ -211,26 +233,40 @@ def _execute(action, target, params, who):
         # же полосой цели. Висящий префетч держит полосу, как и эффект,
         # -- и отпускается тем же порядком мутаций, а не раньше ответа.
         owner = login
-        confirmed = []   # проект подтверждает prepare, не payload (#575)
 
         def prepare():
-            pred, tr, refusal, project = _safety_of(name, owner)
-            if refusal is None:
-                confirmed.append(project)
+            pred, tr, refusal, _ctx = _safety_of(name, owner, audit=audit)
             return pred, tr, refusal
 
         def effect():
             got = WORKER.run(action, name, params, login, prepare=prepare)
-            # Проект -- факт вердикта для аудита (#575): адаптер берёт
-            # его из подтверждённого контекста, не из префикса имени и
-            # не после-эффектной прогулкой по сети. Воркер контракт не
-            # меняет: prepare по-прежнему 3-элементный.
-            if confirmed and isinstance(got, dict):
-                got.setdefault("project", confirmed[0])
+            # Вердикт доопределяет контекст (#575): проект эффекта (send
+            # с собственным резолвом) достовернее догадки префетча, имя
+            # existing-target цели уже в контексте из записи приёма.
+            if isinstance(got, dict):
+                if got.get("project"):
+                    audit["project"] = got["project"]
+                if got.get("name"):
+                    audit["name"] = got["name"]
             return got
         return effect
-    return lambda: WORKER.run(action, name, params, login,
-                              transport=opworker.default_transport(RESOLVER))
+    return lambda: audit_context(
+        WORKER.run(action, name, params, login,
+                   transport=opworker.default_transport(RESOLVER)), audit)
+
+def audit_context(verdict, audit):
+    """Довести контекст аудита (#575) фактами вердикта и вернуть вердикт.
+
+    Targetless-ветка _execute (send/add): вердикт несёт подтверждённые
+    имя/проект -- отправляем их в контекст, адаптер строит завершение
+    из записи приёма и контекста, не из публичного кадра."""
+    if isinstance(verdict, dict):
+        if verdict.get("project"):
+            audit["project"] = verdict["project"]
+        if verdict.get("name"):
+            audit["name"] = verdict["name"]
+    return verdict
+
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
@@ -275,11 +311,15 @@ def _on_operation(frame):
 # роняет.
 def _on_audit(event):
     try:
+        # Тема -- проект записи; не подтвердился -- ЯВНАЯ нейтральная
+        # admin (#575, ревью): project=None у emit фактически берёт
+        # субъект процесса (bus.PROJECT), что не гарантированно
+        # нейтрально на проектном веб-процессе.
         bus.emit(ops.record(event.get("action"), event.get("name"),
                             event.get("project"), event.get("login"),
                             op=event.get("id"),
                             status=event.get("status")),
-                 project=event.get("project"))
+                 project=event.get("project") or bus.ADMIN)
     except Exception:
         pass  # журнал вторичен: тишина не роняет вердикт
 

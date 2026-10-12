@@ -652,14 +652,15 @@ class Worker:
         if verb == "add":
             origin, fields = add_request(params)
             why = self._registry_refusal(origin)
-            # Проект add решает сам origin (ops.target_project -- чистая
-            # функция, без сети): факт вердикта для аудита (#575). Отказ
-            # реестра -- тоже с проектом: реестр его и подтверждает.
-            project = ops.target_project(origin)
             if why:
-                return ops.outcome(ops.REFUSED, None, error=why,
-                                   project=project)
+                # Реестр ОТВЕРГ просьбу (ревью 2 #575): projectName из
+                # незарегистрированного origin -- выдумка, его в аудите
+                # нет; тема публикации -- нейтральная admin.
+                return ops.outcome(ops.REFUSED, None, error=why)
             target = origin
+            # Проект решает реестр: он УЖЕ подтвердил origin (#575),
+            # чистая функция без сети.
+            project = ops.target_project(origin)
             text, sent = self._source(origin)
             got = ops.add(transport, origin, (text, sent),
                           branch=params.get("branch"))
