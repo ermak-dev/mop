@@ -149,11 +149,14 @@ def _safety_of(target, owner):
         # Ошибка state -- уже ответ «не знаю», safety откажет ею; глагол
         # clone -- не обход ошибки, а дорога к фактам ПОДТВЕРЖДЁННО
         # остановленной цели. Берём у него только клон: present/session
-        # ответа state -- свидетельство сессии, и оно не стирается.
+        # ответа state -- свидетельство сессии, и оно не стирается. Ответ
+        # с ошибкой кладём как есть: его причина безопасна и обязана
+        # доехать до вердикта, а не подменяться голым «no facts».
         if (isinstance(got, dict) and got.get("present") is False
                 and not got.get("clone") and not got.get("error")):
             extra = bus.request(node, "clone", name=target, project=project)
-            got = {**got, "clone": (extra or {}).get("clone")}
+            got = extra if isinstance(extra, dict) and extra.get("error") \
+                else {**got, "clone": (extra or {}).get("clone")}
     except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
         return None, None, f"{target}: cannot inspect it before acting — {e}"
     st = state._session_state((got or {}).get("session"))

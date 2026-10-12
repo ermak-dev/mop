@@ -69,8 +69,8 @@ def facts(owner=None, dirty=0, session="idle 1 1", present=True):
 
 
 def execute(action, target, params, who=("anton", "admin"), state=None,
-            clone=None, state_error=None, spec_error=None, origin=ORIGIN,
-            alloc="running", allocate=True, in_roster=True):
+            clone=None, clone_error=None, state_error=None, spec_error=None,
+            origin=ORIGIN, alloc="running", allocate=True, in_roster=True):
     """Вердикт собранного исполнителя #566, подменена только шина.
 
     call_cluster -- глаголы сервиса кластера, и она держит субъекты
@@ -137,7 +137,10 @@ def execute(action, target, params, who=("anton", "admin"), state=None,
     def clone_answer():
         # Глагол clone -- ОТДЕЛЬНЫЙ ответ узла (жив и при мёртвой сессии,
         # #40): явный параметр важнее фактов из state, fallback по
-        # умолчанию -- те же факты, что в state.
+        # умолчанию -- те же факты, что в state. clone_error -- глагол
+        # падает исключением (вторая граница рядом со словарём-ошибкой).
+        if clone_error is not None:
+            raise clone_error
         if clone is not None:
             return clone
         if state_error is not None:
@@ -298,6 +301,15 @@ def main():
                                  state={"present": False},
                                  clone={"error": "clone probe timed out"})
     c.check("#566 a clone error answer refuses with its own reason",
+            got.get("status") == "refused"
+            and "clone probe timed out" in (got.get("error") or "")
+            and not mutations_of(cluster, node), (got, cluster, node))
+    # Вторая граница: глагол clone падает исключением -- причина тоже
+    # обязана доехать, отказом с именем клона, не голым «no facts».
+    got, cluster, node = execute("wipe", target, {}, alloc="complete",
+                                 state={"present": False},
+                                 clone_error=bus.BusError("clone probe timed out"))
+    c.check("#566 a clone exception refuses with its own reason",
             got.get("status") == "refused"
             and "clone probe timed out" in (got.get("error") or "")
             and not mutations_of(cluster, node), (got, cluster, node))
