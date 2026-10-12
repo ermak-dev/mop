@@ -23,7 +23,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, ops, puppets
+from mop.common import bus, busnames, config, ops, puppets, state
+from mop.common.domain import Alloc
 from mop.server import adminapi, opworker, web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
@@ -85,10 +86,104 @@ RESOLVER = _resolve_project
 # Исполнитель #499: эффект операции -- воркер run тем же транспортом,
 # что CLI (#496/#498); поток на операцию даёт адаптер (adminapi), сюда
 # приходит уже свободная цель. Личность -- (login, role) HTTP-сессии.
+# Действие с целью проходит обязательный ops.safety (#566): воркер зовёт
+# предикат ДО эффекта, но факты и занятость собирает ЭТА обвязка, из
+# живых источников, -- сам по себе предикат их не спрашивает, а без
+# фактов инвариант #460 молчит. Add -- без цели (его ворота -- реестр
+# #470), send -- за своими воротами _wrap_send: оба идут без предиката.
+UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
+                          "update", "model"))
+
+
+def _safety_of(target, owner):
+    """Предикат #460 для run: свежие факты и занятость под target gate.
+
+    -> (predикат, транспорт, None) | (None, None, отказ). Транспорт --
+    подтверждённый проектом цели: эффект воркера едет им же, а не
+    глобальным резолвером, чья догадка могла быть stale. Отказ --
+    готовая причина для вердикта run'а: контекст цели не собрался
+    (спека, аллокация, узел) -- «не знаю» не значит «можно», действие
+    не исполняется вовсе.
+    Субъект -- ПРОЕКТ ЦЕЛИ (#498): префетч едет тем же адресным
+    транспортом, что и эффект воркера, а не субъектом процесса --
+    проектному веб-процессу belongs-отказ ответил бы до того, как
+    известен origin. Кандидат проекта -- из ростера (резолвер); спека
+    подтверждает его origin'ом, и подтверждённый проект ПЕРЕВЯЗЫВАЕТ
+    транспорт своей связкой резолвера -- иначе alloc и эффект
+    продолжали бы ехать первой догадкой ростера, и stale-кандидат
+    оставлял мутацию на субъекте процесса. Узел -- последней аллокации
+    в любом статусе (#377): легитимный wipe -- по остановленному.
+    Свидетельство сессии -- ответ state, и он не заменяется целиком:
+    fallback на глагол clone берёт у него ТОЛЬКО факты клона, и только
+    для подтверждённо остановленной цели (present False: state фактов
+    клона без tmux не даёт, #40) -- живой или неразобранный ответ
+    fallback'ом не подменяется, неизвестность сессии не становится
+    idle. Занятость -- общий вердикт сессии (#501): слово статуса
+    разобралось -- всё, что не free и не hung, живая работа, и
+    незнакомое слово тоже; не разобралось или её нет -- жив ли tmux
+    (present) решает, и живый ответ без строки сессии -- занят. Флаг
+    disruptive предикат передаёт ops.safety как пришёл от run:
+    model/update сессию не убивают (#468) и не получают ложный отказ
+    над живой чистой целью."""
+    transport = opworker.default_transport(RESOLVER)
+    try:
+        project = RESOLVER(target)
+        spec = transport("spec", name=target) or {}
+        origin = (spec.get("meta") or {}).get("origin")
+        if not origin:
+            return (None, None, f"{target}: carries no origin — whose target it "
+                                f"is cannot be told, and acting on it is not "
+                                f"for the web")
+        confirmed = ops.target_project(origin)
+        if confirmed != project:
+            # Ростер мог соврать (поздний meta-фикс), а спека авторитетна:
+            # перевязываем транспорт подтверждённым проектом, а не только
+            # локальную переменную -- дальше едут alloc, узел и эффект.
+            transport = opworker.default_transport(lambda _name: confirmed)
+            project = confirmed
+        alloc = Alloc.from_dict(transport("alloc", name=target).get("alloc"))
+        if not alloc or not alloc.node:
+            raise LookupError(f"{target}: no allocation — node unknown")
+        node = alloc.node
+        got = bus.request(node, "state", name=target, project=project)
+        # Ошибка state -- уже ответ «не знаю», safety откажет ею; глагол
+        # clone -- не обход ошибки, а дорога к фактам ПОДТВЕРЖДЁННО
+        # остановленной цели. Берём у него только клон: present/session
+        # ответа state -- свидетельство сессии, и оно не стирается. Ответ
+        # с ошибкой кладём как есть: его причина безопасна и обязана
+        # доехать до вердикта, а не подменяться голым «no facts».
+        if (isinstance(got, dict) and got.get("present") is False
+                and not got.get("clone") and not got.get("error")):
+            extra = bus.request(node, "clone", name=target, project=project)
+            got = extra if isinstance(extra, dict) and extra.get("error") \
+                else {**got, "clone": (extra or {}).get("clone")}
+    except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
+        return None, None, f"{target}: cannot inspect it before acting — {e}"
+    st = state._session_state((got or {}).get("session"))
+    if st is not None:
+        busy = state._state_from_session(st, None).kind not in ("free", "hung")
+    else:
+        # Строки сессии нет или не разобралась: жив ли tmux -- единственное
+        # свидетельство; жив -- занята (не idle), мёртв -- сессии нет.
+        busy = (got or {}).get("present") is not False
+
+    def predicate(name, _project, disruptive=True, **_):
+        return ops.safety(name, project, owner=owner, facts=got,
+                          busy=busy, disruptive=disruptive)
+
+    return predicate, transport, None
+
+
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
-    return lambda: WORKER.run(action, target or "", params, login,
-                              transport=opworker.default_transport(RESOLVER))
+    name = target or ""
+    safety, transport = None, opworker.default_transport(RESOLVER)
+    if action in UNSAFE_VERBS and name:
+        safety, transport, refusal = _safety_of(name, login)
+        if safety is None:
+            return lambda: {"status": "refused", "error": refusal}
+    return lambda: WORKER.run(action, name, params, login,
+                              transport=transport, safety=safety)
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
