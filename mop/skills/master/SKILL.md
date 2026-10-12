@@ -151,8 +151,8 @@ not. Re-dispatch full context after recovery.
 
 The roster deliberately does not fetch remote refs, so its Git figures may
 be stale. Check the puppet's branch with `git fetch` and `git log` against
-origin, inspect `mcp__mop__tail`, or ask the puppet. A quota-exhausted puppet can appear online and accept messages
-while every model turn fails. A proxy outage goes to the operator, not a
+origin, inspect `mcp__mop__tail`, or ask the puppet. A quota-exhausted
+puppet can appear online and accept messages while every model turn fails. A proxy outage goes to the operator, not a
 restart. Never assume a silent node agent means a silent puppet.
 
 One clone = one branch = one ticket. The puppet builds in the clone's default
@@ -302,8 +302,9 @@ environment, restart or model without a stated reason.
 
 By default the puppet who wrote the fix merges, checks and pushes it; the
 master lands a change itself when it wrote it or on the operator's word,
-under the same gate. The master reviews the puppet's report first and names the order when one issue depends on another:
-“land only once #N is in the integration branch”; the puppet verifies that
+under the same gate. The master reviews the puppet's report first and
+names the order when one issue depends on another: “land only once #N is
+in the integration branch”; the puppet verifies that
 ancestry before landing. An epic's tasks land into the epic branch named by
 project rules, not straight into the default branch; its integrated epic
 merge happens only at the operator's direction.
