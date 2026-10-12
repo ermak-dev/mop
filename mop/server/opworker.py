@@ -439,16 +439,29 @@ class Worker:
         # вызывающий. Слот == 1 всегда: одна операция -- один токен.
         target_key = self._lane_key(verb, target, params)
         token = self._reserve(target_key)
-        if not self._drain(target_key, ignore={token}):
+        try:
+            drained = self._drain(target_key, ignore={token})
+        except BaseException:
+            # Admission упал ДО старта (fault часов в drain): эффекта
+            # нет, владение нитке не передавалось -- резерв снимает тот,
+            # кто его завёл. Снятие и подъём, не заглушка: причина
+            # идёт наверх (#569, ревью 3).
+            token.release()
+            raise
+        if not drained:
             token.release()
             who = target_key if target_key is not None else "the target"
             return {"status": "refused", "error":
                     f"{who}: the previous operation on this target "
                     f"is still finishing; this one did not start"}
-        # Снятие держателя -- ровно одно место: finally самой нитки
-        # эффекта (фактический конец, успех/отказ/крах/пережил срок);
-        # таймаут ответа его НЕ снимает -- хвост держит полосу. Не
-        # смогла стартовать -- снимает _limited (start бросил до ride).
+        # Снятие держателя -- ровно два места, и оба по одну сторону
+        # границы владения (#569, ревью 3): ДО успешного старта нитки
+        # резерв снимает вызывающий -- неуспешный start (on_start_fail
+        # в _wait_effect) и упавший admission выше; ПОСЛЕ успешного
+        # старта -- ТОЛЬКО finally самой нитки эффекта по фактическому
+        # концу (успех/отказ/крах/пережил срок). Ошибка наблюдателя
+        # при подтверждённом старте полосу не отпускает: эффект жив,
+        # его исход неизвестен, и следующая операция ждёт его в drain.
         try:
             verdict = self._limited(whole, target=target_key, token=token)
         except _TimedOut as e:
@@ -493,9 +506,14 @@ class Worker:
         finally самой нитки снимает его по фактическому концу -- честно
         завершившийся эффект (успех, отказ, крах) полосу освобождает
         сразу, переживший срок -- ровно до реального конца, и следующая
-        операция той же цели ждёт его в _drain. Нитку убить нельзя: она
-        остаётся демоном и умирает с процессом. Пустой ключ (add без
-        origin) держателя не заводит: полосы без имени нет."""
+        операция той же цели ждёт его в _drain. Граница владения ровно
+        одна (#569, ревью 3): ДО успешного старта ошибки снимает
+        вызывающий (упавший admission -- run, неуспешный start --
+        on_start_fail), ПОСЛЕ -- только сама нитка; ошибка наблюдателя
+        при подтверждённом старте исход эффекта не определяет и полосу
+        не отпускает. Нитку убить нельзя: она остаётся демоном и умирает
+        с процессом. Пустой ключ (add без origin) держателя не заводит:
+        полосы без имени нет."""
         if target is None:
             try:
                 return self._wait_effect(effect)
@@ -508,20 +526,16 @@ class Worker:
                 return effect()
             finally:
                 # Фактический конец эффекта: токен снимает сама нитка --
-                # ответ run (успех/таймаут) тут ни при чём.
+                # ответ run (успех/таймаут/крах наблюдателя) тут ни при чём.
                 token.release()
 
-        try:
-            return self._wait_effect(ride)
-        except _TimedOut:
-            # Хвост жив и держит полосу: снятия нет (см. ride выше).
-            raise
-        except BaseException:
-            # Старт не удался (start бросил до ride) -- держателя снимает
-            # вызывающий. Исключение самого эффекта приходит уже мёртвым
-            # нитками: release идемпотентен, повтор -- no-op.
-            token.release()
-            raise
+        # Ошибки ЗДЕСЬ токен не трогают: после успешного старта владение
+        # у нитки, и сбой наблюдателя -- не факт о эффекте (#569, ревью 3).
+        # Неудавшийся старт (start бросил до ride) -- единственный случай
+        # снятия на этом пути: колбэк зовёт _wait_effect ДО того, как
+        # нитка стала владельцем. Исключение самого эффекта приходит уже
+        # мёртвой ниткой: ride снял токен сам, повтор был бы no-op.
+        return self._wait_effect(ride, on_start_fail=token.release)
 
     def _lane_key(self, verb, target, params):
         """Ключ полосы операции (#569) -- effective_target: одна точка
@@ -544,11 +558,16 @@ class Worker:
                 self._lanes.setdefault(target_key, set()).add(token)
         return token
 
-    def _wait_effect(self, ride):
+    def _wait_effect(self, ride, on_start_fail=None):
         """Ждать эффекта под дедлайном ответа (#497).
 
         ride занимает и отпускает полосу сам: пережившее срок остаётся
-        держателем, а здесь видны только эффект и срок."""
+        держателем, а здесь видны только эффект и срок. on_start_fail --
+        колбэк неудачного СТАРТА (#569, ревью 3): зовётся только когда
+        Thread.start бросил, то есть нитка-эффект не существует и
+        владельца у полосы нет; ошибки ожидания после успешного старта
+        (дедлайн, сбой _sleep/_now наблюдателя) колбэк не зовут -- эффект
+        жив, и полоса остаётся за ним до его фактического конца."""
         box = []
 
         def carry():
@@ -559,7 +578,14 @@ class Worker:
 
         worker = threading.Thread(target=carry, daemon=True,
                                   name="mop-op-effect")
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            # Нитки нет -- владельца нет: резерв снимает колбэк, причину
+            # несём наверх без заглушки.
+            if on_start_fail is not None:
+                on_start_fail()
+            raise
         deadline = self._now() + self.effect_timeout
         while worker.is_alive():
             if self._now() >= deadline:
