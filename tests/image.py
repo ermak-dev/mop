@@ -105,11 +105,21 @@ def check_node_check_321(c):
 # исходный неуспех: rc 17 исчезал за отказом подъёма; теперь в причине
 # «image bake failed (rc 17)» рядом со строкой отказа подъёма. (2)
 # контрольный поток не становится RuntimeError: KeyboardInterrupt/SystemExit
-# выходят своим типом с дописанной строкой подъёма -- иначе верхний слой
+# выходят своим типом с дописанной строкой -- иначе верхний слой
 # ловил бы обычную ошибку и продолжал работу после отмены. Оба -- RED
 # ровно на них (1 и 2 отказа), мутации: вырезанная rc-ветка -- 1,
 # RuntimeError вместо типа исходного -- 2. Обычное исключение + отказ
 # подъёма -- прежний контракт обоих сообщений.
+# Ревью 2: type(original)(text) ломал данные и конструкторы -- SystemExit
+# (17).code становился строкой (фактический выход процесса сменился бы на
+# 1), multi-arg CalledProcessError умирал TypeError «__init__ missing
+# cmd», теряя ОБЕ причины. Исходный объект теперь выходит КАК ЕСТЬ:
+# add_note (PEP 678) прикладывает диагностику подъёма, не трогая текст и
+# данные. Единственное исключение -- сам RuntimeError: CLI и сборщик
+# печатают str(e), замет туда не попадает, и «обе причины строками»
+# держится только прежним контрактом. RED -- 4 отказа (code-строка,
+# TypeError, оба «is original»); мутации: пересоздание класса -- 5,
+# уроненная замет -- 3 (диагностика недоступна).
 # STATUS: FIXED — see #570
 class RefusingNomad(FakeNomad):
     """FakeNomad, чей register отказывает поимённо: подъём снятого папета
@@ -245,16 +255,48 @@ def check_clear_recovery_570(c):
     c.expect("#570 the failed rc did not turn into a result", r["result"], None)
 
     # Контрольный поток (KeyboardInterrupt/SystemExit) при живом отказе
-    # подъёма не становится обычной ошибкой: тип первичного обязан выйти
-    # тем же типом, иначе верхний слой поймает RuntimeError и продолжит
-    # работу после отмены. Диагностика подъёма доезжает заметной.
-    for control in (KeyboardInterrupt("cancelled by operator"),
-                    SystemExit("stopping for the night")):
+    # подъёма не становится обычной ошибкой: исходный ОБЪЕКТ выходит как
+    # есть -- свой тип и свои данные (у SystemExit.code -- число 17, а не
+    # строка с дописанной диагностикой, иначе фактический выход процесса
+    # меняется), а диагностика подъёма доезжает заметой (PEP 678), не
+    # порчей исходного текста. Ревью #570: type(original)(text) ломал
+    # произвольные конструкторы и превращал SystemExit.code в строку.
+    def raised(control):
         r = run_570(rows_570(("pu-p-1", "n1")), pool, bake_raises=control,
                     register_refuses=("pu-p-1",))
-        c.check(f"#570 {type(control).__name__} with a restore failure: the control-flow exception leaves with its own type",
-                type(r["err"]) is type(control) and "not raised again: Nomad refused pu-p-1" in str(r["err"]),
-                (type(r["err"]).__name__, str(r["err"])))
+        notes = getattr(r["err"], "__notes__", [])
+        return r["err"], "; ".join([str(r["err"])] + notes)
+
+    for control, want_code in ((KeyboardInterrupt("cancelled by operator"), None),
+                               (SystemExit(17), 17)):
+        err, visible = raised(control)
+        c.check(f"#570 {type(control).__name__} leaves as the original object with its code",
+                err is control and getattr(err, "code", None) == want_code,
+                (type(err).__name__, getattr(err, "code", None)))
+        c.check(f"#570 {type(control).__name__}: the raising diagnosis is reachable without spoiling the original",
+                "not raised again: Nomad refused pu-p-1" in visible, visible)
+
+    # Произвольный конструктор исключения не зовётся вовсе: multi-arg
+    # CalledProcessError с отказом подъёма выходит тем же объектом, без
+    # TypeError «__init__ missing cmd», с обеими причинами доступными:
+    # исходная -- в str/полях, вторичная -- заметой (PEP 678, в трассировке
+    # и __notes__; str(e) замет не печатает -- и не должен портиться).
+    import subprocess as _sp
+    cpe = _sp.CalledProcessError(7, ["ansible-playbook"])
+    err, visible = raised(cpe)
+    c.check("#570 an exception with a multi-arg constructor keeps its data",
+            err is cpe and getattr(err, "returncode", None) == 7
+            and err.cmd == ["ansible-playbook"],
+            (type(err).__name__, getattr(err, "returncode", None),
+             getattr(err, "cmd", None)))
+    c.check("#570 the CalledProcessError diagnosis is reachable and the original says what it said",
+            "not raised again: Nomad refused pu-p-1" in visible
+            and str(err) == "Command '['ansible-playbook']' returned non-zero exit status 7.",
+            str(err))
+
+    # Обычный RuntimeError + отказ подъёма -- прежний контракт #570: одна
+    # RuntimeError, обе причины строками (CLI и сборщик печатают str(e),
+    # замет они не видят).
 
     # Обычное исключение + отказ подъёма: прежний контракт -- оба сообщения.
     r = run_570(rows_570(("pu-p-1", "n1")), pool,

@@ -239,13 +239,28 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
             # (ревью #570: rc 17 пропадал за отказом подъёма).
             if rc is not None and rc != 0:
                 raise RuntimeError(f"image bake failed (rc {rc})\n{e}") from None
-            # Контрольный поток (KeyboardInterrupt/SystemExit) остаётся
-            # собой: RuntimeError наверху поймали бы и продолжили работу
-            # после отмены. Его текст и несёт диагностику подъёма --
-            # пере-raise проходит через except-ветку с уже дописанной
-            # строкой.
             if original is not None:
-                raise type(original)(f"{original}\n{e}") from None
+                # Исходный выходит КАК ЕСТЬ -- свой объект, тип и данные:
+                # у SystemExit.code число остаётся числом (строка сменила бы
+                # фактический выход процесса), а экзотический конструктор
+                # (CalledProcessError и прочие multi-arg) не зовётся вовсе.
+                # Диагностика подъёма доезжает заметой (PEP 678): видна в
+                # трассировке и __notes__, текст исходного не портится, и
+                # произвольный конструктор (CalledProcessError и прочие
+                # multi-arg) не зовётся вовсе -- иначе TypeError съедает ОБЕ
+                # причины. RuntimeError так адресат читает не всегда -- CLI
+                # и сборщик печатают str(e), замет туда не попадает, -- и
+                # для него прежний контракт: одна RuntimeError, обе причины
+                # строками (ревью #570).
+                if isinstance(original, RuntimeError):
+                    raise RuntimeError(f"{original}\n{e}") from None
+                try:
+                    original.add_note(f"while raising the puppets again: {e}")
+                except AttributeError:
+                    # add_note появился в 3.11; запасной дороги нет --
+                    # исходный поток дороже диагностики, без порчи данных.
+                    pass
+                raise original
             raise
     if rc == 0:
         step("announcing the image to the nodes")
