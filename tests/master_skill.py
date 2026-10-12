@@ -17,17 +17,36 @@ SKILL = os.path.join(ROOT, "mop", "skills", "master", "SKILL.md")
 # RESULT: мастер не сможет применить shell как запасной путь при нехватке MCP.
 # STATUS: FIXED — see #445
 
+# HYPOTHESIS (#559): граница «только MCP» из #445 мешает мастеру делать его
+# работу: проверять ветки git, сливать собственную правку, проверять живую
+# установку. Пользователь: мастер выполняет любые нужные ему команды.
+# SOLUTION: смена контракта #445 -- запреты shell/Git/CLI и «стоп при
+# нехватке инструмента» заменены явной границей: команды любые, MCP --
+# предпочтительный путь для операций с пулом, действия масштаба оператора --
+# по его явному указанию, секреты не печатаются. Остальные стражи #445
+# (профиль, --no-branch, инструменты, gate проекта, токен) не тронуты.
+# RESULT: RED на прежнем скилле (запреты на месте, новой границы нет),
+# GREEN после правки.
+# STATUS: FIXED — see #559
 def check_control_boundary(c, text):
-    c.check("#445 only MCP for master control", bool(re.search(
-        r"master.*(?:pool|tracker|CI).*exclusively.*MCP", text, re.I | re.S)))
-    for forbidden in ("Bash", "shell", "CLI `mop`", "Git", "HTTP", "fallback"):
-        c.check(f"#445 explicit prohibition: {forbidden}", forbidden in text)
-    c.check("#445 ordinary read-only file inspection permitted",
-            "read-only" in text and "file" in text)
+    # Фразы сверяются по тексту со схлопнутыми пробелами: перенос строки
+    # посреди запрета не должен делать его «исчезнувшим».
+    text = " ".join(text.split())
+    c.check("#559 the master runs whatever commands it needs",
+            "runs whatever commands it needs" in text)
+    for gone in ("exclusively through mop MCP", "never merges, checks, commits",
+                 "Do not invent a substitute", "not even for a read"):
+        c.check(f"#559 the MCP-only prohibition is gone: {gone!r}", gone not in text)
+    c.check("#559 MCP stays the preferred path for pool operations", bool(re.search(
+        r"MCP[^.]*preferred[^.]*pool|pool[^.]*MCP[^.]*preferred", text, re.I)))
+    c.check("#559 a missing or failing MCP tool falls back to the same mop command",
+            bool(re.search(r"missing or (?:fails|failing)[^.]*`mop", text, re.I)))
+    c.check("#559 operator-scale actions wait for the operator's explicit direction",
+            "operator's explicit direction" in text)
+    c.check("#559 secrets are never printed", bool(re.search(
+        r"never (?:print|echo)[^.]*(?:secret|key|\.env)", text, re.I)))
     c.check("#445 profile gate", "mcp__mop__profile" in text)
     c.check("#445 master claim without branch", "--no-branch" in text)
-    c.check("#445 missing tools escalated rather than bypassed",
-            bool(re.search(r"missing.*tool.*(?:operator|stop)", text, re.I | re.S)))
 
 
 def check_tools(c, text):
@@ -47,11 +66,14 @@ def check_tools(c, text):
 
 
 def check_landing(c, text):
+    text = " ".join(text.split())
     c.check("#445 integrated full suite takes project-rule precedence",
             bool(re.search(r"project.*rules.*(?:full|suite|test).*merged|"
                            r"(?:full|suite|test).*merged.*project.*rules", text, re.I | re.S)))
     c.check("#445 puppet does Git merge and push", "puppet" in text and
             "merge --no-ff" in text and "push" in text)
+    c.check("#559 the master may land its own change or on the operator's word",
+            bool(re.search(r"master[^.]*lands? [^.]*(?:own|itself)[^.]*operator", text, re.I)))
     c.check("#445 landing token survives", "mcp__mop__landing" in text and
             "take" in text and "give" in text)
 
