@@ -120,6 +120,19 @@ def check_node_check_321(c):
 # держится только прежним контрактом. RED -- 4 отказа (code-строка,
 # TypeError, оба «is original»); мутации: пересоздание класса -- 5,
 # уроненная замет -- 3 (диагностика недоступна).
+# Ревью 3: замету читал только тест. НАСТОЯЩИЙ читатель -- builder.failure
+# (110-122) и cli.run -- смотрит str/тип, и CalledProcessError с отказом
+# подъёма доезжал до просителя одной строкой без «not raised again».
+# Граница поменялась: ЛЮБОЙ ordinary Exception (не только RuntimeError)
+# агрегируется в читаемую RuntimeError с обеими причинами («Тип: текст» +
+# строка подъёма), конструктор исходного не зовётся; исходный ОБЪЕКТ,
+# code и замет (PEP 678) -- только контрольному потоку (BaseException вне
+# Exception: KeyboardInterrupt, SystemExit). Проверка форматтера --
+# настоящий builder.failure, не самодельный читатель notes. except
+# AttributeError вокруг add_note убран: поддерживаемый Python >= 3.11,
+# молча терять вторичную причину ради несуществующей поддержки не нужно.
+# RED -- 4 отказа (две границы ordinary, два форматтера); мутации:
+# RuntimeError-only ветка -- 2, обёрнутый контрольный поток -- 5.
 # STATUS: FIXED — see #570
 class RefusingNomad(FakeNomad):
     """FakeNomad, чей register отказывает поимённо: подъём снятого папета
@@ -254,6 +267,32 @@ def check_clear_recovery_570(c):
             str(r["err"]))
     c.expect("#570 the failed rc did not turn into a result", r["result"], None)
 
+    # Граница (ревью 3): причины обязаны доехать до НАСТОЯЩЕГО читателя.
+    # builder.failure (110-122) читает только str/тип, замет __notes__ не
+    # видит -- и CalledProcessError с отказом подъёма доезжал до просителя
+    # одной строкой «CalledProcessError: Command ... status 7», без
+    # «not raised again». Ложный зелёный по одним notes больше не держим:
+    # любой ordinary Exception агрегируется в читаемую RuntimeError с обеими
+    # причинами; исходный ОБЪЕКТ с кодом и заметой выходит только
+    # контрольному потоку (BaseException вне Exception: KeyboardInterrupt,
+    # SystemExit). Требование сохранить returncode/cmd отдельного
+    # CalledProcessError было сверх задачи: потребитель читает причины.
+    import subprocess as _sp
+    from mop.server import builder as _builder
+
+    cpe = _sp.CalledProcessError(7, ["ansible-playbook"])
+    r = run_570(rows_570(("pu-p-1", "n1")), pool, bake_raises=cpe,
+                register_refuses=("pu-p-1",))
+    c.check("#570 an ordinary Exception with a restore failure becomes a readable RuntimeError with both reasons",
+            isinstance(r["err"], RuntimeError)
+            and "Command '['ansible-playbook']' returned non-zero exit status 7." in str(r["err"])
+            and "not raised again: Nomad refused pu-p-1" in str(r["err"]),
+            str(r["err"]))
+    c.check("#570 the real formatter (builder.failure) sees BOTH the bake reason and the restore refusal",
+            "returned non-zero exit status 7." in _builder.failure(r["err"])
+            and "not raised again: Nomad refused pu-p-1" in _builder.failure(r["err"]),
+            _builder.failure(r["err"]))
+
     # Контрольный поток (KeyboardInterrupt/SystemExit) при живом отказе
     # подъёма не становится обычной ошибкой: исходный ОБЪЕКТ выходит как
     # есть -- свой тип и свои данные (у SystemExit.code -- число 17, а не
@@ -275,24 +314,9 @@ def check_clear_recovery_570(c):
                 (type(err).__name__, getattr(err, "code", None)))
         c.check(f"#570 {type(control).__name__}: the raising diagnosis is reachable without spoiling the original",
                 "not raised again: Nomad refused pu-p-1" in visible, visible)
-
-    # Произвольный конструктор исключения не зовётся вовсе: multi-arg
-    # CalledProcessError с отказом подъёма выходит тем же объектом, без
-    # TypeError «__init__ missing cmd», с обеими причинами доступными:
-    # исходная -- в str/полях, вторичная -- заметой (PEP 678, в трассировке
-    # и __notes__; str(e) замет не печатает -- и не должен портиться).
-    import subprocess as _sp
-    cpe = _sp.CalledProcessError(7, ["ansible-playbook"])
-    err, visible = raised(cpe)
-    c.check("#570 an exception with a multi-arg constructor keeps its data",
-            err is cpe and getattr(err, "returncode", None) == 7
-            and err.cmd == ["ansible-playbook"],
-            (type(err).__name__, getattr(err, "returncode", None),
-             getattr(err, "cmd", None)))
-    c.check("#570 the CalledProcessError diagnosis is reachable and the original says what it said",
-            "not raised again: Nomad refused pu-p-1" in visible
-            and str(err) == "Command '['ansible-playbook']' returned non-zero exit status 7.",
-            str(err))
+        c.check(f"#570 {type(control).__name__} reaches the real formatter with its type still named",
+                _builder.failure(err) == f"{type(control).__name__}: {control}",
+                _builder.failure(err))
 
     # Обычный RuntimeError + отказ подъёма -- прежний контракт #570: одна
     # RuntimeError, обе причины строками (CLI и сборщик печатают str(e),
