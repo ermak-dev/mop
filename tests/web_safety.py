@@ -290,6 +290,17 @@ def main():
     c.check("#566 a stopped target with unknown facts is still refused",
             got.get("status") == "refused"
             and not mutations_of(cluster, node), (got, cluster, node))
+    # Ошибка clone-глагола -- словарём, как её отдаёт агент: проекция
+    # fallback'а вырезала error, и отказ терял причину, оставляя голое
+    # «no facts from the node». Причина безопасна и обязана доехать (#566:
+    # не терять reason отказа).
+    got, cluster, node = execute("wipe", target, {}, alloc="complete",
+                                 state={"present": False},
+                                 clone={"error": "clone probe timed out"})
+    c.check("#566 a clone error answer refuses with its own reason",
+            got.get("status") == "refused"
+            and "clone probe timed out" in (got.get("error") or "")
+            and not mutations_of(cluster, node), (got, cluster, node))
 
     # ── чистый разрешённый случай доходит до эффекта ────────────────────
     got, cluster, node = execute("restart", target, {}, state=facts(owner=mine))
