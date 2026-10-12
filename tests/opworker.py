@@ -1158,6 +1158,167 @@ def main():
             < add_mutations.index("add4:git@example.test:g/one.git"),
             (got_l2, add_mutations))
 
+    # ── #569, ревью 3: граница передачи владения токеном ──────────────
+    # HYPOTHESIS: снятие держателя ловилось except BaseException вокруг
+    # всего ожидания: ошибка НАБЛЮДАТЕЛЯ (_sleep в дедлайн-цикле) при
+    # живом и уже стартовавшем эффекте считалась неудачей старта --
+    # токен снимался, B той же цели мутировал поверх живого A. И
+    # наоборот: _drain стоит вне любой очистки, и его исключение
+    # (fault часов) оставляло токен навсегда при не стартовавшем
+    # эффекте. Владение передаётся один раз и в одну сторону: до
+    # ПОДТВЕРЖДЕННОГО старта нитки ошибки admission (drain, старт)
+    # освобождают резерв; после старта токен снимает ТОЛЬКО finally
+    # самой нитки эффекта -- ошибка ожидателя не равна ошибке старта,
+    # эффект при этом неизвестен и полосу держит. SOLUTION: подтверждение
+    # старта -- событие сразу за успешным Thread.start(); ошибка
+    # ожидания при подтвержденном старте токен не снимает, ошибка до
+    # старта -- снимает вызывающий. RESULT: оба сценария -- порядком
+    # мутаций и статусами; отдельно -- настоящий крах Thread.start
+    # освобождает резерв; эффект, завершившийся своей ошибкой, и прежний
+    # таймаут проверены блоками выше.
+
+    # Сценарий 1: наблюдатель умирает при живом эффекте A. A стоит на
+    # alloc-гейте; первый _sleep наблюдателя жив (старт подтвержден),
+    # второй бросает -- токен обязан остаться у живой нитки A.
+    held3 = threading.Event()
+    mut3 = []
+    dead_watch = opworker.Worker(effect_timeout=5, observe_wait=0,
+                                 sleep=lambda s: time.sleep(0.02),
+                                 workspace=lambda origin: ("", None))
+    real_wait = opworker.Worker._wait_effect
+
+    def failing_wait(self, ride, *a, **kw):
+        """Сон наблюдателя: первый жив, второй умирает."""
+        calls = [0]
+        real_sleep = self._sleep
+
+        def sleep(step):
+            calls[0] += 1
+            if calls[0] > 1:
+                raise RuntimeError("observer died")
+            real_sleep(step)
+
+        self._sleep = sleep
+        try:
+            return real_wait(self, ride, *a, **kw)
+        finally:
+            self._sleep = real_sleep
+
+    with patched(opworker.Worker, _wait_effect=failing_wait):
+        got_a4 = {"status": "unset"}
+        try:
+            got_a4 = dead_watch.run("restart", "pu-mop-7", {}, login="anton",
+                                    transport=Lane("restart:pu-mop-7#1",
+                                                   held3, mut3),
+                                    safety=allow)
+        except RuntimeError as e:  # ошибка наблюдателя поднимается из run
+            got_a4 = {"status": "observer-failed", "error": str(e)}
+    c.check("#569 an observer failure surfaces from run with its reason",
+            got_a4.get("status") == "observer-failed"
+            and "observer died" in (got_a4.get("error") or ""), got_a4)
+
+    def dead_executor(action, target, params, who):
+        return lambda: dead_watch.run(
+            action, target, params, (who or (None,))[0],
+            transport=Lane(f"{action}:{target}", lane_free, mut3))
+
+    dead_ops = adminapi.Operations()
+    opworker.register(dead_ops)
+    dead_api = adminapi.Api(dead_ops, origin="https://pool.example",
+                            who=ADMIN, executor=dead_executor)
+    b4 = dead_api.submit("update", "pu-mop-7", {"fresh": True}, ADMIN)
+    got_b4 = settled(dead_api, b4["id"])
+    c.check("#569 an observer failure does not release a live effect",
+            got_b4.get("status") == "refused"
+            and "update:pu-mop-7" not in mut3, (got_b4, mut3))
+    held3.set()
+    deadline7 = time.monotonic() + 5
+    while ("restart:pu-mop-7#1" not in mut3
+           and time.monotonic() < deadline7):
+        time.sleep(0.02)
+    after4 = dead_api.submit("update", "pu-mop-7", {"fresh": True}, ADMIN)
+    got_after4 = settled(dead_api, after4["id"])
+    c.check("#569 after the observer died the lane waits for the real end",
+            "restart:pu-mop-7#1" in mut3
+            and "update:pu-mop-7" in mut3
+            and mut3.index("restart:pu-mop-7#1")
+            < mut3.index("update:pu-mop-7"), (got_after4, mut3))
+
+    # Сценарий 2: admission падает ДО старта (drain бросает на fault
+    # часов) -- резерв обязан освободиться: эффект не запускался.
+    dead_clock_w = opworker.Worker(effect_timeout=5, observe_wait=0,
+                                   sleep=lambda s: time.sleep(0.02))
+    mut5 = []
+    clock_enters = []
+
+    def clock_executor(action, target, params, who):
+        ev = threading.Event()
+        clock_enters.append(ev)
+        return lambda: dead_clock_w.run(
+            action, target, params, (who or (None,))[0],
+            transport=Lane(f"{action}:{target}", lane_free, mut5,
+                           entered=ev))
+
+    clock_ops = adminapi.Operations()
+    opworker.register(clock_ops)
+    clock_api = adminapi.Api(clock_ops, origin="https://pool.example",
+                             who=ADMIN, executor=clock_executor)
+    clock_fault = [True]
+
+    def faulty_now():
+        if clock_fault[0]:
+            clock_fault[0] = False
+            raise RuntimeError("clock died")
+        return time.time()
+
+    dead_clock_w._now = faulty_now
+    a5 = clock_api.submit("restart", "pu-mop-8", {}, ADMIN)
+    got_a5 = settled(clock_api, a5["id"])
+    c.check("#569 a faulted admission reads failed, not a hung lane",
+            got_a5.get("status") == "failed", got_a5)
+    b5 = clock_api.submit("restart", "pu-mop-8", {}, ADMIN)
+    got_b5 = settled(clock_api, b5["id"])
+    deadline8 = time.monotonic() + 5
+    while (len(clock_enters) < 2 and time.monotonic() < deadline8):
+        time.sleep(0.02)
+    c.check("#569 an admission failure releases the unstarted reservation",
+            len(clock_enters) >= 2 and clock_enters[1].is_set()
+            and got_b5.get("status") in opworker.TERMINAL, (got_b5, mut5))
+
+    # Позитив: настоящий Thread.start-крах освобождает резерв -- следующий
+    # run той же цели допускается до эффекта. Краш подлинный: класс нитки
+    # с падающим start, никакого патча наблюдателя.
+    boom_start_w = opworker.Worker(effect_timeout=2, observe_wait=0,
+                                   sleep=lambda s: time.sleep(0.02),
+                                   workspace=lambda origin: ("", None))
+
+    class BrokenThread(threading.Thread):
+        """Нить, чей start всегда падает -- как переполнение процессов."""
+
+        def start(self):
+            raise RuntimeError("cannot start new thread")
+
+    with patched(threading, Thread=BrokenThread):
+        got_bs = {"status": "unset"}
+        try:
+            boom_start_w.run("restart", "pu-mop-9", {}, login="anton",
+                             transport=Lane("restart:pu-mop-9#1", lane_free,
+                                            mut5),
+                             safety=allow)
+        except RuntimeError as e:  # крах старта поднимается из run, как эффект
+            got_bs = {"status": "start-failed", "error": str(e)}
+    c.check("#569 a real thread-start failure surfaces from run",
+            got_bs.get("status") == "start-failed"
+            and "cannot start new thread" in (got_bs.get("error") or ""),
+            got_bs)
+    entered9 = threading.Event()
+    boom_start_w.run("restart", "pu-mop-9", {}, login="anton",
+                     transport=Lane("restart:pu-mop-9#2", lane_free, mut5,
+                                    entered=entered9),
+                     safety=allow)
+    c.check("#569 a thread-start failure releases the reservation",
+            entered9.is_set() and "restart:pu-mop-9#2" in mut5, mut5)
+
     return c.report("opworker")
 
 
