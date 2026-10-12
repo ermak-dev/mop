@@ -2408,74 +2408,139 @@ def check_add_race_567(c):
 
 
 def check_add_limit_interleaving_567(c):
-    """Смена лимита против add: поведенческий interleaving, не запись
-    взятых замков.
+    """Смена лимита против add: контракт по точкам мутаций, не по порядку
+    ответов.
 
-    Гонка без ворот у лимита: add прочитал старый потолок (3) при двух
-    живых, оператор опустил потолок до 1 и получил ok, и только потом add
-    зарегистрировал третьего -- после подтверждённого ответа лимита живых
-    больше потолка. Запрещённое состояние: лимит ответил ok РАНЬШЕ add,
-    add ok, и живых больше нового потолка. Координатор -- событие у
-    регистрации add: add стоит в register, пока поток лимита не шагнул к
-    ответу; с воротами лимит не ответит до освобождения ворот add, и
-    порядок ответов разворачивается сам -- без sleep'ов и таймаутов как
-    доказательства."""
-    import contextvars
+    Порядок ответов -- не порядок мутаций: поток add может завершить
+    регистрацию и отпустить ворота, а его ответ -- задержаться; лимит
+    успевает сохраниться и ответить раньше, и это законный
+    add-before-limit. Поэтому наблюдение -- сами точки: регистрация add
+    (register у Nomad-заглушки) и запись нового лимита (cluster._save).
+    Два контролируемых порядка:
+      A. add регистрируется до сохранения нового лимита -- add паркится у
+         register, лимит стучится в ворота; обоим ok допустимо, третий
+         джоб законен по старому потолку, и в журнале мутаций register
+         раньше save;
+      B. новый лимит сохранён до решения add -- add отказывает, без
+         register и workspace.
+    Красное при снятии координации: без ворот (у лимита или у add) save
+    врезается между чтением потолка и регистрацией -- журнал даёт save
+    раньше register при ok-ответе add. Никаких timestamp'ов: только
+    события и журнал мутаций."""
     import time
 
-    class _WaitsNomad(FakeNomad):
-        """Регистрация add сигналит и ждёт шага потока лимита."""
+    class _ParkNomad(FakeNomad):
+        """Регистрация паркится до разрешения координатора; сам факт --
+        строка в журнале мутаций."""
 
         def __init__(self, jobs):
             super().__init__(jobs=jobs)
             self.at_register = threading.Event()
-            self.limit_steps = threading.Event()
-            self.done = []
+            self.release_register = threading.Event()
 
         def register(self, spec):
             self.at_register.set()
-            self.limit_steps.wait(timeout=10)
+            if not self.release_register.wait(timeout=10):
+                raise TimeoutError("567 limit race: register was never released")
             super().register(spec)
+            with m:
+                log.append("register")
 
+    class _GateProbe:
+        """Замок-наблюдатель: тот же замок, но стук в него виден."""
+
+        def __init__(self, real, knock):
+            self.real, self.knock = real, knock
+
+        def acquire(self, *a, **k):
+            self.knock.set()
+            return self.real.acquire(*a, **k)
+
+        def release(self):
+            self.real.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    def wait_first(*events, timeout=10):
+        """Первое из событий. Координация, не доказательство: таймаут --
+        FAIL вызывающего, как страховка у #534."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for e in events:
+                if e.is_set():
+                    return True
+            time.sleep(0.005)
+        return False
+
+    def job(i):
+        return {"ID": f"pu-mop-{i}", "Status": "run", "Meta": {"origin": MOP534}}
+
+    def stub_spec(name, origin, cont=False, branch=None, node=None):
+        return {"Job": {"ID": name, "Type": "service", "Meta": {"origin": origin}}}
+
+    real_gate = cluster._project_gate
+
+    # A. Register раньше save: add паркится у register (держит ворота),
+    # лимит отпускают только у самых ворот -- координатор ждёт стука (или,
+    # если координация снята, самой записи) и после неё завершает add.
+    m, log = threading.Lock(), []
+    knock = threading.Event()   # лимит у ворот
+    saved = threading.Event()   # новый лимит записан
+    real_save = cluster._save
+
+    def saving(snapshot):
+        real_save(snapshot)
+        with m:
+            log.append("save")
+            saved.set()
+
+    fake = _ParkNomad({j["ID"]: j for j in (job(1), job(2))})
     env = _Registry534(limits={"mop": 3})
     try:
         with env.patched_env():
-            def stub_spec(name, origin, cont=False, branch=None, node=None):
-                return {"Job": {"ID": name, "Meta": {"origin": origin}}}
-
-            def job(i):
-                return {"ID": f"pu-mop-{i}", "Status": "run",
-                        "Meta": {"origin": MOP534}}
-
-            fake = _WaitsNomad({j["ID"]: j for j in (job(1), job(2))})
-            cv = contextvars.ContextVar("nomad_api", default=fake)
-            out, when = {}, {}
-            mark = threading.Lock()
-
-            def note(key):
-                with mark:
-                    when[key] = time.monotonic()
+            out = {}
 
             def run_add():
                 out["add"] = cluster.answer(
                     "mop", {"verb": "add", "origin": MOP534,
-                            "workspace": PLAYS567["one"]})
-                note("add")
+                            "workspace": PLAYS567["one"]}, api=fake)
 
             def run_limit():
-                fake.at_register.wait(timeout=10)      # add дошёл до register
-                fake.limit_steps.set()                 # отпустить add
                 out["limit"] = cluster.answer(
-                    "admin", {"verb": "project_limit", "name": "mop", "value": "1"})
-                note("limit")
+                    "admin", {"verb": "project_limit", "name": "mop",
+                              "value": "1"}, api=fake)
 
-            with patched(cluster, _API=cv), \
+            def probing(name):
+                return _GateProbe(real_gate(name), knock)
+
+            with patched(cluster, _project_gate=probing, _save=saving), \
                     patched(cluster.spec, job_spec=stub_spec), \
                     patched(_bootstrap, ROOT=tempfile.mkdtemp(prefix="mop-test-567d-")):
                 a = threading.Thread(target=run_add)
-                l = threading.Thread(target=run_limit)
                 a.start()
+                if not fake.at_register.wait(timeout=10):
+                    c.fail("#567 the limit race coordinator timed out",
+                           "add never reached register")
+                    a.join(timeout=15)
+                    return
+                l = threading.Thread(target=run_limit)
                 l.start()
+                # Стук лимита в ворота -- либо, без координации, его запись:
+                # в обоих случаях add можно отпускать, порядок мутаций
+                # решит журнал, а не таймер.
+                if not wait_first(knock, saved):
+                    c.fail("#567 the limit race coordinator timed out",
+                           "limit neither knocked nor saved")
+                    fake.release_register.set()
+                    a.join(timeout=15)
+                    l.join(timeout=15)
+                    return
+                fake.release_register.set()
                 a.join(timeout=15)
                 l.join(timeout=15)
                 for t, n in ((a, "add"), (l, "limit")):
@@ -2483,23 +2548,58 @@ def check_add_limit_interleaving_567(c):
                         c.fail(f"#567 the interleaved {n} hung", "join timed out")
                         return
             add, lim = out.get("add") or {}, out.get("limit") or {}
-            live = sorted(fake.jobs)
             if not c.check("#567 the limit change answers ok in the race",
                            lim.get("ok"), f"limit: {lim}, add: {add}"):
                 return
-            limit_first = when["limit"] < when["add"]
-            if limit_first:
-                # Лимит подтвердился раньше ответа add -- add обязан
-                # отказать и ничего не зарегистрировать.
-                c.check("#567 an add answered after the confirmed limit refuses",
-                        "error" in add and live == ["pu-mop-1", "pu-mop-2"],
-                        f"add: {add}, jobs: {live}")
-            else:
-                # Add выиграл serialization -- третий жив, потолок 1 записан
-                # следом; это законный порядок, отказывать нечему.
-                c.check("#567 an add answered before the limit may pass under the old ceiling",
-                        add.get("ok") and live == ["pu-mop-1", "pu-mop-2", "pu-mop-3"],
-                        f"add: {add}, jobs: {live}")
+            with m:
+                order = list(log)
+            c.check("#567 a passing add registers before the new limit is saved",
+                    add.get("ok") and "register" in order and "save" in order
+                    and order.index("register") < order.index("save"),
+                    f"add: {add}, mutations: {order}")
+            c.check("#567 the third puppet is legal under the old ceiling",
+                    sorted(fake.jobs) == ["pu-mop-1", "pu-mop-2", "pu-mop-3"],
+                    f"jobs: {sorted(fake.jobs)}")
+    finally:
+        env.cleanup()
+
+    # B. Save раньше решения add: лимит завершён, add приходит следом --
+    # отказ про потолок, ни регистрации, ни workspace. Ответ add может
+    # задержаться сколько угодно: проверка смотрит содержание, не порядок.
+    m, log = threading.Lock(), []
+    saved = threading.Event()
+    fake = _ParkNomad({j["ID"]: j for j in (job(1), job(2))})
+    env = _Registry534(limits={"mop": 3})
+    try:
+        with env.patched_env():
+            def saving_b(snapshot):
+                real_save(snapshot)
+                with m:
+                    log.append("save")
+                    saved.set()
+
+            boot = tempfile.mkdtemp(prefix="mop-test-567e-")
+            with patched(cluster, _save=saving_b), \
+                    patched(cluster.spec, job_spec=stub_spec), \
+                    patched(_bootstrap, ROOT=boot):
+                lim = cluster.answer("admin", {"verb": "project_limit",
+                                               "name": "mop", "value": "1"}, api=fake)
+                if not c.check("#567 the limit saved first answers ok",
+                               lim.get("ok") and saved.wait(timeout=0),
+                               f"limit: {lim}"):
+                    return
+                add = cluster.answer("mop", {"verb": "add", "origin": MOP534,
+                                             "workspace": PLAYS567["two"]}, api=fake)
+                written = sorted(p for p in os.listdir(boot)
+                                 if p.startswith("pu-"))
+            c.check("#567 the add decided after the save refuses on the ceiling",
+                    "error" in add and "limit" in add.get("error", ""),
+                    f"add: {add}")
+            c.check("#567 the refused add registers nothing",
+                    "register" not in log and sorted(fake.jobs) == ["pu-mop-1", "pu-mop-2"],
+                    f"mutations: {log}, jobs: {sorted(fake.jobs)}")
+            c.check("#567 the refused add writes no workspace",
+                    written == [], f"written: {written}")
     finally:
         env.cleanup()
 
