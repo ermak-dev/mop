@@ -4,6 +4,7 @@ import os
 import re
 import sys
 
+import hermetic  # noqa: F401 -- настройки не с этой машины (#209)
 from _lib import Checks
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
