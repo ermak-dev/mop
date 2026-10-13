@@ -6,6 +6,7 @@ import { usePuppetTail } from "../usePuppetCard";
 import { IconButton } from "./IconButton";
 import { SendForm } from "./SendForm";
 import { LABELS } from "./labels";
+import { HybridWorkspace } from "./HybridWorkspace";
 
 // #507: единственный источник -- экран (tail); ветка stderr ушла вместе с
 // кнопкой «лог»: у задачи он пуст, причина падающей -- в вердикте строки.
@@ -139,6 +140,7 @@ export function PuppetCard({ session, target, onClose }: {
       header: { flexShrink: 0 },
       body: { flex: 1, minHeight: 0, padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" },
     }}>
-    <PuppetOutput key={`${session.login}\0${target}`} session={session} target={target} />
+    <HybridWorkspace key={`${session.login}\0${session.role}\0${target}`} session={session} target={target}
+      fallback={<PuppetOutput session={session} target={target} />} />
   </Modal>;
 }
