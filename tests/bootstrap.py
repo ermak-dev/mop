@@ -561,12 +561,170 @@ def check_role_secrets_592(c):
         c.fail("#592 legacy play must stay today's", e)
 
 
+def check_role_secrets_hard_592(c):
+    """HYPOTHESIS (#592, ревью 84a1fae): четыре поведенческих провала,
+    воспроизведённых независимо на живом коде. (1) Пустой allowlist без
+    хранилища и задач не играет прогон -- прежний staging тела живёт:
+    «на сервере нет» не доказывает «в теле чисто». (2) Симлинк: vars.env
+    читается по ссылке, каталог проекта -- ссылка наружу -- и листовая
+    проверка её не видит: проверять надо каждую ступень от корня
+    хранилища. (3) 'a/../b' нормализуется valid_name и проходит при
+    существующем b: каноничность -- до поиска. (4) Гонка чтения:
+    list_vars проверяет одним чтением, _vars перечитывает другим --
+    рассинхрон отдаёт пустой успех: один слепок на прогон. (5) rmtree(
+    ignore_errors=True) глотал сбой уборки вопреки контракту ошибок.
+    SOLUTION: режим роли играет прогон всегда; имя канонично и без
+    масок до хранилища; ни одной ссылки по пути; vars читаются одним
+    слепком и материализуются из него; уборка строгая -- сбой виден.
+    STATUS: RED — see #592"""
+    from mop.common import project_secrets
+    import subprocess as _sp
+    import shutil as _sh
+    from _lib import patched as _patched
+
+    def fake_run(cmd, **kw):
+        played = fake_run.played = getattr(fake_run, "played", {})
+        played["argv"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "PLAY RECAP ***\nh : ok=1 failed=0\n"
+            stderr = ""
+        return R()
+
+    # (1) Нет хранилища и задач, allowlist пуст: прогон всё равно нужен --
+    #     чистить прежнее тело; «no bootstrap» в режиме роли -- ложный.
+    bare = tempfile.mkdtemp(prefix="mop-test-bare-592-")
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(bare, "no-ws")), \
+                _patched(project_secrets, ROOT=bare), \
+                _patched(bootstrap, TIMEOUT=120), _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""}, "proj",
+                                 role={"files": [], "vars": []})
+        c.check("#592 an empty allowlist with no store must still play to clear the body",
+                not (not got.get("played") or not got.get("ok")), got)
+        argv = getattr(fake_run, "played", {}).get("argv") or []
+        extra = json.loads(argv[argv.index("-e", argv.index("-e") + 1) + 1]) if argv else {}
+        c.check("#592 ... and the empty play must carry a staging dir",
+                not (not extra.get("mop_secrets_dir")), extra)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 the empty role play with no store", e)
+
+    # (2а) vars.env -- симлинк наружу: значения по ссылке не выдаются.
+    sroot = tempfile.mkdtemp(prefix="mop-test-link-592-")
+    pdir = os.path.join(sroot, "proj")
+    os.makedirs(os.path.join(pdir, "files"))
+    outside = os.path.join(sroot, "outside.env")
+    with open(outside, "w") as f:
+        f.write("KEY=fixture\n")
+    os.symlink(outside, os.path.join(pdir, "vars.env"))
+    try:
+        with bootstrap.role_staging(sroot, "proj", {"files": [], "vars": ["KEY"]}):
+            c.fail("#592 a symlinked vars.env must be refused", None)
+    except ValueError:
+        pass
+
+    # (2б) Каталог проекта -- симлинк наружу: хранилище читается по ссылке
+    #      целиком, листовая проверка файла её не видит. Проверяется каждая
+    #      ступень от корня хранилища.
+    r2 = tempfile.mkdtemp(prefix="mop-test-link2-592-")
+    real = os.path.join(r2, "real")
+    os.makedirs(os.path.join(real, "files"))
+    with open(os.path.join(real, "files", "b"), "w") as f:
+        f.write("THROUGH-LINK")
+    os.symlink(real, os.path.join(r2, "proj"))
+    try:
+        with bootstrap.role_staging(r2, "proj", {"files": ["b"], "vars": []}):
+            c.fail("#592 a symlinked project dir must be refused", None)
+    except ValueError:
+        pass
+
+    # (2в) Предок выбранного файла -- симлинк-каталог: путь к листу тоже
+    #      не должен идти по ссылкам. ci здесь -- ссылка на соседний
+    #      каталог с настоящим файлом: листовая проверка прошла бы.
+    r3 = tempfile.mkdtemp(prefix="mop-test-link3-592-")
+    p3 = os.path.join(r3, "proj", "files")
+    os.makedirs(p3)
+    realci = os.path.join(r3, "elsewhere")
+    os.makedirs(realci)
+    with open(os.path.join(realci, "runner.key"), "w") as f:
+        f.write("REAL")
+    os.symlink(realci, os.path.join(p3, "ci"))
+    try:
+        with bootstrap.role_staging(r3, "proj",
+                                    {"files": ["ci/runner.key"], "vars": []}):
+            c.check("#592 a file through an ancestor symlink must not stage", False, None)
+    except ValueError:
+        pass
+
+    # (3) Неканоническое имя при существующей цели: отказ до хранилища.
+    nroot = tempfile.mkdtemp(prefix="mop-test-canon-592-")
+    project_secrets.put_file(nroot, "proj", "b", b"REAL")
+    for bad in ("a/../b", "./b", "b/", "*"):
+        try:
+            with bootstrap.role_staging(nroot, "proj", {"files": [bad], "vars": []}):
+                c.fail(f"#592 a noncanonical name {bad!r} must be refused", bad)
+        except ValueError:
+            pass
+
+    # (4) Гонка чтения vars: первое чтение видит ключ, второе -- нет.
+    #     Либо отказ, либо материализовано запрошенное: пустой успех --
+    #     тихая утечка права.
+    root4 = tempfile.mkdtemp(prefix="mop-test-race-592-")
+    project_secrets.set_var(root4, "proj", "KEY", "fixture")
+    calls = {"n": 0}
+
+    def racing(root, project):
+        calls["n"] += 1
+        return {"KEY": "fixture"} if calls["n"] == 1 else {}
+
+    with _patched(project_secrets, _vars=racing):
+        try:
+            with bootstrap.role_staging(root4, "proj", {"files": [], "vars": ["KEY"]}) as stage:
+                with open(os.path.join(stage, "vars.env")) as f:
+                    text = f.read()
+                c.check("#592 the staged snapshot must carry the requested var",
+                        "KEY=fixture" in text, text)
+        except ValueError:
+            c.check("#592 a racy var read must refuse rather than deliver empty",
+                    False, "delivered an empty staging")
+
+    # (5) Сбой уборки не глотается: ignore_errors -- не способ убрать
+    #     каталог секретов, отказ уборки обязан быть слышен (без значений).
+    root5 = tempfile.mkdtemp(prefix="mop-test-clean-592-")
+
+    def picky_rmtree(path, ignore_errors=False, *a, **kw):
+        if not ignore_errors:
+            raise OSError("staging cleanup refused")
+
+    try:
+        with _patched(_sh, rmtree=picky_rmtree):
+            with bootstrap.role_staging(root5, "proj", {"files": [], "vars": []}):
+                pass
+        c.fail("#592 a cleanup failure must surface, not be swallowed", None)
+    except OSError:
+        pass
+
+    # (6) Исключение в теле: staging убирается и там (закрепление
+    #     заявления отчёта, которого прежде не было в проверках).
+    stage_of = {}
+    try:
+        with bootstrap.role_staging(root5, "proj", {"files": [], "vars": []}) as st:
+            stage_of["p"] = st
+            raise RuntimeError("body boom")
+    except RuntimeError:
+        pass
+    c.check("#592 an exception in the body must still clean the staging",
+            not (stage_of.get("p") and os.path.exists(stage_of["p"])), stage_of)
+
+
 def main():
     c = Checks()
     check_journal_no_secrets_349(c)
     check_give_up_345(c)
     check_result_334(c)
     check_role_secrets_592(c)
+    check_role_secrets_hard_592(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 
     # HYPOTHESIS: механизма нет вовсе — ничто не играет манифест при старте.
