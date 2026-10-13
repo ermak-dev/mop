@@ -32,7 +32,6 @@ import fcntl
 import json
 import os
 import secrets
-import tempfile
 import threading
 
 from ..common import busnames, fsutil, soul
@@ -75,7 +74,7 @@ class _Writer:
         self.reg = None
 
     def __enter__(self):
-        os.makedirs(self.root, exist_ok=True)
+        fsutil.make_private_dir(self.root)
         self.fd = _locked(self.root)
         self.reg = _read(self.root)
         return self
@@ -115,17 +114,11 @@ def _read(root):
 
 
 def _write(root, reg):
-    """Атомарная замена реестра: tmp + rename, режим 0600."""
+    """Атомарная замена реестра: fsutil.write_private (tmp + fsync +
+    rename, 0600) -- своей копии mkstemp/replace нет, инвариант fsutil."""
     path = os.path.join(root, "registry.json")
-    fd, tmp = tempfile.mkstemp(dir=root, prefix=".registry.")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(reg, f, ensure_ascii=False, sort_keys=True)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        os.unlink(tmp)
-        raise
+    fsutil.write_private(path, json.dumps(reg, ensure_ascii=False,
+                                        sort_keys=True))
 
 
 def _bundle_dir(root, digest):
@@ -190,7 +183,7 @@ def _store_bundle(root, digest, manifest, prompt):
     if soul.from_manifest(manifest, prompt).digest != digest:
         raise ValueError(f"grants: digest mismatch for bundle {digest[:8]}")
     path = _bundle_dir(root, digest)
-    os.makedirs(path, exist_ok=True)
+    fsutil.make_private_dir(path)
     man = os.path.join(path, "manifest.json")
     pr = os.path.join(path, soul_bundle_name(manifest))
     for name, data in ((man, json.dumps(manifest, ensure_ascii=False,
@@ -198,15 +191,7 @@ def _store_bundle(root, digest, manifest, prompt):
                        (pr, prompt)):
         if os.path.exists(name):
             continue
-        fd, tmp = tempfile.mkstemp(dir=path)
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, name)
-        except BaseException:
-            os.unlink(tmp)
-            raise
+        fsutil.write_private(name, data)
     again = bundle(digest, root=root)
     if again is None or again["manifest"] != manifest or again["prompt"] != prompt:
         raise ValueError(f"grants: bundle {digest[:8]} is pinned with "
