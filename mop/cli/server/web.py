@@ -779,11 +779,11 @@ class Handler(BaseHTTPRequestHandler):
     def _session_token(self):
         """Cookie, действительно принятая провайдером, а не первая по имени."""
         for part in (self.headers.get("Cookie") or "").split(";"):
-            key, separator, token = part.strip().partition("=")
-            if separator and key == websession.COOKIE:
-                who = SESSIONS.get(token)
+            item = part.strip().split("=", 1)
+            if len(item) == 2 and item[0] == websession.COOKIE:
+                who = SESSIONS.get(item[1])
                 if who:
-                    return token, who
+                    return item[1], who
         return None
 
     def _session_actor(self):
