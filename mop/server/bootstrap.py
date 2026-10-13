@@ -44,7 +44,6 @@ import contextlib
 import hashlib
 import json
 import os
-import posixpath
 import re
 import shutil
 import stat
@@ -286,11 +285,19 @@ def _allow_of(role):
 def _canonical_file_name(name):
     """Имя секретного файла, каноническое, без масок. Нормализация --
     валидатор, а не пропуск: 'a/../b' и './b' остаются собой и
-    отказываются до хранилища; '*' -- маска, а не имя."""
-    if not isinstance(name, str) or name != posixpath.normpath(name) \
-            or any(w in name for w in ("*", "?", "[")):
+    отказываются до хранилища; '*' -- маска, а не имя. Канонично и то,
+    чего хранилище не меняет: оно само стрипит и нормализует (valid_name),
+    и написание, отличающееся от его канонической формы (' b' против 'b'),
+    выбрало бы чужой секрет -- молча другое имя не выбирается никогда."""
+    if not isinstance(name, str) or any(w in name for w in ("*", "?", "[")):
         raise ValueError(f"{name!r}: a secret file is named exactly, in canonical form")
-    return project_secrets.valid_name(name)
+    try:
+        stored = project_secrets.valid_name(name)
+    except ValueError:
+        stored = None
+    if stored != name:
+        raise ValueError(f"{name!r}: a secret file is named exactly, in canonical form")
+    return stored
 
 
 def secrets_of(root, project, allow):
