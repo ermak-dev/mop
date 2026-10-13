@@ -74,6 +74,7 @@ prompt: soul.md
 """
 UUID_OK = "123e4567-e89b-42d3-a456-426614174000"
 HEX32 = "ab" * 16
+HEX64 = "ab" * 32  # digest бандла -- SHA256 (#579, review #580)
 
 
 def make_role(base, name, manifest_text, prompt="You are the role.\n",
@@ -93,9 +94,13 @@ def make_role(base, name, manifest_text, prompt="You are the role.\n",
 
 def contract_digest(manifest_text, prompt):
     """Digest формулой контракта #579, посчитанной здесь же: канонический
-    JSON разобранного манифеста + NUL + сырой промпт."""
+    JSON разобранного манифеста (с умолчаниями схемы, одним набором ключей
+    -- review #580: yaml без блока secrets и с явным пустым -- один бандл)
+    + NUL + сырой промпт."""
     import yaml
     parsed = yaml.safe_load(manifest_text)
+    parsed.setdefault("secrets", {})
+    parsed["secrets"] = {"files": [], "vars": [], **parsed["secrets"]}
     canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"),
                            ensure_ascii=False).encode()
     raw = prompt.encode() if isinstance(prompt, str) else prompt
@@ -114,9 +119,9 @@ def check_meta_580(c):
     STATUS: RED"""
     JobMeta = domain.JobMeta
     full = JobMeta("git@h:g/mop.git", None, None, soul="master",
-                   soul_digest="ab" * 16, soul_inc=UUID_OK)
+                   soul_digest=HEX64, soul_inc=UUID_OK)
     meta = full.to_meta()
-    for key, want in (("soul", "master"), ("soul_digest", "ab" * 16),
+    for key, want in (("soul", "master"), ("soul_digest", HEX64),
                       ("soul_inc", UUID_OK)):
         c.expect(f"#580 to_meta carries {key}", meta.get(key), want)
     back = JobMeta.from_meta(dict(meta, origin="git@h:g/mop.git", branch=None))
@@ -143,19 +148,19 @@ def check_meta_580(c):
 
     for what, build, field in [
             ("half a triple (digest only)",
-             lambda: JobMeta("o", soul_digest="ab" * 16), "soul"),
+             lambda: JobMeta("o", soul_digest=HEX64), "soul"),
             ("half a triple (incarnation only)",
              lambda: JobMeta("o", soul_inc=UUID_OK), "soul"),
             ("half a triple (name and digest)",
-             lambda: JobMeta("o", soul="master", soul_digest="ab" * 16), "soul"),
+             lambda: JobMeta("o", soul="master", soul_digest=HEX64), "soul"),
             ("a digest that is not 32 hex",
              lambda: JobMeta("o", soul="master", soul_digest="xyz",
                              soul_inc=UUID_OK), "soul_digest"),
             ("an incarnation that is not a UUID",
-             lambda: JobMeta("o", soul="master", soul_digest="ab" * 16,
+             lambda: JobMeta("o", soul="master", soul_digest=HEX64,
                              soul_inc="zzz"), "soul_inc"),
             ("a soul name outside the role grammar",
-             lambda: JobMeta("o", soul="Master!", soul_digest="ab" * 16,
+             lambda: JobMeta("o", soul="Master!", soul_digest=HEX64,
                              soul_inc=UUID_OK), "soul")]:
         refused(what, build, field)
 
@@ -265,6 +270,42 @@ def check_parse_580(c):
              (oned.secrets.files, oned.secrets.vars), (("gitlab-token",), ()))
     refused(MASTER_YAML + "secrets:\n  files: gitlab-token\n  vars: []\n",
             "files")
+    # Блок цели -- не «пусто», а ложный тип: `or {}` читал false/[]/0/'' как
+    # «блока нет» и молча выдавал пустой allowlist (review #580): явный
+    # мусор в схеме -- отказ, а не умолчание.
+    for block in ("false", "[]", "0", "''"):
+        refused(MASTER_YAML + f"secrets: {block}\n", "secrets")
+    # Элементы -- та же каноническая форма, что у хранилища (#592): файл --
+    # путь от корня files/ без побегов, масок и ненормализованных написаний;
+    # переменная -- KEY грамматики vars.env. Валидное принимается (ложный
+    # отказ отрезал бы живые имена), мусор -- отказ.
+    for path, ok in (("../escape", False), ("/abs", False),
+                     ("a/../b", False), ("ok*", False),
+                     ("sub/dir/file", True), (".env", True),
+                     ("./plain", False)):
+        try:
+            soul.parse(MASTER_YAML.replace(
+                "prompt: soul.md",
+                "prompt: soul.md\nsecrets:\n  files: ['" + path + "']\n"))
+            verdict = "accepted"
+        except ValueError as e:
+            verdict = str(e)
+        c.check(f"#580 secrets.files {path!r} follows the #592 name rules",
+                verdict != "accepted" if not ok else verdict == "accepted",
+                verdict)
+    for var, ok in (("OK_VAR", True), ("9LEAD", False), ("HAS-DASH", False),
+                    ("with space", False), ("CI_JOB_TOKEN", True),
+                    ("_UNDER", True)):
+        try:
+            soul.parse(MASTER_YAML.replace(
+                "prompt: soul.md",
+                "prompt: soul.md\nsecrets:\n  vars: ['" + var + "']\n"))
+            verdict = "accepted"
+        except ValueError as e:
+            verdict = str(e)
+        c.check(f"#580 secrets.vars {var!r} follows the #592 name rules",
+                verdict != "accepted" if not ok else verdict == "accepted",
+                verdict)
 
 
 def check_bundle_580(c):
@@ -349,6 +390,81 @@ runtime:
     refused(lambda: make_role(base, "binary", MASTER_YAML, b"\xff\xfe raw"),
             "utf-8")
 
+    # ── review #580: отказ мастера на живых ролях ─────────────────────────
+    # Digest -- SHA256, 64 знака hex (#579), а запись привязки и тройка
+    # меты требовали 32: каждый живой бандл обязан был не проходить собственную
+    # привязку. Раздельные правила: HEX64 для digest бандла, HEX32 для id
+    # принципала.
+    c.check("#580 review: the real bundle digest is 64 lower-case hex",
+            len(bundle.digest) == 64
+            and all(ch in "0123456789abcdef" for ch in bundle.digest),
+            bundle.digest)
+    try:
+        soul.binding("grant-" + HEX32, "anton", "mop", "pu-mop-1", UUID_OK,
+                     bundle.digest, "master")
+    except ValueError as e:
+        c.fail("#580 review: a binding must take the real 64-hex digest", str(e))
+    try:
+        domain.JobMeta("o", soul="master", soul_digest=bundle.digest,
+                       soul_inc=UUID_OK)
+    except ValueError as e:
+        c.fail("#580 review: JobMeta must take the real 64-hex digest", str(e))
+    # 32 hex -- не digest: усечение не появляется, правило отдельное.
+    for short in (bundle.digest[:32], bundle.digest + "a", "x" * 64):
+        try:
+            soul.binding("grant-" + HEX32, "anton", "mop", "pu-mop-1", UUID_OK,
+                         short, "master")
+            c.fail(f"#580 review: a binding must refuse digest {short[:8]}…",
+                   "accepted")
+        except ValueError as e:
+            c.check(f"#580 review: a binding refuses digest {short[:8]}…",
+                    "64" in str(e), str(e))
+
+    # Roundtrip канонического источника: load → manifest.to_dict() →
+    # from_manifest — тот же digest. to_dict вставляет умолчания (secrets),
+    # и вставленное меняло digest: сервер (#581) собирал бы бандл, чей
+    # digest не совпадает ни с хранилищем, ни с метой джоба. Канонический
+    # вход digest — словарь с ПОЛНЫМ набором ключей схемы: один источник
+    # канонизации на все входы (load, from_manifest), формула --
+    # документирована контрактом.
+    rebuilt = soul.from_manifest(bundle.manifest.to_dict(), bundle.prompt)
+    c.expect("#580 review: to_dict round-trips to the same digest",
+             rebuilt.digest, bundle.digest)
+    # Пакетный пресет -- тот же закон: реальный load→store→deliver без
+    # расхождения форм.
+    real = soul.load(os.path.join(PACKAGE, "puppet"))
+    c.expect("#580 review: a packaged preset round-trips its digest",
+             soul.from_manifest(real.manifest.to_dict(), real.prompt).digest,
+             real.digest)
+    # Явный пустой блок в yaml -- та же каноническая форма, что вставленный:
+    # «по умолчанию -- пусто» не делает два написания одного смысла двумя
+    # бандлами.
+    explicit = make_role(base, "explicit", MASTER_YAML.replace(
+        "prompt: soul.md", "prompt: soul.md\nsecrets:\n  files: []\n  vars: []\n"),
+        prompt)
+    c.expect("#580 review: an explicit empty secrets block is the same bundle",
+             soul.load(explicit).digest, bundle.digest)
+
+    # Промпт -- UTF-8 на обоих входах бандла: load отказывает битым байтам,
+    # from_manifest принимал их молча и молча же считал digest (review #580).
+    try:
+        soul.from_manifest(bundle.manifest.to_dict(), b"\xff\xfe raw")
+        c.fail("#580 review: from_manifest must refuse a non-UTF-8 prompt",
+               "accepted")
+    except ValueError as e:
+        c.check("#580 review: from_manifest refuses a non-UTF-8 prompt",
+                "utf-8" in str(e).lower(), str(e))
+
+    # active -- точный bool, не «что угодно правдивого»: строка 'false'
+    # становилась True и молча активировала привязку (review #580).
+    try:
+        soul.binding("grant-" + HEX32, "anton", "mop", "pu-mop-1", UUID_OK,
+                     bundle.digest, "master", active="false")
+        c.fail("#580 review: a binding must refuse active='false'", "accepted")
+    except ValueError as e:
+        c.check("#580 review: a binding refuses active='false'",
+                "true or false" in str(e), str(e))
+
 
 def check_catalogue_580(c):
     """HYPOTHESIS (#580): каталога ролей нет: пакет везёт один файл скилла
@@ -430,6 +546,12 @@ def check_principals_580(c):
             not soul.is_grant("puppet-mop"))
     c.check("#580 the grant check wants the prefix",
             not soul.is_grant("grant-nope") and not soul.is_grant(HEX32))
+    # Принципал -- машинное имя: bus.login (#161) и callout относятся к нему
+    # как к машине, иначе grant читался человеческим входом (review #580).
+    # Маршрутизация каналов -- #603; здесь только классификация префикса.
+    c.check("#580 review: a grant principal is a machine name",
+            busnames.is_machine(soul.grant_user(HEX32)),
+            busnames.is_machine("puppet-mop"))
     for bad in ("AB" * 16, "a" * 31, "a" * 33, "z" * 32):
         try:
             soul.grant_user(bad)
@@ -461,10 +583,10 @@ def check_principals_580(c):
     # Запись привязки (#581): принципал -> {owner, project, job, soul_inc,
     # soul_digest, role, active}. Ключи точные: иное -- не запись.
     record = soul.binding("grant-" + HEX32, "anton", "mop", "pu-mop-1",
-                          UUID_OK, "cd" * 16, "master")
+                          UUID_OK, "cd" * 32, "master")
     c.expect("#580 a binding record has the exact shape", record,
              {"principal": "grant-" + HEX32, "owner": "anton", "project": "mop",
-              "job": "pu-mop-1", "soul_inc": UUID_OK, "soul_digest": "cd" * 16,
+              "job": "pu-mop-1", "soul_inc": UUID_OK, "soul_digest": "cd" * 32,
               "role": "master", "active": True})
     c.expect("#580 the record round-trips", soul.binding_from(record), record)
     for broken, because in (
@@ -497,17 +619,17 @@ def check_row_580(c):
     STATUS: RED"""
     item = {"job": {"ID": "pu-mop-1", "Status": "running", "Meta": {
         "origin": "git@h:g/mop.git", "soul": "master",
-        "soul_digest": "ab" * 16, "soul_inc": UUID_OK}},
+        "soul_digest": HEX64, "soul_inc": UUID_OK}},
         "alloc": None, "error": None, "state": "free", "kind": "free",
         "owner": None}
     row = puppets._row(item)
     c.expect("#580 the row carries the role triple",
              (row.soul, row.soul_digest, row.soul_inc),
-             ("master", "ab" * 16, UUID_OK))
+             ("master", HEX64, UUID_OK))
     as_dict = row.to_dict()
     c.expect("#580 the role rides the wire as plain fields",
              (as_dict["soul"], as_dict["soul_digest"], as_dict["soul_inc"]),
-             ("master", "ab" * 16, UUID_OK))
+             ("master", HEX64, UUID_OK))
     # Легаси-папет без роли: прежние ключи байт в байт, новых -- нет.
     legacy_item = {"job": {"ID": "pu-mop-2", "Status": "running", "Meta": {
         "origin": "git@h:g/mop.git"}}, "alloc": None, "error": None,
@@ -526,7 +648,7 @@ def check_row_580(c):
     back = state.PuppetRow.from_dict(as_dict)
     c.expect("#580 the row round-trips",
              (back.soul, back.soul_digest, back.soul_inc),
-             ("master", "ab" * 16, UUID_OK))
+             ("master", HEX64, UUID_OK))
     back = state.PuppetRow.from_dict(legacy)
     c.expect("#580 a legacy dict reads back without a role", back.soul, None)
 

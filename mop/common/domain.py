@@ -106,7 +106,9 @@ class JobMeta:
             # не поднять и не понять.
             from . import soul as soulmod
             soulmod._name(self.soul, "soul")
-            soulmod._hex32(self.soul_digest, "soul_digest")
+            # Digest бандла -- SHA256/64 hex (review #580): живой бандл
+            # обязан проходить собственную мету.
+            soulmod._hex64(self.soul_digest, "soul_digest")
             soulmod._uuid(self.soul_inc, "soul_inc")
 
     @property
