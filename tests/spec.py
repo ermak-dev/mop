@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -1159,6 +1160,457 @@ def check_node_pin_289(c):
                     for x in spec.respec("pu-mop-1", meta)["Job"]["Constraints"]))
 
 
+# ── #583: общий ролевой старт обёртки ──────────────────────────────────────
+# HYPOTHESIS: обёртка не знает про роли. Тройка роли едет в Meta (#582), а
+# до тела доезжает только каталог инкарнации (#590 кладёт бандл, кред
+# принципала и расписку готовности) -- обёртка его не читает и подняла бы
+# ролевого папета без промпта роли, на проектном креде и с общими на узел
+# настройками claude. Всё, против чего эпик (#579: роль без бандла не
+# стартует, расхождение -- громкий отказ на старте).
+# SOLUTION: тройка едет окружением спеки (PU_SOUL/PU_SOUL_DIGEST/PU_SOUL_INC
+# + PU_SOUL_DIR из driver.soul_dir), обёртка ДО первого шага с телом
+# сверяет расписку готовости и кред с метой джоба, перечитывает бандл тем
+# же правилом, что регистрация (soul.load), и поднимает claude с промптом
+# бандла, кредом принципала и своими на папета --settings/--mcp-config.
+# Разница ролей -- только данные: ни одной проверки имени роли. Легаси-джоб
+# ходит прежним путём без новой ветки; из ролевой ветки легаси-путь
+# недостижим -- битый бандл не поднимает «просто папета».
+# STATUS: RED
+ROLE_BEGIN = "# --- role startup (#583) ---"
+ROLE_END = "# --- end of role startup (#583) ---"
+
+INC = "1b4e28ba-2fa1-4d2b-9a5e-3c1f0a7b8c9d"
+GRANT = "grant-" + "a1" * 16
+
+# Подмена claude (#583): argv панели и срез окружения сессии -- в журнал по
+# MOP_FAKE_LOG; `mcp add` зовется тем же путём и тоже журналяется (его
+# наличие -- часть контракта легаси-пути, отсутствие -- ролевого).
+FAKE_CLAUDE = """#!/bin/bash
+printf '%s\\n' "$*" >> "$MOP_FAKE_LOG"
+env | grep -E '^MOP_(SOUL_DIR|PUPPET|NODE|BUS_CONFIG|PROJECT)=' | sort >> "$MOP_FAKE_LOG"
+[ "$1" = mcp ] && printf 'mcp %s\\n' "$*" >> "$MOP_FAKE_LOG"
+exit 0
+"""
+
+# Подмена tmux (#583): new-session исполняет команду панели с её -e
+# окружением синхронно, has-session всегда «нет» -- обёртка доходит до
+# конца, а журнал claude уже написан. kill-session -- успех.
+FAKE_TMUX = """#!/bin/bash
+verb=""
+for a in "$@"; do
+    case "$a" in new-session|kill-session|has-session) verb="$a";; esac
+done
+case "$verb" in
+    new-session)
+        envs=()
+        prev=""
+        for a in "$@"; do
+            [ "$prev" = "-e" ] && envs+=("$a")
+            prev="$a"
+        done
+        exec env ${envs[@]+"${envs[@]}"} bash -c "${@: -1}"
+        ;;
+    kill-session) exit 0;;
+    *) exit 1;;
+esac
+"""
+
+# npx обязан врать быстро (#583): настоящий качал бы chromium из сети.
+FAKE_NPX = "#!/bin/sh\nexit 1\n"
+
+
+def role_triple(which):
+    """Поставляемая роль (mop/skills/<роль>) -> (манифест-словарь, промпт,
+    digest). Тем же правилом, что сервер: soul.load каталога."""
+    from mop.common import soul
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                     "mop", "skills", which)
+    b = soul.load(d)
+    return b.manifest.to_dict(), b.prompt, b.digest
+
+
+def plant_soul(home, name, manifest, prompt, digest,
+               ready=None, files=None, creds=None):
+    """Разложить каталог инкарнации как его кладёт #590: bundle/ из
+    soul.yaml (JSON, как его пишет доставка) и промпта, рядом bus.json и
+    ready.json. -> путь корня. ready/files/creds -- подмены для проверок
+    расхождения; None -- честная раскладка (ready по тройке, creds --
+    принципал, files -- ровно два файла бандла)."""
+    root = os.path.join(home, ".config", "mop", "souls", name, INC)
+    bundle = os.path.join(root, "bundle")
+    os.makedirs(bundle, exist_ok=True)
+    planted = files if files is not None else {
+        "soul.yaml": json.dumps(manifest, sort_keys=True) + "\n",
+        manifest["prompt"]: prompt.decode(),
+    }
+    for fn, text in planted.items():
+        with open(os.path.join(bundle, fn), "w") as f:
+            f.write(text)
+    if creds is not None:
+        with open(os.path.join(root, "bus.json"), "w") as f:
+            json.dump(creds, f)
+    if ready is not None:
+        with open(os.path.join(root, "ready.json"), "w") as f:
+            json.dump(ready, f)
+    else:
+        with open(os.path.join(root, "ready.json"), "w") as f:
+            json.dump({"ready": True, "role": manifest["soul"],
+                       "soul_inc": INC, "soul_digest": digest}, f)
+    return root
+
+
+def fake_tools(home):
+    """Подмены (#583) -> путь каталога на PATH. claude -- в двух местах:
+    в теле врапер зовёт его и абсолютным путём ($HOME/.local/bin/claude,
+    строка запуска панели), и именем (`claude mcp add`, PATH); подмена
+    обязана перехватить оба. tmux/npx -- тем же каталогом."""
+    local = os.path.join(home, ".local", "bin")
+    d = os.path.join(home, "fake-bin")
+    os.makedirs(local)
+    os.makedirs(d)
+    for name, text in (("claude", FAKE_CLAUDE), ("tmux", FAKE_TMUX),
+                       ("npx", FAKE_NPX)):
+        for where in (local, d) if name == "claude" else (d,):
+            p = os.path.join(where, name)
+            with open(p, "w") as f:
+                f.write(text)
+            os.chmod(p, 0o755)
+    return d
+
+
+def run_wrapper(home, env, timeout=180):
+    """Врапер целиком в поддельном теле. -> процесс."""
+    import subprocess
+    return subprocess.run(["/bin/bash", "-c", spec.WRAPPER],
+                          env={**env, "HOME": home}, capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def fake_body(name, which=None, cont=False, plant=None, env_extra=None):
+    """Сгенерированное окружение задачи + поддельное тело. -> (env, дом,
+    путь журнала claude). Роль -- из mop/skills: манифест и промпт честные,
+    раскладка -- plant (по умолчанию честная)."""
+    import subprocess
+    home = tempfile.mkdtemp(prefix="mop-583-")
+    log = os.path.join(home, "claude.log")
+    # Пакет в теле ($HOME/mop): ролевые врата импортируют mop.common.soul.
+    os.symlink(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+               os.path.join(home, "mop"))
+    tools = fake_tools(home)
+    manifest = prompt = digest = None
+    if which is not None:
+        manifest, prompt, digest = role_triple(which)
+        root = (plant(home, name, manifest, prompt, digest)
+                if plant else plant_soul(home, name, manifest, prompt, digest))
+    env = dict(spec.task_env(name, ORIGIN, cont))
+    clone = os.path.join(home, "puppets", name)
+    os.makedirs(clone)
+    subprocess.run(["git", "init", "-q", clone], check=True)
+    subprocess.run(["git", "-C", clone, "remote", "add", "origin",
+                    env["PU_ORIGIN"]], check=True)
+    creds = os.path.join(home, f"bus-{env['PU_PROJECT']}.json")
+    with open(creds, "w") as f:
+        json.dump({"url": "nats://10.0.0.1:4222",
+                   "user": f"puppet-{env['PU_PROJECT']}", "password": "p"}, f)
+    env.update({
+        "PU_CLONE": clone,
+        "PU_TARGET": os.path.join(home, f"target-{name}"),
+        "PU_SECRETS": os.path.join(home, "secrets.env"),
+        "PU_PROJECT_CREDS": creds,
+        "PU_SECRETS_DIR": os.path.join(home, "secrets"),
+        "PU_LLM_ENV": "", "PU_LLM_KEY_VAR": "", "PU_LLM_AUTH_VAR": "",
+        "PU_SEED": "",
+        "HOME": home, "MOP_FAKE_LOG": log,
+        # Подмены -- первыми: путь задачи из спеки несёт {HOME} дома пула,
+        # но вызовы по имени (claude mcp add, npx, tmux) обязаны видеть
+        # подмены раньше настоящих claude/npx этой машины.
+        "PATH": tools + ":" + env["PATH"].replace(
+            "{HOME}/.cargo/bin", home + "/.cargo/bin").replace(
+            "{HOME}/.nvm", home + "/.nvm").replace("{HOME}", home),
+    })
+    if which is not None:
+        # Ролевые поля -- руками: contract окружения спеки проверяет свой
+        # случай ниже, а здесь от него не зависит.
+        env.update({"PU_SOUL": manifest["soul"], "PU_SOUL_DIGEST": digest,
+                    "PU_SOUL_INC": INC,
+                    "PU_SOUL_DIR": os.path.join(
+                        home, ".config", "mop", "souls", name, INC),
+                    "PU_NODE": "node-a"})
+    if env_extra:
+        env.update(env_extra)
+    return env, home, log
+
+
+def launch_record(log):
+    """Журнал подмены claude -> (строка argv панели, {переменная:
+    значение}); без журнала -- (None, {}): модель не стартовала. Первая
+    строка журнала -- запуск панели: `mcp add` пишется в конец, после
+    строк окружения."""
+    if not os.path.exists(log):
+        return None, {}
+    lines = open(log).read().splitlines()
+    panel = next((l for l in lines if not l.startswith("MOP_")
+                  and not l.startswith("mcp ")), None)
+    env = dict(l.split("=", 1) for l in lines
+               if l.startswith("MOP_") and "=" in l)
+    return panel, env
+
+
+def role_section():
+    """Кусок ролевого старта -- ровно тот текст, что едет."""
+    w = spec.WRAPPER
+    if ROLE_BEGIN not in w or ROLE_END not in w:
+        return None
+    return w[w.index(ROLE_BEGIN):w.index(ROLE_END)]
+
+
+def check_role_startup_583(c):
+    import shutil
+    import subprocess
+    import tempfile
+    from mop import driver
+    from mop.common import soul  # noqa: F401 -- бандл-правило теста через role_triple
+
+    # (0) контракт окружения спеки: тройка -> PU_SOUL*, путь -- driver.soul_dir
+    manifest, prompt, digest = role_triple("puppet")
+    try:
+        role = spec.task_env("pu-mop-1", ORIGIN, False,
+                             soul=manifest["soul"], soul_digest=digest,
+                             soul_inc=INC)
+        bad = None
+    except TypeError as e:
+        role, bad = None, e
+    legacy = spec.task_env("pu-mop-1", ORIGIN, False)
+    if c.check("#583 task_env takes the role triple", not bad, bad):
+        for key, want in (("PU_SOUL", manifest["soul"]),
+                          ("PU_SOUL_DIGEST", digest), ("PU_SOUL_INC", INC),
+                          ("PU_SOUL_DIR", driver.soul_dir("pu-mop-1", INC))):
+            c.check(f"#583 {key} rides to the body",
+                    not (role.get(key) != want), f"{role.get(key)!r} != {want!r}")
+        c.check("#583 the role triple rides in PU_CARRY",
+                not (set(role["PU_CARRY"].split(",")) <
+                     {"PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC", "PU_SOUL_DIR"}),
+                role.get("PU_CARRY"))
+        c.check("#583 a role adds only its four keys to the task env",
+                not (set(role) - {"PU_CARRY", "PU_WRAPPER", "PU_SOUL",
+                                  "PU_SOUL_DIGEST", "PU_SOUL_INC",
+                                  "PU_SOUL_DIR"} != set(legacy)),
+                sorted(set(role) ^ set(legacy)))
+        c.check("#583 the role env carries no dollar and no secret",
+                not any("$" in v or "password" in v.lower()
+                        for v in role.values()), sorted(role))
+        c.check("#583 the role must not move the template version",
+                not (spec.template_version(role) != spec.template_version(legacy)),
+                "role keys are the puppet's own data, like its name")
+    c.check("#583 task_env carries no node name: the node is the launcher's to name",
+            not ("PU_NODE" in legacy or (role is not None and "PU_NODE" in role)),
+            "PU_NODE comes from #590")
+
+    section = role_section()
+
+    # (1) легаси-джоб: прежний путь, ни одной новой ветки
+    env, home, log = fake_body("pu-mop-1")
+    try:
+        r = run_wrapper(home, env)
+        argv, senv = launch_record(log)
+        if c.check("#583 a legacy job still launches claude",
+                   not (r.returncode or argv is None),
+                   f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"):
+            c.check("#583 the legacy claude carries no role prompt flag",
+                    not ("--append-system-prompt" in argv), argv)
+            c.check("#583 the legacy claude keeps the shared hooks file",
+                    not ("--settings " not in argv
+                         or f"{home}/.config/mop/claude-hooks.json" not in argv),
+                    argv)
+            c.check("#583 the legacy claude rides the project credential",
+                    not (senv.get("MOP_BUS_CONFIG") != env["PU_PROJECT_CREDS"]
+                         or "MOP_SOUL_DIR" in senv or "MOP_PUPPET" in senv),
+                    senv)
+            c.check("#583 the legacy path registers mcp through claude itself",
+                    not ("mcp add --scope user mop" not in open(log).read()),
+                    "no `claude mcp add` in the journal")
+    finally:
+        shutil.rmtree(home)
+
+    if not c.check("#583 the wrapper has a role startup section",
+                   not (section is None)):
+        return
+    code = "\n".join(l for l in section.splitlines()
+                     if not l.lstrip().startswith("#"))
+    c.check("#583 the role branch is data, no role name is checked",
+            not re.search(r"\b(master|builder|puppet)\b", code),
+            re.findall(r"\b(?:master|builder|puppet)\b", code))
+    c.check("#583 the gate heredoc is quoted: no shell expansion of python",
+            not ("<<'PY'" not in section))
+
+    # (2) роль: старт с промптом бандла, своим кредом и своими настройками
+    env, home, log = fake_body("pu-mop-1", "puppet")
+    try:
+        r = run_wrapper(home, env)
+        argv, senv = launch_record(log)
+        if c.check("#583 a role job launches claude",
+                   not (r.returncode or argv is None),
+                   f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:300]}"):
+            c.check("#583 the claude of a role carries the bundle's prompt",
+                    not (f"--append-system-prompt-file {env['PU_SOUL_DIR']}/bundle/soul.md"
+                         not in argv), argv)
+            prompt_path = argv.split("--append-system-prompt-file ", 1)[1].split()[0]
+            with open(prompt_path, "rb") as f:
+                c.check("#583 the appended prompt is the role's own bytes",
+                        not (f.read() != role_triple("puppet")[1]), prompt_path)
+            settings = f"{home}/.config/mop/claude/pu-mop-1/settings.json"
+            mcp = f"{home}/.config/mop/claude/pu-mop-1/mcp.json"
+            c.check("#583 the role session uses per-puppet --settings",
+                    not (f"--settings {settings}" not in argv), argv)
+            c.check("#583 the role session uses per-puppet --mcp-config",
+                    not (f"--mcp-config {mcp}" not in argv), argv)
+            c.check("#583 the role session registers no user-scope mcp",
+                    not ("mcp add --scope user mop" in open(log).read()),
+                    "claude mcp add ran")
+            with open(settings) as f:
+                doc = json.load(f)
+            c.check("#583 the per-puppet settings carry hooks and statusline",
+                    not (set(doc.get("hooks", {})) != HOOK_EVENTS
+                         or "statusLine" not in doc), sorted(doc))
+            with open(mcp) as f:
+                doc = json.load(f)
+            c.check("#583 the per-puppet mcp config names the pool's server",
+                    not (doc.get("mcpServers", {}).get("mop", {}).get("args")
+                         != ["mcp"]), doc)
+            c.check("#583 the role session rides the principal's credential",
+                    not (senv.get("MOP_BUS_CONFIG")
+                         != f"{env['PU_SOUL_DIR']}/bus.json"), senv)
+            c.check("#583 the role session sees its soul, name and node",
+                    not (senv.get("MOP_SOUL_DIR") != f"{env['PU_SOUL_DIR']}/bundle"
+                         or senv.get("MOP_PUPPET") != "pu-mop-1"
+                         or senv.get("MOP_NODE") != "node-a"), senv)
+    finally:
+        shutil.rmtree(home)
+
+    # (3) две роли на одном доме: настройки изолированы
+    first = second = None
+    for name, which in (("pu-mop-1", "puppet"), ("pu-mop-2", "builder")):
+        env, home, log = fake_body(name, which)
+        try:
+            r = run_wrapper(home, env)
+            argv, _ = launch_record(log)
+            if which == "puppet":
+                first = (r, argv)
+            else:
+                second = (r, argv)
+        finally:
+            shutil.rmtree(home)
+    if c.check("#583 two roles on one home both launch",
+               not (first is None or second is None
+                    or first[0].returncode or second[0].returncode)):
+        a, b = first[1], second[1]
+        c.check("#583 each role gets its own settings file",
+                not (a == b or "/claude/pu-mop-1/" not in a
+                     or "/claude/pu-mop-2/" not in b), f"{a} vs {b}")
+        c.check("#583 each role gets its own prompt bytes",
+                not (a.split("--append-system-prompt-file ", 1)[1].split()[0]
+                     == b.split("--append-system-prompt-file ", 1)[1].split()[0]),
+                "the same prompt file for two roles")
+
+    # (4) промпт роли живёт и на продолжении истории
+    env, home, log = fake_body("pu-mop-1", "puppet", cont=True,
+                               env_extra={"PU_CONTINUE": "tok-583"})
+    try:
+        marker = os.path.join(env["PU_CLONE"], ".git", "mop-continue")
+        with open(marker, "w") as f:
+            f.write("tok-583")
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        if c.check("#583 a resumed role session launches",
+                   not (r.returncode or argv is None),
+                   f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:300]}"):
+            c.check("#583 the resume carries both --continue and the prompt",
+                    not ("--continue" not in argv
+                         or "--append-system-prompt-file" not in argv), argv)
+    finally:
+        shutil.rmtree(home)
+
+    # (5) три роли -- один старт: разница только в данных
+    starts = []
+    for which in ("puppet", "builder", "master"):
+        env, home, log = fake_body("pu-mop-1", which)
+        try:
+            r = run_wrapper(home, env)
+            argv, _ = launch_record(log)
+            if argv is not None:
+                starts.append(re.sub(re.escape(env["PU_SOUL_DIR"]), "$SOUL", argv))
+        finally:
+            shutil.rmtree(home)
+    c.check("#583 three roles start identically, differences are data",
+            not (len(starts) != 3 or len(set(starts)) != 1), starts)
+
+    # (6) расхождение -- отказ до модели, без легаси-отката
+    bad_ready = {"ready": True, "role": "puppet", "soul_inc": INC,
+                 "soul_digest": "ff" * 32}
+    tampered = {  # бандл с подменённым промптом: digest не сойдётся с метой
+        "soul.yaml": json.dumps(role_triple("puppet")[0], sort_keys=True) + "\n",
+        "soul.md": "rewrite me",
+    }
+    no_prompt = {"soul.yaml": json.dumps(role_triple("puppet")[0],
+                                         sort_keys=True) + "\n"}
+    extra_file = dict(no_prompt)
+    extra_file["soul.md"] = role_triple("puppet")[1].decode()
+    extra_file["stowaway.txt"] = "x"
+    m, p, d = role_triple("puppet")
+    cases = [
+        ("no ready receipt", lambda h, n: plant_soul(h, n, m, p, d, ready=False)),
+        ("the receipt names another digest", lambda h, n: plant_soul(
+            h, n, m, p, d, ready=bad_ready)),
+        ("the bundle hash does not pin the meta", lambda h, n: plant_soul(
+            h, n, m, p, d, files=tampered)),
+        ("a partial bundle", lambda h, n: plant_soul(h, n, m, p, d, files=no_prompt)),
+        ("a stowaway file in the bundle", lambda h, n: plant_soul(
+            h, n, m, p, d, files=extra_file)),
+        ("no principal credential", lambda h, n: plant_soul(h, n, m, p, d,
+                                                            ready=False)),
+    ]
+    for what, plant in cases:
+        env, home, log = fake_body("pu-mop-1", "puppet", plant=plant)
+        try:
+            r = run_wrapper(home, env)
+            argv, _ = launch_record(log)
+            c.check(f"#583 {what}: refusal before the model, with a reason",
+                    not (r.returncode == 0 or argv is not None
+                         or not r.stderr.strip()),
+                    f"exit {r.returncode}, launched {argv is not None}")
+        finally:
+            shutil.rmtree(home)
+    env, home, log = fake_body("pu-mop-1", "puppet",
+                               env_extra={"PU_NODE": ""})
+    try:
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        c.check("#583 a role without a node identity refuses, no hostname guess",
+                not (r.returncode == 0 or argv is not None),
+                f"exit {r.returncode}, launched {argv is not None}")
+    finally:
+        shutil.rmtree(home)
+
+    # (7) кавычки и флаг: вратам нечего экранировать, флаг знает CLI
+    c.check("#583 the wrapper still travels base64: no $$ in it",
+            not ("$$" in spec.WRAPPER))
+    for inputs in SPEC_INPUTS:
+        job = spec.job_spec(*inputs[:2], cont=inputs[2])
+        plain = json.dumps(job)
+        c.check(f"{inputs[0]}: no substitution outside the base64 wrapper (#583)",
+                not (not set(re.findall(r"\$\{[^}]*\}", plain))
+                     <= {spec.PROJECTS_TARGET, spec.MEM_CAP_TARGET}),
+                sorted(set(re.findall(r"\$\{[^}]*\}", plain))))
+    claude = shutil.which("claude", path=os.environ["PATH"])
+    if claude is not None:
+        r = subprocess.run([claude, "--help"], capture_output=True, text=True,
+                           timeout=60)
+        c.check("#583 the installed claude knows --append-system-prompt[-file]",
+                not (re.search(r"--append-system-prompt(\[-file\])?",
+                               r.stdout + r.stderr) is None),
+                "the flag is absent from --help")
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -1176,7 +1628,7 @@ def main():
                check_memory_197, check_project_asks_197, check_spec_memory_197,
                check_nomad_order_197, check_claude_hooks_223, check_hook_events_341,
                check_no_feedback_420, check_statusline_455, check_job_meta_265,
-               check_node_pin_289):
+               check_node_pin_289, check_role_startup_583):
         fn(c)
 
     for what, j, want in STALE:
