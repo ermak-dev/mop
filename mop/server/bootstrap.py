@@ -208,7 +208,7 @@ def store(root, project, text):
         # С файлом уходят и отправленное с итогом (#334): их папета больше нет
         # на сервере, и чужой старый итог не должен прочитаться своим.
         for p in (tasks_path, vars_path, _sent_path(root, project),
-                  _result_path(root, project)):
+                  _result_path(root, project), *_progress_paths(root, project)):
             try:
                 os.unlink(p)
             except FileNotFoundError:
@@ -301,6 +301,46 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
             "-e", json.dumps(extra, ensure_ascii=False)]
 
 
+PROGRESS_BYTES = 65536
+PROGRESS_LINES = 500
+_PROGRESS = re.compile(r"^(?:PLAY|TASK) \[(.*?)\](?: \*+)?$|^((?:ok|changed|skipping|failed|fatal): \[[^\]\r\n]+\])")
+
+
+def _progress_paths(root, name):
+    return (os.path.join(root, f"{name}-progress.log"),
+            os.path.join(root, f"{name}-progress.json"))
+
+
+def read_progress(root, name, alloc):
+    """Ход текущей аллокации: только задачи и их статусы, не command/stdout.
+    Вывод доступен во время прогона; прежняя аллокация не выдаётся за новую."""
+    log, meta = _progress_paths(root, name)
+    empty = {"lines": [], "running": False, "alloc": None, "truncated": False}
+    try:
+        with open(meta, encoding="utf-8") as stream:
+            record = json.load(stream)
+    except FileNotFoundError:
+        return empty
+    if record.get("alloc") != alloc:
+        return empty
+    try:
+        with open(log, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - PROGRESS_BYTES))
+            text = stream.read(PROGRESS_BYTES).decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return empty
+    lines = []
+    for line in text.splitlines():
+        matched = _PROGRESS.match(line)
+        if matched:
+            lines.append(line.split(" =>", 1)[0].rstrip(" *")[:1024])
+    return {"lines": lines[-PROGRESS_LINES:], "running": record.get("running") is True,
+            "alloc": alloc, "at": record.get("at"),
+            "truncated": size > PROGRESS_BYTES or len(lines) > PROGRESS_LINES}
+
+
 # ─── сервер ──────────────────────────────────────────────────────────────
 def play(req, project):
     """Сыграть bootstrap проекта в песочницу папета. -> {ok, played, ...}.
@@ -315,16 +355,27 @@ def play(req, project):
     cmd = argv(PLAYBOOK, req.get("address") or "", config.get("MOP_USER"), KEY,
                playvars.playbook_vars(), project, name, driver.clone_dir(name),
                tasks, of_vars, secrets)
+    log, meta = _progress_paths(ROOT, name)
+    fsutil.write_private(log, "")
+    progress = {"alloc": req.get("alloc"), "running": True, "at": req.get("started_at")}
+    fsutil.write_private(meta, json.dumps(progress))
     t0 = time.time()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT - 10,
-                           env={**os.environ, "ANSIBLE_CONFIG": os.path.join(config.PROJECT, "ansible.cfg")})
+        with open(log, "w+", encoding="utf-8") as output:
+            r = subprocess.run(cmd, stdout=output, stderr=subprocess.STDOUT,
+                               text=True, timeout=TIMEOUT - 10,
+                               env={**os.environ, "PYTHONUNBUFFERED": "1", "ANSIBLE_FORCE_COLOR": "0",
+                                    "ANSIBLE_CONFIG": os.path.join(config.PROJECT, "ansible.cfg")})
+            output.seek(0)
+            text = output.read()
     except subprocess.TimeoutExpired:
         return {"ok": False, "played": True, "rc": None,
                 "seconds": round(time.time() - t0, 1),
                 "tail": f"bootstrap of {name} did not finish in {TIMEOUT - 10}s — "
                         f"keep bootstrap.yaml in seconds, bake the heavy part into sandbox.yaml"}
-    return outcome(r.returncode, r.stdout + r.stderr, time.time() - t0)
+    finally:
+        fsutil.write_private(meta, json.dumps({**progress, "running": False}))
+    return outcome(r.returncode, text, time.time() - t0)
 
 
 # Строка провала задачи ansible: `fatal: [хост]: FAILED! => {...}` или, у
