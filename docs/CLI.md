@@ -229,6 +229,17 @@ own transcripts, so a puppet whose clone was removed no longer counts. In a
 master shell the picture is the project's, not the pool's.
 ```
 
+#### mop stop
+
+```text
+stop a puppet job: mop stop <name>
+
+Operator only. Stops initialization, the current session and automatic
+restarts. The container, clone and bootstrap workspace are kept.
+Use mop update <name> to start the job again. This is not Escape for
+interrupting a Claude turn, and it does not delete the puppet.
+```
+
 #### mop tail
 
 ```text

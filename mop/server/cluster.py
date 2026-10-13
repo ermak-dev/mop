@@ -483,6 +483,20 @@ def _stop(project, req):
     return {"ok": True, "alloc": alloc.id}
 
 
+def _job_stop(project, req):
+    """Оператор останавливает задание, сохраняя тело и workspace (#608)."""
+    name = req["name"]
+    job = _api().get_job(name)
+    if not job:
+        return {"error": f"no job {name}"}
+    origin = JobMeta.from_job(job).origin
+    if not origin:
+        return {"error": f"{name} carries no origin: not a pool puppet"}
+    _api().deregister(name, purge=False)
+    return {"ok": True, "name": name, "stopped": True,
+            "project": puppets.project_of(origin)}
+
+
 def _delete(project, req):
     """Снять джоб. purge=False оставляет его в истории остановленным — так
     работает рецикл: джоб останавливается, рабочая копия сносится, и та же
@@ -1010,6 +1024,7 @@ VERBS = {
     "update":         Verb(_gated(_update), PROJECT, True,  True),
     "restart":        Verb(_gated(_restart), PROJECT, True,  True),
     "stop":           Verb(_gated(_stop), PROJECT, True,  True),
+    "job_stop":       Verb(_job_stop,       ADMIN,   True,  True),
     "delete":         Verb(_gated(_delete), PROJECT, True,  True),
     "alloc":          Verb(_alloc,          PROJECT, True,  False),
     "stderr":         Verb(_stderr,         PROJECT, True,  False),
