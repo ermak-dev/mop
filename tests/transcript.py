@@ -263,9 +263,24 @@ def check_stale_epoch_rotation_truncation_and_regrowth(c):
         regrown = session.history(cwd, truncated["cursor"])
         c.check("truncate and regrow detected by byte fences", regrown["reset"])
         c.check("new generation stays stable", not session.history(cwd, regrown["cursor"])["reset"])
+        # HYPOTHESIS: часы файловой системы в Docker могут не различить две
+        # быстрые записи даже в ns-полях; одинаковые байты и вся метаинформация
+        # не дают наблюдаемого признака перезаписи (CI 5176, test 28729).
+        # SOLUTION: после той же записи явно сдвигаем mtime на секунду и
+        # проверяем предусловие новой наблюдаемой версии, не ослабляя reset.
+        before = os.stat(path2)
         put(path2, [{"type": "regrown", "padding": "b" * 400}])
+        os.utime(path2, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        after = os.stat(path2)
+        c.expect("identical rewrite keeps inode and size",
+                 (after.st_dev, after.st_ino, after.st_size),
+                 (before.st_dev, before.st_ino, before.st_size))
+        c.check("identical rewrite presents a distinct observable file version",
+                after.st_mtime_ns != session._history_cursor(regrown["cursor"])["mtime"])
         identical_rewrite = session.history(cwd, regrown["cursor"])
         c.check("same-size truncate and rewrite resets even with identical bytes", identical_rewrite["reset"])
+        # RESULT: reset проверяется при действительно изменённой версии файла.
+        # STATUS: FIXED — see #597
 
 
 def check_limits_escaping_and_giant_record_progress(c):
