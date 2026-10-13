@@ -25,6 +25,8 @@ import base64
 import io
 import json
 import os
+import re
+import shlex
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -104,7 +106,7 @@ class FakeBus:
         self.log, self.project, self.sink = [], project, None
         self.replies = {"initial_identity": identity or {}, "bootstrap": bootstrap or {}}
         fd, self.creds_file = tempfile.mkstemp(prefix="mop-node-creds-")
-        user = node if node.startswith("node-") else "node-" + node
+        user = node  # имя пользователя -- как есть: и узел, и «не узел»
         with os.fdopen(fd, "w") as f:
             json.dump({"url": "nats://10.0.0.1:4222", "user": user,
                        "password": "node-pass"}, f)
@@ -202,7 +204,7 @@ class Body:
         return {"written": [p for p, _ in files]}
 
 
-def launch(body, reply, env, name=NAME):
+def launch(body, reply, env, name=NAME, node=NODE_USER):
     """main() с подменённым миром. -> (код|SystemExit-текст, stdout, лог).
     Лог -- push'и, шеллы в теле и запуск врапера в порядке исполнения."""
     body.triple = (env.get("NOMAD_META_soul"), env.get("NOMAD_META_soul_digest"),
@@ -218,7 +220,7 @@ def launch(body, reply, env, name=NAME):
         receipt = {"ok": True}
     elif body.identity == "wrong-triple":
         receipt = {**receipt, "role": "builder"}
-    transport = FakeBus(identity=receipt, bootstrap=reply)
+    transport = FakeBus(identity=receipt, bootstrap=reply, node=node)
     transport.sink = body.log
     if body.identity == "raise":
         transport.raises(bus.BusError("the agent did not answer"))
@@ -274,6 +276,18 @@ def launched(log):
 
 def creds_in(body, path):
     return json.loads(body.files[path]) if path in body.files else None
+
+
+def wrapper_script(body):
+    """Текст внутреннего врапера, долетевший в тело (последняя стадия)."""
+    return next((v.decode() for p, v in body.files.items()
+                 if p.endswith(".cache/mop-wrapper.sh")), "")
+
+
+def _export(script, key):
+    """Значение export <key> из прелюдии врапера: None -- нет такого экспорта."""
+    m = re.search(rf"^export {key}=(.*)$", script, re.M)
+    return shlex.split(m.group(1))[0] if m else None
 
 
 def main():
@@ -453,6 +467,36 @@ def main():
     c.check("#590 the password never reaches argv",
             not any(SECRET in " ".join(a) for k, a in log if k in ("sh", "launch")), brief(log))
     c.check("#590 the password is not printed", SECRET not in out, out)
+
+    # #583-согласованные поля окружения тела (#590): явные значения роли --
+    # в мету джоба их пишет сервер, и обёртка читает их из окружения, а не
+    # из файла конфигурации. MOP_SOUL_DIR -- корень/бандл, не корень;
+    # PU_NODE -- из авторизованного креда узла, без падения в hostname
+    # контейнера. Легаси-джоб этих полей не получает.
+    w = wrapper_script(body)
+    c.expect("#590 the wrapper exports PU_SOUL", _export(w, "PU_SOUL"), "puppet")
+    c.expect("#590 the wrapper exports PU_SOUL_DIGEST", _export(w, "PU_SOUL_DIGEST"), digest)
+    c.expect("#590 the wrapper exports PU_SOUL_INC", _export(w, "PU_SOUL_INC"), INC)
+    c.expect("#590 the wrapper exports PU_SOUL_DIR", _export(w, "PU_SOUL_DIR"), d)
+    c.expect("#590 the wrapper exports MOP_SOUL_DIR", _export(w, "MOP_SOUL_DIR"),
+             f"{d}/bundle" if d else None)
+    c.expect("#590 the wrapper exports PU_NODE", _export(w, "PU_NODE"), NODE_USER[5:])
+    # Кред без узлового имени -- не узел: PU_NODE не выдумывается из hostname
+    # контейнера, старт роли отказывает. #583: имя узла -- только из креда.
+    alien_body = Body()
+    acode, aout, alog, _ = launch(alien_body, good, env, node="puppet-mop")
+    c.check("#590 a non-node credential refuses the role start",
+            refused(acode) and "node credential" in acode and not launched(alog),
+            (acode, brief(alog)))
+
+    legacy_body = Body()
+    lcode, lout, llog, _ = launch(legacy_body, legacy_reply(), {})
+    c.check("#590 legacy: no soul environment is carried",
+            not any(_export(wrapper_script(legacy_body), k)
+                    for k in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC",
+                              "PU_SOUL_DIR", "MOP_SOUL_DIR", "PU_NODE")),
+            wrapper_script(legacy_body))
+    c.expect("#590 legacy still launches", lcode, 0)
 
     # Identity хозяина: отказ глагола -- отказ старта, без метки.
     for mode, why in (("error", "another owner"), ("raise", "did not answer")):

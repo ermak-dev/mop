@@ -67,6 +67,31 @@ def _inner_script():
     return _prelude(os.environ) + base64.b64decode(blob).decode()
 
 
+def role_env(role, node, root, bundle):
+    """Экспорт ролевых полей в прелюдию врапера (#590, имена согласованы с
+    #583): явные значения -- в тело, обёртка читает их из окружения, а не
+    из файла конфигурации. MOP_SOUL_DIR -- корень/бандл, не корень:
+    обёртке нужен сам бандл. Чистая. -> строки export."""
+    fields = {"PU_SOUL": role.soul, "PU_SOUL_DIGEST": role.soul_digest,
+              "PU_SOUL_INC": role.soul_inc, "PU_SOUL_DIR": root,
+              "MOP_SOUL_DIR": bundle, "PU_NODE": node}
+    return [f"export {k}={shlex.quote(v)}\n" for k, v in fields.items()]
+
+
+def _inner_script_role(role, node, root):
+    """Внутренний врапер ролевого джоба: прелюдия спеки + явные ролевые
+    поля (#583), затем blob. Без PU_WRAPPER -- тот же отказ, что и у
+    врапера без роли."""
+    blob = os.environ.get("PU_WRAPPER") or ""
+    if not blob:
+        sys.exit("no PU_WRAPPER in the task environment — this job spec predates "
+                 "the wrapper split; re-register the puppet: mop recycle <name>")
+    return (_prelude(os.environ)
+            + "".join(role_env(role, node, root,
+                               os.path.join(root, driver.SOUL_BUNDLE)))
+            + base64.b64decode(blob).decode())
+
+
 def _prelude(environ):
     """Экспорт окружения задачи для скрипта в теле: переменные спеки живут
     в процессе задачи на узле, а скрипт исполняется в теле."""
@@ -443,6 +468,14 @@ def main(argv):
         role = expected_role(os.environ)
     except ValueError as e:
         sys.exit(f"role delivery of {name} refused: {e}")
+    # Имя узла -- из авторизованного креда узла, не из hostname тела
+    # (#583): контейнер PVE не знает имени узла, на котором стоит. Кред не
+    # узловой -- не узел: отказ до тела, без выдумывания имени. Легаси без
+    # узлового креда поднимается как раньше.
+    node = node_of_credentials()
+    if role is not None and node is None:
+        sys.exit(f"role delivery of {name} refused: no node credential to "
+                 f"name the node — PU_NODE is never a container hostname")
     d = driver.current()
 
     r = asyncio.run(d.ensure(name, ensure_params(name, os.environ)))
@@ -512,7 +545,9 @@ def main(argv):
         deliver_legacy(d, name, b)
 
     inner = os.path.join(config.get("MOP_HOME"), INNER)
-    w = asyncio.run(d.push(name, inner, _inner_script().encode()))
+    script = (_inner_script_role(role, node, driver.soul_dir(name, role.soul_inc))
+              if role is not None else _inner_script())
+    w = asyncio.run(d.push(name, inner, script.encode()))
     if w.get("error"):
         sys.exit(f"the wrapper did not reach the body of {name}: {w['error']}")
 
