@@ -43,11 +43,11 @@ class TerminalBridge:
     """
 
     def __init__(self, transport=None, resolve=None, *, audit=lambda record: None,
-                 clock=time.monotonic, maximum=8, idle=60):
+                 clock=time.monotonic, maximum=8, idle=60, writer_idle=30):
         self.transport = transport or bus.request
         self.resolve = resolve or target_context
         self.audit, self.clock = audit, clock
-        self.maximum, self.idle = maximum, idle
+        self.maximum, self.idle, self.writer_idle = maximum, idle, writer_idle
         self._lock = threading.RLock()
         self._bindings, self._writers = {}, {}
         self._pending = 0
@@ -56,6 +56,8 @@ class TerminalBridge:
     def _actor(authorize):
         try:
             login, role, browser = authorize()
+        except BridgeError:
+            raise
         except Exception:
             raise BridgeError(401, "authentication provider unavailable") from None
         if not login:
@@ -65,6 +67,12 @@ class TerminalBridge:
         if not isinstance(browser, str) or not browser:
             raise BridgeError(401, "browser session required")
         return login, browser
+
+    def _touch(self, tid, entry):
+        with self._lock:
+            if self._bindings.get(tid) is entry:
+                duration = self.writer_idle if entry["mode"] == "rw" else self.idle
+                entry["until"] = self.clock() + duration
 
     def _rpc(self, node, verb, **fields):
         try:
@@ -157,7 +165,8 @@ class TerminalBridge:
             if not node or not project or project == bus.ADMIN:
                 raise BridgeError(409, "cannot determine the target project")
             entry = {"name": name, "node": node, "project": project,
-                     "actor": actor, "mode": mode, "until": self.clock() + self.idle}
+                     "actor": actor, "mode": mode,
+                     "until": self.clock() + (self.writer_idle if mode == "rw" else self.idle)}
             if mode == "rw":
                 try:
                     facts = self._rpc(node, "state", project=project, name=name)
@@ -192,6 +201,7 @@ class TerminalBridge:
                 if reason:
                     e.error += f"; {reason}"
                 raise
+            self._touch(tid, entry)
             return {key: got[key] for key in ("tid", "epoch", "cursor", "mode", "cols", "rows")}
         finally:
             with self._lock:
@@ -219,6 +229,19 @@ class TerminalBridge:
         if not _integer(cursor, 0, 2**63 - 1) or not _integer(wait, 0, 15):
             raise BridgeError(400, "invalid terminal cursor or wait")
         entry = self._entry(name, tid, authorize)
+        with self._lock:
+            if self._bindings.get(tid) is not entry:
+                raise BridgeError(404, "no such terminal")
+            if entry.get("reading"):
+                raise BridgeError(409, "terminal read is already in progress")
+            entry["reading"] = True
+        try:
+            return self._read_frame(name, tid, cursor, authorize, wait, entry)
+        finally:
+            with self._lock:
+                entry["reading"] = False
+
+    def _read_frame(self, name, tid, cursor, authorize, wait, entry):
         got = self._rpc(entry["node"], "term_read", project=bus.ADMIN,
                         name=name, tid=tid, owner=entry["actor"][0], cursor=cursor, wait=wait)
         try:
@@ -246,9 +269,7 @@ class TerminalBridge:
             if reason:
                 got["error"] = reason
         else:
-            with self._lock:
-                if self._bindings.get(tid) is entry:
-                    entry["until"] = self.clock() + self.idle
+            self._touch(tid, entry)
         return {key: got.get(key) for key in ("data", "cursor", "reset", "closed", "exit", "epoch", "error")}
 
     def write(self, name, tid, seq, data, authorize):
@@ -265,8 +286,9 @@ class TerminalBridge:
             got = self._rpc(entry["node"], "term_write", project=bus.ADMIN,
                             name=name, tid=tid, owner=entry["actor"][0], seq=seq, data=data)
             if (got.get("seq") != seq or got.get("outcome") not in ("written", "duplicate")
-                    or not _integer(got.get("written"), 0, len(raw))):
+                    or not _integer(got.get("written"), len(raw), len(raw))):
                 raise BridgeError(502, "terminal input could not be confirmed")
+            self._touch(tid, entry)
             return {key: got.get(key) for key in ("written", "seq", "outcome")}
         except BridgeError as e:
             return {"outcome": "refused" if e.code == 409 else "unknown",
@@ -276,8 +298,11 @@ class TerminalBridge:
         if not _integer(cols, 20, 500) or not _integer(rows, 5, 200):
             raise BridgeError(400, "invalid terminal dimensions")
         entry = self._entry(name, tid, authorize, write=True)
-        return self._rpc(entry["node"], "term_resize", project=bus.ADMIN,
-                         name=name, tid=tid, owner=entry["actor"][0], cols=cols, rows=rows)
+        got = self._rpc(entry["node"], "term_resize", project=bus.ADMIN,
+                        name=name, tid=tid, owner=entry["actor"][0], cols=cols, rows=rows)
+        if got.get("ok") is True:
+            self._touch(tid, entry)
+        return got
 
     def close(self, name, tid, authorize):
         self._entry(name, tid, authorize)

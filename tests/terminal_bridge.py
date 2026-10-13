@@ -139,6 +139,14 @@ def main():
 
     r = Rig()
     tid = r.open()["tid"]
+
+    def provider_failed():
+        raise BridgeError(503, "login provider unavailable")
+
+    refused("#599 a structured authentication failure keeps its code and reason",
+            lambda: r.bridge.read(target, tid, 0, provider_failed), 503)
+    r = Rig()
+    tid = r.open()["tid"]
     for seq, data in ((0, "YWJj"), (True, "YWJj"), (1, "not-base64"),
                       (1, base64.b64encode(b"x" * 4097).decode())):
         refused("#599 input schema fails before effect",
@@ -162,6 +170,9 @@ def main():
     r.answer = {"written": 3, "seq": 2, "outcome": "written", "secret_extra": "hidden"}
     got = r.bridge.write(target, tid, 2, "YWJj", r.auth)
     c.check("#599 only declared input result fields leave the bridge", "secret_extra" not in got, got)
+    r.answer = {"written": 1, "seq": 3, "outcome": "written"}
+    c.expect("#599 a partial byte receipt cannot claim full input written",
+             r.bridge.write(target, tid, 3, "YWJj", r.auth)["outcome"], "unknown")
     r.answer = {"data": "YWJj", "cursor": 1, "reset": False,
                 "closed": False, "exit": None, "epoch": "epoch-a"}
     refused("#599 a cursor cannot move backwards without reset",
@@ -181,9 +192,54 @@ def main():
     c.check("#599 expiration closes only attach clients",
             any(v == "term_close" for _, v, _ in r.calls)
             and not any(v in ("kill", "stop", "restart", "delete") for _, v, _ in r.calls), r.calls)
+    r = Rig()
+    r.open()
+    r.now += 31
+    try:
+        new = r.open()
+    except BridgeError as e:
+        c.check("#599 writer expiry agrees with node's 30 seconds", False, e.error)
+    else:
+        c.expect("#599 writer expiry agrees with node's 30 seconds", new["mode"], "rw")
+    r = Rig()
+    tid = r.open()["tid"]
+    for seq in (1, 2, 3):
+        r.now += 25
+        try:
+            got = r.bridge.write(target, tid, seq, "YWJj", r.auth)
+        except BridgeError as e:
+            c.check("#599 successful keyboard activity renews control", False, e.error)
+        else:
+            c.expect("#599 successful keyboard activity renews control", got["outcome"], "written")
     r = Rig(maximum=1)
     r.open("ro")
     refused("#599 server has a hard attachment cap", lambda: r.open("ro"), 429)
+    r = Rig()
+    tid = r.open()["tid"]
+    read_entered, read_release = threading.Event(), threading.Event()
+    read_results = []
+
+    def blocked_read(node, verb, **fields):
+        if verb == "term_read":
+            read_entered.set()
+            read_release.wait(3)
+        return r.call(node, verb, **fields)
+
+    r.bridge.transport = blocked_read
+    thread = threading.Thread(target=lambda: read_results.append(r.bridge.read(target, tid, 0, r.auth)))
+    thread.start()
+    try:
+        c.check("#599 one long poll reserves its private reader", read_entered.wait(2))
+        c.expect("#599 keyboard control does not await a long poll",
+                 r.bridge.write(target, tid, 1, "YWJj", r.auth)["outcome"], "written")
+        refused("#599 duplicate long polls are bounded per attachment",
+                lambda: r.bridge.read(target, tid, 0, r.auth), 409)
+    finally:
+        read_release.set()
+        thread.join(3)
+    c.check("#599 the first reader completes without blocking keyboard control",
+            len(read_results) == 1, read_results)
+
     r = Rig()
     entered, release = threading.Event(), threading.Event()
     results = []
