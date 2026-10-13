@@ -105,7 +105,8 @@ def soul_env(api, limit=None, roles=True, root=None, catalogue=(PACKAGED,)):
         with patched(projects, SNAPSHOT_DIR=d), \
                 patched(cluster.config, get=setting), \
                 patched(cluster, SOUL_ROOT=g), \
-                patched(cluster, SOUL_CATALOGUE=list(catalogue)):
+                patched(cluster, SOUL_CATALOGUE=list(catalogue)), \
+                patched(spec, SOUL_STORE=g):
             yield g
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -147,30 +148,36 @@ def check_spec_triple_582(c):
     требует изоляционный драйвер способностью, а не именем роли."""
     triple = dict(soul="puppet", soul_digest=PUPPET_DIGEST,
                   soul_inc=soulmod.incarnation())
-    with_role = try_spec(c, "#582 job_spec must accept the soul triple",
-                         name="pu-alpha-1", origin=ALPHA, branch="b1",
-                         **triple)
-    legacy = spec.job_spec("pu-alpha-1", ALPHA, branch="b1")["Job"]
-    if with_role is None:
-        return
-    with_role = with_role["Job"]
-    m = with_role["Meta"]
-    c.check("#582 the triple rides Meta whole (soul, soul_digest, soul_inc)",
-            (m.get("soul"), m.get("soul_digest"), m.get("soul_inc"))
-            == ("puppet", PUPPET_DIGEST, triple["soul_inc"]), m)
-    c.check("#582 a legacy spec carries no soul keys at all",
-            not [k for k in legacy["Meta"] if k.startswith("soul")],
-            legacy["Meta"])
-    c.check("#582 the role does not touch the task env or the template version",
-            with_role["TaskGroups"][0]["Tasks"][0]["Env"]
-            == legacy["TaskGroups"][0]["Tasks"][0]["Env"]
-            and with_role["Meta"][spec.SPEC_META]
-            == legacy["Meta"][spec.SPEC_META])
-    # Любой драйвер (puppet): дополнительного ограничения нет -- роль не
-    # должна выдавать имя за привилегию размещения (#579).
-    cons = [x["LTarget"] for x in with_role["Constraints"]]
-    c.check("#582 an any-driver role adds no placement constraint",
-            cons == [x["LTarget"] for x in legacy["Constraints"]], cons)
+    g = tempfile.mkdtemp(prefix="mop-test-582t-")
+    try:
+        with patched(spec, SOUL_STORE=g):
+            seed_grants(g)
+            with_role = try_spec(c, "#582 job_spec must accept the soul triple",
+                                 name="pu-alpha-1", origin=ALPHA, branch="b1",
+                                 **triple)
+            legacy = spec.job_spec("pu-alpha-1", ALPHA, branch="b1")["Job"]
+        if with_role is None:
+            return
+        with_role = with_role["Job"]
+        m = with_role["Meta"]
+        c.check("#582 the triple rides Meta whole (soul, soul_digest, soul_inc)",
+                (m.get("soul"), m.get("soul_digest"), m.get("soul_inc"))
+                == ("puppet", PUPPET_DIGEST, triple["soul_inc"]), m)
+        c.check("#582 a legacy spec carries no soul keys at all",
+                not [k for k in legacy["Meta"] if k.startswith("soul")],
+                legacy["Meta"])
+        c.check("#582 the role does not touch the task env or the template version",
+                with_role["TaskGroups"][0]["Tasks"][0]["Env"]
+                == legacy["TaskGroups"][0]["Tasks"][0]["Env"]
+                and with_role["Meta"][spec.SPEC_META]
+                == legacy["Meta"][spec.SPEC_META])
+        # Любой драйвер (puppet): дополнительного ограничения нет -- роль не
+        # должна выдавать имя за привилегию размещения (#579).
+        cons = [x["LTarget"] for x in with_role["Constraints"]]
+        c.check("#582 an any-driver role adds no placement constraint",
+                cons == [x["LTarget"] for x in legacy["Constraints"]], cons)
+    finally:
+        shutil.rmtree(g, ignore_errors=True)
 
 
 def check_spec_isolating_582(c):
@@ -338,19 +345,28 @@ def check_add_pending_before_nomad_582(c):
                 and retry.get("name") == (pending[0] or {}).get("job"),
                 (retry, after))
         # Захваченное имя чужим запросом не переезжает молча: имя из
-        # незавершённого резерва занято чужой регистрацией -- ретрай того
-        # же request_id обязан отказаться громко, а не поднять третью
-        # душу на одном джобе. Регистратор здесь всегда сломан: ретрай
-        # доходит до сверки, не до Nomad.
-        other = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
-                                      "_caller": "anton"})
-        api.broken = True
-        again = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
-                                      "soul": "puppet",
-                                      "request_id": "launch-1",
-                                      "_caller": "anton"})
-        c.check("#582 a reserved name taken by another request is a loud "
-                "refusal on retry", "error" in again, (other, again))
+        # незавершённого резерва занято ЧУЖОЙ регистрацией -- ретрай того
+        # же request_id обязан отказаться громко ДО Nomad, а не поднять
+        # третью душу на одном джобе. Регистратор здесь всегда сломан:
+        # доехавший до Nomad ретрай умер бы чужой ошибкой, а не отказом
+        # о имени.
+        api2 = _OnceBroken()
+        with soul_env(api2) as g2:
+            answer(api2, "alpha", {"verb": "add", "origin": ALPHA,
+                                   "soul": "puppet", "request_id": "solo-1",
+                                   "_caller": "anton"})
+            thief = answer(api2, "alpha", {"verb": "add", "origin": ALPHA,
+                                           "_caller": "anton"})
+            api2.broken = True
+            again = answer(api2, "alpha", {"verb": "add", "origin": ALPHA,
+                                           "soul": "puppet",
+                                           "request_id": "solo-1",
+                                           "_caller": "anton"})
+            c.check("#582 a reserved name taken by another registration "
+                    "is a loud refusal on retry",
+                    "error" in again and "pu-alpha-1" in again.get("error", "")
+                    and thief.get("name") == "pu-alpha-1"
+                    and len(_principals(g2)) == 1, (thief, again))
 
 
 def check_add_request_payload_582(c):
@@ -430,30 +446,35 @@ def check_add_legacy_untouched_582(c):
 
 
 def check_add_workspace_boundary_582(c):
-    """Делегированный принципал не поднимает папета своим текстом:
-    workspace/bootstrap_sent от grant-роли -- отказ до всего; человек
-    сохраняет сегодняшний путь (#579: bootstrap роли -- серверный,
-    операторски согласованный)."""
+    """Роль не поднимается клиентским текстом (#579): add с душой и
+    workspace/bootstrap_sent -- отказ до всего, кто бы ни просил -- у роли
+    bootstrap серверный, операторски согласованный. Делегированный
+    принципал до глагола вовсе не доезжает: легаси-rpc для него закрыт
+    ограждением #603 (здесь проверяем, что ограждение стоит; канал роли --
+    #603). Человек сохраняет сегодняшний путь: легаси-add со своим текстом."""
     api = FakeNomad()
-    grant_caller = "grant-" + "a" * 32
     with soul_env(api) as g:
         refused = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                         "soul": "puppet", "request_id": "r",
                                         "workspace": "- name: evil\n",
-                                        "_caller": grant_caller})
-        c.check("#582 a delegated add with client workspace text is refused",
+                                        "_caller": "anton"})
+        c.check("#582 a role add with client workspace text is refused "
+                "whoever asks",
                 "error" in refused and not api.jobs
                 and not _principals(g), refused)
-        bare = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
-                                     "soul": "puppet", "request_id": "r2",
-                                     "_caller": grant_caller})
+        fenced = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                       "soul": "puppet", "request_id": "r2",
+                                       "_caller": "grant-" + "a" * 32})
+        c.check("#582 a grant principal does not reach the legacy add "
+                "at all (#603 fence)",
+                "error" in fenced
+                and "role channel" in fenced.get("error", "")
+                and not api.jobs and not _principals(g), fenced)
         human = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                       "_caller": "anton",
                                       "workspace": "- name: play\n  tasks: []\n"})
-        c.check("#582 a delegated add without client text passes, "
-                "and the human keeps today's workspace path",
-                bare.get("ok") and human.get("ok")
-                and len(api.jobs) == 2, (bare, human))
+        c.check("#582 the human keeps today's legacy workspace path",
+                human.get("ok") and len(api.jobs) == 1, human)
 
 
 def check_add_quota_counts_roles_582(c):
@@ -508,7 +529,7 @@ def check_update_preserves_triple_582(c):
                                         "origin": ALPHA, "force": True,
                                         "_caller": "anton"})
             meta = (api.jobs.get("pu-alpha-1") or {}).get("Meta") or {}
-            old = soul_job(branch="swarm")["Meta"]
+            old = api.jobs["pu-alpha-1"]["Meta"]
             c.check("#582 update without role fields keeps the triple "
                     "and the branch",
                     got.get("ok") and meta.get("soul_digest") == old["soul_digest"]
@@ -655,8 +676,9 @@ def check_roster_mop_soul_582(c):
     master_job = soul_job("pu-alpha-1", digest=MASTER_DIGEST)
     master_job["Meta"]["soul"] = "master"
     orphan = soul_job("pu-alpha-3", digest="0" * 64)
+    puppet_job = soul_job("pu-alpha-2")
     api = FakeNomad(jobs={"pu-alpha-1": master_job,
-                          "pu-alpha-2": soul_job(),
+                          "pu-alpha-2": puppet_job,
                           "pu-alpha-3": orphan,
                           "pu-alpha-4": {"ID": "pu-alpha-4", "Status": "run",
                                          "Type": "service",
