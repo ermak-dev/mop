@@ -2959,6 +2959,25 @@ GRANTS_584 = {
         "node_verbs": ["send", "wipe"]},
 }
 INC_1 = "11111111-1111-1111-1111-111111111111"
+INC_2 = "22222222-2222-2222-2222-222222222222"
+MARK_584 = "soul-ready"   # имя маркера инициализации тела (шов #590/#583)
+
+
+def marked_584(root, inc, who="agent"):
+    """Маркер инициализации тела, какой пишет агент под замком (#584)."""
+    path = os.path.join(root, f".mop-{MARK_584}")
+    open(path, "w").write(json.dumps({"inc": inc, "by": who}))
+
+
+def marker_584(root):
+    path = os.path.join(root, f".mop-{MARK_584}")
+    try:
+        got = json.loads(open(path).read() or "null")
+    except (OSError, ValueError):
+        return None, "unreadable"
+    if not isinstance(got, dict) or got.get("inc") is None:
+        return None, "malformed"
+    return got, None
 TARGETS_584 = {
     "pu-mop-1": {"found": True, "job": "pu-mop-1", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
@@ -3462,8 +3481,17 @@ def check_startup_soul_584(c):
         return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
                 "cur": "master", "def": "master"}
 
-    st = {"mode": None, "facts": {}}
+    st = {"mode": None, "facts": {}, "sessions": {}}
     asks = []
+
+    def live_fact(name, sid="s-1"):
+        """Живой факт сессии с её идентификатором: строка целиком."""
+        st["sessions"][name] = sid
+        return {"present": True, "session": f"running 1 1 {sid}"}
+
+    async def local(name):
+        """Джоб этого узла: проверка startup-канала -- локальность цели."""
+        return name in clones
 
     class Reply:
         def __init__(self, body):
@@ -3523,25 +3551,51 @@ def check_startup_soul_584(c):
         agent.IDENTITY_WAIT, agent.SOUL_FACT_TTL = 0.1, 0
         agent.clone_dir = lambda name: clones[name]
         bus.arequest = arequest
+        agent.local_puppet = local
         live = {"present": True, "session": "running 1 1"}
 
-        # 1. Живая сессия + проверенная привязка -> тройка роли в ростере.
+        # 1. Привязка и сессия без маркера тела -- НЕ готовность: это факт
+        # регистрации, а не рантайм-подтверждение роли (#584-ревизия).
         reset()
         st["facts"] = {"pu-mop-1": live}
         got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
-        c.check("584 states carry the soul triple of a validated live binding",
+        c.check("584 no runtime marker -- not ready, with a reason",
+                soul == {"ready": False, "why": soul.get("why")}
+                if isinstance(soul, dict) and soul.get("ready") is False
+                and "marker" in (soul.get("why") or "") else False, soul)
+        # Маркер этой инкарнации -- готовность: тройка в ростере.
+        marked_584(clones["pu-mop-1"], INC_1)
+        agent._soul_cache.clear()
+        got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+        c.check("584 states carry the soul triple of a validated live binding "
+                "with the body's runtime marker",
                 soul == {"ready": True, "role": "puppet", "soul_inc": INC_1,
                          "soul_digest": "a" * 32}, (soul, got))
+        # Маркер другой инкарнации -- не готовность: имя переиспользовано.
+        marked_584(clones["pu-mop-1"], INC_2)
+        agent._soul_cache.clear()
+        got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+        c.check("584 a marker of another incarnation is not readiness",
+                soul == {"ready": False, "why": soul.get("why")}
+                if isinstance(soul, dict) and soul.get("ready") is False
+                and "incarnation" in (soul.get("why") or "") else False, soul)
+        marked_584(clones["pu-mop-1"], INC_1)
+        agent._soul_cache.clear()
         c.check("584 the binding lookup envelope is exactly target-shaped",
                 [(s, sorted(r)) for s, r in asks
                  if r.get("verb") == "resolve" and "principal" not in r]
                 == [("mop.mop.server.rpc", ["service", "target", "verb"])], asks)
 
-        # 2. Мёртвая сессия или отсутствующее тело -- факта нет вовсе.
+        # 2. Мёртвая сессия, отсутствующее тело, кривая строка -- факта нет.
         for label, fact in (("no live session", {"present": True, "session": "none"}),
-                            ("no body", {"present": False})):
+                            ("no body", {"present": False}),
+                            ("bare status string", {"present": True, "session": "running"}),
+                            ("unknown word", {"present": True, "session": "bogus 1 1 s-1"})):
             reset()
+            marked_584(clones["pu-mop-1"], INC_1)
             st["facts"] = {"pu-mop-1": fact}
             got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
@@ -3570,14 +3624,20 @@ def check_startup_soul_584(c):
                     if isinstance(soul, dict) and soul.get("ready") is False
                     and word in (soul.get("why") or "") else False, soul)
 
-        # 4. Кэш читающего глагола: короткий TTL, повтор -- без вопроса.
+        # 4. Кэш читающего глагола: короткий TTL, повтор -- без вопроса;
+        # новая сессия того же имени -- мимо кэша.
         reset()
         agent.SOUL_FACT_TTL = 60
-        st["facts"] = {"pu-mop-1": live}
+        st["facts"] = {"pu-mop-1": live_fact("pu-mop-1")}
+        marked_584(clones["pu-mop-1"], INC_1)
         ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the soul fact is cached for the read within the TTL",
                 len(binding_asks()) == 1, asks)
+        st["facts"] = {"pu-mop-1": live_fact("pu-mop-1", "s-2")}
+        ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+        c.check("584 a new session of the same name misses the cache",
+                len(binding_asks()) == 2, asks)
 
         # 5. Канал подъёма: initial_identity с шины, хозяин -- из привязки.
         reset()
@@ -3589,13 +3649,45 @@ def check_startup_soul_584(c):
                 and ident("pu-mop-1") == profiles["anton"], (got, holder("pu-mop-1")))
         c.check("584 startup returns the role triple for the wrapper",
                 (got or {}).get("soul", {}).get("soul_digest") == "a" * 32, got)
+        got_mark, got_why = marker_584(clones["pu-mop-1"])
+        c.check("584 startup installs the runtime marker of this incarnation "
+                "under the lock",
+                got_mark == {"inc": INC_1, "by": "agent"}
+                and holder("pu-mop-1") == "anton", (got_mark, holder("pu-mop-1")))
+        # Resume доказан маркером этой инкарнации, не арендой: свежий клон
+        # того же хозяина без маркера -- не resume, а полная инициализация.
+        fresh("pu-mop-2")
+        ask("mop.mop.node.hyper.startup",
+            {"verb": "initial_identity", "name": "pu-mop-2", "soul_inc": INC_1},
+            startup=True)
+        c.check("584 a fresh same-owner body without the marker is fully initialized",
+                holder("pu-mop-2") is not None, holder("pu-mop-2"))
+        reset("pu-mop-1")
+        marked_584(clones["pu-mop-1"], INC_1)
+        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
+            f.write(Owner("anton", 1).render())
+        ask("mop.mop.node.hyper.startup",
+            {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+            startup=True)
         before = ident("pu-mop-1")
         got = ask("mop.mop.node.hyper.startup",
                   {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
                   startup=True)
-        c.check("584 startup resume of the same owner writes nothing",
+        c.check("584 startup resume of the same incarnation writes nothing",
                 (got or {}).get("resumed") is True and ident("pu-mop-1") == before
-                and holder("pu-mop-1") == "anton", (got, ident("pu-mop-1")))
+                and holder("pu-mop-1") == "anton"
+                and marker_584(clones["pu-mop-1"])[0]["inc"] == INC_1,
+                (got, ident("pu-mop-1")))
+        # Аренда уехала другому хозяину законным dispatch'ем -- маркер жив:
+        # сессию не перезаписываем, но готовность остаётся за телом.
+        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
+            f.write(Owner("petr", int(1)).render())
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 a markered body keeps its runtime proof even when the "
+                "lease moved on by a later dispatch",
+                not (got or {}).get("error"), got)
 
         # 6. Власть -- не тело: хозяин из привязки, инкарнация сверяется.
         reset()
@@ -3607,8 +3699,14 @@ def check_startup_soul_584(c):
                 (holder("pu-mop-1"), got))
         reset()
         got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1"}, startup=True)
+        c.check("584 startup requires the exact expected incarnation",
+                bool((got or {}).get("error")) and holder("pu-mop-1") is None,
+                (got, holder("pu-mop-1")))
+        reset()
+        got = ask("mop.mop.node.hyper.startup",
                   {"verb": "initial_identity", "name": "pu-mop-1",
-                   "soul_inc": "22222222-2222-2222-2222-222222222222"}, startup=True)
+                   "soul_inc": INC_2}, startup=True)
         c.check("584 startup refuses an old incarnation of a reused name",
                 bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                 (got, holder("pu-mop-1")))
@@ -3625,6 +3723,14 @@ def check_startup_soul_584(c):
         c.check("584 startup of another project does not reach this binding",
                 bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                 (got, holder("pu-mop-1")))
+
+        # 6b. Канал подъёма -- только местные джобы: цель этого узла.
+        reset()
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-other-1",
+                   "soul_inc": INC_1}, startup=True)
+        c.check("584 startup of a job that is not on this node refuses",
+                bool((got or {}).get("error")), got)
 
         # 7. Один глагол на канале; чужие субъекты его не имеют.
         reset()
