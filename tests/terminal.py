@@ -341,6 +341,9 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
         import textwrap
+        import io
+        from types import SimpleNamespace
+        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "session_source.py")
             one = dict(pid=1, sessionId="x", cwd="/clone", messagingSocketPath="one")
@@ -352,8 +355,13 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     def sessions(): return {matches!r}
                     def socket_alive(path): return True
                 '''))
-                # Два живых кандидата обязаны отказать до чтения /proc и tmux.
-                with self.assertRaises(ValueError):
+                # Неоднозначный registry отказывает после канонического PID.
+                def opened(name, *args, **kwargs):
+                    return io.BytesIO(b'HOME=/fixture\0') if name.endswith('/environ') else io.StringIO('1 (claude) ' + ' '.join(['0'] * 20))
+                with patch('subprocess.run', return_value=SimpleNamespace(stdout='%0\t/dev/pts/7\t1\n')), \
+                        patch('builtins.open', side_effect=opened), \
+                        patch('os.stat', return_value=SimpleNamespace(st_uid=os.getuid())), \
+                        patch('os.readlink', return_value='/clone'), self.assertRaises(ValueError):
                     self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
 
     async def test_body_proc_pane_foreground_and_clear_binding(self):
@@ -372,24 +380,27 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
             fields = ["0"] * 20
             fields[0], fields[2], fields[4], fields[5], fields[19] = "S", "123", "34823", "123", "456"
             proc = "123 (claude (agent)) " + " ".join(fields)
-            pane = SimpleNamespace(stdout="%0\t/dev/pts/7\n")
-            device = SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=os.makedev(136, 7))
+            pane = SimpleNamespace(stdout="%0\t/dev/pts/7\t123\n")
+            device = SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=os.makedev(136, 7), st_uid=os.getuid())
+            snapshots = [proc, proc]
             def opened(path, *a, **kw):
-                return io.StringIO(proc)
+                if path.endswith('/environ'):
+                    return io.BytesIO(b'HOME=/fixture\0')
+                return io.StringIO(snapshots.pop(0))
             with patch("subprocess.run", return_value=pane), patch("builtins.open", side_effect=opened), \
-                    patch("os.stat", return_value=device):
+                    patch("os.stat", return_value=device), patch('os.readlink', return_value='/clone'):
                 got = self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
                 self.assertEqual(got, IDENT)
                 after = fields.copy()
                 after[5] = "124"
                 proc_after = "123 (claude (agent)) " + " ".join(after)
-                with patch("builtins.open", side_effect=[io.StringIO(proc), io.StringIO(proc_after)]):
-                    with self.assertRaises(ValueError):
-                        self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
-                with patch("builtins.open", return_value=io.StringIO(proc_after)):
-                    with self.assertRaises(ValueError):
-                        self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
-                pane.stdout = "%0\t/dev/pts/7\n%1\t/dev/pts/8\n"
+                snapshots[:] = [proc, proc_after]
+                with self.assertRaisesRegex(ValueError, 'changed during identity probe'):
+                    self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
+                snapshots[:] = [proc_after]
+                with self.assertRaisesRegex(ValueError, 'foreground'):
+                    self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
+                pane.stdout = "%0\t/dev/pts/7\t123\n%1\t/dev/pts/8\t124\n"
                 with self.assertRaises(ValueError):
                     self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
 
@@ -416,7 +427,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
             info = json.loads(output)
             with tempfile.TemporaryDirectory() as directory:
                 source = Path(directory, "session_source.py")
-                metadata = dict(pid=info["pid"], sessionId="real-session", cwd=directory,
+                metadata = dict(pid=info["pid"], sessionId="real-session", cwd=os.getcwd(),
                                 messagingSocketPath="fixture-socket")
                 source.write_text(
                     f"record={metadata!r}\ncount=0\n"
@@ -426,9 +437,9 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     "def sessions():\n"
                     " return [dict(record, **" + repr(dict(status='working', updatedAt=2, waitingFor='tool') if changing else {}) + ")]\n"
                     "def socket_alive(path): return True\n")
-                argv = [sys.executable, "-I", "-c", f"print('%0\\t{info['tty']}')"]
+                argv = [sys.executable, "-I", "-c", f"print('%0\\t{info['tty']}\\t{info['pid']}')"]
                 with patch.object(self.t, "pane_argv", return_value=argv):
-                    script = self.t.probe_script(str(source), directory, "pu-mop-1")
+                    script = self.t.probe_script(str(source), os.getcwd(), "pu-mop-1")
                 caller = await asyncio.create_subprocess_exec(
                     *shlex.split(script), stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -492,6 +503,134 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b"DONE", output)
         finally:
             await process.close()
+
+    async def test_custom_config_from_canonical_process_with_old_session_source(self):
+        # HYPOTHESIS: глобальный ~/.claude/sessions не видит отдельный профиль.
+        # Реальный /proc и PTY, старый standalone source без history_dependency.
+        # SOLUTION: registry импортированной пробы привязан к config PID пейна.
+        # RESULT: default registry не разрешает цель; каноническая проба разрешает.
+        # STATUS: FIXED — see #598
+        import json
+        import shlex
+        import socket
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home, config = root / 'home', root / 'custom-role'
+            home.mkdir()
+            (config / 'sessions').mkdir(parents=True)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock = str(root / 'inbox.sock')
+            listener.bind(sock)
+            listener.listen(20)
+            output = bytearray()
+            child = ("import os,json; os.chdir(" + repr(directory) + "); "
+                     "os.write(1,(json.dumps(dict(pid=os.getpid(),tty=os.ttyname(0)))+'\\n').encode()); "
+                     "os.read(0,1)")
+            with patch.dict(os.environ, HOME=str(home), CLAUDE_CONFIG_DIR=str(config)):
+                process = await self.t.PTY.spawn([sys.executable, '-I', '-c', child], 80, 24,
+                                                output.extend, lambda code: None)
+            try:
+                async def ready():
+                    while b'\n' not in output:
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(ready(), 3)
+                info = json.loads(output)
+                record = dict(pid=info['pid'], sessionId='custom-role-session', cwd=directory,
+                              messagingSocketPath=sock)
+                (config / 'sessions' / 'fixture.json').write_text(json.dumps(record))
+                source = root / 'old_session.py'
+                source.write_text(Path(self.t.__file__).parents[1].joinpath('session.py').read_text())
+                argv = [sys.executable, '-I', '-c',
+                        f"print('%0\\t{info['tty']}\\t{info['pid']}')"]
+                with patch.object(self.t, 'pane_argv', return_value=argv):
+                    script = self.t.probe_script(str(source), directory, 'pu-mop-1')
+                # Агент имеет другой HOME/config: ни один не должен влиять на пробу.
+                env = dict(os.environ, HOME=str(root / 'agent'), CLAUDE_CONFIG_DIR=str(root / 'agent-config'))
+                default = await asyncio.create_subprocess_exec(
+                    sys.executable, '-I', '-c',
+                    f"import runpy; m=runpy.run_path({str(source)!r}); assert m['live_session_for_cwd']({directory!r}) is None",
+                    env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                _, err = await default.communicate()
+                self.assertEqual(default.returncode, 0, err.decode())
+                caller = await asyncio.create_subprocess_exec(
+                    *shlex.split(script), env=env, start_new_session=True,
+                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE)
+                out, err = await asyncio.wait_for(caller.communicate(), 3)
+                self.assertEqual(caller.returncode, 0, err.decode())
+                self.assertEqual(json.loads(out)['sessionId'], 'custom-role-session')
+                self.assertEqual(json.loads(out)['pid'], info['pid'])
+            finally:
+                await process.close()
+                listener.close()
+
+    async def test_process_config_fallbacks_and_fail_closed(self):
+        import io
+        import stat
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        # SOLUTION: только HOME/CLAUDE_CONFIG_DIR канонического PID, pwd при
+        # отсутствии HOME; ошибки окружения/UID/cwd не разрешают fallback.
+        # RESULT: реальная custom-config проба и синтетические отказы зелёные.
+        # STATUS: FIXED — see #598
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'source.py')
+            fields = ['0'] * 20
+            fields[0], fields[2], fields[4], fields[5], fields[19] = 'S', '123', '34823', '123', '456'
+            proc = '123 (claude) ' + ' '.join(fields)
+            record = dict(pid=123, sessionId='session-one', cwd='/clone', messagingSocketPath='socket')
+            device = SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=os.makedev(136, 7), st_uid=os.getuid())
+            environment = b''
+            def opened(path, *args, **kwargs):
+                return io.BytesIO(environment) if path.endswith('/environ') else io.StringIO(proc)
+            with patch('subprocess.run', return_value=SimpleNamespace(stdout='%0\t/dev/pts/7\t123\n')), \
+                    patch('builtins.open', side_effect=opened), patch('os.stat', return_value=device), \
+                    patch('os.readlink', return_value='/clone') as link, \
+                    patch('pwd.getpwuid', return_value=SimpleNamespace(pw_dir='/account-home')):
+                for environment, config in (
+                        (b'HOME=/pane-home\0CLAUDE_CONFIG_DIR=/role\0PRIVATE=not-for-output\0', '/role'),
+                        (b'HOME=/pane-home\0', '/pane-home/.claude'),
+                        (b'PRIVATE=not-for-output\0', '/account-home/.claude')):
+                    source.write_text(
+                        "SESSIONS='/wrong-global'\n"
+                        f"def live_session_for_cwd(cwd): return {record!r} if SESSIONS=={config + '/sessions'!r} else None\n"
+                        f"def sessions(): return [{record!r}] if SESSIONS=={config + '/sessions'!r} else []\n"
+                        "def socket_alive(path): return True\n")
+                    self.assertEqual(self.t.resolve_body_identity(str(source), '/clone', self.t.pane_argv('pu-mop-1')), IDENT)
+                with patch('builtins.open', side_effect=lambda path, *a, **k:
+                           (_ for _ in ()).throw(PermissionError('PRIVATE=not-for-output'))
+                           if path.endswith('/environ') else io.StringIO(proc)):
+                    with self.assertRaisesRegex(ValueError, '^terminal process configuration unavailable$'):
+                        self.t.resolve_body_identity(str(source), '/clone', self.t.pane_argv('pu-mop-1'))
+                for changed in ('uid', 'cwd'):
+                    device.st_uid = os.getuid() + 1 if changed == 'uid' else os.getuid()
+                    link.return_value = '/wrong-clone' if changed == 'cwd' else '/clone'
+                    with self.assertRaisesRegex(ValueError, '^terminal process configuration unavailable$'):
+                        self.t.resolve_body_identity(str(source), '/clone', self.t.pane_argv('pu-mop-1'))
+
+    async def test_longpoll_refreshes_idle_clock_on_return(self):
+        # HYPOTHESIS: touched до wait сокращает TTL на длительность ожидания.
+        # SOLUTION: обновляем touched также после bounded wait перед ответом.
+        # RESULT: reader и writer получают полный TTL от возврата longpoll.
+        # STATUS: FIXED — see #598
+        for mode, ttl in (('rw', self.t.WRITER_TTL), ('ro', self.t.IDLE_TTL)):
+            with self.subTest(mode=mode):
+                tid = (await self.open(mode))["tid"]
+                task = asyncio.create_task(self.r.read('pu-mop-1', 'alice', tid, 0, 15))
+                await asyncio.sleep(0)
+                self.now += 15
+                self.ptys[-1].on_data(b'after wait')
+                await task
+                self.now += ttl - 1
+                await self.r._expire()
+                self.assertIn(tid, self.r.sessions, 'longpoll return must start a fresh idle TTL')
+                self.assertFalse(self.r.sessions[tid].closed)
+                await self.r.close('pu-mop-1', 'alice', tid)
 
     async def test_longpoll_wakeup_and_exit(self):
         tid = (await self.open("ro"))["tid"]

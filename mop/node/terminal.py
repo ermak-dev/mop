@@ -157,22 +157,53 @@ def resolve_body_identity(session_py, cwd, tmux_argv):
                 if os.path.realpath(s.get("cwd") or "") == os.path.realpath(cwd)
                 and mod.socket_alive(s["messagingSocketPath"])]
 
-    live = mod.live_session_for_cwd(cwd)
-    matches = candidates()
-    if not live or len(matches) != 1 or identity(live) != identity(matches[0]):
-        raise ValueError("session identity ambiguous or unavailable")
-    pid = live.get("pid")
-    sid = live.get("sessionId")
-    if type(pid) is not int or pid <= 0 or not isinstance(sid, str) or not sid:
-        raise ValueError("session identity unavailable")
+    # PID берём только у канонического tmux target, не из registry или RPC.
     result = subprocess.run(tmux_argv, capture_output=True, text=True, timeout=2, check=True)
     panes = result.stdout.strip().splitlines()
     if len(panes) != 1:
         raise ValueError("terminal pane ambiguous or unavailable")
-    pane, path = panes[0].split("\t")
+    pane, path, pane_pid = panes[0].split("\t")
+    if not pane_pid.isdigit() or int(pane_pid) <= 0:
+        raise ValueError("terminal pane identity unavailable")
+    pid = int(pane_pid)
     with open(f"/proc/{pid}/stat") as f:
         before = f.read()
     fields = before[before.rfind(")") + 2:].split()
+
+    def process_config():
+        import pwd
+        try:
+            uid = os.stat(f"/proc/{pid}").st_uid
+            if uid != os.getuid() or os.path.realpath(os.readlink(f"/proc/{pid}/cwd")) != os.path.realpath(cwd):
+                raise ValueError
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                raw = f.read()
+            env = {}
+            for entry in raw.split(b"\0"):
+                key, sep, value = entry.partition(b"=")
+                if sep and key in (b"HOME", b"CLAUDE_CONFIG_DIR"):
+                    if key in env:
+                        raise ValueError
+                    env[key] = os.fsdecode(value)
+            home = env.get(b"HOME") or pwd.getpwuid(uid).pw_dir
+            config = env.get(b"CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
+            if not os.path.isabs(config):
+                config = os.path.join(cwd, config)
+            return os.path.realpath(config)
+        except Exception:
+            # Ни содержимое environ, ни пути/ключи не доходят до вызывающего.
+            raise ValueError("terminal process configuration unavailable") from None
+
+    config = process_config()
+    # Только этот импорт в короткоживущем -I процессе; модуль агента не меняем.
+    mod.SESSIONS = os.path.join(config, "sessions")
+    live = mod.live_session_for_cwd(cwd)
+    matches = candidates()
+    if not live or len(matches) != 1 or identity(live) != identity(matches[0]):
+        raise ValueError("session identity ambiguous or unavailable")
+    sid = live.get("sessionId")
+    if type(live.get("pid")) is not int or live["pid"] != pid or not isinstance(sid, str) or not sid:
+        raise ValueError("session identity unavailable")
     # Поля proc stat: state(3), pgrp(5), tty_nr(7), tpgid(8), starttime(22).
     if fields[0] == "Z" or int(fields[2]) != int(fields[5]) or int(fields[5]) <= 0:
         raise ValueError("Claude is not the terminal foreground process group")
@@ -191,7 +222,9 @@ def resolve_body_identity(session_py, cwd, tmux_argv):
         after = value[value.rfind(")") + 2:].split()
     current = mod.live_session_for_cwd(cwd)
     matches = candidates()
-    if (after[0] == "Z" or any(after[i] != fields[i] for i in (2, 4, 5, 19))
+    final_panes = subprocess.run(tmux_argv, capture_output=True, text=True, timeout=2, check=True)
+    if (process_config() != config or final_panes.stdout.strip().splitlines() != panes
+            or after[0] == "Z" or any(after[i] != fields[i] for i in (2, 4, 5, 19))
             or identity(current) != identity(live) or len(matches) != 1
             or identity(matches[0]) != identity(live)
             or not mod.socket_alive(current["messagingSocketPath"])
@@ -204,7 +237,7 @@ def resolve_body_identity(session_py, cwd, tmux_argv):
 def pane_argv(name):
     actor(name, "probe")
     return shlex.split(driver.Tmux(name).base) + ["list-panes", "-s", "-t", name,
-                                                 "-F", "#{pane_id}\t#{pane_tty}"]
+                                                 "-F", "#{pane_id}\t#{pane_tty}\t#{pane_pid}"]
 
 
 def probe_script(session_py, cwd, name):
@@ -465,6 +498,7 @@ class Registry:
             except asyncio.TimeoutError:
                 pass
             data, next_cursor, reset = s.ring.read(cursor)
+        s.touched = self.clock()
         return {"data": base64.b64encode(data).decode(), "cursor": next_cursor,
                 "reset": reset, "closed": s.closed, "exit": s.exit, "epoch": s.epoch}
 
