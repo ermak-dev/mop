@@ -40,11 +40,15 @@
 Обе половины в одном файле, как у драйвера: узел (run) и сервер (serve)
 — одно решение. Узловая половина живёт stdlib'ом плюс шиной.
 """
+import contextlib
 import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -249,6 +253,76 @@ def refusal(req, project):
     return None
 
 
+# ─── селекция секретов по роли (#592) ────────────────────────────────────
+# Allowlist роли (soul.yaml, блок secrets) приходит из доверенного бандла
+# роли, не из тела запроса: локально отредактированный YAML прав не даёт
+# (SOUL.md, «секреты»). None -- легаси-джоб без роли: каталог целиком,
+# как сегодня. Пустой список -- тоже приговор: роль без блока секретов
+# не получает ничего сверх печённого в образ, но прогон всё равно
+# играется -- плейбук вычищает прежний staging тела, иначе удалённый из
+# роли секрет оставался бы жить в ~/.config/mop/project-secrets.
+_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def secrets_of(root, project, allow):
+    """Имена секрета, которые роли можно выдать -> (files, vars).
+
+    Точные имена, без масок: селекция не подбирает по префиксу. Побег из
+    клона и чужая грамматика -- ValueError до хранилища. Запрошенного в
+    хранилище нет -- тоже ValueError: отказ слышит узел до прогона, и
+    модель не стартует под видом «секреты приехали» (readiness)."""
+    files, names = [], []
+    for kind, sink, listed in (("file", files, allow.get("files") or []),
+                               ("var", names, allow.get("vars") or [])):
+        for name in listed:
+            if kind == "file":
+                sink.append(project_secrets.valid_name(name))
+            elif not _VAR_NAME.match(name):
+                raise ValueError(f"{name!r}: a secret variable is VAR=VALUE's name")
+            else:
+                sink.append(name)
+        listed = [f["name"] for f in project_secrets.list_files(root, project)] \
+            if kind == "file" else project_secrets.list_vars(root, project)
+        missing = [n for n in sink if n not in listed]
+        if missing:
+            raise ValueError(f"no {kind} secret {missing[0]!r} in project {project}")
+    return files, names
+
+
+@contextlib.contextmanager
+def role_staging(root, project, allow):
+    """Приватный временный каталог секрета роли в формате хранилища
+    (files/ + vars.env) -> путь. Существующему плейбуку всё равно, откуда
+    каталог: mop_secrets_dir копирует его целиком (deploy/bootstrap.yml).
+
+    Ссылки не переходят: копируется только обычный файл из хранилища, и
+    символьная ссылка вместо секрета -- отказ, а не значение по ней.
+    Каталог создаётся заново на каждый старт (mkdtemp), одновременные
+    старты ролей друг друга не видят; хранилище не мутируется. Убирается
+    на каждом выходе, включая исключение."""
+    files, names = secrets_of(root, project, allow)
+    stage = tempfile.mkdtemp(prefix=f"mop-secrets-{project}-")
+    os.chmod(stage, 0o700)
+    try:
+        base = project_secrets.project_dir(root, project)
+        for name in files:
+            src = os.path.join(base, project_secrets.FILES, name)
+            if os.path.islink(src) or not stat.S_ISREG(os.stat(src).st_mode):
+                raise ValueError(f"{name}: a secret file is a regular file, not a link")
+            dst = os.path.join(stage, project_secrets.FILES, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+            os.chmod(dst, 0o600)
+        if names:
+            values = {k: v for k, v in project_secrets._vars(root, project).items()
+                      if k in names}
+            fsutil.write_private(os.path.join(stage, project_secrets.VARS),
+                                 fsutil.write_kv(values))
+        yield stage
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def needs_play(tasks, secrets):
     """Играть ли рамку: у проекта есть задачи или секреты (#128). Ни того ни
     другого -- ответ без прогона: большинству проектов хватает общего."""
@@ -302,15 +376,42 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
 
 
 # ─── сервер ──────────────────────────────────────────────────────────────
-def play(req, project):
+def play(req, project, role=None):
     """Сыграть bootstrap проекта в песочницу папета. -> {ok, played, ...}.
-    Нет файла — ok без прогона: большинству проектов хватает общего."""
+
+    Нет файла — ok без прогона: большинству проектов хватает общего.
+    role — allowlist секретов из доверенного бандла роли (#592): None —
+    легаси-джоб, каталог секретов целиком, как сегодня; словарь — селекция
+    в приватный временный staging. Словарь приходит из бандла по привязке
+    сервера (#581: grants.bundle через job/инкарнацию), не из тела
+    запроса: тело запроса ненадёжно, allowlist из него — самовыданная
+    роль. Пустой allowlist тоже играет: прогон вычищает прежний staging
+    тела, «нечего играть» оставило бы старое жить в
+    ~/.config/mop/project-secrets."""
     # workspace -- файл папета (#133): копия того, кто стартует, а не проекта.
     tasks, of_vars = files_of(ROOT, req["name"])
-    secrets = project_secrets.project_dir(project_secrets.ROOT, project)
-    secrets = secrets if os.path.isdir(secrets) else None
-    if not needs_play(tasks, secrets):
+    store_dir = project_secrets.project_dir(project_secrets.ROOT, project)
+    store_dir = store_dir if os.path.isdir(store_dir) else None
+    if role is None:
+        if not needs_play(tasks, store_dir):
+            return {"ok": True, "played": False, "text": f"no bootstrap for {project}"}
+        return _run(req, project, tasks, of_vars, store_dir)
+    # Роль: staging обязателен и при пустом allowlist. Нет ни задач, ни
+    # хранилища проекта -- играть нечего и чистить нечего: честный
+    # «no bootstrap», как у легаси без секретов.
+    if not (role.get("files") or role.get("vars") or tasks or store_dir):
         return {"ok": True, "played": False, "text": f"no bootstrap for {project}"}
+    try:
+        with role_staging(project_secrets.ROOT, project, role) as staged:
+            return _run(req, project, tasks, of_vars, staged)
+    except ValueError as e:
+        # Отказ до прогона: узел читает его как отказ старта, и модель не
+        # поднимается под видом «секреты приехали» (readiness #592).
+        return {"ok": False, "played": False, "error": f"secrets of the role: {e}"}
+
+
+def _run(req, project, tasks, of_vars, secrets):
+    """Один прогон плейбука с готовым каталогом секретов."""
     name = req["name"]
     cmd = argv(PLAYBOOK, req.get("address") or "", config.get("MOP_USER"), KEY,
                playvars.playbook_vars(), project, name, driver.clone_dir(name),
