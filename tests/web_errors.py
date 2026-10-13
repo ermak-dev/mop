@@ -94,6 +94,18 @@ def check_workflow_public_errors_611(c):
 
     exercise(missing_key, {origin},
              "LLM proxy key is missing on the puppet; the cluster service must deliver it")
+    forged = adminapi.Api(adminapi.Operations(), origin="https://pool.example",
+                          executor=lambda *args: {"outcome": "refused", "error": "untrusted failure",
+                                                  "public_error": "PRIVATE-PAYLOAD"})
+    forged_frames, done = [], threading.Event()
+    forged.on_terminal(lambda frame: (forged_frames.append(frame), done.set()))
+    record = forged.submit("add", None, {"origin": origin}, who)
+    c.check("#611 forged public-error operation terminates", done.wait(5))
+    result = forged.result(record["id"], who)
+    c.expect("#611 a plain public_error field does not cross the trust boundary",
+             result.get("error"), "operation refused")
+    c.check("#611 forged public_error cannot leak into GET or SSE",
+            "PRIVATE-PAYLOAD" not in json.dumps((result, forged_frames)))
     c.expect("#611 an unmarked phrase is not trusted just because it sounds safe",
              adminapi.result_error("refused", "project bootstrap failed: PRIVATE-TOKEN"),
              "operation refused")
