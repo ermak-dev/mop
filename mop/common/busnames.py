@@ -222,8 +222,10 @@ def is_puppet(user):
 
 
 def is_machine(user):
-    """Не человек: сервис сервера, callout, папет или узел."""
-    return user in (SERVICE, CALLOUT) or user.startswith((PUPPET_PREFIX, NODE_PREFIX))
+    """Не человек: сервис сервера, callout, папет, узел или принципал
+    делегированной роли (grant-<id>, #579)."""
+    return user in (SERVICE, CALLOUT) or user.startswith(
+        (PUPPET_PREFIX, NODE_PREFIX, GRANT_PREFIX))
 
 
 # Имена ролей на шине: человеку их не выдать (operators.RESERVED).
