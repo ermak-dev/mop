@@ -1726,10 +1726,14 @@ async def handle(conn, msg, public):
         return await msg.respond(
             json.dumps({"error": "request is not a JSON object"}).encode())
     # Одно правило на всех (#173): mop.<проект>.node.<узел>.<канал>.
+    # Доверенный префикс `_` тело не доставляет (#581): глаголы узла
+    # читали бы `_grant`/`_actor` как выданные сервером. Свои доверенные
+    # поля агент ставит сам, после зачистки.
+    for k in [k for k in req if k.startswith("_")]:
+        del req[k]
     req["_project"] = service.project_from_subject(msg.subject)
     # Кто просит (#207) -- из субъекта, поверх тела. Публичный канал --
     # папетов: владельца он не несёт, и названный в теле не в счёт.
-    req.pop("_caller", None)
     caller = None if public else busnames.caller(msg.subject)
     if caller:
         req["_caller"] = caller

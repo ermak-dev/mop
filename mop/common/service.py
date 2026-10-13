@@ -52,7 +52,11 @@ async def answer(name, project, data, handler, journal, log, send, caller=None):
     if not isinstance(req, dict):
         req, out = {}, {"error": NOT_AN_OBJECT, "done": True}
     else:
-        req.pop("_caller", None)
+        # Доверенный префикс `_` тело не доставляет (#581): что с ним
+        # приехало -- написано отправителем, а не сервером. Каркас ставит
+        # свои доверенные поля сам (caller -- из субъекта #207), поверх
+        # зачистки, как и раньше.
+        req = {k: v for k, v in req.items() if not k.startswith("_")}
         if caller:
             req["_caller"] = caller
         try:
