@@ -95,12 +95,16 @@ def bootstrap_result(transport, name, marker, timeout, sleep, clock, step):
 # ─── операции ────────────────────────────────────────────────────────────
 def add(transport, origin, workspace, branch=None, ctx=None,
         sleep=time.sleep, clock=time.time, step=lambda s: None,
-        place_wait=PLACE_WAIT, bootstrap_wait=BOOTSTRAP_WAIT):
+        place_wait=PLACE_WAIT, bootstrap_wait=BOOTSTRAP_WAIT,
+        context=None):
     """Завести папета: регистрация, ожидание узла, итог bootstrap'а.
 
     transport -- глаголы сервиса кластера (call_cluster-подобный),
     workspace -- (текст, происхождение) тем же видом, что собирал командлет:
-    явный источник, а не чтение cwd операции. -> вердикт-словарь."""
+    явный источник, а не чтение cwd операции. -> вердикт-словарь.
+    context (#575) -- словарь аудита операции: доверенное имя из ответа
+    регистрации кладётся в него в момент ответа, до ожидания узла --
+    зависший placement имени больше не отнимает."""
     progress = []
     note = progress.append
     note("registering")
@@ -113,6 +117,8 @@ def add(transport, origin, workspace, branch=None, ctx=None,
     name = got.get("name")
     if not name:
         return _refused(name, "the service named no puppet", progress)
+    if context is not None and name:
+        context["name"] = name
     note(f"{name}: waiting for a node")
     deadline = clock() + place_wait
     node = None
@@ -599,11 +605,20 @@ def safety(name, project, owner=None, facts=None, busy=False,
     return True, None
 
 
-def record(verb, name, project, principal, sender="mop-web"):
+def record(verb, name, project, principal, sender="mop-web",
+           op=None, status=None):
     """Аудит-запись операции воркера (#476): принципал HTTP и сервис --
     отдельные поля, payload сообщения -- НЕ входит (ключи не хранятся).
 
     owner_note и события шины сохраняются воркером отдельно; здесь только
-    сама запись: кто из людей велел, какой сервис исполнил, что и над кем."""
-    return {"event": "op", "verb": verb, "name": name, "project": project,
-            "principal": principal, "sender": sender}
+    сама запись: кто из людей велел, какой сервис исполнил, что и над кем.
+    op/status (#575) -- связка с операцией веба: id из приёма адаптера и
+    терминальный исход; отсутствуют -- запись не из веб-конвейера (или
+    исход неизвестен вовсе), прежние читатели формы не замечают."""
+    out = {"event": "op", "verb": verb, "name": name, "project": project,
+           "principal": principal, "sender": sender}
+    if op is not None:
+        out["op"] = op
+    if status is not None:
+        out["status"] = status
+    return out
