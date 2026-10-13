@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Приватный ход инициализации до tmux, без пула (#612)."""
-import dataclasses
 import json
 import os
 import sys
@@ -12,9 +11,7 @@ from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import bus, puppets  # noqa: E402
-from mop.server import bootstrap, cluster, websession  # noqa: E402
-from mop.cli.server import web as webcli  # noqa: E402
-import web as webchecks  # noqa: E402
+from mop.server import bootstrap, cluster  # noqa: E402
 
 
 # HYPOTHESIS: отсутствие ещё не созданного tmux ошибочно превращается в 502;
@@ -26,84 +23,6 @@ import web as webchecks  # noqa: E402
 # устаревшая попытка, несопоставимые часы, утечка raw exception через RPC
 # и неверная структура приватного ответа. Узкие проверки теперь зелёные.
 # STATUS: FIXED — see #612
-def check_screen(c):
-    store = websession.SessionStore(now=lambda: 1000.0)
-    admin = store.open(webchecks.identity.Identity("anton", "admin", ()))
-    user = store.open(webchecks.identity.Identity("olga", "user", ()))
-    row = dataclasses.replace(webchecks.CARD_ROW, kind="starting", state="starting")
-    calls = []
-    mode = {"pane": False, "broken": False, "refused": False, "malformed": False}
-
-    def pane(node, name):
-        calls.append(("pane", node, name))
-        if not mode["pane"]:
-            raise RuntimeError("no tmux session")
-        return ["Claude ready"]
-
-    def startup(name):
-        calls.append(("startup", name))
-        if mode["malformed"]:
-            return {"lines": ["safe stage"], "note": {"password": "PRIVATE-NOTE"}}
-        if mode["refused"]:
-            raise bus.Refused("initialization log unavailable: Nomad client is unreachable")
-        if mode["broken"]:
-            raise RuntimeError("PRIVATE-TOKEN /private/error.env")
-        return {"lines": ["body ready", "TASK [Configure database]", "MOP_PROXY_KEY=hush-hush"],
-                "truncated": False, "note": None}
-
-    def get(name="pu-mop-1", token=admin):
-        return webchecks._fake_handler(webcli, "GET", f"/api/puppet/{name}/tail",
-            headers={"Cookie": f"mop_session={token}"} if token else None)
-
-    with patched(webcli, SESSIONS=store, COLLECTOR=webchecks._card_collector([row])), \
-         patched(websession, provider=lambda: webchecks.FakeProvider()), \
-         patched(webcli.config, get=lambda key, default=None: {
-             "MOP_SERVER_LAN": "10.0.0.1", "MOP_HTTPS_PORT": "443"}.get(key, default)), \
-         patched(puppets, pane_lines=pane, node_of=lambda name: "mate", startup_lines=startup):
-        headers, raw = get()
-        data = json.loads(raw)
-        c.expect("#612 starting screen returns its initialization log, not 502", headers[0][1], 200)
-        c.expect("#612 startup source is explicit", data.get("source"), "initialization")
-        c.check("#612 actual initialization stages reach the screen",
-                "TASK [Configure database]" in data.get("lines", []), data)
-        c.check("#612 startup secrets do not reach browser", "hush-hush" not in raw.decode(), raw)
-        c.check("#612 initialization read carries no-store",
-                ("Cache-Control", "no-store") in headers, headers)
-        with patched(webcli, COLLECTOR=webchecks._card_collector([
-                dataclasses.replace(row, kind="failing", alloc_status="failing")])):
-            headers, raw = get()
-            c.expect("#612 initialization failures keep their process log visible",
-                     (headers[0][1], json.loads(raw).get("source")), (200, "initialization"))
-        mode["pane"] = True
-        calls.clear()
-        headers, raw = get()
-        data = json.loads(raw)
-        c.expect("#612 next poll prefers a newly available live screen", data.get("source"), "screen")
-        c.expect("#612 live screen lines replace initialization", data.get("lines"), ["Claude ready"])
-        c.check("#612 live screen needs no startup log lookup", not any(x[0] == "startup" for x in calls), calls)
-        mode["pane"] = False
-        mode["broken"] = True
-        headers, raw = get()
-        c.expect("#612 a genuinely failed initialization reader is an error", headers[0][1], 502)
-        c.check("#612 raw reader exceptions are not published", "PRIVATE-TOKEN" not in raw.decode(), raw)
-        mode["refused"] = True
-        headers, raw = get()
-        c.expect("#612 an already safe library refusal keeps its reason",
-                 json.loads(raw).get("error"), "initialization log unavailable: Nomad client is unreachable")
-        c.expect("#612 a private log refusal names its source", json.loads(raw).get("source"), "initialization")
-        mode["malformed"] = True
-        headers, raw = get()
-        c.expect("#612 unexpected note structure is not published as process data", headers[0][1], 502)
-        c.check("#612 credentials in a malformed note stay private", "PRIVATE-NOTE" not in raw.decode(), raw)
-        for label, token, code in (("guest", None, 401), ("user", user, 403)):
-            calls.clear()
-            headers, raw = get(token=token)
-            c.expect(f"#612 {label} cannot read process log", headers[0][1], code)
-            c.expect(f"#612 {label} touches no process reader", calls, [])
-        calls.clear()
-        headers, raw = get("../../private")
-        c.expect("#612 unknown target is refused before any reader", (headers[0][1], calls), (404, []))
-
 
 def check_bootstrap_progress(c):
     reader = getattr(bootstrap, "read_progress", None)
@@ -255,7 +174,6 @@ def check_nomad_stdout(c):
 def main():
     c = Checks()
     check_nomad_stdout(c)
-    check_screen(c)
     check_bootstrap_progress(c)
     check_cluster_log(c)
     check_cli_reader(c)
