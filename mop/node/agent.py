@@ -1159,6 +1159,60 @@ async def _install_identity(conn, name, login, undo):
             f"commit with git -c", None, snap, True)
 
 
+async def _prepare(conn, name, req):
+    """Захват аренды и identity владельца ДО доставки (#574). -> (отказ |
+    None, откат | None, заметка | None). Зовут под замком папета.
+
+    Захват -> identity -> передача: под одним замком, окно -- вопрос
+    профилю (IDENTITY_WAIT) и шелл установки. Ошибка подготовки -- отказ ДО
+    доставки: задание не уходит под неверной identity; компенсация
+    подтвердилась -- откат захвата едет с той же причиной (#181), не
+    подтвердилась -- аренда остаётся за пославшим, «восстановлено» не
+    говорится (review-2, п.2)."""
+    me, verified = lease.caller(req)
+    refused, undo, note = await _claim(name, req)
+    if refused:
+        return refused, None, None
+    if undo and verified:
+        inote, failed, snap, safe = await _install_identity(conn, name, me, undo)
+        if failed:
+            if safe:
+                undone = await _unclaim(name, undo)
+                if undone:
+                    failed = f"{failed}; owner not restored: {undone}"
+            return f"{name}: {failed}", None, None
+        note = "; ".join(filter(None, (note, inote)))
+        # Снимок в реестр: прежняя пара и свои хуки тем же шеллом
+        # установки, до записи новой.
+        _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
+    return None, undo, note
+
+
+async def initial_identity(conn, name, owner):
+    """Первая аренда и identity хозяина в теле роли ДО первого хода модели
+    (docs/SOUL.md, шов для #590). -> {resumed | owner_note} либо {error}.
+
+    Та же транзакция, что у dispatch (#574): замок папета, захват, снимок,
+    установка, откат при провале. owner -- хозяин-человек из резолвера,
+    не из тела. Аренда уже за ним -- возобновление той же инкарнации: ни
+    аренду, ни git не трогаем, их мог законно переставить поздний
+    dispatch. Чужая аренда в неинициализированном теле -- отказ, а не
+    перезапись: работа в клоне не наша."""
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        clone = CloneFacts.from_dict(await clone_facts(name))
+        held = clone and clone.owner and clone.owner.user
+        if held == owner:
+            return {"resumed": True}
+        if held:
+            return {"error": f"{name}: lease is held by {held}, not {owner}"}
+        refused, undo, note = await _prepare(conn, name, {"_caller": owner})
+        if refused:
+            return {"error": refused}
+        if undo:
+            _settle(undo[0], undo[3])
+    return {"owner_note": note} if note else {}
+
+
 async def v_send(conn, req):
     """Сообщение в сессию папета. -> {msg_id} либо {error}.
 
@@ -1179,40 +1233,18 @@ async def v_send(conn, req):
     самим замком, и откат чужой записи поверх невозможен конструктивно."""
     name = req["name"]
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
-    me, verified = lease.caller(req)
     # Актёр роли (#584): обычный send -- сообщение соседу, без аренды и без
     # identity; аренду берёт только dispatch, решённый субъектом и
-    # резолвером в handle (_dispatch), а не телом. Identity при dispatch --
-    # хозяина-человека из ответа резолвера, аренда -- за самим актёром:
-    # два мастера одного человека иначе забирали бы задания друг у друга.
+    # резолвером в handle (_dispatch), а не телом. Аренда и identity
+    # dispatch -- хозяина-человека из резолвера (_caller), как у человека.
     actor = req.get("_actor")
     leased = not actor or req.get("_dispatch") is True
-    signer = req.get("_owner") if actor else me
     out = {}
     async with _owner_locks.setdefault(name, asyncio.Lock()):
-        refused, undo, note = await _claim(name, req) if leased else (None, None, None)
+        refused, undo, note = await _prepare(conn, name, req) if leased \
+            else (None, None, None)
         if refused:
             return {"error": refused}
-        # Захват -> identity -> передача: под одним замком, окно -- вопрос
-        # профилю (IDENTITY_WAIT), шелл установки и короткая передача
-        # --wait 0, не 600 секунд простоя. Ошибка подготовки -- отказ ДО
-        # доставки: задание не уходит под неверной identity; компенсация
-        # подтвердилась -- откат захвата едет с той же причиной (#181),
-        # не подтвердилась -- аренда остаётся за пославшим, «восстановлено»
-        # не говорится (review-2, п.2).
-        if undo and verified:
-            inote, failed, snap, safe = await _install_identity(conn, name, signer, undo)
-            if failed:
-                if safe:
-                    undone = await _unclaim(name, undo)
-                    if undone:
-                        failed = f"{failed}; owner not restored: {undone}"
-                return {"error": f"{name}: {failed}"}
-            else:
-                note = "; ".join(filter(None, (note, inote)))
-                # Снимок в реестр: прежняя пара и свои хуки тем же шеллом
-                # установки, до записи новой.
-                _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
         # Цель — клон, а не сокет: session.py резолвит сессию сам, внутри
         # тела, где только и лежат её файлы. Снаружи сокет контейнерного
         # папета не виден. Передача -- под тем же замком: bounded (--wait 0,
@@ -1256,7 +1288,7 @@ async def v_send(conn, req):
             out["idle"] = r.get("state")
     # Аудит -- фактический актёр и его хозяин из резолвера, не поле тела.
     await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}",
-                 **({"actor": actor, "owner": req.get("_owner"),
+                 **({"actor": actor, "owner": req.get("_caller"),
                      "dispatch": req.get("_dispatch") is True} if actor else {}))
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
@@ -1748,6 +1780,15 @@ def actor_of(subject):
     return "rpc", (login if soul.is_grant(login) else None)
 
 
+def source_dispatch(got):
+    """Право источника на dispatch из ответа резолвера: source_dispatch
+    либо capabilities.dispatch; иного вида нет -- None, то есть отказ."""
+    if "source_dispatch" in got:
+        return got["source_dispatch"]
+    caps = got.get("capabilities")
+    return caps.get("dispatch") if isinstance(caps, dict) else None
+
+
 def actor_verdict(got, principal, project, verb, target=None):
     """Ответ резолвера -> причина отказа | None. Чистая: решает узел, а не
     вера в то, что сервер ответил о том, о чём спросили.
@@ -1764,8 +1805,9 @@ def actor_verdict(got, principal, project, verb, target=None):
         return f"the resolver answered about {got.get('principal')}, not {principal}"
     if got.get("project") != project:
         return f"principal {principal} is not in project {project}"
-    if not (isinstance(got.get("owner"), str) and got["owner"]):
-        return f"principal {principal} has no human owner"
+    for key, what in (("owner", "human owner"), ("job", "job")):
+        if not (isinstance(got.get(key), str) and got[key]):
+            return f"principal {principal} has no {what}"
     if target is not None:
         t = got.get("target")
         if not (isinstance(t, dict) and t.get("found") is True):
@@ -1775,7 +1817,7 @@ def actor_verdict(got, principal, project, verb, target=None):
         if t.get("project") != project:
             return foreign(target, project)
     if verb == DISPATCH:
-        if got.get("dispatch") is not True:
+        if source_dispatch(got) is not True:
             return f"role {got.get('role')} does not dispatch"
         if target is None or got["target"].get("receives_dispatch") is not True:
             return f"puppet {target} does not receive dispatch"
@@ -1786,11 +1828,15 @@ async def resolve_actor(conn, project, principal, verb, target=None):
     """Принципал, глагол, цель -> (ответ резолвера | None, отказ | None).
 
     Свежий запрос к bootstrap-сервису проекта узловым кредом: ни Nomad,
-    ни каталога ролей узел не держит. Общий шов для подъёма роли (#590)."""
+    ни каталога ролей узел не держит. Проект -- субъектом запроса, не
+    полем тела: сервер берёт его оттуда. Принципал -- полным именем
+    grant-<id> на обоих каналах. Общий шов для подъёма роли (#590)."""
+    fields = {"principal": principal, "service": "node", "verb_name": verb}
+    if target is not None:
+        fields["target"] = target
     try:
-        msg = await bus.arequest(conn, busnames.server(project), bus.envelope(
-            "resolve", principal=principal, service="node", verb_name=verb,
-            project=project, target=target), RESOLVE_WAIT)
+        msg = await bus.arequest(conn, busnames.server(project),
+                                 bus.envelope("resolve", **fields), RESOLVE_WAIT)
         got = json.loads(msg.data.decode())
     except Exception as e:
         return None, f"the resolver did not answer ({type(e).__name__})"
@@ -1821,10 +1867,12 @@ async def _admit_actor(conn, req, actor, channel):
         return why
     for key in ACTOR_STRIPPED:
         req.pop(key, None)
-    # _caller -- тот же актёр и на dispatch-субъекте, где busnames.caller
-    # его не читает: аренда и ворота (#40) спрашивают lease.caller.
-    req.update(_caller=actor, _actor=actor, _owner=got["owner"],
-               _dispatch=channel == DISPATCH, from_name=actor)
+    # Власть -- хозяин-человек из резолвера (_caller): аренда, ворота (#40)
+    # и git-подпись те же, что у него самого; два мастера одного человека --
+    # один человек, как по прежней политике. Актёр -- отдельно, для аудита.
+    # from-name -- джоб актёра: стабильный адрес папета для отчётов.
+    req.update(_caller=got["owner"], _actor=actor, _job=got["job"],
+               _dispatch=channel == DISPATCH, from_name=got["job"])
     return None
 
 

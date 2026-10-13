@@ -2935,26 +2935,26 @@ def _doctor_sweep_timeout():
 A, B, W, R, X = ("grant-" + ch * 32 for ch in "abcde")
 GRANTS_584 = {
     # Мастер-роль хозяина anton: диспетчерит, обычное управление телами.
-    A: {"role": "master", "owner": "anton", "project": "mop", "active": True,
+    A: {"job": "pu-mop-7", "role": "master", "owner": "anton", "project": "mop", "active": True,
         "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-a",
         "node_verbs": ["send", "tail", "state", "states", "ping", "local",
                        "type", "wipe", "usage", "clone"]},
     # Вторая мастер-роль того же человека (#584: «один человек, два мастера»).
-    B: {"role": "master", "owner": "anton", "project": "mop", "active": True,
+    B: {"job": "pu-mop-8", "role": "master", "owner": "anton", "project": "mop", "active": True,
         "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-b",
         "node_verbs": ["send", "tail", "state", "states", "ping", "local",
                        "type", "wipe", "usage", "clone"]},
     # Рабочий: send есть, dispatch нет.
-    W: {"role": "puppet", "owner": "anton", "project": "mop", "active": True,
+    W: {"job": "pu-mop-5", "role": "puppet", "owner": "anton", "project": "mop", "active": True,
         "dispatch": False, "receives_dispatch": True, "soul_inc": "inc-w",
         "node_verbs": ["send", "tail", "state", "states", "ping", "local"]},
     # Старая инкарнация: привязка отозвана, токен в субъекте по-прежнему
     # правильной формы, соединение живо (факт 1 SOUL.md).
-    R: {"role": "master", "owner": "anton", "project": "mop", "active": False,
+    R: {"job": "pu-mop-6", "role": "master", "owner": "anton", "project": "mop", "active": False,
         "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-old",
         "node_verbs": ["send", "wipe"]},
     # Чужой проект.
-    X: {"role": "master", "owner": "olga", "project": "other", "active": True,
+    X: {"job": "pu-other-1", "role": "master", "owner": "olga", "project": "other", "active": True,
         "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-x",
         "node_verbs": ["send", "wipe"]},
 }
@@ -2967,15 +2967,17 @@ TARGETS_584 = {
 }
 
 
-def resolver_584(req, mode=None):
-    """Резолвер сервера, каким его обещает #581: решает реестр, не тело."""
+def resolver_584(req, project, mode=None):
+    """Резолвер сервера, каким его обещает #581: решает реестр, не тело;
+    проект -- из субъекта запроса."""
     principal, verb, target = req.get("principal"), req.get("verb_name"), req.get("target")
     g = GRANTS_584.get(principal)
     if g is None:
         return {"allow": False, "reason": f"unknown principal {principal}"}
     out = {"principal": principal, "role": g["role"], "owner": g["owner"],
-           "project": g["project"], "soul_inc": g["soul_inc"],
-           "dispatch": g["dispatch"], "receives_dispatch": g["receives_dispatch"]}
+           "project": g["project"], "job": g["job"], "soul_inc": g["soul_inc"],
+           "soul_digest": "f" * 32, "receives_dispatch": g["receives_dispatch"],
+           "capabilities": {"dispatch": g["dispatch"], "node_verbs": g["node_verbs"]}}
     if target is not None:
         out["target"] = dict(TARGETS_584.get(target, {"found": False}))
     if mode == "other-principal":
@@ -2986,10 +2988,12 @@ def resolver_584(req, mode=None):
         out["target"] = dict(out["target"], project="other")
     if mode == "no-owner":
         out["owner"] = ""
+    if mode == "no-job":
+        out.pop("job")
     if not g["active"]:
         return dict(out, allow=False, reason=f"principal {principal} is not active")
-    if g["project"] != req.get("project"):
-        return dict(out, allow=False, reason=f"principal {principal} is not in project {req.get('project')}")
+    if g["project"] != project:
+        return dict(out, allow=False, reason=f"principal {principal} is not in project {project}")
     if verb == "dispatch":
         ok = g["dispatch"] and TARGETS_584.get(target, {}).get("receives_dispatch") is True
     else:
@@ -3007,8 +3011,9 @@ def check_role_node_gates_584(c):
     SOLUTION: см. agent.resolve_actor / handle -- разрешение принципала
     свежим запросом к резолверу сервера (server.rpc, узловой кред) перед
     любым эффектом; send нового актёра -- без аренды и identity; dispatch --
-    своим субъектом, аренда за актёром, identity -- хозяина-человека из
-    ответа резолвера, транзакция #574 целиком.
+    своим субъектом, аренда и identity -- хозяина-человека из ответа
+    резолвера (политика аренды прежняя), актёр -- в аудите, from-name --
+    его джоб; транзакция #574 целиком.
     RESULT: RED на fa60d1e (21 провал: аренда и identity у рабочего, wipe
     вне node_verbs и по dispatch-субъекту, отозванный и молчащий резолвер
     пропускают); зелёный после правки агента.
@@ -3066,7 +3071,7 @@ def check_role_node_gates_584(c):
             p = profiles.get(req.get("login"))
             return Reply(p if p else {"error": f"no profile for {req.get('login')}"})
         if req.get("verb") == "resolve":
-            return Reply(resolver_584(req, st["mode"]))
+            return Reply(resolver_584(req, subject.split(".")[1], st["mode"]))
         return Reply({"error": f"no such verb {req.get('verb')}"})
 
     async def deliver(name, cmd, timeout=20):
@@ -3131,6 +3136,11 @@ def check_role_node_gates_584(c):
         c.check("584 grant send is authorized by the server resolver",
                 [(r.get("principal"), r.get("verb_name"), r.get("target"))
                  for r in resolves()] == [(W, "send", "pu-mop-1")], asks)
+        c.check("584 the resolver request carries exactly the decided envelope; "
+                "the project travels by subject, not by body",
+                [(s, sorted(r)) for s, r in asks if r.get("verb") == "resolve"]
+                == [("mop.mop.server.rpc",
+                     ["principal", "service", "target", "verb", "verb_name"])], asks)
         c.check("584 grant send is delivered", bool(got and got.get("msg_id")), got)
         c.check("584 grant send takes no lease", holder("pu-mop-1") is None,
                 holder("pu-mop-1"))
@@ -3138,8 +3148,8 @@ def check_role_node_gates_584(c):
                 ident("pu-mop-1") == profiles["petr"]
                 and not [r for _s, r in asks if r.get("verb") == "identity"],
                 (ident("pu-mop-1"), asks))
-        c.check("584 grant send: from-name is the actual actor, not the body",
-                bool(delivered) and f"--from-name {W}" in delivered[0]["cmd"]
+        c.check("584 grant send: from-name is the actual actor's job, not the body",
+                bool(delivered) and "--from-name pu-mop-5" in delivered[0]["cmd"]
                 and "--from-name anton" not in delivered[0]["cmd"], delivered)
         c.check("584 grant send: the audit event names the actual actor",
                 [(k, f.get("actor")) for k, _n, f in events if k == "send"] == [("send", W)],
@@ -3186,29 +3196,42 @@ def check_role_node_gates_584(c):
                 not delivered and holder("pu-mop-1") is None
                 and bool(got and got.get("error")), (delivered, got))
 
-        # 6. dispatch: свой субъект; аренда -- за актёром, identity -- хозяина
-        # из резолвера, до доставки (#574); from-name -- актёр.
+        # 6. dispatch: свой субъект; аренда и identity -- хозяина-человека из
+        # резолвера, до доставки (#574); from-name -- джоб актёра, аудит --
+        # принципал актёра.
         reset()
         got = ask(dsp(A), dict(send, verb="dispatch"))
         c.check("584 dispatch asks the resolver for verb dispatch on the target",
                 [(r.get("principal"), r.get("verb_name"), r.get("target"))
                  for r in resolves()] == [(A, "dispatch", "pu-mop-1")], asks)
         c.check("584 dispatch is delivered", bool(got and got.get("msg_id")), got)
-        c.check("584 dispatch: the lease is held by the actor, identity is the "
+        c.check("584 dispatch: the lease and the identity are the resolved "
                 "human owner's, both before delivery",
-                bool(delivered) and delivered[0]["holder"] == A
+                bool(delivered) and delivered[0]["holder"] == "anton"
                 and delivered[0]["ident"] == profiles["anton"], delivered)
-        c.check("584 dispatch: from-name is the actor",
-                bool(delivered) and f"--from-name {A}" in delivered[0]["cmd"], delivered)
+        c.check("584 dispatch: from-name is the actor's job",
+                bool(delivered) and "--from-name pu-mop-7" in delivered[0]["cmd"], delivered)
         c.check("584 dispatch: the audit event names the actor and the owner",
                 [(f.get("actor"), f.get("owner")) for k, _n, f in events if k == "send"]
                 == [(A, "anton")], events)
 
-        # 7. Один человек, два мастера: B не забирает живую аренду A, даже
-        # если тело просит force -- его владелец тот же человек.
-        got = ask(dsp(B), dict(send, verb="dispatch", force=True))
-        c.check("584 the same human's second master cannot take a live lease",
-                len(delivered) == 1 and holder("pu-mop-1") == A
+        # 7. Один человек, два мастера: тот же человек по прежней политике
+        # аренды; аудит различает актёров.
+        events.clear()
+        got = ask(dsp(B), dict(send, verb="dispatch"))
+        c.check("584 the same human's second master works under the same lease",
+                len(delivered) == 2 and holder("pu-mop-1") == "anton"
+                and bool(got and got.get("msg_id")), (delivered, got))
+        c.check("584 two masters of one human stay apart in the audit",
+                [(f.get("actor"), f.get("owner")) for k, _n, f in events if k == "send"]
+                == [(B, "anton")], events)
+        # Чужая живая аренда (другой человек) закрывает dispatch, и force
+        # тела её не снимает.
+        reset()
+        ask("mop.mop.node.hyper.rpc.petr", send)
+        got = ask(dsp(A), dict(send, verb="dispatch", force=True))
+        c.check("584 another human's live lease refuses dispatch, body force ignored",
+                len(delivered) == 1 and holder("pu-mop-1") == "petr"
                 and bool(got and got.get("error")), (delivered, got))
 
         # 8. Роль без dispatch -- отказ.
@@ -3256,13 +3279,14 @@ def check_role_node_gates_584(c):
                     not delivered and holder("pu-mop-1") is None
                     and bool(got and got.get("error")), (delivered, got))
 
-        # 13. Нет хозяина-человека в ответе -- dispatch отказан до эффекта.
-        reset()
-        st["mode"] = "no-owner"
-        got = ask(dsp(A), dict(send, verb="dispatch"))
-        c.check("584 dispatch without a resolved human owner is refused",
-                not delivered and holder("pu-mop-1") is None
-                and bool(got and got.get("error")), (delivered, got))
+        # 13. Нет хозяина-человека или джоба в ответе -- отказ до эффекта.
+        for mode in ("no-owner", "no-job"):
+            reset()
+            st["mode"] = mode
+            got = ask(dsp(A), dict(send, verb="dispatch"))
+            c.check(f"584 dispatch without a resolved {mode[3:]} is refused",
+                    not delivered and holder("pu-mop-1") is None
+                    and bool(got and got.get("error")), (delivered, got))
 
         # 14. Путаница операций: субъект dispatch с глаголом wipe -- отказ;
         # rpc с телом «dispatch: true» -- обычный send; глагол dispatch по
@@ -3283,7 +3307,7 @@ def check_role_node_gates_584(c):
                 and bool(got and got.get("error")), (delivered, got))
 
         # 15. Частичный провал: доставка упала -- аренда и identity
-        # откатываются (#574) за актёром.
+        # откатываются (#574).
         reset()
         st["deliver_error"] = "socket gone"
         got = ask(dsp(A), dict(send, verb="dispatch"))
@@ -3292,13 +3316,33 @@ def check_role_node_gates_584(c):
                 and bool(got and got.get("error")),
                 (holder("pu-mop-1"), ident("pu-mop-1"), got))
 
-        # 16. Изменяющий глагол актёра -- через ворота аренды актёра: чужая
-        # живая аренда (A) закрывает wipe второму мастеру (B).
+        # 16. Изменяющий глагол актёра -- через ворота аренды его хозяина:
+        # живая аренда другого человека закрывает wipe.
         reset()
-        ask(dsp(A), dict(send, verb="dispatch"))
-        got = ask(rpc(B), {"verb": "wipe", "name": "pu-mop-1"})
-        c.check("584 another actor's live lease gates a mutating verb",
+        ask("mop.mop.node.hyper.rpc.petr", send)
+        got = ask(rpc(A), {"verb": "wipe", "name": "pu-mop-1"})
+        c.check("584 another human's live lease gates an actor's mutating verb",
                 not destroyed and bool(got and got.get("error")), (destroyed, got))
+
+        # 18. Шов #590: первая аренда и identity хозяина до первого хода.
+        reset()
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton"))
+        c.check("584 initial identity: a fresh body gets the human lease and "
+                "identity", holder("pu-mop-1") == "anton"
+                and ident("pu-mop-1") == profiles["anton"] and not got.get("error"),
+                (holder("pu-mop-1"), ident("pu-mop-1"), got))
+        asks.clear()
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton"))
+        c.check("584 initial identity: resume of the same owner touches nothing",
+                got == {"resumed": True} and not asks
+                and holder("pu-mop-1") == "anton", (got, asks))
+        reset()
+        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
+            f.write(Owner("petr", 1).render())       # чужая, и давно не живая
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton"))
+        c.check("584 initial identity: a foreign lease refuses, nothing rewritten",
+                bool(got.get("error")) and holder("pu-mop-1") == "petr"
+                and ident("pu-mop-1") == profiles["petr"], (got, holder("pu-mop-1")))
 
         # 17. Легаси без изменений: человек по rpc -- аренда и identity, без
         # резолвера; публичный msg -- без владельца и без резолвера.
@@ -3320,7 +3364,8 @@ def check_role_node_gates_584(c):
                 bool(got and got.get("error")), got)
 
     # Чистый вердикт: только явное allow, иное -- отказ, не «пропустить».
-    ok = {"allow": True, "principal": A, "project": "mop", "owner": "anton"}
+    ok = {"allow": True, "principal": A, "project": "mop", "owner": "anton",
+          "job": "pu-mop-7"}
     for label, got in (("no allow", {k: v for k, v in ok.items() if k != "allow"}),
                        ("truthy allow", dict(ok, allow="yes")),
                        ("not a mapping", ["allow"]),
@@ -3329,6 +3374,16 @@ def check_role_node_gates_584(c):
                 bool(agent.actor_verdict(got, A, "mop", "send")), got)
     c.check("584 actor_verdict passes an explicit allow about the asked principal",
             agent.actor_verdict(ok, A, "mop", "send") is None)
+    tgt = {"target": {"found": True, "job": "pu-mop-1", "project": "mop",
+                      "receives_dispatch": True}}
+    for label, extra, want in (
+            ("source_dispatch", {"source_dispatch": True}, None),
+            ("capabilities.dispatch", {"capabilities": {"dispatch": True}}, None),
+            ("bare top-level dispatch is not a source right", {"dispatch": True}, "deny"),
+            ("no source right", {}, "deny")):
+        got = agent.actor_verdict(dict(ok, **tgt, **extra), A, "mop", "dispatch", "pu-mop-1")
+        c.check(f"584 dispatch source right: {label}",
+                (got is None) == (want is None), got)
     c.check("584 dispatch subject token must be a principal id",
             agent.actor_of("mop.mop.node.hyper.dispatch.anton") == ("dispatch", None)
             and agent.actor_of("mop.mop.node.hyper.rpc.anton") == ("rpc", None)
