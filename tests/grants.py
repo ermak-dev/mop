@@ -24,13 +24,11 @@ HYPOTHESIS: без реестра делегированная личность 
 три префикса -- новый четвёртый он молча считает человеком.
 SOLUTION: mop/server/grants.py -- реестр + бандлы + резолвер + рендер прав
 одним серверным модулем; пространство имён -- в busnames/soul одним
-определением (#580 landed). STATUS: RED -- 3 поведенческих зелёные,
-хранилищная половина заблокирована дефектом #580: soul.binding требует
-soul_digest в 32 hex, а формула контракта (soul.digest, docs/SOUL.md)
-даёт sha256 в 64 hex -- запись привязки с настоящим дайджестом бандла
-невозможна, пока #580 не согласует длину. Отказ воспроизводится на
-каждой проверке: «binding soul_digest=...: 32 lower-case hex
-characters». Проверки НЕ ослаблены под дефект.
+определением (#580 landed, 369b01d: digest 64hex). STATUS: FIXED —
+55/55 зелёные на merge 369b01d (свой #581) -- see #581. Хранилищная
+половина была заблокирована дефектом #580 (soul.binding требовал
+soul_digest в 32 hex при контрактных 64); после исправления 369b01d
+легла в зелень БЕЗ правок проверок.
 """
 import json
 import os
@@ -338,7 +336,7 @@ def check_immutable_bundle(c):
             mod.prepare(project="mop", role="puppet",
                         digest=MASTER_DIGEST, manifest=PUPPET,
                         prompt=b"# other prompt\n", owner="anton",
-                        request_id="r2", job="j2", soul_inc="i2",
+                        request_id="r2", job="j2", soul_inc=incarnation("i2"),
                         intent="intent-A", root=root.name)
         except ValueError as e:
             c.check("#581 a different bundle under a known digest "
