@@ -400,9 +400,13 @@ async def _open(**opts):
     return nc
 
 
-async def _aconnect(file=None):
+async def _aconnect(creds):
+    """Соединение процесса по ВЫБРАННОМУ снимку кредов -- config() здесь не
+    читается вовсе (#603, ревью 01a4a58): второе чтение развязывалось с
+    первым (файл перезаписали между чтениями), и рукопожатие шло одним
+    пользователем, а conn.creds и identity-хелперы называли другого."""
     return await _open(
-        **auth(config(file)), name="mop", error_cb=_on_error,
+        **auth(creds), name="mop", error_cb=_on_error,
         # Молча копить неотправленное в ожидании сервера — худший вид отказа:
         # вызывающий получит успех, которого не было.
         allow_reconnect=True, max_reconnect_attempts=-1,
@@ -465,7 +469,9 @@ def connect(file=None):
             return selected
         since = _clock()
         with _connect_failure(creds_or_nothing, lambda e: _error_since(since) or str(e)):
-            _conn = _call(_aconnect(file), 10)
+            # Один снимок кредов -- и рукопожатию, и identity: второе чтение
+            # config() развязало бы их (см. _aconnect).
+            _conn = _call(_aconnect(selected), 10)
             _conn.creds = selected
         return _conn
 

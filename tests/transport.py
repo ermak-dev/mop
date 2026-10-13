@@ -466,7 +466,9 @@ def check_connect_snapshot_603(c):
     SOLUTION: connect() передаёт ОДИН выбранный снимок в асинхронное
     соединение, и оно не читает config() вовсе -- рукопожатие и identity
     связаны одним и тем же словарём. Публичный API не меняется.
-    RESULT: см. ниже. STATUS: RED"""
+    RESULT: transport 159/159, strict 77/77; фикстура гонит настоящий
+    connect() с подменёнными только _open/_call.
+    STATUS: FIXED — see #603"""
     reads = []
 
     def shifting_config(file=None):
