@@ -2,16 +2,18 @@
 // (useProjects -- один источник, имя и origin с сервера), ветка опциональна,
 // имя папета приходит ОТ СЕРВЕРА -- страница его не выдумывает. POST
 // /api/admin/ops {action: "add", params: {origin, branch?}} -- без target.
-// Результат -- общий ход useAdminOp: 202 -> id -> «принято, исход
-// неизвестен» и опрос из памяти страницы; перезагрузка начинает заново --
-// id хранить негде (storage запрещён #463), это названо.
-//
-// RESULT: тесты написаны до реализации (RED).
-import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+// HYPOTHESIS: #605 форма сохраняет выбор и остаётся открытой после 202,
+// а вердикт вынесен за Modal; терминал позволяет повторить add одним кликом.
+// SOLUTION: подтверждённый id закрывает и очищает форму; отказ остаётся
+// внутри Modal, следующий add требует нового выбора, loading явный.
+// RESULT: семь проверок воспроизвели дефект до исправления; interaction-suite зелёный.
+// STATUS: FIXED — see #605
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { AddBox } from "./AddBox";
 import { renderUi } from "../test-utils";
 import type { Session } from "../useSession";
+import { operations } from "../useOperationFeed";
 
 const ADMIN: Session = { login: "anton", role: "admin" };
 
@@ -36,7 +38,7 @@ const route = (post: () => Promise<Response>, get: () => Promise<Response>) =>
     return ({ ok: true, status: 200, json: async () => ({}) }) as Response;
   });
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); operations.resetForTest(); });
 
 const openForm = async () => {
   fireEvent.click(screen.getByRole("button", { name: /завести папета/i }));
@@ -110,13 +112,15 @@ test("after 202 the poll reads the outcome by id from the page memory", async ()
   await openForm();
   fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
   fireEvent.click(screen.getByRole("button", { name: /^завести$/i }));
-  // 202 принят, опрос по id из памяти: первый же GET даёт правду
-  await waitFor(() => expect(screen.getByTestId("add-verdict")).toHaveTextContent(/Идёт/));
-  expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/api/admin/ops/op-1"))).toBe(true);
+  await waitFor(() => expect(fetchMock.mock.calls.some((c) =>
+    String(c[0]).includes("/api/admin/ops/op-1"))).toBe(true));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByTestId("add-verdict")).toBeNull();
+  expect(screen.getByRole("button", { name: /завести папета/i })).toBeDisabled();
 });
 
-test("a dropped answer (unknown) is named unknown, never failed", async () => {
-  const fetchMock = route(() => Promise.resolve(ok202("op-1")),
+test("a dropped first answer stays unknown inside the form, never failed", async () => {
+  const fetchMock = route(() => Promise.reject(new Error("network")),
                           () => Promise.resolve(opJson("unknown")));
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<AddBox session={ADMIN} />);
@@ -125,8 +129,11 @@ test("a dropped answer (unknown) is named unknown, never failed", async () => {
   fireEvent.click(screen.getByRole("button", { name: /^завести$/i }));
   await waitFor(() => expect(screen.getByTestId("add-verdict"))
     .toHaveTextContent(/Исход неизвестен/));
-  // unknown -- не failed: слова «не удался» нет
-  expect(screen.getByTestId("add-verdict")).not.toHaveTextContent(/не удался/);
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByTestId("add-verdict")).toHaveTextContent(/первый ответ потерян/);
+  expect(within(dialog).getByTestId("add-verdict")).not.toHaveTextContent(/не удался/);
+  expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
+    .toHaveLength(1);
 });
 
 test("double submit rides one POST", async () => {
@@ -146,7 +153,7 @@ test("double submit rides one POST", async () => {
     .toHaveLength(1);
 });
 
-test("terminal verdict replaces the unknown phrase; storage stays empty", async () => {
+test("a fast terminal result closes the form without a dashboard verdict; storage stays empty", async () => {
   const fetchMock = route(() => Promise.resolve(ok202("op-1")),
                           () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
@@ -154,20 +161,73 @@ test("terminal verdict replaces the unknown phrase; storage stays empty", async 
   await openForm();
   fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
   fireEvent.click(screen.getByRole("button", { name: /^завести$/i }));
-  await waitFor(() => expect(screen.getByTestId("add-verdict")).toHaveTextContent(/заведён/i));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(screen.getByRole("button", { name: /завести папета/i })).toBeEnabled());
+  expect(screen.queryByTestId("add-verdict")).toBeNull();
+  expect(screen.queryByText(/заведён/i)).toBeNull();
   expect(window.localStorage.length).toBe(0);
   expect(window.sessionStorage.length).toBe(0);
 });
 
-test("the form does not close itself on submit: the verdict is visible", async () => {
+test("accepted add closes before placement finishes and requires a new choice after completion", async () => {
   const fetchMock = route(() => Promise.resolve(ok202("op-1")),
                           () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<AddBox session={ADMIN} />);
   await openForm();
   fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
+  fireEvent.change(screen.getByLabelText(/ветка/i), { target: { value: "swarm" } });
   fireEvent.click(screen.getByRole("button", { name: /^завести$/i }));
-  await waitFor(() => expect(screen.getByTestId("add-verdict")).toBeInTheDocument());
-  // выбор проекта ещё на экране -- ход операции виден целиком
-  expect(screen.getByTestId("add-project")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByTestId("add-verdict")).toBeNull();
+  expect(screen.getByRole("button", { name: /завести папета/i })).toBeDisabled();
+  await act(async () => { operations.frame({ id: "op-1", action: "add", target: null,
+                                            status: "succeeded" }); });
+  await openForm();
+  expect(screen.getAllByRole("radio").every((r) => !(r as HTMLInputElement).checked)).toBe(true);
+  expect(screen.getByLabelText(/ветка/i)).toHaveValue("");
+  expect(screen.getByTestId("add-submit")).toBeDisabled();
+  fireEvent.click(screen.getByTestId("add-submit"));
+  expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
+    .toHaveLength(1);
+});
+
+test("a refused request keeps the selected form and its reason inside the dialog", async () => {
+  const fetchMock = route(() => Promise.resolve(({ ok: false, status: 409,
+    json: async () => ({ error: "project limit reached" }) }) as Response),
+    () => Promise.resolve(opJson("running")));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<AddBox session={ADMIN} />);
+  await openForm();
+  fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
+  fireEvent.click(screen.getByTestId("add-submit"));
+  const reason = await screen.findByText("project limit reached");
+  expect(screen.getByRole("dialog")).toContainElement(reason);
+  expect(within(screen.getByRole("dialog")).getByTestId("add-verdict")).toHaveTextContent(/Отказано/);
+  expect(screen.getByRole("radio", { name: /mop/i })).toBeChecked();
+});
+
+test("an empty loaded registry is not a perpetual loading state", async () => {
+  let release: ((r: Response) => void) | null = null;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { release = resolve; })));
+  renderUi(<AddBox session={ADMIN} />);
+  await openForm();
+  expect(screen.getByText(/реестр грузится/i)).toBeInTheDocument();
+  await act(async () => { release?.(({ ok: true, status: 200,
+    json: async () => ({ projects: [] }) }) as Response); });
+  expect(screen.queryByText(/реестр грузится/i)).toBeNull();
+  expect(screen.getByText(/нет зарегистрированных проектов/i)).toBeInTheDocument();
+  expect(screen.getByTestId("add-submit")).toBeDisabled();
+});
+
+test("acceptance closes the form even while the initial result GET has no reply", async () => {
+  const fetchMock = route(() => Promise.resolve(ok202("op-1")),
+                          () => new Promise<Response>(() => {}));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<AddBox session={ADMIN} />);
+  await openForm();
+  fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
+  fireEvent.click(screen.getByTestId("add-submit"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByTestId("add-verdict")).toBeNull();
 });

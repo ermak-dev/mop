@@ -1309,7 +1309,7 @@ def check_no_replay_519(c):
             # после первого вычитания, до второго.
             if self.rounds >= 2:
                 for frame in self.later:
-                    webcli._OP_FRAMES.append(frame)
+                    webcli._on_operation(json.loads(frame))
             return self.version, {"n": self.version}
 
         def current(self):
@@ -1321,7 +1321,9 @@ def check_no_replay_519(c):
     def _subscribe(before, later):
         """Кадры before лежат в буфере ДО подписчика; later приходят после
         его первого круга. -> что подписчик успел получить в wfile."""
-        with patched(webcli, COLLECTOR=_Col(later), _OP_FRAMES=list(before)):
+        with patched(webcli, COLLECTOR=_Col(later), _OP_FRAMES=[], _OP_SEQUENCE=0):
+            for frame in before:
+                webcli._on_operation(json.loads(frame))
             h = webcli.Handler.__new__(webcli.Handler)
             h.path = "/events"
             h.headers = {}
@@ -2704,6 +2706,95 @@ def readers_stub():
                    node_of=lambda name, running=True: "mate")
 
 
+
+# HYPOTHESIS: индекс в обрезаемом списке замирает на 100, и следующие
+# терминалы не доходят до существующего SSE-подписчика.
+# SOLUTION: курсор -- монотонный номер; смещение в кольце считается от
+# текущего номера и числа сохранённых кадров под тем же замком.
+# RESULT: кадры после 100 доезжают, replay при новом соединении отсутствует.
+# STATUS: FIXED — see #604
+def check_operation_stream_capacity_604(c):
+    from mop.cli.server import web as webcli
+
+    class Collector:
+        def __init__(self, batches):
+            self.batches = iter(batches)
+            self.version = 0
+
+        def wait(self, version, timeout):
+            try:
+                batch = next(self.batches)
+            except StopIteration:
+                raise BrokenPipeError()
+            for number in batch:
+                webcli._on_operation({"id": f"op-{number}", "action": "add",
+                                      "target": f"pu-demo-{number}", "status": "done"})
+            self.version += 1
+            return self.version, {"version": self.version}
+
+        def kick(self):
+            pass
+
+    def stream(before, batches):
+        collector = Collector(batches)
+        with patched(webcli, COLLECTOR=collector, _OP_FRAMES=[], _OP_SEQUENCE=0):
+            for number in before:
+                webcli._on_operation({"id": f"old-{number}", "action": "add",
+                                      "target": f"pu-old-{number}", "status": "done"})
+            handler = webcli.Handler.__new__(webcli.Handler)
+            handler.wfile = BytesIO()
+            handler.send_response = lambda *args: None
+            handler.send_header = lambda *args: None
+            handler.end_headers = lambda: None
+            handler.stream()
+            wire = handler.wfile.getvalue().decode()
+            frames = [json.loads(part.split("data: ", 1)[1]) for part in wire.split("\n\n")
+                      if part.startswith("event: operation\n")]
+            return frames, len(webcli._OP_FRAMES)
+
+    continuous, size = stream([], [[number] for number in range(115)])
+    c.expect("#604 an existing subscriber receives all 115 consecutive terminals",
+             [frame["id"] for frame in continuous], [f"op-{number}" for number in range(115)])
+    c.expect("#604 the operation history remains bounded", size, 100)
+    fresh, _ = stream(range(140), [[140], [141]])
+    c.expect("#604 a new subscriber skips the capped old history but receives new terminals",
+             [frame["id"] for frame in fresh], ["op-140", "op-141"])
+    delayed, _ = stream([], [list(range(125)), [125]])
+    c.expect("#604 a lagging subscriber receives retained terminals and continues afterwards",
+             [frame["id"] for frame in delayed], [f"op-{number}" for number in range(25, 126)])
+# HYPOTHESIS: GET результата кодирует admin-гейт как status="403"
+# внутри HTTP 200, и клиент принимает отказ доступа за исход операции.
+# SOLUTION: отказ -- типизированный Refused, HTTP-handler сохраняет его
+# код и безопасную причину, а не упаковывает отказ как статус операции.
+# RESULT: 401/403/503 проверены на настоящем GET-handler.
+# STATUS: FIXED — see #610
+def check_operation_result_http_gate_610(c):
+    from mop.cli.server import web as webcli
+    from mop.server import adminapi
+
+    def unavailable():
+        raise RuntimeError("PRIVATE-TOKEN /private/provider.env")
+
+    cases = (((None, None), None, 401, "login required"),
+             (("viewer", "user"), None, 403, "admin only"),
+             (("admin", "admin"), unavailable, 503, "login provider unavailable"))
+    for who, provider, expected, reason in cases:
+        api = adminapi.Api(adminapi.Operations(), origin="https://pool.example", provider=provider)
+        with patched(webcli, ADMINAPI=api), patched(webcli.Handler, _who=lambda self, p=who: p):
+            headers, body = _fake_handler(webcli, "GET", "/api/admin/ops/private-operation-id")
+        c.expect(f"#610 HTTP result gate {expected}", headers[0][1], expected)
+        c.expect(f"#610 result gate {expected} gives only its public reason",
+                 json.loads(body), {"error": reason})
+        c.check(f"#610 result gate {expected} leaks no operation or provider details",
+                all(secret not in body.decode() for secret in
+                    ("private-operation-id", "PRIVATE-TOKEN", "provider.env", '"target"')), body)
+    api = adminapi.Api(adminapi.Operations(), origin="https://pool.example")
+    with patched(webcli, ADMINAPI=api), patched(webcli.Handler, _who=lambda self: ("admin", "admin")):
+        headers, body = _fake_handler(webcli, "GET", "/api/admin/ops/unknown-id")
+    c.expect("#610 admin can still read an unknown result", headers[0][1], 200)
+    c.expect("#610 unknown is an operation status, not an auth failure", json.loads(body)["status"], "unknown")
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -2714,10 +2805,10 @@ def main():
                check_load_378, check_master_sessions_421, check_who_answer_421,
                check_session_store_415, check_login_api_415,
                check_session_survives_restart_485,
-               check_admin_routes_486,
+               check_admin_routes_486, check_operation_result_http_gate_610,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
-               check_no_replay_519,
+               check_no_replay_519, check_operation_stream_capacity_604,
                check_login_bounds_415, check_guard_417,
                check_guard_placeholder_417, check_breaker_417,
                check_gateway_417, check_breaker_singleflight_417,

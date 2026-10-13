@@ -22,7 +22,7 @@ from contextlib import contextmanager
 
 from ..common import bus, config, fsutil, paths, puppets
 
-TICK = 300                   # редко и предсказуемо; sha не нов -- ни одного запроса
+TICK = 300                   # период сверки и восстановления копий прежних узлов
 STATE = paths.local("proxy-key.json")
 KEY_FILE = paths.local(paths.SECRETS, "llm-proxy-client.pass")
 
@@ -749,34 +749,72 @@ def _secrets_env(env):
     return out
 
 
-def push(env=None, nodes=None, now=None):
-    """Раздать блоб узлам и запомнить отпечаток. -> {узел: итог} | None.
+def delivery_targets(content, state, nodes, now):
+    """Получатели без подтверждённой свежей копии; прежнее имя не доказывает
+    сохранность файла после переустановки, поэтому копия обновляется по сроку."""
+    if content is None:
+        return []
+    if due(content, state):
+        return list(nodes)
+    outcomes = state.get("nodes") or {}
+    delivered = state.get("delivered_at") or {}
+    targets = []
+    for node in nodes:
+        at = delivered.get(node, state.get("at"))
+        recent = isinstance(at, (int, float)) and not isinstance(at, bool) \
+            and 0 <= now - at < TICK
+        if outcomes.get(node) != "OK" or not recent:
+            targets.append(node)
+    return targets
 
-    None -- раздавать нечего или отпечаток не нов. nodes -- готовый список
+
+def push(env=None, nodes=None, now=None):
+    """Раздать нужным получателям и сохранить их подтверждения. -> итог | None.
+
+    None -- блоба нет или все копии ещё свежие. Новый узел и отказ записи
+    требуют доставки независимо от sha; переустановленное прежнее имя
+    получает копию не позже следующего периода TICK. nodes -- готовый список
     (проба), иначе состав пула по шине. Пишет глагол write без адреса:
     агент для админа кладёт копию узла и живые тела без аренды."""
     env = config.effective() if env is None else env
     content = blob(_secrets_env(env))
-    if not due(content, _load()):
+    if content is None:
         return None
+    state = _load() or {}
+    now = time.time() if now is None else now
     if nodes is None:
         nodes = sorted(puppets.ready_nodes())
     if not nodes:
         return {}
+    targets = delivery_targets(content, state, nodes, now)
+    if not targets:
+        return None
     try:
-        answers = bus.request_many("write", nodes, timeout=bus.WRITE_TIMEOUT,
+        answers = bus.request_many("write", targets, timeout=bus.WRITE_TIMEOUT,
                                    files=[bus.as_file(paths.NODE_SECRETS, content)])
     except bus.BusError as e:
-        answers = {n: e for n in nodes}
-    out = bus.results_from(nodes, answers)
-    if settled(out):
-        _save({"sha": sha(content), "at": int(now or time.time()), "nodes": out})
+        answers = {n: e for n in targets}
+    out = bus.results_from(targets, answers)
+    same = not due(content, state)
+    previous = (state.get("nodes") or {}) if same else {}
+    times = (state.get("delivered_at") or {}) if same else {}
+    outcomes = {n: previous[n] for n in nodes if n in previous}
+    delivered = {n: times.get(n, state.get("at")) for n in nodes
+                 if previous.get(n) == "OK"}
+    outcomes.update(out)
+    for node, result in out.items():
+        if result == "OK":
+            delivered[node] = int(now)
+        else:
+            delivered.pop(node, None)
+    _save({"sha": sha(content), "at": int(now), "nodes": outcomes,
+           "delivered_at": delivered})
     return out
 
 
 def ticker(log, every=TICK):
-    """Цикл раздачи: sha не нов -- ни одного запроса шине. Живёт рядом с
-    никаким другим циклом."""
+    """Цикл доставки новым узлам и восстановления прежних копий по сроку.
+    Подтверждённые получатели не повторяются до своего периода обновления."""
     while True:
         try:
             out = push()

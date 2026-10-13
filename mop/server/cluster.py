@@ -167,12 +167,13 @@ def nomad_jobs(project=None):
 
 
 def task_and_reason(alloc):
-    """Сводка задачи и, у падающей, причина из stderr (#126). Только сервис
-    кластера: у него Nomad. stderr читается лишь у падающих -- это запрос к
-    клиенту Nomad на узле, и платить его за здоровых незачем."""
+    """Сводка задачи и причина последнего отказа из stderr. Повторная running
+    обёртка ещё не доказывает подъём сессии: ростер сверяет это с агентом.
+    Без ненулевого исхода stderr не читается."""
     task = state.task_summary(alloc)
     reason = None
-    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None):
+    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None,
+                         initializing=True):
         try:
             reason = state.failure_reason(
                 _api().alloc_stderr(Alloc.from_dict(alloc).id, state.task_name(alloc)))
@@ -480,6 +481,20 @@ def _stop(project, req):
         return {"error": f"{req['name']} has no allocation to stop"}
     _api().alloc_stop(alloc.id)
     return {"ok": True, "alloc": alloc.id}
+
+
+def _job_stop(project, req):
+    """Оператор останавливает задание, сохраняя тело и workspace (#608)."""
+    name = req["name"]
+    job = _api().get_job(name)
+    if not job:
+        return {"error": f"no job {name}"}
+    origin = JobMeta.from_job(job).origin
+    if not origin:
+        return {"error": f"{name} carries no origin: not a pool puppet"}
+    _api().deregister(name, purge=False)
+    return {"ok": True, "name": name, "stopped": True,
+            "project": puppets.project_of(origin)}
 
 
 def _delete(project, req):
@@ -1009,6 +1024,7 @@ VERBS = {
     "update":         Verb(_gated(_update), PROJECT, True,  True),
     "restart":        Verb(_gated(_restart), PROJECT, True,  True),
     "stop":           Verb(_gated(_stop), PROJECT, True,  True),
+    "job_stop":       Verb(_job_stop,       ADMIN,   True,  True),
     "delete":         Verb(_gated(_delete), PROJECT, True,  True),
     "alloc":          Verb(_alloc,          PROJECT, True,  False),
     "stderr":         Verb(_stderr,         PROJECT, True,  False),

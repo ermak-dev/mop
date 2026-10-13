@@ -20,12 +20,14 @@ from . import nomad, playvars, spec
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
 
-def prepare(origin, root=None):
+def prepare(origin, root=None, branch=None):
     """Манифесты проекта: из рабочей копии root, если она названа, иначе из
     origin (дефолтная ветка). -> словарь manifest.fetch плюс 'origin'.
+    branch выбирает remote-ветку и имеет приоритет над root.
     Отказ — RuntimeError, как у manifest."""
     project = puppets.project_of(origin)
-    got = manifest.fetch_tree(root, project) if root else manifest.fetch(origin)
+    got = (manifest.fetch(origin, branch=branch) if branch is not None
+           else manifest.fetch_tree(root, project) if root else manifest.fetch(origin))
     got["origin"] = origin
     return got
 
@@ -37,6 +39,12 @@ def extra_vars(origin, got):
     живой сборкой (#26), держится tests/image.py."""
     extra = {"mop_project": got["project"], "mop_origin": origin,
              "mop_project_asks": got["asks"]}
+    if "branch" in got:
+        branch, commit = got["branch"], got.get("commit")
+        if commit is None:
+            raise RuntimeError("image branch has no verified commit")
+        manifest.image_source(branch, commit)
+        extra.update(mop_image_branch=branch, mop_image_commit=commit)
     # В образ едет только песочница (#61): bootstrap играется при старте.
     if got["sandbox_vars"]:
         extra["mop_project_vars"] = got["sandbox_vars"]
