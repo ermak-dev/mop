@@ -14,7 +14,7 @@ bus.principal/caller_token/node_name, ops.add(soul=, request_id=) без
 повторов, receives_dispatch в строке ростера с серверного MopSoul и корни
 каталога ролей MOP_SOUL_DIRS (os.pathsep, доверенные внешние раньше
 пакетных). Легаси-провода байт в байт прежние.
-STATUS: RED
+STATUS: FIXED — see #603
 """
 import asyncio
 import os
@@ -259,12 +259,19 @@ def check_server_qualified_603(c):
     rec = Recorder()
     with patched(bus, config=creds(NODE_USER)), patched(bus, _ask=rec):
         bus.ask_server("bootstrap", project="mop")
-        c.expect("a node's ask_server goes qualified", rec.subjects[-1],
+        c.expect("plain ask_server keeps the anonymous legacy subject",
+                 rec.subjects[-1], "mop.mop.server.rpc")
+        bus.ask_server("bootstrap", project="mop", node_auth=True)
+        c.expect("node_auth=True goes qualified", rec.subjects[-1],
                  f"mop.mop.server.rpc.{NODE_USER}")
     with patched(bus, config=creds("alice")), patched(bus, _ask=rec):
         bus.ask_server("bootstrap", project="mop")
         c.expect("a human's ask_server stays anonymous", rec.subjects[-1],
                  "mop.mop.server.rpc")
+    # Квалифицированный путь -- узловой: не узлу он не выдаётся.
+    with patched(bus, config=creds("alice")):
+        refused(c, "node_auth without a node credential is refused",
+                bus.ask_server, "bootstrap", project="mop", node_auth=True)
 
 
 def check_startup_603(c):
@@ -345,10 +352,12 @@ def check_row_dispatch_603(c):
     legacy = puppets._row(item()).to_dict()
     c.check("a legacy row carries no receives_dispatch key",
             "receives_dispatch" not in legacy, legacy)
-    # Данные, не политика: что сервер прислал, то и в строке.
-    row = puppets._row(item({"receives_dispatch": "yes"}))
-    c.expect("no local evaluation of the server's fact",
-             row.receives_dispatch, "yes")
+    # Мусорное поле -- громкий отказ (замороженный контракт), не молчаливое
+    # «не цель»: ростер (#587) и дашборд (#588) не читали бы мусор как факт.
+    refused(c, "a malformed MopSoul fact is refused loud",
+            puppets._row, item({"receives_dispatch": "yes"}))
+    refused(c, "a non-mapping MopSoul fact is refused loud",
+            puppets._row, item("garbage"))
 
 
 def check_roots_603(c):
@@ -374,12 +383,34 @@ def check_roots_603(c):
             and os.path.isdir(souldirs.PACKAGE_DIR), souldirs.PACKAGE_DIR)
 
 
+def check_body_layout_603(c):
+    """Раскладка тела роли -- одна таблица (590's shape, #603): каталог
+    инкарнации, бандл и кред рядом, метка готовности. Константами владеет
+    common, чтобы 584 и 590 брали их без цикла зависимостей."""
+    try:
+        from mop import driver
+    except ImportError as e:
+        c.check(f"the body layout constants exist ({e})", False)
+        return
+    from mop.common import paths
+    c.expect("soul_dir is the incarnation directory under HOME",
+             driver.soul_dir("archivist", "7"),
+             paths.under(driver.HOME, "souls", "archivist", "7"))
+    c.check("the bundle sits in its own subdirectory",
+            driver.SOUL_BUNDLE == "bundle", driver.SOUL_BUNDLE)
+    c.check("the node's credential file is bus.json",
+            driver.BUS_FILE == "bus.json", driver.BUS_FILE)
+    c.check("the readiness marker is ready.json",
+            driver.READY == "ready.json", driver.READY)
+
+
 def check_service_facts_603(c):
     """Каркас ставит транспортные факты _reply/_subject настоящим значением
     ПОСЛЕ trusted(): тело их не подделывает."""
     seen = []
 
-    async def h(project, req, send):
+    # Синхронный обработчик: каркас зовёт его в исполнителе, а не в петле.
+    def h(project, req, send):
         seen.append(req)
         return {"ok": True}
 
@@ -411,7 +442,7 @@ def main():
                           check_private_603, check_server_qualified_603,
                           check_startup_603, check_add_fields_603,
                           check_row_dispatch_603, check_roots_603,
-                          check_service_facts_603)):
+                          check_body_layout_603, check_service_facts_603)):
         fn(c)
     return c.report("transport")
 

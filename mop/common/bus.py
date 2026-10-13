@@ -154,8 +154,8 @@ def config(file=None):
 def login():
     """Логин человека, под которым этот процесс на шине, или None.
 
-    Им мастер называет себя владельцем задания (#161). Папет, узел и сервисы
-    сервера -- не люди: их `send` аренду не берёт."""
+    Им мастер называет себя владельцем задания (#161). Папет, узел, сервисы
+    сервера и принципалы ролей -- не люди: их `send` аренду не берёт."""
     try:
         user = config().get("user") or ""
     except Exception:
@@ -163,6 +163,43 @@ def login():
     if not user or busnames.is_machine(user):
         return None
     return user
+
+
+def principal():
+    """Принципал делегированной роли этого процесса, или None.
+
+    Единственный «кто я» для транспорта роли (#603): полный grant-<id>, не
+    голый id -- на проводе всё, что адресует принципала, появляется целиком.
+    Человек, узел, сервис и легаси-папет принципала не имеют."""
+    user = None
+    try:
+        user = config().get("user") or ""
+    except Exception:
+        return None
+    return user if busnames.is_grant(user) else None
+
+
+def caller_token():
+    """Кто оставляет токен вызывающего в субъекте: логин человека или
+    принципал роли, либо None (машина легаси-мира). Один выбор на rpc,
+    cluster и dispatch (#603): субъект строит его здесь, получатели читают
+    caller() -- двух таблиц не будет."""
+    return principal() or login()
+
+
+def node_name():
+    """Имя узла, под которым этот процесс на шине, или None.
+
+    Квалифицированный server.rpc (#603) -- узловая штука: его строит только
+    процесс с узловым кредом (mop driver run), человек и принципал остаются
+    на анонимном легаси-субъекте."""
+    try:
+        user = config().get("user") or ""
+    except Exception:
+        return None
+    if user.startswith(busnames.NODE_PREFIX):
+        return user[len(busnames.NODE_PREFIX):]
+    return None
 
 
 def server_config(host):
@@ -198,9 +235,19 @@ def server_config(host):
 # ─── соединение ──────────────────────────────────────────────────────────
 def auth(c):
     """Аргументы nats.connect по кредам из config(): один способ представиться
-    шине на всех — фасад мастера, петля агента и его самопроверка."""
+    шине на всех — фасад мастера, петля агента и его самопроверка.
+
+    Ответы машин нового мира (#603) -- приватным префиксом _MOP_REPLY.<user>:
+    на сервере ему нужна своя ACL-строка, а публичный _INBOX.> обслуживал бы
+    и человека, и подмену. nats-py 2.16 поддерживает connect(inbox_prefix=)
+    -- проверено по установленному SDK, не по догадке. Люди, сервисы и
+    легаси-папеты остаются на _INBOX: их ответы -- прежняя публичная
+    механика, и менял бы её только новый мир."""
     out = {"servers": [c["url"]], "user": c.get("user"),
            "password": c.get("password")}
+    user = c.get("user") or ""
+    if busnames.is_grant(user) or user.startswith(busnames.NODE_PREFIX):
+        out["inbox_prefix"] = busnames.private_prefix(user)
     # wss -- через TLS-прокси (#97); nats:// узлов и папетов -- без TLS.
     tls = creds.tls_context(c)
     if tls is not None:
@@ -423,10 +470,27 @@ def close():
 
 # ─── субъекты ────────────────────────────────────────────────────────────
 def subject(node, channel="rpc", project=None):
-    """Агент узла. Человек спрашивает rpc со своим логином в субъекте (#207):
-    публиковать туда NATS даёт только ему, и агент берёт вызывающего оттуда.
-    Машина (login() -- None) спрашивает прежним субъектом."""
-    return busnames.node(project or PROJECT, node, channel, login=login())
+    """Агент узла. Человек спрашивает rpc со своим логином в субъекте (#207),
+    принципал роли -- своим каналом role, диспетчер -- dispatch (#603):
+    публиковать туда NATS даёт только им, и агент берёт вызывающего оттуда.
+    Машина легаси-мира (caller_token() -- None) спрашивает прежним субъектом.
+
+    Канал startup (#603) -- только своему узлу: субъект строит его лишь
+    процесс с узловым кредом, и только на своё имя. Грант и человек туда
+    не пишут вовсе."""
+    if channel == busnames.STARTUP_CHANNEL:
+        own = node_name()
+        if own is None:
+            raise ValueError(
+                "the startup channel belongs to the node's own agent: "
+                "node credentials required")
+        if own != node:
+            raise ValueError(
+                f"the startup channel belongs to node {own}: {node} is "
+                f"another node's")
+        return busnames.startup_subject(project or PROJECT, node)
+    return busnames.node(project or PROJECT, node, channel,
+                         login=caller_token())
 
 
 def broadcast(project=None):
@@ -479,9 +543,10 @@ def cluster_subject(project=None, as_login=None):
     прибавляется: у `master-<проект>` уже есть весь `mop.<проект>.>`, а у
     папета и узла его нет.
 
-    Логин человека -- токеном субъекта (#207), как у агента; as_login --
-    чужие креды (`mop join` спрашивает другие серверы)."""
-    return busnames.cluster(project or PROJECT, login=as_login or login())
+    Логин человека -- токеном субъекта (#207), принципал роли -- каналом
+    role (#603), как у агента узла; as_login -- чужие креды (`mop join`
+    спрашивает другие серверы)."""
+    return busnames.cluster(project or PROJECT, login=as_login or caller_token())
 
 
 def build_subject():
@@ -554,9 +619,15 @@ def request(node, verb, timeout=TIMEOUT, channel="rpc", project=None, **fields):
     попади он в тело, права NATS его бы не увидели. Обычно не нужен: процесс
     ходит своим проектом, который ему поставил `mop master`.
 
+    Канал dispatch -- принципалам роли (#579/#603): субъект диспетчера
+    строится только из креда принципала, человек канал не получает -- режим
+    определяет резолвер, а не роль отправителя и не тело запроса.
+
     Ошибка агента приезжает полем `error` внутри ответа и не поднимает
     исключение: это ответ, а не отказ шины. Исключение — только когда до
     агента не доехали."""
+    if channel == busnames.DISPATCH_CHANNEL and not principal():
+        raise ValueError("the dispatch channel carries role principals only")
     return _ask(subject(node, channel, project), f"node agent {node}",
                 f"node agent {node} is not subscribed — the mop-agent unit is not running",
                 verb, timeout, **fields)
@@ -623,9 +694,22 @@ def call_cluster(verb, timeout=TIMEOUT, project=None, **fields):
     return got
 
 
-def ask_server(verb, timeout=TIMEOUT, project=None, **fields):
-    """Глагол серверу (mop-bootstrap). -> разобранный ответ (dict)."""
-    return _ask(server_subject(project), "bootstrap service",
+def ask_server(verb, timeout=TIMEOUT, project=None, node_auth=False, **fields):
+    """Глагол серверу (mop-bootstrap). -> разобранный ответ (dict).
+
+    node_auth (#603) -- квалифицированный путь узла: субъект
+    mop.<p>.server.rpc.node-<узел> называет узел токеном, и сервер (#581)
+    отличает запрос узла от анонимного легаси. Требует узлового креда; без
+    него и без флага -- прежний анонимный субъект, как сегодня ходит
+    bootstrap песочницы (mop driver run)."""
+    subj = server_subject(project)
+    if node_auth:
+        node = node_name()
+        if node is None:
+            raise ValueError("node_auth requires the node's own credentials "
+                             "(node-<name> user)")
+        subj = busnames.server(project or PROJECT, caller=busnames.node_user(node))
+    return _ask(subj, "bootstrap service",
                 "no bootstrap service is subscribed — the mop-bootstrap unit is "
                 "not running on the server",
                 verb, timeout, **fields)
