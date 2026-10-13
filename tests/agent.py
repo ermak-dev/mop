@@ -3572,6 +3572,7 @@ def check_startup_soul_584(c):
             fresh(n)
 
     rpc = lambda g: f"mop.mop.node.hyper.rpc.{g}"                      # noqa: E731
+    role = lambda g: f"mop.mop.node.hyper.role.{g}"                    # noqa: E731
     binding_asks = lambda: [r for _s, r in asks  # noqa: E731
                             if r.get("verb") == "resolve" and "principal" not in r]
 
