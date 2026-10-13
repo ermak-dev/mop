@@ -325,6 +325,13 @@ def _wrap_send(target, login, message, context=None):
                            error="message delivery could not be confirmed",
                            project=project)
     if got.get("error"):
+        if got.get("timeout"):
+            # Неопределённая доставка (#574, review-3 п.5): тело молчит,
+            # сообщение могло доехать -- это НЕ подтверждённый отказ, и
+            # повтор автоматически не делается: он мог бы продублировать
+            # уже выполненное. Проект аудита остаётся при вердикте (#575).
+            return ops.outcome(ops.UNKNOWN, target, error=got["error"],
+                               project=project)
         return ops.outcome(ops.REFUSED, target, error=got["error"],
                            project=project)
     if not isinstance(got.get("msg_id"), str) or not got["msg_id"].strip():

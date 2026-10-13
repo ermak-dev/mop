@@ -530,9 +530,17 @@ def send_to_puppet(transport, node, name, message, priority="next", wait=0,
     v = {"kind": "puppet", "to": name, "wait": wait,
          "notify": extra.get("notify", False)}
     if "error" in r:
-        return dict(v, error=r["error"])
+        # timeout (#574, review-3 п.5): узел пометил исход доставки
+        # неопределённым (тело молчит, сообщение могло доехать). Маркер
+        # едет вердиктом тем же ходом, что idle_error: потерять его здесь --
+        # и каждый фронтенд назовёт отказом доставку, которая неизвестна
+        # какова.
+        return dict(v, error=r["error"], timeout=bool(r.get("timeout")))
+    # idle_error (#574): ошибка наблюдения простоя -- не молчаливое «не
+    # дождался»: узел называет причину, и она едет тем же вердиктом до
+    # мастера, не новым полем, которое никто не читает.
     return dict(v, msg_id=r.get("msg_id"), owner_note=r.get("owner_note"),
-                idle=r.get("idle"))
+                idle=r.get("idle"), idle_error=r.get("idle_error"))
 
 
 def _clamp_wait(seconds, ceiling=600):
