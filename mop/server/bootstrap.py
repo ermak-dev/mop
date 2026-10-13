@@ -335,7 +335,7 @@ def read_progress(root, name, alloc):
     for line in text.splitlines():
         matched = _PROGRESS.match(line)
         if matched:
-            lines.append(line.split(" =>", 1)[0].rstrip(" *")[:1024])
+            lines.append((matched.group(2) or line.rstrip(" *"))[:1024])
     return {"lines": lines[-PROGRESS_LINES:], "running": record.get("running") is True,
             "alloc": alloc, "at": record.get("at"),
             "truncated": size > PROGRESS_BYTES or len(lines) > PROGRESS_LINES}

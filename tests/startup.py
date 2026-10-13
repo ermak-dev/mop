@@ -39,6 +39,7 @@ def check_bootstrap_progress(c):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         out.write("PLAY [Bootstrap]\nTASK [Install packages] ************************\nchanged: [body]\n")
         out.write('stdout: PRIVATE-VALUE\nfatal: [body]: FAILED! => {"password":"PRIVATE-VALUE"}\n')
+        out.write('ok: [body] PRIVATE-STATUS-VALUE\n')
         out.flush()
         current = reader(root, name, "alloc-a")
         observed.append(current)
@@ -47,6 +48,9 @@ def check_bootstrap_progress(c):
         c.expect("#612 attempt time comes from the node clock, not the controller clock", current.get("at"), 1234.5)
         c.check("#612 task appears before the process is complete", "TASK [Install packages]" in current.get("lines", []), current)
         c.check("#612 arbitrary stdout and Ansible result values stay private", "PRIVATE-VALUE" not in json.dumps(current), current)
+        c.check("#612 status suffixes cannot turn arbitrary output into trusted progress",
+                "PRIVATE-STATUS-VALUE" not in json.dumps(current), current)
+        c.check("#612 only the parsed status is preserved", "ok: [body]" in current.get("lines", []), current)
         c.expect("#612 a previous allocation's log is not shown as current", reader(root, name, "alloc-b").get("lines"), [])
         return types.SimpleNamespace(returncode=0)
 
