@@ -135,7 +135,7 @@ def _pass_path(root, principal):
 
 
 def prepare(project, role, digest, manifest, prompt, owner, request_id,
-            job, soul_inc, intent, root=None):
+            job, soul_inc, intent, root=None, actor=None):
     """Подготовить грант до регистрации: новый принципал, резерв job/inc.
 
     Идемпотентна по request_id с привязкой к интенту: ретрай того же
@@ -147,7 +147,12 @@ def prepare(project, role, digest, manifest, prompt, owner, request_id,
     отдельная случайная строка, 0600, в реестр не попадает; бандл
     write-once по дайджесту (#579). Запись неактивна: активного гранта до
     подтверждения регистрации нет. Ответ -- вся запись: принципал в ней
-    поле, отдельным кортежем он был бы второй правдой о том же."""
+    поле, отдельным кортежем он был бы второй правдой о том же.
+
+    owner -- человек-хозяин записи; actor (#582) -- кто ЗАВЕЛ, отдельным
+    полем: делегированный add заводит принципал роли, и его происхождение
+    -- факт аудита, не право. Actor не входит в душу: владелец и после
+    делегирования человек, и путь загрузки workspace грант не получает."""
     manifest = dict(manifest or {})
     with _THREAD_LOCK, _Writer(_root_dir(root)) as w:
         for principal, rec in w.reg.items():
@@ -156,18 +161,19 @@ def prepare(project, role, digest, manifest, prompt, owner, request_id,
             same = (rec.get("intent") == intent
                     and rec.get("soul_digest") == digest
                     and rec.get("job") == job and rec.get("soul_inc") == soul_inc
-                    and rec.get("owner") == owner and rec.get("project") == project)
+                    and rec.get("owner") == owner and rec.get("project") == project
+                    and rec.get("actor") == actor)
             if not same:
                 raise ValueError(
                     f"grants: request {request_id} is already prepared with "
-                    f"a different payload (intent/digest/job/inc/owner/project)")
+                    f"a different payload (intent/digest/job/inc/owner/project/actor)")
             return dict(rec)
         principal = soul.grant_user(secrets.token_hex(16))
         password = secrets.token_urlsafe(32)
         rec = soul.binding(principal, owner=owner, project=project, job=job,
                            soul_inc=soul_inc, soul_digest=digest, role=role,
                            active=False)
-        rec.update(request_id=request_id, intent=intent)
+        rec.update(request_id=request_id, intent=intent, actor=actor)
         _store_bundle(_root_dir(root), digest, manifest, prompt)
         w.reg[principal] = rec
         fsutil.write_private(_pass_path(_root_dir(root), principal), password + "\n")
@@ -434,6 +440,19 @@ def _role_verbs(manifest, service):
 
 def _flag(manifest, name):
     return bool((manifest.get("capabilities") or {}).get(name))
+
+
+def spawn_of(principal, root=None):
+    """Разрешённые роли цели принципала (#582): список spawn его бандла.
+    Пусто -- принципал никого не поднимает; нет бандла -- тоже пусто:
+    fail closed. Делегированный add сверяет роль цели по ЭТОМУ списку,
+    не по грамматике субъекта: право поднимать -- у души, не у провода."""
+    rec = binding(principal, root=root)
+    if rec is None:
+        return ()
+    got = bundle(rec.get("soul_digest"), root=root) or {}
+    return tuple((got.get("manifest") or {}).get(
+        "capabilities", {}).get("spawn") or ())
 
 
 def _runtime(manifest, name):

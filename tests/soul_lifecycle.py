@@ -22,8 +22,10 @@ HYPOTHESIS: сегодня спека и глаголы кластера тро�
 хранятся в реестре #581 (grants.prepare/activate/revoke/by_request/
 by_job -- реальный модуль, не заглушка), роль администратора включается
 настройкой сервера, выключенная -- молчит и в ping, и в add.
-STATUS: RED -- ждёт реализации #582 (поля JobMeta #580 и реестр #581
-на ветке уже есть; by_request/by_job -- запрос мастер-реляции к #581).
+STATUS: FIXED — делегированный add по каналу роли: родитель из реестра,
+роль цели по spawn бандла, снапшот согласованной политики наследуется
+и закрепляется за запросом (метка с хешем снапшота, bootstrap.py),
+актёр отдельным полем от владельца (grants.prepare actor=). См. #582.
 """
 import contextlib
 import json
@@ -42,7 +44,7 @@ from mop.common import projects  # noqa: E402
 from mop.common import soul as soulmod  # noqa: E402
 from mop.common.domain import JobMeta  # noqa: E402
 from mop import driver  # noqa: E402
-from mop.server import cluster, grants, image, spec  # noqa: E402
+from mop.server import bootstrap, cluster, grants, image, spec  # noqa: E402
 
 ALPHA = "git@h:g/alpha.git"
 HEX32 = re.compile(r"^[0-9a-f]{32}$")
@@ -69,6 +71,12 @@ def role(name):
 PUPPET_MANIFEST, PUPPET_PROMPT, PUPPET_DIGEST = role("puppet")
 MASTER_MANIFEST, MASTER_PROMPT, MASTER_DIGEST = role("master")
 
+# Согласованные политики родителя для делегированных проверок: текст
+# .mop/bootstrap.yaml, какой сервер хранит под ИМЕНЕМ папета (#133),
+# а не проекта.
+PLAY_A = "- vars:\n    answer: 42\n  tasks:\n  - name: greet\n    shell: echo hi\n"
+PLAY_B = "- vars:\n    answer: 43\n  tasks:\n  - name: bye\n    shell: echo bye\n"
+
 
 def seed_grants(root, digest=PUPPET_DIGEST, manifest=PUPPET_MANIFEST,
                 prompt=PUPPET_PROMPT):
@@ -84,9 +92,13 @@ def seed_grants(root, digest=PUPPET_DIGEST, manifest=PUPPET_MANIFEST,
 def soul_env(api, limit=None, roles=True, root=None, catalogue=(PACKAGED,)):
     """Среда глаголов add/update/delete/ping: снимок реестра с одним
     alpha (limit -- потолок), настройка роли сервера, корень реестра
-    привязок и каталог ролей -- швы #582, Nomad -- параметром."""
+    привязок, каталог ролей и корень bootstrap -- швы #582, Nomad --
+    параметром. Корень bootstrap свой: делегированный add читает
+    согласованный снапшот родителя из реального хранилища, и проверка
+    обязана держать его под контролем, а не в чужом HOME."""
     d = tempfile.mkdtemp(prefix="mop-test-582r-")
     g = root or tempfile.mkdtemp(prefix="mop-test-582g-")
+    b = tempfile.mkdtemp(prefix="mop-test-582b-")
     try:
         with open(os.path.join(d, "projects.json"), "w") as f:
             json.dump({"version": 1,
@@ -107,12 +119,14 @@ def soul_env(api, limit=None, roles=True, root=None, catalogue=(PACKAGED,)):
                 patched(cluster.config, get=setting), \
                 patched(cluster, SOUL_ROOT=g), \
                 patched(cluster, SOUL_CATALOGUE=list(catalogue)), \
-                patched(spec, SOUL_STORE=g):
+                patched(spec, SOUL_STORE=g), \
+                patched(bootstrap, ROOT=b):
             yield g
     finally:
         shutil.rmtree(d, ignore_errors=True)
         if root is None:
             shutil.rmtree(g, ignore_errors=True)
+        shutil.rmtree(b, ignore_errors=True)
 
 
 def soul_job(name="pu-alpha-1", origin=ALPHA, branch=None, digest=PUPPET_DIGEST):
@@ -329,6 +343,26 @@ def check_add_soul_582(c):
                 and rec.get("owner") == "anton", rec)
 
 
+def soul_parent(api, g, request_id="parent-1", workspace=PLAY_A):
+    """Живой родитель-мастер со согласованной политикой: add ЧЕЛОВЕКОМ --
+    аутентифицированное создание роли сохраняет путь согласования
+    workspace (мастер-ревью #582): текст человека и есть одобрение.
+    workspace -- текст политики; "" -- явно согласованное пусто (mop без
+    .mop/bootstrap.yaml); None -- поля нет вовсе, политика не заявлена.
+    -> (принципал, имя, ответ); отказ -- принципал None, ответ объяснит."""
+    fields = {"verb": "add", "origin": ALPHA, "soul": "master",
+              "request_id": request_id, "_caller": "anton"}
+    if workspace is not None:
+        fields["workspace"] = workspace
+    got = answer(api, "alpha", fields)
+    if not got.get("ok"):
+        return None, None, got
+    rec = grants.by_job("alpha", got["name"], root=g)
+    if not rec or not rec.get("active"):
+        return None, got["name"], {"error": "parent grant is not active", "got": got}
+    return rec["principal"], got["name"], got
+
+
 def _principals(root):
     """Все принципалы реестра привязок в этом корне."""
     path = os.path.join(root, "registry.json")
@@ -481,36 +515,207 @@ def check_add_legacy_untouched_582(c):
                 and "soul" not in got, (got, meta))
 
 
-def check_add_workspace_boundary_582(c):
-    """Роль не поднимается клиентским текстом (#579): add с душой и
-    workspace/bootstrap_sent -- отказ до всего, кто бы ни просил -- у роли
-    bootstrap серверный, операторски согласованный. Делегированный
-    принципал до глагола вовсе не доезжает: легаси-rpc для него закрыт
-    ограждением #603 (здесь проверяем, что ограждение стоит; канал роли --
-    #603). Человек сохраняет сегодняшний путь: легаси-add со своим текстом."""
+def check_add_delegated_582(c):
+    """Делегированный add по каналу роли (#579/#603): принципал родителя
+    поднимает ребёнка сам, сервер выбирает имя/инкарнацию/принципала,
+    наследует СОГЛАСОВАННЫЙ снапшот bootstrap родителя (хранилище по
+    ИМЕНИ папета, #133 -- не проекта), закрепляет его за запросом ретрая
+    и НЕ принимает клиентский YAML ни в каком виде. Согласованная пустая
+    политика -- законный случай (mop без .mop/bootstrap.yaml), её
+    наследует ребёнок без файлов; отсутствие согласования -- отказ,
+    а не тишина. Происхождение актёра хранится отдельно от хозяина:
+    _caller принципала не становится человеческим владельцем и не
+    открывает путь загрузки workspace."""
+    # Живой родитель-мастер с согласованной политикой PLAY_A.
     api = FakeNomad()
     with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        # Позитив: правильный канал роли, разрешённая роль цели, без
+        # клиентского workspace. Ребёнок обязан появиться: джоб с тройкой,
+        # активный грант, наследованные файлы bootstrap под ИМЕНЕМ ребёнка.
+        got = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                    "soul": "puppet", "request_id": "child-1",
+                                    "_caller": principal, "_subject":
+                                    f"mop.alpha.cluster.role.{principal}"})
+        child = got.get("name")
+        child_meta = (api.jobs.get(child) or {}).get("Meta") or {}
+        child_rec = grants.by_job("alpha", child, root=g) if child else None
+        tasks, of_vars = bootstrap.files_of(bootstrap.ROOT, child or "")
+        c.check("#582 a delegated add on the role channel creates a real "
+                "role job",
+                got.get("ok") and child_meta.get("soul") == "puppet"
+                and bool(HEX64.match(child_meta.get("soul_digest") or ""))
+                and bool(UUID.match(child_meta.get("soul_inc") or "")), got)
+        c.check("#582 the delegated child's grant is active and owned by "
+                "the human, provenance names the grant actor",
+                child_rec is not None and child_rec.get("active") is True
+                and child_rec.get("owner") == "anton"
+                and child_rec.get("actor") == principal, child_rec)
+        c.check("#582 the delegated child inherits the parent's approved "
+                "snapshot under its own name",
+                tasks is not None and of_vars is not None
+                and open(tasks).read().find("greet") >= 0
+                and open(of_vars).read().find("42") >= 0,
+                (tasks, of_vars))
+        # Ретрай того же request_id после смены политики родителя
+        # наследует ЗАКРЕПЛЁННЫЙ снапшот, не свежий: ретрай не может
+        # молча получить другую политику, чем первая попытка.
+        retry = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "child-1",
+                                      "_caller": principal, "_subject":
+                                      f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 a retry returns the reserved name, not a new child",
+                retry.get("ok") and retry.get("name") == child, retry)
+
+    # Смена политики родителя между попытками: новая попытка (другой
+    # request_id) наследует свежий снапшот; закреплённый за старым
+    # запросом остаётся прежним.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g, workspace=PLAY_A)
+        # Первая попытка «упала в Nomad»: снапшот закреплён за child-x.
+        class _NoReg(FakeNomad):
+            def register(self, sp):
+                raise RuntimeError("nomad is down")
+        broken = _NoReg()
+        broken.jobs = api.jobs
+        first = answer(broken, "alpha", {"verb": "add", "origin": ALPHA,
+                                         "soul": "puppet", "request_id": "child-x",
+                                         "_caller": principal, "_subject":
+                                         f"mop.alpha.cluster.role.{principal}"})
+        # Политика родителя сменена человеком ПОСЛЕ резерва.
+        bootstrap.store(bootstrap.ROOT, parent, PLAY_B)
+        retry = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "child-x",
+                                      "_caller": principal, "_subject":
+                                      f"mop.alpha.cluster.role.{principal}"})
+        rec = grants.by_request("child-x", root=g)
+        tasks, of_vars = bootstrap.files_of(
+            bootstrap.ROOT, (rec or {}).get("job") or "")
+        c.check("#582 a pinned snapshot survives a parent policy change: "
+                "the retry inherits what the first attempt pinned",
+                "error" in first and retry.get("ok")
+                and rec is not None and tasks is not None
+                and open(tasks).read().find("greet") >= 0, (first, retry))
+
+    # Согласованная пустая политика родителя: ребёнок без файлов -- это
+    # наследование пустоты, не отказ и не тихая пропажа.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g, workspace="")
+        got = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                    "soul": "puppet", "request_id": "child-e",
+                                    "_caller": principal, "_subject":
+                                    f"mop.alpha.cluster.role.{principal}"})
+        tasks, of_vars = bootstrap.files_of(bootstrap.ROOT, got.get("name") or "")
+        c.check("#582 an approved empty parent policy inherits cleanly",
+                got.get("ok") and tasks is None and of_vars is None, got)
+
+    # Родитель без согласования: согласование было и снято (файлы ушли,
+    # как их снимает bootstrap.store с пустым текстом) -- делегированный
+    # add отказан громко, ни джоба, ни резерва.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, got = soul_parent(api, g, workspace=PLAY_A)
+        for suffix in ("tasks", "vars"):
+            path = os.path.join(bootstrap.ROOT, f"{parent}-{suffix}.yml")
+            if os.path.exists(path):
+                os.unlink(path)
+        child = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "nop-2",
+                                      "_caller": principal, "_subject":
+                                      f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 an unapproved parent snapshot is refused loudly",
+                "error" in child and not api.jobs.get("pu-alpha-2")
+                and "approv" in (child.get("error") or ""), child)
+
+    # Клиентский YAML от принципала -- отказ, не молчаливый игнор:
+    # грант не грузит произвольный текст и не создаёт легаси-ребёнка.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
         refused = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
-                                        "soul": "puppet", "request_id": "r",
+                                        "soul": "puppet", "request_id": "ev-1",
                                         "workspace": "- name: evil\n",
-                                        "_caller": "anton"})
-        c.check("#582 a role add with client workspace text is refused "
-                "whoever asks",
-                "error" in refused and not api.jobs
-                and not _principals(g), refused)
-        fenced = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
-                                       "soul": "puppet", "request_id": "r2",
-                                       "_caller": "grant-" + "a" * 32})
-        c.check("#582 a grant principal does not reach the legacy add "
-                "at all (#603 fence)",
-                "error" in fenced
-                and "role channel" in fenced.get("error", "")
-                and not api.jobs and not _principals(g), fenced)
+                                        "_caller": principal, "_subject":
+                                        f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 client YAML from a grant is rejected, not ignored",
+                "error" in refused and "workspace" in (refused.get("error") or "")
+                and len(api.jobs) == 1, refused)
+        # Грант без души не создаёт легаси-ребёнка: omitting soul --
+        # попытка обойти роль, а не легаси-добавление.
+        unbound = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                        "_caller": principal, "_subject":
+                                        f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 a grant omitting soul creates no legacy child",
+                "error" in unbound and len(api.jobs) == 1, unbound)
+
+    # Разрешённая роль цели: spawn родителя. master позволяет puppet и
+    # builder; попытка поднять master от master (spawn его не содержит)
+    # -- отказ по роли цели, а не по грамматике субъекта.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        denied = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                       "soul": "master", "request_id": "sp-1",
+                                       "_caller": principal, "_subject":
+                                       f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 a spawn role outside the parent's allowlist is refused",
+                "error" in denied and "spawn" in (denied.get("error") or "")
+                and len(api.jobs) == 1, denied)
+
+    # Человек сохраняет сегодняшний путь: легаси-add со своим текстом
+    # (источник согласования -- сам человек, канал легаси-rpc).
+    api = FakeNomad()
+    with soul_env(api) as g:
         human = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                       "_caller": "anton",
                                       "workspace": "- name: play\n  tasks: []\n"})
         c.check("#582 the human keeps today's legacy workspace path",
                 human.get("ok") and len(api.jobs) == 1, human)
+
+
+def check_add_workspace_boundary_582(c):
+    """Граница workspace различает актёров, а не запрещает всем (#582):
+    аутентифицированный ЧЕЛОВЕК, заводящий роль, согласовывает политику
+    своим текстом -- тот же одобренный путь, что у легаси-add (текст
+    человека и есть одобрение); ГРАНТ текста не приносит вовсе --
+    его ребёнок наследует снапшот родителя (check_add_delegated_582),
+    а YAML от гранта отклонён до всего. Голая метка bootstrap_sent без
+    текста -- не согласование. Легаси-rpc для гранта закрыт ограждением
+    #603: правильный канал роли проверен делегированной проверкой."""
+    api = FakeNomad()
+    with soul_env(api) as g:
+        human = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "r",
+                                      "workspace": "- name: play\n  tasks: []\n",
+                                      "_caller": "anton"})
+        name = human.get("name") or ""
+        mark = bootstrap.approval_of(bootstrap.ROOT, name)
+        c.check("#582 a human role add approves the policy with its text",
+                human.get("ok") and mark is not None
+                and mark.get("key") == bootstrap._snapshot_key(
+                    bootstrap.ROOT, name),
+                (human, mark))
+        bare = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                     "soul": "puppet", "request_id": "r2",
+                                     "bootstrap_sent": {"source": "x"},
+                                     "_caller": "anton"})
+        c.check("#582 a bare bootstrap_sent marker is not an approval",
+                "error" in bare and len(api.jobs) == 1, bare)
+        fenced = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                       "soul": "puppet", "request_id": "r3",
+                                       "_caller": "grant-" + "a" * 32})
+        c.check("#582 a grant principal does not reach the legacy add "
+                "at all (#603 fence)",
+                "error" in fenced
+                and "role channel" in fenced.get("error", "")
+                and len(api.jobs) == 1, fenced)
+        legacy = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                       "_caller": "anton",
+                                       "workspace": "- name: play\n  tasks: []\n"})
+        c.check("#582 the human keeps today's legacy workspace path",
+                legacy.get("ok") and len(api.jobs) == 2, legacy)
 
 
 def check_add_quota_counts_roles_582(c):
@@ -748,7 +953,8 @@ def main():
                check_respec_keeps_triple_582,
                check_add_soul_582, check_add_pending_before_nomad_582,
                check_add_request_payload_582, check_add_source_gates_582,
-               check_add_legacy_untouched_582, check_add_workspace_boundary_582,
+               check_add_legacy_untouched_582, check_add_delegated_582,
+               check_add_workspace_boundary_582,
                check_add_quota_counts_roles_582,
                check_update_preserves_triple_582, check_restart_keeps_meta_582,
                check_recycle_road_keeps_triple_582, check_image_roundtrip_582,

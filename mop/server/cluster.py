@@ -439,6 +439,51 @@ class _Launch:
                 "soul_inc": soul_inc}
 
 
+def _delegated(project, req, caller):
+    """Делегированный add по каналу роли (#582/#603): принципал
+    поднимает ребёнка сам, сервер выбирает всё остальное. Границы:
+
+    - родитель -- ИЗ РЕЕСТРА по принципалу (grants.binding), никогда из
+      тела: клиент не называет ни родителя, ни происхождение;
+    - роль цели -- по списку spawn бандла родителя (fail closed);
+    - клиентский workspace/bootstrap_sent -- отказ ДО всего: грант не
+      грузит текст и не создаёт легаси-ребёнка без души (omitting soul --
+      обход роли, не легаси-путь);
+    - политика ребёнка -- унаследованный СОГЛАСОВАННЫЙ снапшот родителя
+      (bootstrap.copy_approval, хранилище по имени папета #133),
+      закреплённый резервом до Nomad: ретрай наследует то, что закрепила
+      первая попытка, а не свежую политику;
+    - происхождение -- actor в записи гранта, владелец остаётся
+      человеком-хозяином родителя: актёр не открывает путь загрузки.
+
+    -> ответ словарем; None здесь невозможен (ветка только add)."""
+    if req.get("verb") != "add":
+        return {"error": f"{caller}: the role channel carries the add "
+                         f"verb only in this protocol version (#582)"}
+    if "workspace" in req or "bootstrap_sent" in req:
+        return {"error": f"{caller}: a delegated add takes no client "
+                         f"workspace text: the child inherits the parent's "
+                         f"approved bootstrap (#582)"}
+    parent_rec = grants.binding(caller, root=SOUL_ROOT)
+    if parent_rec is None:
+        return {"error": f"{caller}: unknown principal on the role channel"}
+    if parent_rec.get("project") != project:
+        return {"error": f"{caller}: the binding lives in project "
+                         f"{parent_rec.get('project')}, not {project}"}
+    allowed = grants.spawn_of(caller, root=SOUL_ROOT)
+    if req.get("soul") not in allowed:
+        return {"error": f"{caller}: the role {req.get('soul')} is not in "
+                         f"its parent's spawn allowlist "
+                         f"({', '.join(allowed) or 'none'}); spawn is the "
+                         f"parent soul's, not the caller's to choose (#582)"}
+    # Дальше -- путь _add с маркером делегирования: тот держит ворота
+    # проекта, резерв и активацию, здесь только граница источника.
+    req = {**req, "_delegated_by": caller,
+           "_parent_job": parent_rec.get("job"),
+           "_owner": parent_rec.get("owner") or project}
+    return _add(project, req)
+
+
 def _role_launch(req):
     """Путь роли глагола add (#582). -> None (легаси: полей роли нет) |
     _Launch | {"error": ...}. Источник бандла -- каталог сервера: клиент
@@ -543,26 +588,49 @@ def _add(project, req):
             name = next_name(target.name)
             soul_inc = soul.incarnation() if launch is not None else None
         # workspace -- до регистрации: первый подъём обязан его увидеть.
-        # Роль клиентского текста не поднимает (#579): bootstrap роли --
-        # серверный, операторски согласованный; отказ -- до резерва.
-        if launch is not None and ("workspace" in req or "bootstrap_sent" in req):
-            return {"error": "a role add takes no client workspace or "
-                             "bootstrap text: the role's bootstrap is the "
-                             "server's, operator-approved (#579)"}
+        # Актёров distinguishes не запрет, а путь (#582): ЧЕЛОВЕК, заводящий
+        # роль, согласовывает политику своим текстом -- метка согласования
+        # ставится тем же ходом, текст идёт в хранилище как сегодня; грант
+        # (делегированный add) текста не приносит вовсе -- его ребёнок
+        # наследует закреплённый снапшот родителя ниже, и попытка прислать
+        # YAML отклонена в _delegated ДО ворот проекта.
+        delegated = req.get("_delegated_by")
         marker = None
         if launch is None:
             marker = store_workspace(bootstrap.ROOT, name, req)
+        elif delegated is None:
+            if "workspace" in req:
+                store_workspace(bootstrap.ROOT, name, req)
+                bootstrap.note_approval(bootstrap.ROOT, name)
+            elif "bootstrap_sent" in req:
+                return {"error": "a role add carries workspace text, not a "
+                                 "bare bootstrap_sent marker (#582)"}
+        else:
+            # Делегированный ребёнок: снапшот родителя под именем ребёнка
+            # ДО Nomad -- ретрай наследует закреплённое, не свежее: копия
+            # кладётся только когда резерва ещё не было (свежий запуск),
+            # ретрай уже держит её под своим именем.
+            if not (launch and launch.record):
+                why = bootstrap.copy_approval(
+                    bootstrap.ROOT, req.get("_parent_job") or "", name)
+                if why:
+                    return {"error": why}
         principal = None
         if launch is not None:
             # Резерв ДО Nomad: что бы ни случилось с регистрацией, принципал,
             # имя и инкарнация уже сохранены -- ретрай поднимет их. Тот же
             # request_id с другой полезной нагрузкой (#581) откажет здесь.
+            # Владелец -- человек (delегated: хозяин родителя из реестра),
+            # актёр -- отдельным полем: происхождение не право (#582).
             principal = grants.prepare(
                 project, role=launch.role, digest=launch.bundle.digest,
                 manifest=launch.bundle.manifest.to_dict(),
-                prompt=launch.bundle.prompt, owner=lease.caller(req)[0] or project,
+                prompt=launch.bundle.prompt,
+                owner=(req.get("_owner") if delegated is not None else
+                       (lease.caller(req)[0] or project)),
                 request_id=launch.request_id, job=name, soul_inc=soul_inc,
-                intent=launch.intent(req), root=SOUL_ROOT)["principal"]
+                intent=launch.intent(req), root=SOUL_ROOT,
+                actor=delegated)["principal"]
         _api().register(spec.job_spec(
             name, origin, branch=req.get("branch"),
             **(launch.triple(soul_inc) if launch is not None else {})))
@@ -678,9 +746,11 @@ def _delete(project, req):
     name = req["name"]
     _api().deregister(name, purge=bool(req.get("purge", True)))
     # Снятый насовсем папет уносит свой workspace (#133); рецикл (purge=False)
-    # его сохраняет -- update следом положит свежий.
+    # его сохраняет -- update следом положит свежий. Метка согласования
+    # уходит вместе с файлами (#582): имени без папета нет политики.
     if req.get("purge", True):
         bootstrap.store(bootstrap.ROOT, name, "")
+        bootstrap.drop_approval(bootstrap.ROOT, name)
     # Душа снятого уходит с ним (#582): глагольный отзыв (#581), активных
     # кредов на несуществующий джоб нет. Рецикл (purge=False) душу
     # сохраняет -- папет вернётся с той же инкарнацией.
@@ -1264,8 +1334,22 @@ def _answer(project, req):
     # старый контроллер на смешанном роллауте. Отказ -- до таблиц глаголов.
     caller = req.get("_caller") or ""
     if soul.is_grant(caller):
-        return {"error": f"{caller}: grant principals speak on the role "
-                         f"channel, not the legacy rpc (#603)"}
+        # Канал роли на месте (факт транспорта #603: субъект запроса)?
+        # Тогда глагол идёт с резолвером -- делегированная ветка add (#582).
+        subject = req.get("_subject") or ""
+        on_role_channel = (subject ==
+                           f"{busnames.ROOT}.{project}.cluster.role.{caller}")
+        if not (on_role_channel and config.get("MOP_SOUL_ROLES")):
+            return {"error": f"{caller}: grant principals speak on the role "
+                             f"channel, not the legacy rpc (#603)"}
+        try:
+            return _delegated(project, req, caller)
+        except ValueError as e:
+            return {"error": f"add: {e}"}
+        except Exception as e:
+            # Причина едет с отказом: тихий «failed» убил бы диагностику
+            # на полпути (#265).
+            return {"error": f"add: {nomad.describe_error(e)}"}
     name = req.get("name")
     spec = _row(verb)
     origin, exists = (None, False)

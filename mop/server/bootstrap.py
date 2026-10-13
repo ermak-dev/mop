@@ -84,6 +84,10 @@ def _sent_path(root, name):
     return os.path.join(root, f"{name}-sent.json")
 
 
+def _approval_path(root, name):
+    return os.path.join(root, f"{name}-approved.json")
+
+
 def _result_path(root, name):
     return os.path.join(root, f"{name}-result.json")
 
@@ -131,6 +135,79 @@ GIVE_UP_AFTER = 3
 GIVE_UP_GRACE = 5
 # ansible-playbook: 2 -- упала задача на хосте (3 -- хост недоступен).
 TASK_FAILED_RC = 2
+
+
+def note_approval(root, name):
+    """Метка согласования политики папета-роли (#582): человек ЗАЯВИЛ
+    политику полем workspace -- текст любой, включая пустой («пусто
+    согласовано» -- законная политика, mop сам без .mop/bootstrap.yaml).
+    Метка держит хеш снапшота на момент согласования: копия ребёнку
+    сверяется с ней -- файлы, сменившиеся мимо человеческого пути,
+    согласованием не считаются. Кладётся только человеческим
+    add/update роли; грант метку не пишет."""
+    fsutil.make_private_dir(root)
+    fsutil.write_private(_approval_path(root, name), json.dumps(
+        {"at": int(time.time()), "key": _snapshot_key(root, name)}))
+    return True
+
+
+def _snapshot_key(root, name):
+    """Хеш хранимого снапшота политики: те же байты, что workspace_key,
+    без метки регистрации -- согласование о файлах, не о прогонах."""
+    h = hashlib.sha256()
+    for path in files_of(root, name):
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except (OSError, TypeError):
+            pass
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def approval_of(root, name):
+    """Согласована ли политика папета-роли (#582): метка либо None."""
+    return _read_json(_approval_path(root, name))
+
+
+def drop_approval(root, name):
+    """Снять метку согласования (#582): папета нет -- политики нет."""
+    try:
+        os.unlink(_approval_path(root, name))
+    except FileNotFoundError:
+        pass
+
+
+def copy_approval(root, parent, child):
+    """Наследование согласованной политики (#582): снапшот родителя под
+    именем ребёнка, одним ходом и до Nomad -- ретрай того же request_id
+    не может молча получить политику новее той, что закреплена резервом.
+    Без метки согласования -- отказ: унаследовать несогласованное значило
+    бы обойти границу, которую держит человек. Снапшот, не сходящийся с
+    меткой (файлы сменились мимо человеческого пути), -- тот же отказ:
+    согласование -- факт человека о конкретных байтах. -> отказ | None."""
+    import shutil as _shutil
+    mark = approval_of(root, parent)
+    if mark is None:
+        return (f"{parent}: no approved bootstrap to inherit: its human "
+                f"owner has not registered a policy (#582)")
+    if _snapshot_key(root, parent) != mark.get("key"):
+        return (f"{parent}: the approved bootstrap changed outside the "
+                f"human path: the stored snapshot does not match its "
+                f"approval (#582)")
+    fsutil.make_private_dir(root)
+    for what in ("tasks", "vars"):
+        src = os.path.join(root, f"{parent}-{what}.yml")
+        dst = os.path.join(root, f"{child}-{what}.yml")
+        try:
+            os.unlink(dst)
+        except FileNotFoundError:
+            pass
+        if os.path.exists(src):
+            _shutil.copyfile(src, dst)
+    _shutil.copyfile(_approval_path(root, parent),
+                     _approval_path(root, child))
+    return None
 
 
 def workspace_key(root, name):
