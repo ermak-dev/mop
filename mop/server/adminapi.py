@@ -83,7 +83,7 @@ import threading
 import time
 import uuid
 
-from ..common import config, puppets
+from ..common import config, ops, puppets
 from . import opworker
 from .opworker import TERMINAL, status_of
 
@@ -115,10 +115,10 @@ def sanitize(error):
 
 
 def result_error(status, error):
-    """Публичная причина — закрытая фраза, подробности остаются в журнале.
+    """Доверенная workflow-фраза сохраняется, raw error -- закрытая причина.
 
-    Фильтрации пунктуации недостаточно: ключ или текст сообщения могут
-    состоять из обычных букв. Ни один фрагмент сырой ошибки не копируется.
+    Маркер PublicError не приходит из HTTP/RPC. Фильтрации пунктуации
+    недостаточно: ключ или payload могут состоять из обычных букв.
     """
     fallback = {
         "refused": "operation refused",
@@ -128,6 +128,8 @@ def result_error(status, error):
     }.get(status)
     if fallback is None:
         return None
+    if isinstance(error, ops.PublicError):
+        return str(error)
     text = str(error or "")
     reasons = (
         ("work in the clone", "target has unfinished work"),
@@ -427,6 +429,8 @@ class Api:
                 rec["status"] = status
                 if isinstance(verdict, dict) and verdict.get("error"):
                     rec["error"] = verdict["error"]
+                if isinstance(verdict, dict) and isinstance(verdict.get("public_error"), ops.PublicError):
+                    rec["public_error"] = verdict["public_error"]
                 if self._by_key.get(key) == record["id"]:
                     self._by_key.pop(key, None)
         # Одно внутреннее completion-событие (#575): запись приёма +
@@ -446,7 +450,7 @@ class Api:
         # закрытая фраза, без payload; login и проект в него не идут.
         frame = {"id": audit["id"], "action": audit["action"],
                  "target": record["target"], "status": audit["status"]}
-        reason = result_error(status, rec.get("error") if rec else None)
+        reason = result_error(status, rec.get("public_error", rec.get("error")) if rec else None)
         if reason:
             frame["error"] = reason
         # Сырая причина неуспеха -- в журнал службы (#506): после #499
@@ -515,7 +519,7 @@ class Api:
         # Публичного в результате нет: ни params, ни текста сообщения.
         result = {k: v for k, v in got.items() if k in ("id", "action", "target",
                                                        "status", "login", "at")}
-        reason = result_error(got["status"], got.get("error"))
+        reason = result_error(got["status"], got.get("public_error", got.get("error")))
         if reason:
             result["error"] = reason
         return result
