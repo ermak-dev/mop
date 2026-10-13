@@ -17,8 +17,11 @@ bus.principal/caller_token/node_name, ops.add(soul=, request_id=) без
 STATUS: FIXED — see #603
 """
 import asyncio
+import json
 import os
 import sys
+import tempfile
+from types import SimpleNamespace
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -296,6 +299,204 @@ def check_startup_603(c):
                 project="mop")
 
 
+def check_reply_fence_603(c):
+    """HYPOTHESIS (#603, ревью c9262ac): пользователь приватного префикса
+    обязан быть ОДНИМ токеном субъекта. Узел с точкой в имени (dhcp-хосты,
+    «node-a.b») иначе принимал бы чужие ответы: префикс _MOP_REPLY.node-a.b
+    режется на два токена, и startswith-разбор читает _MOP_REPLY.node-a.b.X
+    как ответ node-a. Кодирование -- то же login_token (точки, пробелы,
+    маски, процент), что у логина человека; обратное чтение -- то же
+    login_of. Грамматика одна на все имена в токенах субъекта.
+    SOLUTION: private_prefix кодирует пользователя login_token'ом,
+    valid_private_reply не пускает маски, пустые сегменты и
+    whitespace/контрольные хвосты, caller квалифицированного server.rpc
+    читает узел декодированием, серверный caller кодируется/читается
+    кругом. Свои значения (имена без точек) -- прежние байт в байт."""
+    dotted = busnames.node_user("a.b")          # node-a.b: два токена, если в лоб
+    confused = busnames.node_user("a")          # node-a: его префикс -- ВИД префикса node-a.b
+    plain = NODE_USER                            # node-hyper: без точек
+    # Префикс кодирует пользователя одним токеном: свои значения -- прежние.
+    c.expect("a plain machine name keeps its private prefix byte-for-byte",
+             busnames.private_prefix(plain), f"_MOP_REPLY.{plain}")
+    c.check("a dotted node name is ONE subject token",
+            "." not in busnames.private_prefix(dotted).split(
+                busnames.REPLY_PREFIX + ".", 1)[1], busnames.private_prefix(dotted))
+    # Узел не принимает чужой приватный ответ: node-a не читает ответ
+    # node-a.b -- префикс node-a.b.NUID ВИДИТ себя началом «_MOP_REPLY.node-a.»
+    # в лобовой нарезке, и это главный случай ревью.
+    c.check("node-a does not accept a node-a.b reply",
+            not busnames.valid_private_reply(
+                busnames.private_prefix(dotted) + ".NUID", confused))
+    c.check("node-a.b does not accept a node-a reply",
+            not busnames.valid_private_reply(
+                busnames.private_prefix(confused) + ".NUID", dotted))
+    c.check("each dotted machine still reads its own reply",
+            busnames.valid_private_reply(
+                busnames.private_prefix(dotted) + ".NUID", dotted))
+    # Хвост-NUID: непустой, без масок, пустых сегментов и
+    # whitespace/контрольных хвостов -- иначе подписка-маска ловила бы
+    # чужие ответы.
+    for bad in ("", "*", ">", "a.*", "a.>", ".a", "a..b", "a.", "a b", "a\tb",
+                "a\nb", "a b.c", "a\x01b"):
+        c.check(f"the reply tail {bad!r} is not a valid private reply",
+                not busnames.valid_private_reply(
+                    busnames.private_prefix(plain) + ("." if bad else "") + bad,
+                    plain))
+    c.check("a clean NUID tail is valid",
+            busnames.valid_private_reply(busnames.private_prefix(plain) + ".aB2x_9", plain))
+    # Квалифицированный server.rpc: узловой caller с точкой ездит одним
+    # токеном и читается кругом (кодирование <-> декодирование).
+    subj = busnames.server("mop", caller=dotted)
+    c.expect("the qualified server subject encodes the node as ONE token",
+             len(subj.split(".")), 5)
+    c.expect("caller round-trips a dotted node name",
+             busnames.caller(subj), dotted)
+    c.expect("caller still reads the plain node name",
+             busnames.caller(busnames.server("mop", caller=plain)), plain)
+    c.expect("a human login on server.rpc is still no caller",
+             busnames.caller(busnames.server("mop", caller="anton.ermak")), None)
+    # Круг обязан сходиться для всего, что валидно: сервер строит субъект,
+    # агент читает имя -- dots/spaces/percent ездят без потерь. Вызывающий
+    # там -- машинное имя узла (префикс node-), человеческий логин -- не
+    # вызывающий.
+    for raw in ("node-a.b", "node-x y", "node-a%2Eb", "node-антон.ермак",
+                "node-a.b.c", "node-n%41me"):
+        c.expect(f"caller round-trips the qualified node {raw!r}",
+                 busnames.caller(busnames.server("mop", caller=raw)), raw)
+
+
+def check_identity_603(c):
+    """HYPOTHESIS (#603, ревью c9262ac): identity-хелперы (login,
+    principal, node_name) перечитывают config() -- каталог сервера или
+    MOP_BUS_CONFIG, -- а лаунчер номада ходит через bus.connect(NODE_FILE):
+    на узле нет профиля сервера, и процесс с узловым кредом молча читал бы
+    None или чужие креды, когда файл нашёлся бы. Подмены #590 (переприсвоение
+    bus.FILE) -- временный костыль.
+    SOLUTION: выбор кредов у соединения и у identity -- один: соединение,
+    открытое из NODE_FILE, несёт узлового пользователя, и хелперы читают
+    его оттуда; file= у config() по-прежнему решает сам, FILE/NODE_FILE --
+    прежние значения, легаси-дефолты и поведение человека не меняются.
+    RESULT: см. ниже; текущее поведение -- без чего отказ.
+    STATUS: RED"""
+    with tempfile.TemporaryDirectory() as d:
+        node_file = os.path.join(d, "bus.json")
+        with open(node_file, "w") as f:
+            json.dump({"url": "nats://x", "user": NODE_USER, "password": "p"}, f)
+
+        class Conn:
+            """Живое соединение с узловым кредом: is_closed и creds."""
+            is_closed = False
+            creds = {"url": "nats://x", "user": NODE_USER, "password": "p"}
+
+        def recording_conn(file=None):
+            calls.append(file)
+            return Conn()
+
+        calls = []
+        # config() в каталоге сервера молчит (нет ни файла, ни каталога) --
+        # как на реальном узле, где лаунчер ходит только NODE_FILE'ом.
+        with patched(bus, config=lambda *a, **k: (_ for _ in ()).throw(
+                bus.BusError("no bus credentials"))), \
+                patched(bus, _conn=None, connect=recording_conn):
+            bus.connect(bus.NODE_FILE)
+            c.expect("connect passes the file through", calls[-1], bus.NODE_FILE)
+            c.expect("node_name reads the CONNECTED credential, not config()",
+                     bus.node_name(), "hyper")
+            c.expect("login of a node process stays None", bus.login(), None)
+            c.expect("principal of a node process stays None", bus.principal(), None)
+        grant_file = os.path.join(d, "grant.json")
+        with open(grant_file, "w") as f:
+            json.dump({"url": "nats://x", "user": GRANT, "password": "p"}, f)
+
+        class GrantConn(Conn):
+            creds = {"url": "nats://x", "user": GRANT, "password": "p"}
+
+        with patched(bus, config=lambda *a, **k: (_ for _ in ()).throw(
+                bus.BusError("no bus credentials"))), \
+                patched(bus, _conn=None, connect=lambda file=None: GrantConn()):
+            bus.connect(grant_file)
+            c.expect("principal reads the connected grant credential",
+                     bus.principal(), GRANT)
+            c.expect("caller_token of a grant process", bus.caller_token(), GRANT)
+        # Легаси-дефолты без соединения: прежние ответы config() -- байт в
+        # байт, никакого молчаливого переключения кредов.
+        with patched(bus, _conn=None, config=creds("alice")):
+            c.expect("a human login still comes from config()",
+                     bus.login(), "alice")
+        with patched(bus, _conn=None, config=creds(NODE_USER)):
+            c.expect("a node name still comes from config()",
+                     bus.node_name(), "hyper")
+        # FILE и NODE_FILE -- прежние значения, подмены #590 нет.
+        c.check("bus.FILE keeps its MOP_BUS_CONFIG meaning", bus.FILE is None
+                or isinstance(bus.FILE, str), repr(bus.FILE))
+
+
+def check_masks_603(c):
+    """HYPOTHESIS (#603, ревью c9262ac): маски каналов роли ACL (#581) и
+    подписок (#584) собирали бы каждый своей таблицей -- расхождение молчит
+    до пула (отказ прав в error_cb читается как «агент молчит»). И публикация
+    приватных ответов -- глобальная маска сервера (_MOP_REPLY.> тем, кто
+    отвечает узлу/принципалу), а не «свой private_scope(user)».
+    SOLUTION: общие node_role/cluster_role (principal=ANY -- маска, полный
+    принципал -- точный субъект) и private_publish (глобальная маска
+    публикации в чужие приватные ответы), отдельная от private_scope.
+    Рантайм-маршрутизация переиспользует их же функции. STATUS: RED"""
+    c.expect("the node role mask",
+             busnames.node_role("mop", "hyper"),
+             f"mop.mop.node.hyper.role.>")
+    c.expect("the node role mask of another project",
+             busnames.node_role("rugent", "hyper"),
+             f"mop.rugent.node.hyper.role.>")
+    c.expect("the node role mask for any node",
+             busnames.node_role("mop", busnames.ANY),
+             f"mop.mop.node.*.role.>")
+    c.expect("the node role subject of one principal",
+             busnames.node_role("mop", "hyper", principal=GRANT),
+             f"mop.mop.node.hyper.role.{GRANT}")
+    c.expect("the cluster role mask",
+             busnames.cluster_role("mop"),
+             f"mop.mop.cluster.role.>")
+    c.expect("the cluster role subject of one principal",
+             busnames.cluster_role("mop", principal=GRANT),
+             f"mop.mop.cluster.role.{GRANT}")
+    c.expect("the cluster role mask for any project",
+             busnames.cluster_role(busnames.ANY),
+             f"mop.*.cluster.role.>")
+    # Маска -- надмножество точного субъекта: подписка и ACL сходятся.
+    for mask, exact in ((busnames.node_role("mop", "hyper"),
+                         busnames.node_role("mop", "hyper", principal=GRANT)),
+                        (busnames.cluster_role("mop"),
+                         busnames.cluster_role("mop", principal=GRANT))):
+        c.check(f"the mask covers its exact subject ({exact})",
+                matches(mask, exact), (mask, exact))
+    # Глобальная маска публикации приватных ответов -- и она отдельна от
+    # собственной подписки.
+    c.expect("the global private reply publish mask",
+             busnames.private_publish(), f"{busnames.REPLY_PREFIX}.>")
+    c.check("private_publish is not any single user's scope",
+            busnames.private_publish() != busnames.private_scope(NODE_USER)
+            and busnames.private_publish() != busnames.private_scope(GRANT))
+    c.check("private_publish covers every machine's replies",
+            all(matches(busnames.private_publish(),
+                        busnames.private_prefix(u) + ".NUID")
+                for u in (NODE_USER, GRANT, busnames.node_user("a.b"))))
+    # Рантайм-маршрутизация переиспользует те же таблицы: субъекты узла и
+    # кластера собираются node()/cluster(), их маски -- node_role/cluster_role.
+    c.expect("node() agrees with node_role for a principal",
+             busnames.node("mop", "hyper", "rpc", login=GRANT),
+             busnames.node_role("mop", "hyper", principal=GRANT))
+    c.expect("cluster() agrees with cluster_role for a principal",
+             busnames.cluster("mop", login=GRANT),
+             busnames.cluster_role("mop", principal=GRANT))
+    # Подписка агента слушает канал роли маской node(..., \">\") -- той же
+    # таблицей busnames: расхождение подписки и ACL молчит до пула.
+    c.check("the agent's node tail subscription covers the role channel",
+            any(matches(s, busnames.node_role("mop", "hyper", principal=GRANT))
+                for s in busnames.agent_subscriptions("hyper")["rpc"] + ["mop.*.node.hyper.>"]
+                if s.endswith(".>")),
+            busnames.agent_subscriptions("hyper")["rpc"])
+
+
 def check_add_fields_603(c):
     """ops.add везёт поля роли транспортом, легаси-провод не меняет, повторов
     не делает."""
@@ -439,7 +640,9 @@ def main():
     c = Checks()
     for fn in map(group, (check_fence_603, check_caller_603,
                           check_principals_603, check_subject_routing_603,
-                          check_private_603, check_server_qualified_603,
+                          check_private_603, check_reply_fence_603,
+                          check_identity_603, check_masks_603,
+                          check_server_qualified_603,
                           check_startup_603, check_add_fields_603,
                           check_row_dispatch_603, check_roots_603,
                           check_body_layout_603, check_service_facts_603)):
