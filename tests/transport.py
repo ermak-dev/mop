@@ -455,6 +455,52 @@ def check_identity_603(c):
                 or isinstance(bus.FILE, str), repr(bus.FILE))
 
 
+def check_connect_snapshot_603(c):
+    """HYPOTHESIS (#603, ревью 01a4a58): connect() выбирал креды одним
+    чтением (selected = config(file)), а _aconnect(file) читал config(file)
+    ВТОРЫМ -- и соединял тем, что вернуло второе чтение. Развязка creds
+    между чтениями -- чужая личность: config, возвращающий node-a затем
+    node-b (файл перезаписали между чтениями), реально авторизуется node-b,
+    а conn.creds и node_name() называют node-a: субъект строится от одного
+    имени, рукопожатие шины -- от другого.
+    SOLUTION: connect() передаёт ОДИН выбранный снимок в асинхронное
+    соединение, и оно не читает config() вовсе -- рукопожатие и identity
+    связаны одним и тем же словарём. Публичный API не меняется.
+    RESULT: см. ниже. STATUS: RED"""
+    reads = []
+
+    def shifting_config(file=None):
+        reads.append(file)
+        user = "node-a" if len(reads) == 1 else "node-b"
+        return {"url": "nats://x", "user": user, "password": "p"}
+
+    authenticated = []
+
+    async def fake_open(**opts):
+        # Как настоящий _open: получает auth-аргументы, собранные _aconnect
+        # из creds, и «соединяется» -- запоминает user рукопожатия.
+        authenticated.append(opts.get("user"))
+        return SimpleNamespace(is_closed=False)
+
+    def run(coro, timeout):
+        return asyncio.run(coro)
+
+    with patched(bus, config=shifting_config, _open=fake_open, _call=run), \
+            patched(bus, _conn=None):
+        bus.connect(bus.NODE_FILE)
+        c.expect("the bus handshake uses the SAME snapshot connect() selected",
+                 authenticated[-1], "node-a")
+        c.expect("identity follows the same snapshot",
+                 getattr(bus._conn, "creds", {}).get("user"), "node-a")
+        c.expect("node_name matches the authenticated user",
+                 bus.node_name(), "a")
+        c.expect("config() was read exactly once for one connection",
+                 len(reads), 1)
+    c.check("the fixture really shifts: without the fix the handshake "
+            "authenticated the SECOND read", authenticated
+            and authenticated[-1] in ("node-a", "node-b"), authenticated)
+
+
 def check_masks_603(c):
     """HYPOTHESIS (#603, ревью c9262ac): маски каналов роли ACL (#581) и
     подписок (#584) собирали бы каждый своей таблицей -- расхождение молчит
@@ -666,7 +712,8 @@ def main():
     for fn in map(group, (check_fence_603, check_caller_603,
                           check_principals_603, check_subject_routing_603,
                           check_private_603, check_reply_fence_603,
-                          check_identity_603, check_masks_603,
+                          check_identity_603, check_connect_snapshot_603,
+                          check_masks_603,
                           check_server_qualified_603,
                           check_startup_603, check_add_fields_603,
                           check_row_dispatch_603, check_roots_603,
