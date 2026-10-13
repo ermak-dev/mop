@@ -101,6 +101,8 @@ def stop(transport, name, login=None):
         return _refused(name, str(e))
     except Exception:
         return outcome(UNKNOWN, name, error="job stop could not be confirmed")
+    if not isinstance(got, dict):
+        return outcome(UNKNOWN, name, error="job stop could not be confirmed")
     if got.get("error"):
         return _refused(name, got["error"])
     if got.get("stopped") is not True:

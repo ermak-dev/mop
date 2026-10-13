@@ -90,6 +90,13 @@ def main():
         result = ops.stop(lambda *a, **k: {}, "pu-mop-1", login="anton")
         c.check("#608 an empty answer does not claim a stop",
                 result.get("outcome") == ops.UNKNOWN)
+        malformed = None
+        try:
+            malformed = ops.stop(lambda *a, **k: "not a reply", "pu-mop-1", login="anton")
+        except AttributeError:
+            pass
+        c.check("#608 a malformed transport answer remains unknown",
+                isinstance(malformed, dict) and malformed.get("outcome") == ops.UNKNOWN)
         def refused(*args, **fields):
             raise bus.Refused("operator required")
         result = ops.stop(refused, "pu-mop-1", login="anton")
