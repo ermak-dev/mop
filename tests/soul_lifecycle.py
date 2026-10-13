@@ -706,6 +706,157 @@ def check_add_delegated_582(c):
                 human.get("ok") and len(api.jobs) == 1, human)
 
 
+def check_add_delegated_gates_582(c):
+    """Блокаторы ревью 809ffc7: шесть красных историй делегированного и
+    человеческого add. Каждая -- про конкретный обход, не про стиль."""
+    # 1a. Отозванный родитель на открытом соединении: свежая проверка
+    #     привязки -- active и не отозвана -- ДО списка spawn.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        grants.revoke(principal, root=g)
+        got = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                    "soul": "puppet", "request_id": "rv-1",
+                                    "_caller": principal, "_subject":
+                                    f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 a revoked parent cannot add a child",
+                "error" in got and "revok" in (got.get("error") or "").lower()
+                and len(api.jobs) == 1, got)
+    # 1b. Родитель без ПРАВА add в cluster_verbs: рабочий (puppet) не
+    #     поднимает детей даже по правильному каналу -- право у души.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        got = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                    "soul": "puppet", "request_id": "wk-1",
+                                    "_caller": "anton"})
+        assert got.get("ok"), got
+        worker = grants.by_job("alpha", got["name"], root=g)["principal"]
+        child = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "wk-2",
+                                      "_caller": worker, "_subject":
+                                      f"mop.alpha.cluster.role.{worker}"})
+        c.check("#582 a parent without the add verb cannot spawn",
+                "error" in child and ("add" in (child.get("error") or "")
+                                      or "may not" in (child.get("error") or ""))
+                and len(api.jobs) == 1, child)
+
+    # 2. Новый грант человеком без верифицированного вызывающего: аноним
+    #     не заводит роли; совместимость -- только для легаси-джобов.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        anon = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                     "soul": "puppet", "request_id": "an-1"})
+        c.check("#582 a new role grant needs a verified human caller",
+                "error" in anon and not api.jobs, anon)
+
+    # 3. Реплей конфликтующего запроса: side effects ДО prepare не
+    #     происходят -- файлы резерва не перезатираются чужим текстом.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        first = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "re-1",
+                                      "workspace": PLAY_A,
+                                      "_caller": "anton"})
+        pinned = bootstrap.files_of(bootstrap.ROOT, first.get("name") or "")
+        c.check("#582 the human role reserve pins its approved files",
+                first.get("ok") and pinned[0] is not None, (first, pinned))
+        before = open(pinned[0]).read()
+        clash = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "puppet", "request_id": "re-1",
+                                      "workspace": PLAY_B,
+                                      "_caller": "anton"})
+        after = open(bootstrap.files_of(bootstrap.ROOT,
+                                        first.get("name"))[0]).read()
+        c.check("#582 a conflicting replay changes no pinned file",
+                "error" in clash and before == after, clash)
+
+    # 4a. Реплей УЖЕ созданного request_id проходит МИМО квоты: успешный
+    #     запуск, занявший последний слот, реплейится без отказа.
+    api = FakeNomad()
+    with soul_env(api, limit=1) as g:
+        principal, parent, _p = soul_parent(api, g, request_id="q-1",
+                                            workspace=PLAY_A)
+        c.check("#582 limit=1 parent consumed the last slot",
+                len(api.jobs) == 1, sorted(api.jobs))
+        replay = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                       "soul": "master", "request_id": "q-1",
+                                       "workspace": PLAY_A,
+                                       "_caller": "anton"})
+        c.check("#582 a replay of the same request passes the quota gate",
+                replay.get("ok") and replay.get("name") == parent, replay)
+
+    # 4b. Выбор имени учитывает резервы, невидимые в Nomad: вторая
+    #     заявка не занимает имя висящего резерва первой.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        # Резерв без регистрации: Nomad молчит, имя занято резервом.
+        class _NoReg(FakeNomad):
+            def register(self, sp):
+                raise RuntimeError("nomad is down")
+        broken = _NoReg()
+        broken.jobs = api.jobs
+        stuck = answer(broken, "alpha", {"verb": "add", "origin": ALPHA,
+                                         "soul": "puppet", "request_id": "nm-1",
+                                         "_caller": principal, "_subject":
+                                         f"mop.alpha.cluster.role.{principal}"})
+        rec = grants.by_request("nm-1", root=g)
+        fresh = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                      "soul": "master", "request_id": "nm-2",
+                                      "_caller": "anton"})
+        c.check("#582 a pending reservation keeps its name against a new add",
+                "error" in stuck and rec is not None
+                and rec.get("job") == "pu-alpha-2"
+                and fresh.get("ok") and fresh.get("name") != "pu-alpha-2",
+                (stuck, rec, fresh))
+
+    # 5. Реплей по сохранённому бандлу, а не по текущему каталогу: роль
+    #    убрана из каталога -- ретрай всё равно поднимает резерв.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g, request_id="cat-1")
+        with patched(cluster, SOUL_CATALOGUE=[]):
+            retry = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                          "soul": "master", "request_id": "cat-1",
+                                          "workspace": PLAY_A,
+                                          "_caller": "anton"})
+        c.check("#582 a replay reads the pinned bundle, not the catalogue",
+                retry.get("ok") and retry.get("name") == parent, retry)
+
+
+def check_bootstrap_snapshot_coherence_582(c):
+    """Блокатор 6: согласованный снапшот -- одни байты на чтение, хеш и
+    запись. Хеш сверяется с прочитанными байтами, копируются они же;
+    нечитаемый файл -- ошибка с причиной, не пустой снапшот."""
+    from mop.common import fsutil
+    root = tempfile.mkdtemp(prefix="mop-test-582a-")
+    try:
+        fsutil.make_private_dir(root)
+        with open(os.path.join(root, "pu-p-tasks.yml"), "w") as f:
+            f.write("- name: greet\n")
+        bootstrap.note_approval(root, "pu-p")
+        # Нечитаемый файл: снапшот не «пуст», а сломан.
+        os.chmod(os.path.join(root, "pu-p-tasks.yml"), 0o000)
+        try:
+            why = bootstrap.copy_approval(root, "pu-p", "pu-c")
+            c.check("#582 an unreadable approved file fails loudly, not "
+                    "as an empty snapshot",
+                    why is not None and "unreadable" in why, why)
+            c.check("#582 a failed copy leaves no child files",
+                    bootstrap.files_of(root, "pu-c") == (None, None),
+                    bootstrap.files_of(root, "pu-c"))
+        finally:
+            os.chmod(os.path.join(root, "pu-p-tasks.yml"), 0o600)
+        # Битый JSON метки: причина на поверхность.
+        with open(os.path.join(root, "pu-p-approved.json"), "w") as f:
+            f.write("{not json")
+        why = bootstrap.copy_approval(root, "pu-p", "pu-c2")
+        c.check("#582 a corrupted approval marker surfaces its reason",
+                why is not None and "approval" in (why or ""), why)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_add_workspace_boundary_582(c):
     """Граница workspace различает актёров, а не запрещает всем (#582):
     аутентифицированный ЧЕЛОВЕК, заводящий роль, согласовывает политику
@@ -985,6 +1136,8 @@ def main():
                check_add_soul_582, check_add_pending_before_nomad_582,
                check_add_request_payload_582, check_add_source_gates_582,
                check_add_legacy_untouched_582, check_add_delegated_582,
+               check_add_delegated_gates_582,
+               check_bootstrap_snapshot_coherence_582,
                check_add_workspace_boundary_582,
                check_add_quota_counts_roles_582,
                check_update_preserves_triple_582, check_restart_keeps_meta_582,

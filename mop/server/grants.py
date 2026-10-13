@@ -367,7 +367,13 @@ def resolve(principal, service, verb, target=None, root=None):
     if rec is None:
         return {"allow": False,
                 "reason": f"grants: unknown principal {principal}"}
-    if rec.get("revoked_at") or not rec.get("active"):
+    if rec.get("revoked_at"):
+        # Отзыв -- не «не активен»: человек, читающий отказ, обязан видеть
+        # ПРИЧИНУ (отозван кем-то), а не угадывать между «ещё не подтверждён»
+        # и «отключён» (#582).
+        return {"allow": False,
+                "reason": f"grants: {principal} is revoked"}
+    if not rec.get("active"):
         return {"allow": False,
                 "reason": f"grants: {principal} is not an active binding"}
     got = bundle(rec.get("soul_digest"), root=root)

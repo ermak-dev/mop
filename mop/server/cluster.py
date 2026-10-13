@@ -253,9 +253,30 @@ def _placement_nodes():
     return [dict(n, meta=metas.get(n["name"], {})) for n in nomad_pool()]
 
 
-def next_name(project):
+def _reserved_names(project):
+    """Имена, занятые резервами грантов ДО Nomad (#582). -> {job}.
+
+    Nomad не видит подвисшего резерва (prepare доехал, регистрация нет),
+    и next_name по одним его джобам отдал бы это имя второй заявке:
+    ретрай первого затёр бы имя и закреплённую политику. Реестр -- та же
+    правда об имени, что и Nomad; отозванный резерв имени не держит --
+    его принципал мёртв, имя свободно. Битый реестр -- громкий отказ
+    _read: тихий пустой список здесь означал бы «Nomad единственная
+    правда» именно в тот момент, когда он правдой быть перестал."""
+    reg = grants._read(SOUL_ROOT)
+    return {rec.get("job") for rec in reg.values()
+            if rec.get("project") == project and rec.get("job")
+            and not rec.get("revoked_at")}
+
+
+def next_name(project, reserving=False):
+    """Следующее свободное имя папета проекта. reserving=True -- заявка
+    роли: имя обязано не пересекаться и с резервами грантов (#582),
+    не только с джобами Nomad."""
     prefix = puppets.JOB_PREFIX
     taken = {j["ID"] for j in _api().get_jobs(f"{prefix}{project}-")}
+    if reserving:
+        taken |= _reserved_names(project)
     n = 1
     while f"{prefix}{project}-{n}" in taken:
         n += 1
@@ -420,7 +441,8 @@ SOUL_CATALOGUE = (os.path.join(config.PROJECT, "mop", "skills"),)
 
 
 class _Launch:
-    """Завод роли одним объектом: бандл из каталога плюс резерв ретрая."""
+    """Завод роли одним объектом: бандл (каталог свежего запуска, хранилище
+    резерва -- у ретрая, #582) плюс запись резерва ретрая."""
 
     def __init__(self, role, bundle, request_id, record=None):
         self.role = role
@@ -431,8 +453,21 @@ class _Launch:
     def intent(self, req):
         """Интент резерва (#581): цель запуска, ретрай сверяет по нему
         полезную нагрузку -- «похожий» запуск с другой веткой другой и
-        есть."""
-        return f"add {req.get('origin')}@{req.get('branch') or ''}"
+        есть. Workspace -- часть интента (#582, блокатор ревью): без него
+        «тот же запрос» с другим текстом не различим вовсе, и конфликтный
+        реплей затирал закреплённые файлы до отказа prepare."""
+        ws = req.get("workspace")
+        text = "" if ws is None else str(ws)
+        return f"add {req.get('origin')}@{req.get('branch') or ''} ws={len(text)}:{self._ws_hash(text)}"
+
+    @staticmethod
+    def _ws_hash(text):
+        import hashlib
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def project_of(self, req):
+        """Проект заявки по origin -- тем же правилом, что и ворота."""
+        return puppets.project_of(req.get("origin") or "")
 
     def triple(self, soul_inc):
         return {"soul": self.role, "soul_digest": self.bundle.digest,
@@ -470,6 +505,14 @@ def _delegated(project, req, caller):
     if parent_rec.get("project") != project:
         return {"error": f"{caller}: the binding lives in project "
                          f"{parent_rec.get('project')}, not {project}"}
+    # Свежая годность И право -- одним снимком реестра (grants.resolve,
+    # #581): отозванный родитель на открытом соединении не поднимает
+    # ребёнка, и право add -- у души (cluster_verbs), не у провода.
+    # Это общая авторизация роли, не спецслучай add: любой глагол канала
+    # роли резолвится тем же вызовом (#603).
+    verdict = grants.resolve(caller, "cluster", "add", root=SOUL_ROOT)
+    if not verdict.get("allow"):
+        return {"error": f"{caller}: {verdict.get('reason') or 'may not add'}"}
     # Граница проекта -- для всех актёров (#567): легаси-путь держит её
     # refusal(add), делегированная ветка идёт мимо -- тот же вопрос здесь.
     why = _foreign_origin(project, req.get("origin"))
@@ -508,14 +551,6 @@ def _role_launch(req):
                          "the reserved principal instead of breeding a "
                          "second one (#579)"}
     name = req.get("soul")
-    try:
-        roles = soul.catalogue(SOUL_CATALOGUE)
-        bundle = soul.load(roles[name]) if name in roles else None
-    except ValueError as e:
-        return {"error": f"soul catalogue: {e}"}
-    if bundle is None:
-        return {"error": f"no role {name} in the catalogue; available: "
-                         f"{', '.join(sorted(roles)) or 'none'}"}
     # Ретрай смотрит реестр ДО выбора имени/инкарнации (#581 by_request):
     # неопределённый исход прошлой попытки поднимает сохранённые, а не
     # заводит вторую душу. Дубль request_id в реестре -- отказ от grants.
@@ -523,7 +558,67 @@ def _role_launch(req):
         record = grants.by_request(req["request_id"], root=SOUL_ROOT)
     except ValueError as e:
         return {"error": f"soul add: {e}"}
+    # Бандл ретрая -- ИЗ РЕЗЕРВА (#582, блокатор ревью): роль может уже
+    # уйти из каталога, а бандл резерва живёт в хранилище write-once --
+    # ретрай поднимает то, что закрепила первая попытка. Свежий запуск
+    # бандл берёт из каталога: клиент называет имя, digest выбирает
+    # сервер, и попытка подложить digest/inc -- отказ до ворот проекта.
+    bundle = None
+    if record is not None:
+        if record.get("role") != name:
+            return {"error": f"request {req['request_id']} is already "
+                             f"prepared with a different role: "
+                             f"{record.get('role')!r} reserved, {name!r} "
+                             f"in this replay (#582)"}
+        got = grants.bundle(record.get("soul_digest"), root=SOUL_ROOT)
+        if got is not None:
+            bundle = soul.from_manifest(got["manifest"], got["prompt"])
+    if bundle is None:
+        try:
+            roles = soul.catalogue(SOUL_CATALOGUE)
+            bundle = soul.load(roles[name]) if name in roles else None
+        except ValueError as e:
+            return {"error": f"soul catalogue: {e}"}
+        if bundle is None:
+            return {"error": f"no role {name} in the catalogue; available: "
+                             f"{', '.join(sorted(roles)) or 'none'}"}
     return _Launch(name, bundle, req["request_id"], record)
+
+
+def _replay_conflict(req, launch):
+    """Почему реплей конфликтен с резервом (#582). -> отказ | None.
+
+    Свой резерв (тот же request_id) -- та же полезная нагрузка или её
+    нет вовсе: сверяются owner/project/actor/role и интент С workspace
+    (--66: прежний интент origin@branch не связывал текст, и «тот же
+    запрос» с другим текстом проходил до файлов). Чужой резерв на этом
+    имени -- _reserved_taken. Вызов ДО side effects: конфликтный реплей
+    не должен затирать закреплённые файлы до отказа prepare."""
+    rec = launch.record
+    if not rec:
+        return None
+    who, verified = lease.caller(req)
+    delegated = req.get("_delegated_by")
+    want = {"owner": rec.get("owner"),
+            "project": rec.get("project"),
+            "actor": rec.get("actor") or None,
+            "role": rec.get("role"), "soul_digest": rec.get("soul_digest")}
+    have = {"owner": (req.get("_owner") if delegated is not None else
+                      (who if verified else None)),
+            "project": launch.project_of(req), "actor": delegated,
+            "role": launch.role, "soul_digest": launch.bundle.digest}
+    for key in want:
+        if want[key] != have[key]:
+            return (f"request {launch.request_id} is already prepared with a "
+                    f"different {key}: {want[key]!r} reserved, {have[key]!r} "
+                    f"in this replay (#582)")
+    want_intent = rec.get("intent") or ""
+    have_intent = launch.intent(req)
+    if want_intent != have_intent:
+        return (f"request {launch.request_id} is already prepared with a "
+                f"different intent: {want_intent!r} reserved, "
+                f"{have_intent!r} in this replay (#582)")
+    return None
 
 
 def _reserved_taken(name, rec):
@@ -579,21 +674,28 @@ def _add(project, req):
         # только глагол проектов -- непредставимая пара не прячет потолок
         # действующего.
         target = Project.of(origin, projects.snapshot_limits(_view()))
-        why = over_limit(target.name, _live_count(target.name), target.limit)
-        if why:
-            return {"error": why}
+        # Реплей сверяется и выбирается ДО квоты (#582): успешный запуск,
+        # занявший последний слот, обязан реплеиться без отказа -- квота
+        # считает НОВЫХ папетов, а не подтверждение своего резерва.
         if launch is not None and launch.record:
             # Ретрай: имя и инкарнация -- из резерва, не новые (#579);
             # чужая регистрация на этом имени -- громкий отказ.
             name, soul_inc = launch.record["job"], launch.record["soul_inc"]
+            why = _replay_conflict(req, launch)
+            if why:
+                return {"error": why}
             why = _reserved_taken(name, launch.record)
             if why:
                 return {"error": why}
         else:
-            name = next_name(target.name)
+            why = over_limit(target.name, _live_count(target.name), target.limit)
+            if why:
+                return {"error": why}
+            name = (next_name(target.name) if launch is None else
+                   next_name(target.name, reserving=True))
             soul_inc = soul.incarnation() if launch is not None else None
         # workspace -- до регистрации: первый подъём обязан его увидеть.
-        # Актёров distinguishes не запрет, а путь (#582): ЧЕЛОВЕК, заводящий
+        # Актёров различает не запрет, а путь (#582): ЧЕЛОВЕК, заводящий
         # роль, согласовывает политику своим текстом -- метка согласования
         # ставится тем же ходом, текст идёт в хранилище как сегодня; грант
         # (делегированный add) текста не приносит вовсе -- его ребёнок
@@ -604,6 +706,14 @@ def _add(project, req):
         if launch is None:
             marker = store_workspace(bootstrap.ROOT, name, req)
         elif delegated is None:
+            # Новый грант -- только верифицированному человеку (#582):
+            # анонимная заявка роли не заводит принципала. Легаси-add
+            # (без роли) совместимость сохраняет -- его джобы не гранты.
+            who, verified = lease.caller(req)
+            if not verified:
+                return {"error": "a role add needs a verified human caller: "
+                                 "the login comes from the request subject, "
+                                 "not the body (#582)"}
             if "workspace" in req:
                 store_workspace(bootstrap.ROOT, name, req)
                 bootstrap.note_approval(bootstrap.ROOT, name)
@@ -625,8 +735,8 @@ def _add(project, req):
             # Резерв ДО Nomad: что бы ни случилось с регистрацией, принципал,
             # имя и инкарнация уже сохранены -- ретрай поднимет их. Тот же
             # request_id с другой полезной нагрузкой (#581) откажет здесь.
-            # Владелец -- человек (delегated: хозяин родителя из реестра),
-            # актёр -- отдельным полем: происхождение не право (#582).
+            # Владелец -- человек (делегированный: хозяин родителя из
+            # реестра), актёр -- отдельным полем: происхождение не право.
             principal = grants.prepare(
                 project, role=launch.role, digest=launch.bundle.digest,
                 manifest=launch.bundle.manifest.to_dict(),
