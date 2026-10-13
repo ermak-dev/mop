@@ -167,12 +167,13 @@ def nomad_jobs(project=None):
 
 
 def task_and_reason(alloc):
-    """Сводка задачи и, у падающей, причина из stderr (#126). Только сервис
-    кластера: у него Nomad. stderr читается лишь у падающих -- это запрос к
-    клиенту Nomad на узле, и платить его за здоровых незачем."""
+    """Сводка задачи и причина последнего отказа из stderr. Повторная running
+    обёртка ещё не доказывает подъём сессии: ростер сверяет это с агентом.
+    Без ненулевого исхода stderr не читается."""
     task = state.task_summary(alloc)
     reason = None
-    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None):
+    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None,
+                         initializing=True):
         try:
             reason = state.failure_reason(
                 _api().alloc_stderr(Alloc.from_dict(alloc).id, state.task_name(alloc)))
