@@ -83,6 +83,60 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
     async def open(self, mode="rw", name="pu-mop-1", owner="alice"):
         return await self.r.open(name, owner, mode, 80, 24)
 
+    async def test_open_optional_actual_interrupt_timing(self):
+        # BUG: Escape и paste в одной записи зависят от escape-time тела.
+        # HYPOTHESIS: timing нужен только как optional metadata, не identity.
+        # SOLUTION: optional callback до финальной identity-пробы, без fallback.
+        # RESULT: известные 100..10100ms добавлены, unknown сохраняет шесть полей.
+        # STATUS: FIXED — see #598
+        calls = []
+        delay = 837
+        async def timing(name):
+            calls.append(name)
+            if isinstance(delay, Exception):
+                raise delay
+            return delay
+        self.r = self.t.Registry(self.r.probe, self.r.authorize, self.r.spawn,
+                                 clock=lambda: self.now, interrupt_delay=timing)
+        for delay in (100, 837, 10100, None, 10101, 99, True, '600',
+                      RuntimeError('private body output')):
+            with self.subTest(delay=repr(delay)):
+                got = await self.open('ro')
+                if type(delay) is int and 100 <= delay <= 10100:
+                    self.assertEqual(got.get('interrupt_delay_ms'), delay)
+                    self.assertEqual(len(got), 7)
+                else:
+                    self.assertNotIn('interrupt_delay_ms', got)
+                    self.assertEqual(len(got), 6)
+                self.assertEqual(self.r.sessions[got['tid']].identity.__dict__, IDENT)
+                await self.r.close('pu-mop-1', 'alice', got['tid'])
+        self.assertEqual(calls, ['pu-mop-1'] * 9)
+
+    async def test_body_interrupt_timing_padding_bound_and_read_only_query(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import shlex
+        # Проверяется actual named server; никаких set-option/config записей.
+        for raw, expected in (('0\n', 100), ('737\n', 837), ('10000\n', 10100),
+                              ('10001\n', None), ('-1\n', None), ('', None),
+                              ('private\n500\n', None), ('1.0\n', None),
+                              ('١\n', None), ('9' * 10000, None)):
+            with self.subTest(raw=raw[:20]), patch('subprocess.run', return_value=SimpleNamespace(stdout=raw)) as run:
+                script = self.t.interrupt_script('pu-mop-1')
+                argv = shlex.split(script)
+                self.assertEqual(argv[:3], ['python3', '-I', '-c'])
+                with patch('builtins.print') as output:
+                    exec(argv[3], {})
+                self.assertEqual(output.call_args_list, [] if expected is None else [unittest.mock.call(expected)])
+                self.assertEqual(run.call_args.args[0],
+                                 ['tmux', '-L', 'pu-mop-1', 'show-options', '-s', '-v', 'escape-time'])
+                self.assertTrue(run.call_args.kwargs['capture_output'])
+                self.assertTrue(run.call_args.kwargs['check'])
+                self.assertLessEqual(run.call_args.kwargs['timeout'], 2)
+        with patch('subprocess.run', side_effect=RuntimeError('private error')), patch('builtins.print') as output:
+            exec(shlex.split(self.t.interrupt_script('pu-mop-1'))[3], {})
+            output.assert_not_called()
+
     async def test_exact_contract_raw_ring_and_loss(self):
         got = await self.open()
         self.assertEqual(set(got), {"tid", "epoch", "cursor", "mode", "cols", "rows"})

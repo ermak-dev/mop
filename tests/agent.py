@@ -3079,6 +3079,37 @@ def check_terminal_protocol_598(c):
     asyncio.run(scenario())
 
 
+def check_terminal_timing_598(c):
+    """HYPOTHESIS: timing берётся через bsh целевого тела, не узловой tmux.
+    Неизвестный ответ не получает 500ms fallback и не раскрывает stdout.
+    SOLUTION: изолированный read-only скрипт и optional callback реестра.
+    RESULT: известная задержка и неизвестные ответы проходят узловой путь.
+    STATUS: FIXED — see #598"""
+    import asyncio
+    from mop.node import terminal
+    async def scenario():
+        calls = []
+        response = ('837\n', 0)
+        async def body(name, script, timeout=20):
+            calls.append((name, script, timeout))
+            if isinstance(response, Exception):
+                raise response
+            return response
+        with patched(agent, bsh=body):
+            for response, expected in ((('837\n', 0), 837), (('10100\n', 0), 10100),
+                                       (('', 0), None), (('private\n837\n', 0), None),
+                                       (('837\n', 1), None), (('10101\n', 0), None),
+                                       (RuntimeError('private body failure'), None)):
+                got = await agent._terminal_interrupt_delay('pu-mop-1')
+                c.expect('#598 body timing optional bounded metadata', got, expected)
+            c.check('#598 timing callback wired to production registry',
+                    agent.TERMINALS.interrupt_delay is agent._terminal_interrupt_delay)
+            c.check('#598 all timing reads route through target body',
+                    all(name == 'pu-mop-1' and script == terminal.interrupt_script(name) and timeout <= 5
+                        for name, script, timeout in calls))
+    asyncio.run(scenario())
+
+
 def check_terminal_claim_598(c):
     """HYPOTHESIS: второй снимок claim может потерять knownclone, а writer
     после снятия аренды -- продолжить ввод без identity. Нельзя брать
@@ -3249,7 +3280,7 @@ def main():
                   check_junk_without_templates_276, check_owner_hook_313,
                   check_sweep_report_358, check_sweep_bodies_363,
                   check_hung_sweep_373, check_terminal_admin_598, check_terminal_protocol_598,
-                  check_terminal_claim_598, check_terminal_failed_open_598):
+                  check_terminal_claim_598, check_terminal_failed_open_598, check_terminal_timing_598):
         try:
             check(c)
         except Exception as e:

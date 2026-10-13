@@ -1506,7 +1506,23 @@ async def _terminal_spawn(name, mode, cols, rows, on_data, on_exit):
     return await terminal.PTY.spawn(argv, cols, rows, on_data, on_exit)
 
 
-TERMINALS = terminal.Registry(_terminal_probe, _terminal_owner, _terminal_spawn)
+async def _terminal_interrupt_delay(name):
+    """Timing -- только metadata actual tmux server в теле, не identity."""
+    script = terminal.interrupt_script(name)
+    try:
+        out, code = await bsh(name, script, timeout=5)
+        value = out.strip()
+        if (code != 0 or not value or len(value) > 5
+                or any(c not in '0123456789' for c in value)):
+            return None
+        delay = int(value)
+        return delay if 100 <= delay <= 10100 else None
+    except Exception:
+        return None  # Ни fallback, ни сырой stdout/traceback в ответе open.
+
+
+TERMINALS = terminal.Registry(_terminal_probe, _terminal_owner, _terminal_spawn,
+                             interrupt_delay=_terminal_interrupt_delay)
 
 
 async def _terminal_rpc(conn, req, verb):

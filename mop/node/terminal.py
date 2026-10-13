@@ -248,6 +248,29 @@ def probe_script(session_py, cwd, name):
     return "python3 -I -c " + shlex.quote(source)
 
 
+def resolve_interrupt_delay(tmux_argv):
+    """В теле читаем только server option; сырой вывод никогда не печатаем."""
+    import subprocess
+    try:
+        result = subprocess.run(tmux_argv, capture_output=True, text=True,
+                                timeout=2, check=True)
+        value = result.stdout.strip()
+        if not value or len(value) > 5 or any(c not in '0123456789' for c in value):
+            return None
+        escape_time = int(value)
+        return escape_time + 100 if escape_time <= 10000 else None
+    except Exception:
+        return None  # Optional metadata: неизвестное значение отключает combined UI.
+
+
+def interrupt_script(name):
+    actor(name, 'timing')
+    argv = shlex.split(driver.Tmux(name).base) + ['show-options', '-s', '-v', 'escape-time']
+    source = inspect.getsource(resolve_interrupt_delay)
+    source += f'\ndelay = resolve_interrupt_delay({argv!r})\nif delay is not None: print(delay)\n'
+    return 'python3 -I -c ' + shlex.quote(source)
+
+
 class Ring:
     def __init__(self):
         self.data = bytearray()
@@ -389,9 +412,10 @@ class Session:
 
 
 class Registry:
-    def __init__(self, probe, authorize, spawn, clock=time.monotonic):
+    def __init__(self, probe, authorize, spawn, clock=time.monotonic, interrupt_delay=None):
         self.probe, self.authorize, self.spawn = probe, authorize, spawn
         self.clock = clock
+        self.interrupt_delay = interrupt_delay
         self.sessions = {}
         self.open_lock = asyncio.Lock()
         self.maintenance = None
@@ -433,6 +457,7 @@ class Registry:
             tid = secrets.token_urlsafe(32)
             self.sessions[tid] = s
         receipt = None
+        delay = None
         try:
             # Сначала доказать сессию, потом staged claim/identity клона.
             s.identity = Identity.from_dict(await self.probe(name))
@@ -441,6 +466,11 @@ class Registry:
             else:
                 receipt = await prepare(name, owner, claim=(mode == "rw"))
             s.process = await self.spawn(name, mode, cols, rows, s.output, s.exited)
+            if self.interrupt_delay is not None:
+                try:
+                    delay = await self.interrupt_delay(name)
+                except Exception:
+                    pass  # Неизвестная optional metadata не мешает обычному attach.
             await self._check(s)
             if s.closed:
                 raise ValueError("terminal attach exited before open")
@@ -473,7 +503,10 @@ class Registry:
             raise
         if self.maintenance is None:
             self.maintenance = asyncio.create_task(self._maintain_loop())
-        return {"tid": tid, "epoch": s.epoch, "cursor": 0, "mode": mode, "cols": cols, "rows": rows}
+        result = {"tid": tid, "epoch": s.epoch, "cursor": 0, "mode": mode, "cols": cols, "rows": rows}
+        if type(delay) is int and 100 <= delay <= 10100:
+            result['interrupt_delay_ms'] = delay
+        return result
 
     def _get(self, name, owner, tid):
         actor(name, owner)
