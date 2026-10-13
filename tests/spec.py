@@ -989,11 +989,16 @@ def check_claude_hooks_223(c):
                     f"stderr {r.stderr.strip()!r}, temp files {leftovers}")
         finally:
             shutil.rmtree(home)
-    # (e) claude стартует с этим файлом, когда он есть
-    launch = re.search(r'^claude_args="([^"]*)"', spec.WRAPPER, re.M)
-    c.check("the claude launch line must carry $settings",
-            not (not launch or "$settings" not in launch.group(1)
-                 or "$claude_args" not in spec.WRAPPER.split("tmux -L \"$PU_NAME\" new-session")[-1]))
+    # (e) claude стартует с этим файлом, когда он есть. Аргументы собираются
+    # массивом (#583, ревью: имя файла промпта с пробелом ломало склеенную
+    # строку), поэтому и проверка смотрит массив: файл хуков -- элемент argv
+    # парой (--settings, путь), и массив доезжает до команды панели.
+    panel = spec.WRAPPER.split('tmux -L "$PU_NAME" new-session')[-1]
+    c.check("the claude launch line must carry the settings argv",
+            not ('claude_argv+=("--settings" "$hooks")' not in spec.WRAPPER
+                 or not re.search(r'^claude_argv=\(', spec.WRAPPER, re.M)
+                 or '"${claude_argv[@]}"' not in panel),
+            "no --settings element in the claude argv array")
     # (f) врапер едет base64 (#155): доллары одинарные, а в открытой части
     # спеки нет ни JSON хуков, ни `${…}`, кроме меты узла.
     c.check("the wrapper travels base64: a $$ in it would reach the body literally",
@@ -1002,7 +1007,7 @@ def check_claude_hooks_223(c):
         job = spec.job_spec(*inputs[:2], cont=inputs[2])
         env = job["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
         c.check(f"{inputs[0]}: the wrapper in the spec has no hooks",
-                not ('settings="--settings $hooks"' not in
+                not ('claude_argv+=("--settings" "$hooks")' not in
                      base64.b64decode(env["PU_WRAPPER"]).decode()))
         env["PU_WRAPPER"] = ""
         plain = json.dumps(job)
@@ -1713,7 +1718,10 @@ def check_role_startup_583(c):
 # зовут soul.is_grant; (ж) ролевой старт валидирует ГОТОВЫЙ клон (origin
 # совпадает, .git на месте) и на расхождении отказывает -- пересоздавать
 # клон после инициализации обёртка не имеет права, легаси-путь не тронут.
-# STATUS: RED
+# RESULT: все семь пунктов закрыты на живом прогоне врапера в поддельных
+# телах; легаси-путь сохранил прежнее поведение (общий файл хуков,
+# регистрация mcp, кред проекта), слепок перегенерирован.
+# STATUS: FIXED — see #583
 def check_role_review_583(c):
     import shutil
     import subprocess
