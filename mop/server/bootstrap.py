@@ -249,6 +249,119 @@ def refusal(req, project):
     return None
 
 
+# ─── выдача кредов роли телу (#590/#603) ─────────────────────────────────
+def _node_of(caller):
+    """Имя узла из его машинного имени, либо None."""
+    if isinstance(caller, str) and caller.startswith(busnames.NODE_PREFIX):
+        return caller[len(busnames.NODE_PREFIX):] or None
+    return None
+
+
+def _soul_root():
+    """Корень хранилища душ: шов проверок (патчится на временный каталог)."""
+    from . import grants
+    return grants._root_dir(None)
+
+
+def _job_meta(name):
+    """Meta джоба Nomad: шов проверок."""
+    from . import nomad
+    try:
+        return (nomad.get_job(name) or {}).get("Meta") or {}
+    except Exception:
+        return {}
+
+
+def _assigned_node(name):
+    """Узел последней аллокации джоба, либо None: шов проверок."""
+    from . import nomad
+    try:
+        alloc = nomad.latest_alloc(name)
+    except Exception:
+        return None
+    if not alloc:
+        return None
+    node_id = alloc.get("NodeID")
+    if not node_id:
+        return None
+    for summary in nomad.get_nodes():
+        if summary.get("ID") == node_id:
+            return summary.get("Name")
+    return None
+
+
+def _owner_profile(login):
+    """Профиль владельца роли для ответа (#590): шов проверок."""
+    return identity.profile(identity.server_provider(), login)
+
+
+def role_gates(name, caller, reply, project, root=None, jobs=None,
+               assigned=None):
+    """Ворота выдачи кредов роли (#581/#603/#590) -> запись | {"error"}.
+
+    Четыре проверки, все до прогона:
+      1. вызывающий -- узел (субъект #603): анонимный легаси server.rpc
+         зовут и люди проекта, ролевые факты им не положены. caller --
+         полное машинное имя (node-<узел>): им же проверяется приватный
+         префикс ответа, голое имя узла -- Nomad-сверка назначения;
+      2. ответ -- приватный префикс ИМЕННО этого узла (valid_private_reply,
+         #603): кред роли не едет в глобально читаемый _INBOX и не в
+         чужой префикс;
+      3. джоб назначен Nomad ИМЕННО этому узлу (свежая аллокация);
+      4. инкарнация Meta джоба -- та, что в реестре: переиспользованное
+         имя (#579) держит новый грант, сверяется фактическая инкарнация.
+    by_job с инкарнацией приносит запись С её состоянием -- решение о
+    неживой (отозвана, не подтверждена) выносит выдающий: кред не выдают.
+
+    root -- корень хранилища душ (шов проверок); jobs(name) -> Meta и
+    assigned(name) -> имя узла аллокации (швы проверок, по умолчанию --
+    Nomad)."""
+    from . import grants
+    node = _node_of(caller)
+    if node is None:
+        return {"error": "role credentials are issued to the node the job "
+                         "is assigned to: the anonymous legacy server.rpc "
+                         "gets no role facts (#603)"}
+    if not busnames.valid_private_reply(reply or "", caller):
+        return {"error": f"role credentials ride the caller's own private "
+                         f"reply subject, not {reply!r} (#603)"}
+    meta = (jobs or _job_meta)(name) or {}
+    rec = grants.by_job(project, name, soul_inc=meta.get("soul_inc"),
+                        root=root)
+    if rec is None or rec.get("revoked_at") or not rec.get("active"):
+        return {"error": f"no live binding for {name} in project {project}"}
+    where = (assigned or _assigned_node)(name)
+    if where != node:
+        return {"error": f"{name} is assigned to {where or 'no node'}, "
+                         f"not {node} (#603)"}
+    return rec
+
+
+def role_reply(rec, project, root=None):
+    """Ролевая надстройка ответа bootstrap'а (#590): индивидуальный кред
+    принципала и полезная нагрузка души. Прогон уже сыгран -- здесь
+    только выдача; пароль едет одним полем bus.password, не в реестр
+    и не в журнал."""
+    import base64
+    from . import grants
+    principal = rec.get("principal")
+    password = grants.password_of(principal, root=root)
+    if not password:
+        return {"error": f"{rec.get('job')}: the principal's password is "
+                         f"cut (transport revocation, #579)"}
+    got = grants.bundle(rec.get("soul_digest"), root=root) or {}
+    return {
+        "bus": creds.bus_config(config.get("MOP_SERVER_LAN"),
+                                config.get("MOP_NATS_PORT"), project,
+                                password, user=principal),
+        "soul": {"role": rec.get("role"), "soul_inc": rec.get("soul_inc"),
+                 "soul_digest": rec.get("soul_digest"),
+                 "manifest": got.get("manifest") or {},
+                 "prompt": base64.b64encode(got.get("prompt") or b"").decode(),
+                 "principal": principal,
+                 "owner": _owner_profile(rec.get("owner"))}}
+
+
 def needs_play(tasks, secrets):
     """Играть ли рамку: у проекта есть задачи или секреты (#128). Ни того ни
     другого -- ответ без прогона: большинству проектов хватает общего."""
@@ -533,6 +646,25 @@ def answer(project, req, _send=None):
             why = refusal(req, project)
             if why:
                 return {"error": why}
+            # Ролевой джоб -- выдают индивидуальный кред принципала, и
+            # ворота строже (#581/#603): анонимный легаси-путь ролевому
+            # имени -- отказ без фактов, узловому -- проверка назначения
+            # и приватного ответа, ДО прогона. Прогон тот же: секреты и
+            # рамка sandbox едут и роли. Легаси-имя (привязки нет) живёт
+            # прежним путём с проектным кредом (переход #603).
+            from . import grants
+            soul_root = _soul_root()
+            is_role = grants.binding_named(project, req.get("name") or "",
+                                           root=soul_root)
+            if is_role:
+                bound = role_gates(req.get("name") or "",
+                                   req.get("_caller") or "",
+                                   req.get("_reply"), project, root=soul_root,
+                                   jobs=_job_meta, assigned=_assigned_node)
+                if bound.get("error"):
+                    return bound
+            # `put` снят (#133): workspace кладут глаголы жизненного цикла
+            # папета у сервиса кластера, а в этот субъект пишут и узлы.
             # Сдавшийся ключ (#345) -- без прогона: ansible не переигрывается,
             # а стоп просится снова (прежний мог не дойти).
             prev = read_result(ROOT, req["name"]) or {}
@@ -549,6 +681,14 @@ def answer(project, req, _send=None):
             if rec.get("gave_up"):
                 ask_give_up(req["name"])
                 return {**out, "gave_up": True, "failures": rec["failures"]}
+            if is_role:
+                # Кред роли едет тем же ответом, что и легаси-кред папета:
+                # разговора два не нужно. Индивидуальный принципал вместо
+                # проектного -- ролевая надстройка (#590), отказ -- отказ.
+                role = role_reply(bound, project, root=soul_root)
+                if role.get("error"):
+                    return role
+                return {**out, **role}
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
             return with_creds(out, puppet_creds(project), project)

@@ -313,6 +313,16 @@ def by_job(project, job, soul_inc=None, root=None):
         return _select_job(_read(_root_dir(root)), project, job, soul_inc)
 
 
+def binding_named(project, job, root=None):
+    """Есть ли у имени ХОТЬ какая-то привязка (#590): pending, активная,
+    отозванная -- без различения. Ветвление bootstrap'а: ролевое имя
+    не должно молча уйти на легаси-путь с проектным кредом, даже когда
+    привязка ещё не активна или уже отозвана -- отказ, не подмена."""
+    reg = _read(_root_dir(root))
+    return any(rec.get("project") == project and rec.get("job") == job
+               for rec in reg.values())
+
+
 def admit(principal, root=None):
     """Годен ли принципал к НОВОМУ входу: активная связанная привязка.
 
@@ -338,6 +348,21 @@ def password_ok(principal, password, root=None):
     except OSError:
         return False
     return bool(stored) and hmac.compare_digest(stored, password or "")
+
+
+def password_of(principal, root=None):
+    """Пароль принципала для выдачи телу (#590), либо None.
+
+    Единственный читатель файла пароля НА ВЫДАЧУ: ответ bootstrap'а роли
+    собирает bootstrap.role_payload, и пароль едет одним полем bus.password
+    -- не в реестр, не в журнал. Срезанный (cut, #579) файл -- None: вход
+    и выдача отказаны, живое соединение держит свой ACL до переподключения."""
+    try:
+        with open(_pass_path(_root_dir(root), principal)) as f:
+            out = f.read().strip()
+    except OSError:
+        return None
+    return out or None
 
 
 def bundle(digest, root=None):
