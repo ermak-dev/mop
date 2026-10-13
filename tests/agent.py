@@ -2348,6 +2348,92 @@ def check_identity_before_delivery_574(c):
                 f"hook {hook_now!r}, "
                 f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}")
 
+        # T5b (review-5): текст stderr «not a git repository» -- НЕ документ
+        # отсутствия хуков. Тот же сценарий first-fails/second-succeeds, но
+        # обёртка отказывает ПЕРВОМУ rev-parse --absolute-git-dir с ЭТИМ
+        # stderr (rc 128): эвристика по тексту принимала отказ за «каталога
+        # нет», ложный A шёл в доставку, а откат со вторым, успешным lookup
+        # УДАЛЯЛ исходный собственный хук. Требования те же: доставка не
+        # начинается, исходный хук остаётся, аренда возвращается (до отказа
+        # ни одной записи не было).
+        own_hook = agent.owner_hook() + "# the project's own line\n"
+        state["clone"] = clone(own_hook=own_hook)
+        rearm()
+        agent.session_json = undelivered
+        hook_path = os.path.join(state["clone"], ".git", "hooks", "pre-commit")
+        mark = os.path.join(root, "gitdir-stderr-once")
+        wrap = os.path.join(root, "git-stderr-once")
+        with open(wrap, "w") as f:
+            f.write("#!/bin/sh\n"
+                    f'if [ "$3" = rev-parse ] && [ "$4" = --absolute-git-dir ] '
+                    f'&& [ ! -f {shlex.quote(mark)} ]; then\n'
+                    f": > {shlex.quote(mark)}\n"
+                    'echo "fatal: not a git repository (or any of the parent '
+                    'directories): .git" >&2\n'
+                    "exit 128\n"
+                    "fi\n"
+                    "exec git \"$@\"\n")
+        os.chmod(wrap, 0o755)
+
+        def stderr_once(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            return real.replace("git -C", f"{wrap} -C")
+        agent.identity_script = stderr_once
+        got = send(_caller="olga", force=True)
+        agent.identity_script = real_identity_script
+        hook_now = (open(hook_path).read()
+                    if os.path.exists(hook_path) else None)
+        c.check("T5b stderr text is not hook absence: no delivery, the hook survives",
+                not (not got.get("error")
+                     or "hooks directory lookup failed" not in got["error"]
+                     or hook_now != own_hook
+                     or os.path.exists(os.path.join(state["clone"], lease.FILE))),
+                f"reply {got!r}, hook {hook_now!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}")
+
+        # T6 (review-5): ворота снимка -- ПОСЛЕ всех обязательных чтений и
+        # ДО первой записи. Отказ stat'а первого хука (X) в старом порядке
+        # замечался воротами, стоявшими ДО snap_hooks: identity уже была
+        # перезаписана, собственный хук уже заменён свежим стражем, и
+        # Python видел неполный снимок лишь по exit 0 -- прежние байты
+        # терялись. Обёртка валит РОВНО ПЕРВЫЙ process-wide stat
+        # (метка-файл): это чтение режима pre-commit в snap_hooks.
+        prior_hook = agent.owner_hook() + "# the owner's line\n"
+        state["clone"] = clone(profiles["petr"], own_hook=prior_hook)
+        rearm()
+        sent[:] = []
+        agent.session_json = deliver_spy
+        hook_path = os.path.join(state["clone"], ".git", "hooks", "pre-commit")
+        mark = os.path.join(root, "stat-failed-once")
+        wrap = os.path.join(root, "stat-once-bin")
+        with open(wrap, "w") as f:
+            f.write("#!/bin/sh\n"
+                    f"if [ ! -f {shlex.quote(mark)} ]; then\n"
+                    f": > {shlex.quote(mark)}\n"
+                    "exit 1\n"
+                    "fi\n"
+                    'exec stat "$@"\n')
+        os.chmod(wrap, 0o755)
+
+        def stat_once(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            return real.replace("stat -c", f"{wrap} -c")
+        agent.identity_script = stat_once
+        got = send(_caller="olga")
+        agent.identity_script = real_identity_script
+        hook_now = (open(hook_path).read()
+                    if os.path.exists(hook_path) else None)
+        c.check("T6 a hook read failure stops the install before any mutation",
+                not (not got.get("error")
+                     or "hook snapshot read failed" not in got["error"]
+                     or sent
+                     or hook_now != prior_hook
+                     or ident(state["clone"]) != profiles["petr"]
+                     or os.path.exists(os.path.join(state["clone"], lease.FILE))),
+                f"reply {got!r}, delivered {sent!r}, hook {hook_now!r}, "
+                f"identity {ident(state['clone'])!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}")
+
 
 
 # ── факт state: исход хода едет мастеру (#224) ───────────────────────────

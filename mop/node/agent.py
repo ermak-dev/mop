@@ -758,25 +758,22 @@ def _hooks_var(clone):
     """Шелл: каталог хуков клона в $hooks. -> (присваивание, шлюз).
 
     Присваивание создаёт и временный файл $t с trap EXIT (review-3 п.4):
-    его же заполняют геттеры конфига и сверки. rev-parse различается по
-    ДОКУМЕНТИРОВАННОМУ признаку (review-4): rc 0 -- каталог; rc 128 с
-    «not a git repository» в stderr -- git-каталога нет, $hooks пуст
-    («/hooks»: управлять хуками нельзя, скрипт скажет строкой, а не
-    выйдет -- выход резал бы и установку identity, что стоит раньше).
-    Иное (молчаливый 128, прочие коды) -- каталог НЕИЗВЕСТЕН, и $hfail
-    включает шлюз: установка отказывает ДО записи и ДО доставки --
-    неизвестный каталог не «отсутствие хуков», ложный A в снимке затем
-    удалял исходный хук при откате."""
+    его же заполняют геттеры конфига и сверки. Определение каталога --
+    rev-parse, и его исход один: rc 0 с непустым ответом -- каталог; любое
+    иное -- НЕ «отсутствие хуков», а неизвестный каталог (review-5): текст
+    «not a git repository» в stderr не документ отсутствия (операционный
+    отказ даёт тот же текст), и даже действительно не-git каталог нельзя
+    безопасно подготавливать для repo-local identity. $hfail включает шлюз:
+    установка и откат отказывают ДО записи и ДО доставки -- ложный A в
+    снимке затем удалял исходный хук при откате."""
     q = shlex.quote
     assign = (
         't=$(mktemp "${TMPDIR:-/tmp}/mop574.XXXXXXXX") || exit 2; '
         "trap 'rm -f \"$t\"' EXIT; "
         f'hooks=$(git -C {q(clone)} rev-parse --absolute-git-dir 2>"$t"); '
         'hr=$?; hfail=; '
-        'if [ $hr -eq 0 ]; then hooks=$hooks/hooks; '
-        'elif [ $hr -eq 128 ] && grep -q "not a git repository" "$t"; then '
-        'hooks=/hooks; '
-        'else hfail=1; hooks=/hooks; fi; ')
+        'if [ $hr -eq 0 ] && [ -n "$hooks" ]; then hooks=$hooks/hooks; '
+        'else hfail=1; fi; ')
     gate = ('if [ -n "$hfail" ]; then '
             'echo "git hooks directory lookup failed: '
             'the prior state is unknown"; exit 1; fi; ')
@@ -1002,8 +999,9 @@ def identity_script(clone, path, mine, profile):
     q = shlex.quote
     guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
     git = f"git -C {q(clone)} config --local"
-    # Каталог хуков: неизвестный каталог (иной rc rev-parse, review-4) --
-    # отказ ДО записи и ДО доставки, не «отсутствие хуков».
+    # Каталог хуков: любое иное определение, кроме rc 0 с непустым ответом,
+    # -- неизвестный каталог (review-5), отказ ДО записи и ДО доставки, не
+    # «отсутствие хуков»: stderr-текст не документ отсутствия.
     hooks_assign, hooks_gate = _hooks_var(clone)
     # Чтение с различением исходов (review-3 п.1): отсутствие -- ТОЛЬКО
     # документированный код 1 геттера с пустым stderr; любой другой
@@ -1024,8 +1022,10 @@ def identity_script(clone, path, mine, profile):
     # Операционный отказ чтения (X) -- ДО любой записи: прежнее состояние
     # неизвестно, «восстанавливать пустоту» нельзя, установка не начинается.
     # Сюда же -- X снимка хуков (review-3 п.1): отказ stat/base64 -- не
-    # «пустые режим и тело», а нечитанный элемент; ворота стоят ПОСЛЕ
-    # snap_hooks (он только читает) и ДО первой записи (set_new).
+    # «пустые режим и тело», а нечитанный элемент. Ворота -- ПОСЛЕ всех
+    # обязательных чтений (read и snap_hooks ставят f_*/st_*; ворота ДО
+    # snap_hooks смотрели несуществующие переменные и пропускали X,
+    # review-5 п.2) и ДО первой записи (set_new).
     gate_x = ('if [ "$f_name" = X ] || [ "$f_email" = X ]; then '
               'echo "git config read failed: the prior identity is unknown"; '
               'exit 1; fi; '
@@ -1039,7 +1039,7 @@ def identity_script(clone, path, mine, profile):
     # чтения (stat/base64) -- X, не «O с пустотой» (review-3 п.1).
     snap_hooks = "".join(
         f'f_{x}="$hooks/{h}"; '
-        f'if [ "$hooks" != /hooks ] && [ -e "$f_{x}" ]; then '
+        f'if [ -e "$f_{x}" ]; then '
         f'if {_ours(chr(34) + "$f_" + x + chr(34))}; then '
         f'm_{x}=$(stat -c %a "$f_{x}"); r1_{x}=$?; '
         f'b_{x}=$(base64 -w0 "$f_{x}" 2>/dev/null); r2_{x}=$?; '
@@ -1097,11 +1097,9 @@ def identity_script(clone, path, mine, profile):
             f'&& rm -f "$f_{x}"; ' for x in v)
     skip = (f'if [ -n "$(git -C {q(clone)} config core.hooksPath)" ]; then '
             f'echo "owner guard skipped: core.hooksPath is set"; '
-            f'elif [ "$hooks" = /hooks ]; then '
-            f'echo "owner guard skipped: no git directory"; '
             f'else {manage}fi; ')
-    return (guard + hooks_assign + read + gate_x + hooks_gate
-            + snap_hooks + set_new + skip + "exit 0")
+    return (guard + hooks_assign + hooks_gate + read + snap_hooks + gate_x
+            + set_new + skip + "exit 0")
 
 
 async def _install_identity(conn, name, login, undo):
