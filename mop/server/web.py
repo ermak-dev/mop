@@ -25,6 +25,7 @@ import threading
 import time
 
 from ..common import bus, paths, puppets, state
+from ..common import domain
 from ..common.domain import WHO_WAIT, MasterAnswer
 from .. import usage
 from . import nodes as node_facts
@@ -222,6 +223,69 @@ def master_rows(answers, rows):
     return sorted(out, key=lambda m: (m["project"], m["user"], m["master"]))
 
 
+def unified_roster(rows, answers):
+    """Канонический ростер сессий пула (#587): управляемые папеты и
+    легаси-локальные сессии перехода одним списком. Чистая.
+
+    Единица -- сессия, как в секции мастеров (#421): два MCP-endpoint'а
+    одной сессии -- одна строка, одинаковые имена разговоров разных
+    сессий -- разные строки. Четыре имени не сливаются (#579): джоб
+    (name), инкарнация (incarnation, из JobMeta), разговор (conversation,
+    имя файла сессии) и адрес доставки (addresses).
+
+    Роль -- данные из доверенной меты джоба (#580, JobMeta), не
+    самозванная: самотчёт who роли не несёт, и строка роли его бы
+    «присвоила». Битая половина тройки -- громкий ValueError от JobMeta
+    (from_meta), строка не теряется молча.
+
+    Локальные легаси-сессии помечены unmanaged: переход (#579), к ним
+    нет Nomad-действий и они не входят в счётчики ёмкости/квот (counts
+    считает аллокации, не сессии). Раздача задач -- не по роли и не
+    «каждому мастеру всех папетов логина»: хозяин сессии назван (user),
+    а действия определяет зритель и цель, не outbound-права строки."""
+    out = []
+    for r in rows:
+        meta = domain.JobMeta.from_meta({"origin": r.origin or "",
+                                         "soul": r.soul,
+                                         "soul_digest": r.soul_digest,
+                                         "soul_inc": r.soul_inc})
+        shown = r.render()
+        out.append({"kind": "managed", "name": r.name, "node": shown["node"],
+                    "alloc_status": r.alloc_status, "state": shown["state"],
+                    "bucket": classify(r), "branch": shown["branch"],
+                    "llm": shown["llm"], "origin": r.origin,
+                    "disk_kb": r.disk_kb,
+                    "role": r.soul, "role_source": "meta",
+                    "soul_digest": r.soul_digest,
+                    "incarnation": r.soul_inc,
+                    "owner": shown["owner"], "user": shown["owner"],
+                    "conversation": None, "addresses": []})
+    # Локальные сессии -- те же who-ответы, что строят master_rows: единица
+    # и ключ склейки одни (#421), на выходе -- строки другого рода.
+    for m in master_rows(answers, rows):
+        out.append(_local_row(m))
+    return sorted(out, key=lambda s: (s["kind"], s["user"] or "",
+                                      s["name"] or s["conversation"] or ""))
+
+
+def _local_row(m):
+    """Строка master_rows -> неуправляемая строка ростера (#587). Локальная
+    легаси-сессия перехода: хозяин -- логин сессии, личности Nomad нет
+    (ключи managed-строк не едут с null-значениями -- их нет вовсе),
+    unmanaged -- без действий и без счётчиков ёмкости."""
+    return {"kind": "local", "unmanaged": True,
+            "name": None, "node": None, "alloc_status": None,
+            "state": None, "bucket": None,
+            "branch": None, "llm": None, "origin": None,
+            "disk_kb": None,
+            "role": None, "role_source": None,
+            "owner": m["user"], "user": m["user"],
+            "conversation": m["session"],
+            "project": m["project"], "cwd": m["cwd"],
+            "addresses": m["addresses"],
+            "identified": m["identified"]}
+
+
 def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
              masters=()):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
@@ -232,7 +296,14 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
     остаётся за `mop server doctor`; больной папет и так виден корзиной sick.
     creds -- строки реестра кредитов (#285), уже без секретов (cred_rows);
     masters -- живые мастера по опросу who (#305, master_rows); load --
-    места пула (#378) по nodes, строкам node_rows."""
+    места пула (#378) по nodes, строкам node_rows.
+
+    sessions -- канонический ростер сессий (#587): аддитивно, прежние ключи
+    -- проекция, страница читает что ей нужно, не ломаясь о новое."""
+    sessions = [r for r in unified_roster(rows, {})]
+    sessions += [_local_row(m) for m in masters]
+    sessions.sort(key=lambda s: (s["kind"], s["user"] or "",
+                                 s["name"] or s["conversation"] or ""))
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
@@ -243,6 +314,9 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
             # Период опроса мастеров (#325): страница пишет «раз в N с» по
             # нему, а не своей копией числа.
             "masters_every": MASTERS_EVERY,
+            # Канонический ростер сессий (#587): managed + local одним
+            # списком; masters остаётся проекцией для старой страницы.
+            "sessions": sessions,
             # Места пула и полоса аллокаций (#378): суммы и сегменты
             # считает сервер, страница только рисует.
             "load": load(rows, nodes)}

@@ -171,7 +171,10 @@ def check_snapshot(c):
     # per_user -- расход по людям (#245).
     # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors", "masters", "masters_every", "load"}
+            "journal", "errors", "masters", "masters_every", "load",
+            # Канонический ростер сессий (#587): аддитивный ключ, прежние --
+            # проекция.
+            "sessions"}
     # masters -- живые мастера по опросу who (#305); masters_every -- период
     # этого опроса (#325): страница его не выдумывает. load -- места пула и
     # полоса аллокаций (#378).
@@ -2704,11 +2707,132 @@ def readers_stub():
                    node_of=lambda name, running=True: "mate")
 
 
+def check_unified_roster_587(c):
+    """HYPOTHESIS (#587): снимок держит два несвязанных списка -- строки
+    ростера (папеты) и секцию «Мастера» (живые локальные сессии по опросу
+    who), -- единого ростера сессий нет: роль папета не читается из меты
+    как данные, локальные легаси-сессии не помечены как неуправляемые и
+    врят счётчиками, а единица сессии (#421) живёт только в секции
+    мастеров, не в общем списке.
+    SOLUTION: аддитивный ключ «sessions» снимка -- канонический ростер
+    сессий всего пула: управляемые папеты (роль -- тройка JobMeta,
+    доверенная, не самозванная) и легаси-локальные сессии перехода с
+    явной пометкой unmanaged: без них Nomad-действий и без счёта в
+    ёмкости/квотах. Четыре имени различны (джоб, инкарнация, разговор,
+    адрес доставки); два MCP-endpoint'а одной сессии -- одна строка;
+    одинаковые имена разговоров разных сессий не склеиваются. Прежние
+    ключи -- проекция, байт в байт.
+    RESULT: STATUS: RED — see #587"""
+    import dataclasses
+    from mop.common import domain
+
+    # ── управляемые строки: роль из JobMeta, не самозванная ──
+    def role_row(name, origin, soul=None, digest=None, inc=None, owner=None, **kw):
+        return dataclasses.replace(row(name, origin, **kw),
+                                   soul=soul, soul_digest=digest, soul_inc=inc,
+                                   **({"owner": owner} if owner is not None else {}))
+
+    HEX64A = "ab" * 32
+    HEX64B = "cd" * 32
+    INC1 = "123e4567-e89b-42d3-a456-426614174001"
+    INC2 = "123e4567-e89b-42d3-a456-426614174002"
+    managed = [
+        # Джоб с ролью: тройка едет целиком из меты (#580).
+        role_row("pu-mop-1", MOP, soul="builder", digest=HEX64A, inc=INC1,
+                 state=State("busy", branch="feat/x"), owner="ermak"),
+        # Легаси-джоб без роли -- управляем, роли нет.
+        role_row("pu-mop-2", MOP, state=FREE, owner="ermak"),
+    ]
+    answers = {"mop": [
+        # Одна живая сессия, два who-адреса: две страницы MCP, одна сессия.
+        {"master": "ermak.mate-7", "user": "ermak", "session": "mop-ab",
+         "sessionId": "0f1e-2d3c", "cwd": "/h/ermak/mop"},
+        {"master": "ermak.mate-7-all", "user": "ermak", "session": "mop-ab",
+         "sessionId": "0f1e-2d3c", "cwd": "/h/ermak/mop"},
+        # Разговор с тем же ИМЕНЕМ файла у другого логина: имя выводится из
+        # каталога и не уникально (#421), sessionId -- личности -- разные.
+        {"master": "ivan.box-2", "user": "ivan", "session": "mop-ab",
+         "sessionId": "5a4b-3c2d", "cwd": "/h/ivan/mop"},
+        # Разговор с другим sessionId у того же логина: отдельная сессия.
+        {"master": "ermak.box-9", "user": "ermak", "session": "mop-cd",
+         "sessionId": "9b8a-7c6d", "cwd": "/h/ermak/other"},
+    ]}
+    fn = getattr(web, "unified_roster", None)
+    if not c.check("#587 web.unified_roster exists", fn is not None):
+        return
+    got = fn(managed, answers)
+    kinds = sorted(r["kind"] for r in got)
+    # (1) Каждый папет -- управляемая строка; локальные -- неуправляемые.
+    c.expect("#587 managed and unmanaged rows in one roster",
+             kinds, ["local", "local", "local", "managed", "managed"])
+    # (2) Роль -- из меты джоба, не самозванная: у джоба с ролью -- имя,
+    #     у легаси -- None; источник помечен.
+    m1 = next(r for r in got if r.get("name") == "pu-mop-1")
+    c.expect("#587 the role comes from the job meta", m1["role"], "builder")
+    c.expect("#587 the role source is the trusted meta",
+             m1["role_source"], "meta")
+    m2 = next(r for r in got if r.get("name") == "pu-mop-2")
+    c.expect("#587 a legacy managed job carries no role", m2["role"], None)
+    c.expect("#587 a managed row is never unmanaged", m2["kind"], "managed")
+    # (3) Четыре имени различны: джоб, инкарнация, разговор, адрес.
+    c.expect("#587 the managed row carries job, incarnation and role digest",
+             (m1["name"], m1["incarnation"], m1["soul_digest"]),
+             ("pu-mop-1", INC1, HEX64A))
+    loc = next(r for r in got if r["kind"] == "local"
+               and r.get("user") == "ermak" and r.get("conversation") == "mop-ab")
+    c.check("#587 a local row has no Nomad identity",
+            not ("incarnation" in loc or "soul_digest" in loc), loc)
+    c.expect("#587 a local row carries its delivery addresses",
+             sorted(loc["addresses"]), ["ermak.mate-7", "ermak.mate-7-all"])
+    # (4) Два endpoint'а одной сессии -- одна строка; одинаковые имена
+    #     разговоров разных сессий -- разные строки (ключ сессии с личностью).
+    ab_rows = [r for r in got if r["kind"] == "local"
+               and r.get("conversation") == "mop-ab"]
+    c.expect("#587 identical conversation names of different sessions stay apart",
+             sorted(r["user"] for r in ab_rows), ["ermak", "ivan"])
+    c.check("#587 two MCP endpoints of one conversation are one row",
+            not any(len(r["addresses"]) > 1 and r["user"] == "ivan" for r in ab_rows),
+            ab_rows)
+    cd = next(r for r in got if r["kind"] == "local"
+              and r.get("user") == "ermak" and r.get("conversation") == "mop-cd")
+    c.expect("#587 a conversation of the same login is its own row",
+             cd["addresses"], ["ermak.box-9"])
+    # (5) Хозяин-человек отличим от имени сессии: у управляемой строки --
+    #     логин аренды, у локальной -- логин сессии.
+    c.expect("#587 a managed row names its human owner", m1["owner"], "ermak")
+    c.expect("#587 a local row names its human owner", loc["owner"], "ermak")
+    # (6) Снимок несёт канонический список аддитивно, прежние ключи --
+    #     проекция: старая страница не меняется.
+    snap = web.snapshot(rows=managed, nodes=[], usage=[], per_puppet=[],
+                        per_user=[], journal=[], errors=[], at=1.0,
+                        masters=web.master_rows(answers, managed))
+    c.check("#587 the snapshot carries the unified roster",
+            isinstance(snap.get("sessions"), list)
+            and len(snap["sessions"]) == len(got), snap.get("sessions"))
+    c.check("#587 the old snapshot keys stay a projection",
+            {"masters", "projects", "counts"} <= set(snap), sorted(snap))
+    # (7) Легаси-локальные строки не считаются в ёмкости и квоты: счётчик
+    #     папетов по-прежнему только про реальные аллокации Nomad.
+    c.expect("#587 pool counts stay about allocations only",
+             snap["counts"]["puppets"], 2)
+
+    # (8) Неразобранная роль/битая мета -- громкий отказ с причиной, не
+    #     молчаливая потеря строки: сохранённые сценарии #421/#423 ниже.
+    broken = [role_row("pu-mop-3", MOP, soul="builder", digest=HEX64B, inc=None)]
+    try:
+        fn(broken, {"mop": []})
+        c.fail("#587 a broken role triple must refuse, not vanish", None)
+    except ValueError as e:
+        c.check("#587 the refusal names the reason",
+                "soul" in str(e).lower(), str(e))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_masters_305, check_dist_297,
+               check_unified_roster_587,
                check_bucket_452,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_master_sessions_421, check_who_answer_421,
