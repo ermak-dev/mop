@@ -35,7 +35,7 @@ import yaml  # noqa: E402
 
 from mop import driver  # noqa: E402
 from mop.cli.driver import run  # noqa: E402
-from mop.common import soul  # noqa: E402
+from mop.common import bus, busnames, soul  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 NAME, OTHER = "pu-mop-3", "pu-mop-4"
@@ -88,6 +88,76 @@ def legacy_reply():
                     "password": PROJECT_SECRET}}
 
 
+NODE_USER = "node-wate-1"
+
+
+class FakeBus:
+    """Настоящий транспорт #603 с фальшивой NATS-стороной: запросы
+    раскладываются по субъектам, ответы -- из сценария. Кред узла --
+    настоящий файл (bus.config читает его сам), соединения не выходит:
+    arequest подменён. Субъекты проверяются настоящими busnames, так что
+    маршрут и собственный узел ловятся здесь, а не в стабе."""
+
+    def __init__(self, identity=None, bootstrap=None, project="mop",
+                 node=NODE_USER):
+        import tempfile
+        self.log, self.project, self.sink = [], project, None
+        self.replies = {"initial_identity": identity or {}, "bootstrap": bootstrap or {}}
+        fd, self.creds_file = tempfile.mkstemp(prefix="mop-node-creds-")
+        user = node if node.startswith("node-") else "node-" + node
+        with os.fdopen(fd, "w") as f:
+            json.dump({"url": "nats://10.0.0.1:4222", "user": user,
+                       "password": "node-pass"}, f)
+
+    def reply(self, verb, out):
+        self.replies[verb] = out
+
+    def raises(self, exc):
+        """Сценарий «глагол не ответил»: сам запрос падает, ответа нет."""
+        self.replies["initial_identity"] = exc
+
+    def asked(self, subj):
+        return [a for a in self.log if a[0] == subj]
+
+    def __enter__(self):
+        import _lib
+        async def fake_arequest(nc, subj, data, timeout):
+            body = json.loads(data.decode())
+            self.log.append((subj, body))
+            if self.sink is not None:
+                # Спрос в журнал драйвера в момент события, не постфактум:
+                # порядок файлов -> identity -> метка проверяется честно.
+                self.sink.append(
+                    ("identity", (body["name"], body["soul_inc"]))
+                    if body.get("verb") == "initial_identity" else
+                    ("bootstrap-ask", body.get("verb", "bootstrap")))
+            out = self.replies.get(
+                "initial_identity" if "initial_identity" in data.decode() else
+                "bootstrap")
+            if isinstance(out, Exception):
+                raise out
+            out = dict(out)
+            import types
+            return types.SimpleNamespace(data=json.dumps(out).encode())
+        self._cm = _lib.patched(bus, arequest=fake_arequest,
+                                connect=lambda file=None: object(),
+                                FILE=self.creds_file)
+        # Файл кредов узла -- туда, откуда его читает config(file): NODE_FILE
+        # модуля run подменяем путём подмены busnames.NODE_FILE через env не
+        # выйдет (expanduser на импорте), поэтому сам атрибут.
+        self._file_cm = _lib.patched(bus, NODE_FILE=self.creds_file)
+        self._file_cm.__enter__()
+        return self._cm.__enter__()
+
+    def __exit__(self, *exc):
+        try:
+            self._cm.__exit__(*exc)
+            self._file_cm.__exit__(*exc)
+        finally:
+            os.unlink(self.creds_file)
+        return False
+
+
 class Body:
     """Драйвер с телом-узлом (как host): запись -- в словарь и на диск
     временного дома (бандл читается soul.load, как его прочтёт обёртка),
@@ -132,38 +202,26 @@ class Body:
         return {"written": [p for p, _ in files]}
 
 
-def fake_identity(body):
-    """Шов initial_identity: что сделает живой агент (#584), по режиму
-    тела -- успех с распиской, отказ с причиной, транспортный отказ,
-    расписка без identity_ready, расписка с чужой тройкой."""
-    async def identity(name, inc, login, profile):
-        body.log.append(("identity", (name, inc, login, profile)))
-        if body.identity == "raise":
-            raise RuntimeError("the agent did not answer")
-        if body.identity == "error":
-            return {"error": "the clone belongs to another owner"}
-        if body.identity == "no-receipt":
-            return {"ok": True}
-        role_name, digest, _ = body.triple
-        if body.identity == "wrong-triple":
-            role_name = "builder"
-        return {"identity_ready": True, "role": role_name,
-                "soul_inc": inc, "soul_digest": digest}
-    return identity
-
-
 def launch(body, reply, env, name=NAME):
     """main() с подменённым миром. -> (код|SystemExit-текст, stdout, лог).
     Лог -- push'и, шеллы в теле и запуск врапера в порядке исполнения."""
     body.triple = (env.get("NOMAD_META_soul"), env.get("NOMAD_META_soul_digest"),
                    env.get("NOMAD_META_soul_inc"))
-    async def role_ask(project, name, address):
-        body.log.append(("bootstrap-ask", ("role", project, name, address)))
-        return reply
-
-    def legacy_ask(*a, **k):
-        body.log.append(("bootstrap-ask", ("legacy",)))
-        return reply
+    role_name, digest, inc = body.triple
+    # Режим identity у Body -- сценарий ответа агента: гуд-расписка по умолчанию,
+    # отказ -- свой ответ глагола (или его отсутствие).
+    receipt = {"identity_ready": True, "role": role_name,
+               "soul_inc": inc, "soul_digest": digest}
+    if body.identity == "error":
+        receipt = {"error": "the clone belongs to another owner"}
+    elif body.identity == "no-receipt":
+        receipt = {"ok": True}
+    elif body.identity == "wrong-triple":
+        receipt = {**receipt, "role": "builder"}
+    transport = FakeBus(identity=receipt, bootstrap=reply)
+    transport.sink = body.log
+    if body.identity == "raise":
+        transport.raises(bus.BusError("the agent did not answer"))
     class Proc:
         def __init__(self, argv, *a, **kw):
             body.log.append(("launch", argv))
@@ -189,17 +247,14 @@ def launch(body, reply, env, name=NAME):
     try:
         with patched_env(**{**base, **env}), \
                 patched(driver, current=lambda: body), \
-                patched(run, role_bootstrap_ask=role_ask,
-                        initial_identity=fake_identity(body)), \
-                patched(run.bus, connect=lambda *a, **k: None,
-                        ask_server=legacy_ask), \
+                transport, \
                 patched(run.subprocess, run=sh, Popen=Proc):
             out, err, code = run_command(run.main, [name])
     finally:
         for s, h in saved.items():
             signal.signal(s, h)
     return (str(code) if isinstance(code, str) else code,
-            out + err, body.log)
+            out + err, body.log, transport)
 
 
 def brief(log):
@@ -229,19 +284,22 @@ def main():
 
     # Легаси (контроль): джоб без тройки -- прежний путь байт в байт.
     body = Body()
-    code, out, log = launch(body, legacy_reply(), {})
+    code, out, log, transport = launch(body, legacy_reply(), {})
     c.expect("#590 legacy: a job without a role launches", code, 0)
     c.expect("#590 legacy: the project credential lands where it always did",
              creds_in(body, project_path), legacy_reply()["bus"])
     c.check("#590 legacy: no role directory appears",
             not any("/souls/" in p for p in body.files), sorted(body.files))
     c.check("#590 legacy: the password is not printed", PROJECT_SECRET not in out, out)
-    c.expect("#590 legacy: the bootstrap ask rides the anonymous server.rpc",
-             [a for k, a in log if k == "bootstrap-ask"], [("legacy",)])
+    c.check("#590 legacy: the bootstrap ask rides the anonymous server.rpc",
+            bool(transport.asked(busnames.server("mop")))
+            and not transport.asked(busnames.server(
+                "mop", caller=busnames.node_user(NODE_USER[5:]))),
+            transport.log)
 
     # Легаси-джоб, которому сервер прислал роль, -- рассогласование: отказ.
     body = Body()
-    code, out, log = launch(body, {**legacy_reply(), "soul": payload(
+    code, out, log, transport = launch(body, {**legacy_reply(), "soul": payload(
         "puppet", digest, INC, GRANT, manifest, prompt)}, {})
     c.check("#590 a legacy job refuses a role payload", refused(code), code)
     c.check("#590 a legacy job with a role payload never launches", not launched(log), brief(log))
@@ -253,7 +311,7 @@ def main():
     # Ролевой джоб, ответ легаси (только проектный кред): отказ до модели,
     # проектный кред в тело не едет.
     body = Body()
-    code, out, log = launch(body, legacy_reply(), env)
+    code, out, log, transport = launch(body, legacy_reply(), env)
     c.check("#590 a role job refuses a legacy-only reply", refused(code), code)
     c.check("#590 a role job without its payload never launches", not launched(log), brief(log))
     c.check("#590 a role job never receives the project credential",
@@ -264,7 +322,7 @@ def main():
     # Ролевой джоб, ролевой ответ, но кред -- проектный: легаси-кред в
     # ролевое тело не едет никак.
     body = Body()
-    code, out, log = launch(body, {**good, "bus": legacy_reply()["bus"]}, env)
+    code, out, log, transport = launch(body, {**good, "bus": legacy_reply()["bus"]}, env)
     c.check("#590 a role job refuses the project credential beside its payload",
             refused(code) and "credential is not" in code and not launched(log)
             and project_path not in body.files, (code, brief(log)))
@@ -272,7 +330,7 @@ def main():
             PROJECT_SECRET not in str(code) + out, (code, out))
     # Второй кред внутри роли -- дубль, не «запасной»: отказ.
     body = Body()
-    code, out, log = launch(body, {**good, "soul": {**good["soul"], "bus": creds(GRANT, SECRET)}},
+    code, out, log, transport = launch(body, {**good, "soul": {**good["soul"], "bus": creds(GRANT, SECRET)}},
                             env)
     c.check("#590 a nested second credential in the role payload refuses",
             refused(code) and "second credential" in code and not launched(log),
@@ -306,7 +364,7 @@ def main():
             ("a job digest that is not the bundle's",
              good, meta_env("puppet", bdigest, INC), "soul_digest")):
         body = Body()
-        code, out, log = launch(body, bad, menv)
+        code, out, log, transport = launch(body, bad, menv)
         c.check(f"#590 refused before the model: {what}",
                 refused(code) and why in code and not launched(log),
                 (code, brief(log)))
@@ -318,16 +376,32 @@ def main():
 
     # Половина тройки в Meta -- битый джоб: отказ до тела.
     body = Body()
-    code, out, log = launch(body, good, {"NOMAD_META_soul": "puppet"})
+    code, out, log, transport = launch(body, good, {"NOMAD_META_soul": "puppet"})
     c.check("#590 half a role triple in Meta refuses before the body",
             refused(code) and not log, (code, brief(log)))
 
     # Удачная доставка: бандл и кред -- в каталоге инкарнации, метка
     # готовности последней, проектного креда нет, модель -- после всего.
     body = Body()
-    code, out, log = launch(body, good, env)
+    code, out, log, transport = launch(body, good, env)
     d = driver.soul_dir(NAME, INC) if hasattr(driver, "soul_dir") else None
     c.expect("#590 a valid role payload launches", code, 0)
+    subj = busnames.startup_subject("mop", NODE_USER[5:])
+    asks = transport.asked(subj)
+    c.check("#590 the identity ask rides the own-node startup channel",
+            len(asks) == 1, transport.log)
+    if asks:
+        c.expect("#590 the startup body carries only verb, name, soul_inc",
+                 asks[0][1], {"verb": "initial_identity", "name": NAME,
+                              "soul_inc": INC})
+    node_subj = busnames.server("mop", caller=busnames.node_user(NODE_USER[5:]))
+    boots = transport.asked(node_subj)
+    c.check("#590 the role bootstrap ask rides the node-qualified server.rpc",
+            len(boots) == 1, transport.log)
+    if boots:
+        c.expect("#590 the bootstrap ask carries the body address",
+                 {k: boots[0][1].get(k) for k in ("verb", "name", "address")},
+                 {"verb": "bootstrap", "name": NAME, "address": "10.0.0.5"})
     c.check("#590 the role directory is per puppet and incarnation",
             d is not None and d.endswith(f"/souls/{NAME}/{INC}"), d)
     if d:
@@ -365,10 +439,8 @@ def main():
         c.check("#590 the owner identity settles after the files, before the mark",
                 ident and last_file and max(last_file) < ident[0]
                 and at_ready and ident[0] < at_ready[0], brief(log))
-        c.expect("#590 the identity verb hears the job and the owner",
-                 log[ident[0]][1] if ident else None,
-                 (NAME, INC, OWNER["login"],
-                  {"name": OWNER["name"], "email": OWNER["email"]}))
+        c.expect("#590 the identity verb hears the job and the incarnation",
+                 log[ident[0]][1] if ident else None, (NAME, INC))
         # Метка прошлого старта той же инкарнации снята ДО записи новых
         # файлов: оборванная запись не оставит «готово» над половиной.
         rm = [i for i, (k, a) in enumerate(log)
@@ -385,7 +457,7 @@ def main():
     # Identity хозяина: отказ глагола -- отказ старта, без метки.
     for mode, why in (("error", "another owner"), ("raise", "did not answer")):
         body = Body(identity=mode)
-        code, out, log = launch(body, good, env)
+        code, out, log, transport = launch(body, good, env)
         c.check(f"#590 a refused identity ({mode}) stops before the model",
                 refused(code) and why in code and not launched(log), (code, brief(log)))
         c.check(f"#590 a refused identity ({mode}) leaves no ready mark",
@@ -398,7 +470,7 @@ def main():
     for mode, why in (("no-receipt", "identity_ready"),
                       ("wrong-triple", "is not the job's")):
         body = Body(identity=mode)
-        code, out, log = launch(body, good, env)
+        code, out, log, transport = launch(body, good, env)
         c.check(f"#590 a bad identity receipt ({mode}) stops before the model",
                 refused(code) and why in code and not launched(log), (code, brief(log)))
         c.check(f"#590 a bad identity receipt ({mode}) leaves no ready mark",
@@ -409,31 +481,11 @@ def main():
             ("no owner", {k: v for k, v in good["soul"].items() if k != "owner"}),
             ("no owner email", {**good["soul"], "owner": {"login": "ermak", "name": "A"}})):
         body = Body()
-        code, out, log = launch(body, reply_for(bad_soul, creds(GRANT, SECRET)), env)
+        code, out, log, transport = launch(body, reply_for(bad_soul, creds(GRANT, SECRET)), env)
         c.check(f"#590 a payload with {what} refuses",
                 refused(code) and "owner" in code and not launched(log)
                 and not any(p.endswith("ready.json") for p in body.files),
                 (code, brief(log)))
-
-    # Швы до появления транспорта (#603/#584): громкий отказ без тикета в тексте.
-    for name in ("role_bootstrap_ask", "initial_identity"):
-        seam = getattr(run, name, None)
-        if seam is None:
-            c.fail(f"#590 the seam {name} must exist", "no attribute")
-            continue
-        calls = {"role_bootstrap_ask": (run.role_bootstrap_ask,
-                                        ("mop", NAME, "10.0.0.5")),
-                 "initial_identity": (run.initial_identity,
-                                      (NAME, INC, OWNER["login"],
-                                       {"name": OWNER["name"],
-                                        "email": OWNER["email"]}))}
-        fn, args = calls[name]
-        try:
-            asyncio.run(fn(*args))
-            c.fail(f"#590 the unwired {name} must refuse", "no refusal")
-        except RuntimeError as e:
-            c.check(f"#590 the unwired {name} refuses with a ticket-free reason",
-                    bool(str(e)) and "#" not in str(e), str(e))
 
     # Маршрут спроса bootstrap: роль -- именованный канал узла, легаси --
     # прежний анонимный server.rpc; дверь в обоих исходах закрывается.
@@ -447,26 +499,24 @@ def main():
         async def admit(self, name, on):
             self.doors.append(on)
             return {}
-    d2, asked = D2(), []
+    d2 = D2()
     ok_reply = {"ok": True, "played": False}
-
-    async def role_ask(project, name, address):
-        asked.append(("role", project, name, address))
-        return dict(ok_reply)
-
-    def legacy_ask(*a, **k):
-        asked.append("legacy")
-        return dict(ok_reply)
-    with patched(run.bus, connect=lambda *a, **k: None, ask_server=legacy_ask), \
-            patched(run, role_bootstrap_ask=role_ask):
+    transport = FakeBus(identity={}, bootstrap=dict(ok_reply))
+    with transport:
         run.bootstrap_sandbox(d2, NAME, "mop", node_qualified=True)
-        c.expect("#590 a role ask goes to the node-qualified channel by name",
-                 asked, [("role", "mop", NAME, "10.0.0.9")])
+        subj = busnames.server("mop", caller=busnames.node_user(NODE_USER[5:]))
+        c.check("#590 a role ask goes to the node-qualified server.rpc",
+                [(a["verb"], a["name"], a["address"])
+                 for _, a in transport.asked(subj)]
+                == [("bootstrap", NAME, "10.0.0.9")], transport.log)
         c.expect("#590 the door still closes for a role ask", d2.doors, [True, False])
-        asked.clear()
+        transport.log.clear()
         run.bootstrap_sandbox(d2, NAME, "mop")
-        c.expect("#590 a legacy job asks the anonymous server.rpc as before",
-                 asked, ["legacy"])
+        c.check("#590 a legacy job asks the anonymous server.rpc as before",
+                bool(transport.asked(busnames.server("mop")))
+                and not transport.asked(busnames.server(
+                    "mop", caller=busnames.node_user(NODE_USER[5:]))),
+                transport.log)
         c.expect("#590 the door still closes for the legacy ask", d2.doors[-2:], [True, False])
 
     # Вторая роль того же проекта на том же доме (host): свои файлы, без
@@ -475,7 +525,7 @@ def main():
     launch(both, good, env)
     second = reply_for(payload("builder", bdigest, INC2, GRANT2, bmanifest, bprompt),
                        creds(GRANT2, SECRET2))
-    code, out, log = launch(both, second, meta_env("builder", bdigest, INC2), name=OTHER)
+    code, out, log, transport = launch(both, second, meta_env("builder", bdigest, INC2), name=OTHER)
     if hasattr(driver, "soul_dir"):
         c.expect("#590 the second role launches", code, 0)
         c.expect("#590 the first role keeps its credential",
@@ -488,7 +538,7 @@ def main():
     # Отказ записи на любом файле роли -- модель не стартует, метки нет.
     for f in ("bus.json", "soul.yaml", manifest["prompt"], "ready.json"):
         body = Body(fail=f"/{f}")
-        code, out, log = launch(body, good, env)
+        code, out, log, transport = launch(body, good, env)
         c.check(f"#590 a failed push of {f} stops before the model",
                 refused(code) and not launched(log), (code, brief(log)))
         c.check(f"#590 a failed push of {f} leaves no ready mark",
@@ -500,7 +550,7 @@ def main():
     body = Body(fail="/ready.json")
     launch(body, good, env)
     body.fail = None
-    code, out, log = launch(body, good, env)
+    code, out, log, transport = launch(body, good, env)
     c.expect("#590 a retry after a partial write launches", code, 0)
     if hasattr(driver, "soul_dir"):
         c.check("#590 the retry writes the ready mark",
