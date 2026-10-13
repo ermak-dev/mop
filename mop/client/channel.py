@@ -184,10 +184,16 @@ def undelivered(kind, to, error):
 
 # ─── вердикт -> текст ────────────────────────────────────────────────────
 def failure(v):
-    """Строка отказа, либо None, если доставлено."""
+    """Строка отказа, либо None, если доставлено.
+
+    Неопределённая доставка (timeout, #574 review-3 п.5) -- своей строкой:
+    «неизвестно» не «отказано», повтор высланного возможен, чужая аренда
+    не освобождена."""
     if v.get("dead"):
         return f"{v['to']}: inbox not listening — session is dead"
     if v.get("error") is not None:
+        if v.get("timeout"):
+            return f"{v['to']}: DELIVERY UNKNOWN — {v['error']}"
         return f"{v['to']}: NOT DELIVERED — {v['error']}"
     return None
 

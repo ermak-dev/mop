@@ -2103,7 +2103,7 @@ CAPS_OK = {
     "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
     # протоколы, сигналы, литералы чужих программ
     "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
-    "PLAY", "RECAP",
+    "PLAY", "RECAP", "EXIT",
     # идентификаторы в тексте
     "SECTIONS",
     # плейсхолдеры в строках usage

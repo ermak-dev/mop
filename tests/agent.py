@@ -16,6 +16,7 @@ SOLUTION: одна таблица {глагол: Verb(fn, scope, named)}, пре
 STATUS: FIXED — see #150
 """
 import dataclasses
+import glob
 import os
 import sys
 
@@ -2158,6 +2159,125 @@ def check_identity_before_delivery_574(c):
                      or "private_snapshot_574" in got["error"]
                      or "Old" in got["error"]),
                 f"reply {got!r}, delivered {sent!r}")
+
+        # ── третья матрица review574 (218dd00): границы I/O и квитанций ──
+
+        # T1. Документ отсутствия ключа -- код 1 getter'а; любой другой
+        # код -- unknown/ошибка ДО записи. rc128 с пустым stderr -- фатал,
+        # а не «ключа нет»: пустой stderr не доказательство отсутствия.
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        sent[:] = []
+        agent.session_json = deliver_spy
+        # «Фатальный» git: обёртка, умирающая 128 МОЛЧА на чтении имени.
+        # Вызов чтения -- «git -C <клон> config --local user.name»:
+        # $3=config, $5=user.name, аргументов ровно пять (setter несёт
+        # шестой -- значение). Все git-вызовы идут через обёртку: читающее
+        # имя умирает, остальное -- честный git.
+        wrap = os.path.join(root, "git-fatal-128")
+        with open(wrap, "w") as f:
+            f.write("#!/bin/sh\n"
+                    '[ "$3" = config ] && [ "$5" = user.name ] '
+                    "&& [ $# -eq 5 ] && exit 128\n"
+                    "exec git \"$@\"\n")
+        os.chmod(wrap, 0o755)
+
+        def fatal_read(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            return real.replace("git -C", f"{wrap} -C")
+        agent.identity_script = fatal_read
+        got = send(_caller="olga")
+        agent.identity_script = real_identity_script
+        c.check("T1 a read error without stderr is not absence",
+                not (not got.get("error")
+                     or "read failed" not in got["error"]
+                     or sent
+                     or ident(state["clone"]) != profiles["petr"]),
+                f"reply {got!r}, delivered {sent!r}, "
+                f"identity {ident(state['clone'])}")
+
+        # T2. Код 0 без полного снимка: установка реально исполнилась
+        # (identity уже New), кадры потеряны на границе. Это не
+        # «безопасный отказ»: прежняя пара неизвестна, вслепую аренду
+        # прежнему владельцу не отдают -- контекст остаётся за пославшим,
+        # причина называет снимок.
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        sent[:] = []
+        agent.session_json = deliver_spy
+
+        async def frame_eater(name, script, timeout=20):
+            out, code = await bash(name, script, timeout)
+            if code == 0 and "mop574-name" in out:
+                # Настоящая установка прошла; из ответа кадры исчезли --
+                # ровно потеря кадров на границе транспорта.
+                out = "\n".join(l for l in out.splitlines()
+                                 if not l.startswith("mop574-"))
+            return out, code
+        agent.bsh = frame_eater
+        got = send(_caller="olga")
+        agent.bsh = bash
+        c.check("T2 code0 without a full snapshot keeps the context with the sender",
+                not (not got.get("error")
+                     or "snapshot" not in got["error"]
+                     or not os.path.exists(os.path.join(state["clone"], lease.FILE))
+                     or ident(state["clone"]) != profiles["olga"]
+                     or sent),
+                f"reply {got!r}, delivered {sent!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}, "
+                f"identity {ident(state['clone'])}")
+
+        # T3. Откат доставки подтверждает свои изменения и несёт причину:
+        # созданный при установке guard (A-хук до установки не было)
+        # неудаляем -- откат обязан отказаться, а не «exit 0»: lease не
+        # возвращается вслепую, причина едет мастеру, хуки на месте
+        # (разбирать оператору, не молча бросать).
+        state["clone"] = clone()
+        rearm()
+        agent.session_json = undelivered
+
+        # Надёжнее файловой подменой: каталог hooks -- только чтение.
+        # restore-скрипт узнаём по отсутствию кадров снимка: установка
+        # всегда печатает mop574-метки, откат их не печатает никогда
+        # (оба начинаются охраной файла аренды и оба зовут rev-parse).
+        async def ro_hooks(name, script, timeout=20):
+            if script.startswith("[ \"$(cat") and "printf 'mop574" not in script:
+                d = os.path.join(state["clone"], ".git", "hooks")
+                os.chmod(d, 0o500)
+                try:
+                    return await bash(name, script, timeout)
+                finally:
+                    os.chmod(d, 0o755)
+            return await bash(name, script, timeout)
+        agent.bsh = ro_hooks
+        got = send(_caller="olga", force=True)
+        agent.bsh = bash
+        c.check("T3 a failed guard removal fails the rollback loudly",
+                not (not got.get("error")
+                     or "not restored" not in (got.get("error") or "")
+                     or not os.path.exists(os.path.join(state["clone"], lease.FILE))
+                     or hooks(state["clone"]) != ["pre-commit", "pre-merge-commit"]),
+                f"reply {got!r}, lease "
+                f"{os.path.exists(os.path.join(state['clone'], lease.FILE))}, "
+                f"hooks {hooks(state['clone'])}")
+
+        # T4. Временный файл stderr не остаётся: ни одного mop574-остатка
+        # в /tmp после установки -- приватный уникальный файл убирают на
+        # каждом выходе, не оставляют предсказуемый след в общем /tmp.
+        # Свод ловит обе формы: старый mop574-err.<pid> и новый
+        # mop574.<случайные> из mktemp. Сначала зачистить следы старого
+        # кода, затем свежая установка: её остатки и только её.
+        for stale in glob.glob("/tmp/mop574*"):
+            os.remove(stale)
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        agent.session_json = deliver_spy
+        got = send(_caller="olga")
+        leftovers = [f for f in glob.glob("/tmp/mop574*")]
+        c.check("T4 the install leaves no temp file behind",
+                not leftovers,
+                f"reply {got!r}, leftovers {leftovers!r}")
+
 
 
 # ── факт state: исход хода едет мастеру (#224) ───────────────────────────

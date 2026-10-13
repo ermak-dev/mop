@@ -70,7 +70,8 @@ def facts(owner=None, dirty=0, session="idle 1 1", present=True):
 
 def execute(action, target, params, who=("anton", "admin"), state=None,
             clone=None, clone_error=None, state_error=None, spec_error=None,
-            origin=ORIGIN, alloc="running", allocate=True, in_roster=True):
+            origin=ORIGIN, alloc="running", allocate=True, in_roster=True,
+            send_answer=None):
     """Вердикт собранного исполнителя #566, подменена только шина.
 
     call_cluster -- глаголы сервиса кластера, и она держит субъекты
@@ -166,7 +167,10 @@ def execute(action, target, params, who=("anton", "admin"), state=None,
         if verb == "type":
             return {"screen": ""}
         if verb == "send":
-            return {"msg_id": "message-1"}
+            # send_answer (#574): подмена ответа агента -- в том числе
+            # транспортно-неопределённого {"error", "timeout"} (тело
+            # молчит, сообщение могло доехать).
+            return send_answer if send_answer is not None else {"msg_id": "message-1"}
         if verb == "wipe":
             return {"reset": True, "target": "target"}
         raise AssertionError(verb)
@@ -430,6 +434,25 @@ def main():
     c.check("#566 a clean send still delivers",
             got.get("status") == "succeeded"
             and [v for _, v, _ in node] == ["state", "send"], (got, node))
+    # #574 ревью 3 п.5: тело молчит -- узел ответил {"error", "timeout"}:
+    # доставка неопределённа, это НЕ подтверждённый отказ. Веб-вердикт --
+    # unknown (не refused), проект аудита на месте (экзотический кейс
+    # держит свой факт, а не теряется в отказе).
+    got, cluster, node = execute(
+        "send", target, {"message": "hi"}, state=facts(owner=mine),
+        send_answer={"error": "pu-untrusted-1: the body did not answer in 20s",
+                     "timeout": True})
+    c.check("#574 an indeterminate delivery is unknown, not refused",
+            got.get("status") == "unknown"
+            and got.get("error") == "pu-untrusted-1: the body did not answer in 20s",
+            got)
+    # Подтверждённый отказ (без timeout) остаётся отказом.
+    got, cluster, node = execute(
+        "send", target, {"message": "hi"}, state=facts(owner=mine),
+        send_answer={"error": "held by another master"})
+    c.check("#574 a confirmed delivery refusal stays refused",
+            got.get("status") == "refused"
+            and got.get("error") == "held by another master", got)
     return c.report("web_safety")
 
 

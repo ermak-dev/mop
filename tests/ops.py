@@ -358,6 +358,16 @@ def main():
     fake = Fake({"send": {"error": "held by ermak"}})
     v = ops.send_to_puppet(fake.node, "node-1", "pu-x-1", "hello")
     c.check("send refusal lands in the verdict", v.get("error") == "held by ermak", v)
+    # #574 ревью 3 п.5: тело молчит -- {"error", "timeout"}: сообщение могло
+    # доехать. Маркер неопределённости едет вердиктом до фронтенда тем же
+    # ходом, что idle_error: потеряй его -- и веб назовёт отказом доставку,
+    # которая неизвестна какова.
+    fake = Fake({"send": {"error": "pu-x-1: the body did not answer in 20s",
+                          "timeout": True}})
+    v = ops.send_to_puppet(fake.node, "node-1", "pu-x-1", "hello")
+    c.check("an indeterminate delivery keeps its marker",
+            v.get("error") == "pu-x-1: the body did not answer in 20s"
+            and v.get("timeout") is True, v)
     c.check("wait is clamped at the channel ceiling",
             ops._clamp_wait(10_000) == 600 and ops._clamp_wait(-5) == 0)
 

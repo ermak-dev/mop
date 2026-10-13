@@ -823,6 +823,10 @@ def _hook_lines(out):
                 got[h] = ("A", None, None)
             elif state == "F":
                 got[h] = ("F", None, None)
+            elif state == "X":
+                # Нечитанный элемент (review-3 п.1): отказ stat/base64 --
+                # не пустота, и восстановление его не примет.
+                got[h] = ("X", None, None)
             elif state == "O":
                 mode, _, b64 = tail.partition("\t")
                 try:
@@ -840,12 +844,14 @@ def _snapshot(out):
     Секция None -- не читана (меток нет) или битая: восстановление обязано
     отказаться, а не «восстановить пустоту». identity читана, когда есть
     оба ключа и ни один не 'X'; hooks -- когда есть каждый страж и ни один
-    не None."""
+    не None и не 'X' (X -- нечитанный элемент, review-3 п.1)."""
     ident = _snap_lines(out)
     ident = (ident if set(ident) == {"name", "email"}
              and all(v[0] != "X" for v in ident.values()) else None)
     hooks = _hook_lines(out)
-    hooks = hooks if set(hooks) == set(GUARDED_HOOKS) and None not in hooks.values() else None
+    hooks = (hooks if set(hooks) == set(GUARDED_HOOKS)
+             and all(v is not None and v[0] != "X" for v in hooks.values())
+             else None)
     return {"identity": ident, "hooks": hooks}
 
 
@@ -880,7 +886,13 @@ def _restore_script(clone, path, mine, snap):
     (чужой и тогда, и теперь). Секция не читана (identity или hooks) --
     восстановление невозможно: вернуть «пустоту» вместо прежней пары или
     молча оставить свои хуки хуже, чем отказаться с причиной (review-2,
-    п.3)."""
+    п.3).
+
+    Успех -- только подтверждённый (review-3 п.3): снятие созданного нами
+    хука обязано пройти (не «тихо не сработало»), и в конце скрипт сверяет
+    результат со снимком -- ровно как компенсация установки. Любой отказ --
+    exit 1 с причиной: причина едет мастеру, аренда остаётся у пославшего,
+    «восстановлено» не говорится, пока не восстановлено."""
     if snap["identity"] is None or snap["hooks"] is None:
         return None
     q = shlex.quote
@@ -904,9 +916,39 @@ def _restore_script(clone, path, mine, snap):
                          f'printf %s {q(b64)} | base64 -d > {f}.mop && '
                          f'chmod {mode} {f}.mop && mv -f {f}.mop {f} || exit 1; fi; ')
         elif state == "A":
-            parts.append(f'[ -f {f} ] && {_ours(chr(34) + f + chr(34))} '
-                         f'&& rm -f {f}; ')
-    parts.append("exit 0")
+            # Снять именно наш (метка): чужой не трогаем. Отказ снятия --
+            # отказ отката (review-3 п.3), не «exit 0 поверх живого хука».
+            parts.append(f'if [ -f {f} ]; then if ! {_ours(chr(34) + f + chr(34))}; '
+                         f'then echo "hook {h} is not ours anymore, kept"; '
+                         f'elif ! rm -f {f}; then '
+                         f'echo "hook {h} removal failed"; exit 1; fi; fi; ')
+    # Сверка с снимком (review-3 п.3): пара -- как в снимке (отсутствие --
+    # код 1 пустым stderr), созданное -- снято, воссозданное -- теми байтами
+    # и режимом. Недостоверное чтение -- тоже отказ.
+    parts.append(
+        'c=ok; t=$(mktemp "${TMPDIR:-/tmp}/mop574.XXXXXXXX") || exit 1; '
+        'trap \'rm -f "$t"\' EXIT; ')
+    for key in ("name", "email"):
+        flag, value = snap["identity"][key]
+        want = q(value) if flag == "P" else None
+        parts.append(
+            f'e=$({git} user.{key} 2>"$t"); r=$?; '
+            + (f'if [ $r -ne 0 ] || [ "$e" != {want} ]; then c=bad; fi; '
+               if flag == "P" else
+               f'if [ $r -ne 1 ] || [ -s "$t" ] || [ -n "$e" ]; then c=bad; fi; '))
+    for h in GUARDED_HOOKS:
+        v = h.replace("-", "_")
+        f = f"$hooks/{h}"
+        state, mode, body = snap["hooks"][h]
+        if state == "O":
+            b64 = base64.b64encode(body.encode()).decode()
+            parts.append(f'[ -f {f} ] || c=bad; '
+                         f'[ "$(stat -c %a {f})" = {q(mode)} ] || c=bad; '
+                         f'[ "$(base64 -w0 {f})" = {q(b64)} ] || c=bad; ')
+        elif state == "A":
+            parts.append(f'[ -f {f} ] && c=bad; ')
+    parts.append('[ "$c" = ok ] || { echo "the prior state is not confirmed '
+                 'restored"; exit 1; }; exit 0')
     return "".join(parts)
 
 
@@ -939,41 +981,59 @@ def identity_script(clone, path, mine, profile):
     q = shlex.quote
     guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
     git = f"git -C {q(clone)} config --local"
-    # Чтение с различением исходов: пустой вывод и rc!=0 -- ключа нет (A);
-    # непустой stderr при rc!=0 -- операционный отказ (X, установка
-    # откажет). Значение сразу в base64-переменную: назад пишем её же.
-    # Файл stderr -- с PID шелла: параллельные установки разных папетов
-    # одного узла не пишут в один файл.
-    err = "/tmp/mop574-err.$$"
-    read = "".join(
-        f'e_{k}=$({git} user.{k} 2>{err}); r_{k}=$?; '
-        f'if [ $r_{k} -ne 0 ] && [ -s {err} ]; then '
-        f'f_{k}=X; v_{k}=; printf \'mop574-{k}\\tX\\n\'; '
-        f'elif [ $r_{k} -ne 0 ]; then f_{k}=A; v_{k}=; '
-        f'printf \'mop574-{k}\\tA\\n\'; '
-        f'else f_{k}=P; v_{k}=$(printf %s "$e_{k}" | base64 -w0); '
-        f'printf \'mop574-{k}\\tP%s\\n\' "$v_{k}"; fi; '
-        for k in ("name", "email"))
+    # Чтение с различением исходов (review-3 п.1): отсутствие -- ТОЛЬКО
+    # документированный код 1 геттера с пустым stderr; любой другой
+    # ненулевой код (молчаливый 128 в том числе) -- операционный отказ (X):
+    # пустой stderr не доказательство отсутствия. Значение сразу в base64-
+    # переменную: назад пишем её же. Файл stderr -- mktemp: приватный и
+    # непредсказуемый (review-3 п.4); trap EXIT убирает его на каждом
+    # выходе (0/1/2), файл живёт до конца -- его же читает сверка.
+    read = (
+        't=$(mktemp "${TMPDIR:-/tmp}/mop574.XXXXXXXX") || exit 2; '
+        'trap \'rm -f "$t"\' EXIT; '
+        + "".join(
+            f'e_{k}=$({git} user.{k} 2>"$t"); r_{k}=$?; '
+            f'if [ $r_{k} -eq 1 ] && [ ! -s "$t" ]; then '
+            f'f_{k}=A; v_{k}=; printf \'mop574-{k}\\tA\\n\'; '
+            f'elif [ $r_{k} -ne 0 ]; then f_{k}=X; v_{k}=; '
+            f'printf \'mop574-{k}\\tX\\n\'; '
+            f'else f_{k}=P; v_{k}=$(printf %s "$e_{k}" | base64 -w0); '
+            f'printf \'mop574-{k}\\tP%s\\n\' "$v_{k}"; fi; '
+            for k in ("name", "email")))
+    v = [h.replace("-", "_") for h in GUARDED_HOOKS]
     # Операционный отказ чтения (X) -- ДО любой записи: прежнее состояние
     # неизвестно, «восстанавливать пустоту» нельзя, установка не начинается.
+    # Сюда же -- X снимка хуков (review-3 п.1): отказ stat/base64 -- не
+    # «пустые режим и тело», а нечитанный элемент; ворота стоят ПОСЛЕ
+    # snap_hooks (он только читает) и ДО первой записи (set_new).
     gate_x = ('if [ "$f_name" = X ] || [ "$f_email" = X ]; then '
               'echo "git config read failed: the prior identity is unknown"; '
-              'exit 1; fi; ')
+              'exit 1; fi; '
+              + "".join(
+                  f'if [ "$st_{x}" = X ]; then '
+                  f'echo "hook snapshot read failed: '
+                  f'the prior state is unknown"; exit 1; fi; '
+                  for x in v))
     # Снимок своих хуков: A/F/O, у O -- режим и тело (b64-переменная);
-    # исходные байты хранит переменная, компенсация пишет её же.
-    v = [h.replace("-", "_") for h in GUARDED_HOOKS]
+    # исходные байты хранит переменная, компенсация пишет её же. Отказ
+    # чтения (stat/base64) -- X, не «O с пустотой» (review-3 п.1).
     snap_hooks = "".join(
         f'f_{x}="$hooks/{h}"; '
         f'if [ "$hooks" != /hooks ] && [ -e "$f_{x}" ]; then '
         f'if {_ours(chr(34) + "$f_" + x + chr(34))}; then '
-        f'st_{x}=O; m_{x}=$(stat -c %a "$f_{x}"); b_{x}='
-        f'$(base64 -w0 "$f_{x}"); '
+        f'm_{x}=$(stat -c %a "$f_{x}"); r1_{x}=$?; '
+        f'b_{x}=$(base64 -w0 "$f_{x}" 2>/dev/null); r2_{x}=$?; '
+        f'if [ $r1_{x} -eq 0 ] && [ $r2_{x} -eq 0 ]; then st_{x}=O; '
         f'printf \'mop574-hook-{h}\\tO\\t%s\\t%s\\n\' "$m_{x}" "$b_{x}"; '
+        f'else st_{x}=X; printf \'mop574-hook-{h}\\tX\\n\'; fi; '
         f'else st_{x}=F; printf \'mop574-hook-{h}\\tF\\n\'; fi; '
         f'else st_{x}=A; printf \'mop574-hook-{h}\\tA\\n\'; fi; '
         for h, x in zip(GUARDED_HOOKS, v))
     # Компенсация с подтверждением (review-2 п.2): вернуть точные
     # bytes/mode/presence, сверить с напечатанным снимком; исходы 1/2.
+    # Сверка -- с той же дисциплиной чтения (review-3 п.1): «отсутствует»
+    # доказывает только rc 1 с пустым stderr, «равно прежнему» -- только
+    # rc 0; иной код геттера -- не подтверждение, c=bad.
     back = "".join(
         f'{git} --unset-all user.{k} || :; '
         f'[ "$f_{k}" = P ] && {git} user.{k} "$e_{k}" || :; '
@@ -987,9 +1047,11 @@ def identity_script(clone, path, mine, profile):
     verify = (
         'c=ok; '
         + "".join(
-            f'[ "$f_{k}" = A ] && {git} user.{k} >/dev/null 2>&1 && c=bad; '
-            f'[ "$f_{k}" = P ] && [ "$({git} user.{k} 2>/dev/null)" != "$e_{k}" ] '
-            f'&& c=bad; '
+            f'q_{k}=$({git} user.{k} 2>"$t"); qr_{k}=$?; '
+            f'if [ "$f_{k}" = A ] && {{ [ $qr_{k} -ne 1 ] || [ -s "$t" ]; }}; '
+            f'then c=bad; fi; '
+            f'[ "$f_{k}" = P ] && {{ [ $qr_{k} -ne 0 ] '
+            f'|| [ "$q_{k}" != "$e_{k}" ]; }} && c=bad; '
             for k in ("name", "email"))
         + "".join(
             f'[ "$st_{x}" = A ] && [ -f "$f_{x}" ] && c=bad; '
@@ -1058,11 +1120,17 @@ async def _install_identity(conn, name, login, undo):
         # Код 1: точка отказа откатила применённое внутри шелла и сверила
         # возврат (review-2 п.2); здесь -- только причина, без прежней пары.
         return None, f"git identity not set: {_why_marked(out, code)}", None, True
-    if snap["identity"] is None:
-        # Код 0 без читанного снимка -- чужой/старый шелл без меток: это не
-        # «прежнего не было», это «неизвестно», и доставка под ним не идёт.
-        return (None, "git identity not set: the prior state snapshot is "
-                      "unreadable, delivery refused", None, True)
+    if snap["identity"] is None or snap["hooks"] is None:
+        # Код 0 без ПОЛНОГО снимка (review-3 п.2): установка реально
+        # исполнилась (identity уже New), но кадры потеряны или неполны --
+        # прежнее состояние неизвестно, и код 0 НЕ доказывает компенсацию,
+        # которой не было. Вслепую вернуть аренду прежнему владельцу --
+        # оставить клон под чужой парой: контекст держим за пославшим,
+        # причину -- с именем снимка, разбирать оператору.
+        return (None,
+                "git identity not set: the prior state snapshot is "
+                "unreadable, the lease stays with the sender",
+                None, False)
     if profile:
         # Пропуск стража (#313) -- тем же текстом, что сказал скрипт.
         skipped = "; ".join(l.strip() for l in out.splitlines() if "skipped" in l)
