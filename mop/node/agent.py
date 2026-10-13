@@ -88,7 +88,8 @@ IDENTITY_WAIT = 5        # сколько send ждёт профиль влад�
 RESOLVE_WAIT = 5         # сколько глагол актёра ждёт резолвер сервера (#584)
 SOUL_FACT_TTL = 10       # кэш soul-факта ростера: только читающие глаголы (#584)
 STARTUP = "initial_identity"   # единственный глагол канала подъёма (#584/#590)
-MARK = "soul-ready"            # маркер инициализации тела (агент, под замком)
+MARK = "mop-soul-inc"          # маркер identity инкарнации (агент, .git/)
+READY = "ready.json"          # доказательство готовности 590/583 (target/)
 
 
 def node_name():
@@ -1911,57 +1912,80 @@ async def target_binding(conn, project, name):
     return got, None
 
 
-# Кэш soul-факта ростера (#584): (проект, имя, инкарнация, id сессии) ->
-# (годен до, факт). Ключ включает инкарнацию и сессию: переиспользованное
-# имя и новая сессия не наследуют готовность прежней. Только читающие
-# глаголы и только на TTL: мутации резолвер спрашивают свежо.
+# Кэш soul-факта ростера (#584): (проект, имя, инкарнация, sessionId) ->
+# (годен до, факт). Ключ -- проверенная инкарнация и идентификатор живой
+# сессии из структурной записи state: переиспользованное имя и новая
+# сессия не наследуют готовность прежней. Только читающие глаголы и
+# только на TTL: мутации резолвер спрашивают свежо.
 _soul_cache = {}
 
 
 async def _read_marker(name):
-    """Маркер инициализации тела. -> (словарь | None, причина | None).
+    """Маркер identity инкарнации. -> (словарь | None, причина | None).
 
-    Маркер пишет агент канала подъёма под замком папета; чей это был
-    процесс и где клон -- его дело, здесь -- имя файла и форма записи.
-    Битый и нечитаемый маркер -- не готовность, а причина: «примерно
-    инициализированное» тело модель не пускает."""
+    Маркер пишет агент канала подъёма под замком папета, в .git/ -- рядом
+    с файлом аренды: клон остаётся чистым для git. Маркер доказывает
+    только то, что агент сам поставил identity этой инкарнации, и ничью
+    готовность сам по себе не доказывает (готовность -- ready-файл 590).
+    Битый и нечитаемый маркер -- причина, не готовность."""
     out, code = await bsh(
-        name, f'cat {shlex.quote(os.path.join(clone_dir(name), ".mop-" + MARK))} 2>/dev/null')
+        name, f'cat {shlex.quote(os.path.join(clone_dir(name), ".git", MARK))} 2>/dev/null')
     if not (out or "").strip():
         # Нет файла (rc 1) и пустой вывод -- маркера нет; таймаут и мусор
         # вместо кода -- нечитаемо: «нет» и «не знаю» -- разные ответы.
         if code in (1, 0, None):
-            return None, f"{name}: the runtime marker is absent"
-        return None, f"{name}: the runtime marker is unreadable"
+            return None, f"{name}: the identity marker is absent"
+        return None, f"{name}: the identity marker is unreadable"
     try:
         got = json.loads(out.strip().splitlines()[-1])
     except ValueError:
-        return None, f"{name}: the runtime marker is malformed"
+        return None, f"{name}: the identity marker is malformed"
     if not (isinstance(got, dict) and isinstance(got.get("inc"), str) and got["inc"]):
-        return None, f"{name}: the runtime marker carries no incarnation"
+        return None, f"{name}: the identity marker carries no incarnation"
     return got, None
 
 
 async def _write_marker(name, inc):
-    """Маркер инициализации этой инкарнации. Пишет агент, под замком
-    папета; тело(marker) при2лежит агенту, как и файл аренды."""
-    path = os.path.join(clone_dir(name), ".mop-" + MARK)
-    body = json.dumps({"inc": inc, "by": "agent"})
+    """Маркер identity этой инкарнации: {"inc": ...} в .git/, как файл
+    аренды. Пишет агент под замком папета."""
+    path = os.path.join(clone_dir(name), ".git", MARK)
+    body = json.dumps({"inc": inc})
     out, code = await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}")
-    return None if code == 0 else f"{name}: the runtime marker is not recorded: {why(out, code)}"
+    return None if code == 0 else f"{name}: the identity marker is not recorded: {why(out, code)}"
+
+
+async def _read_ready(name):
+    """Доказательство готовности 590/583 -> (словарь | None, причина |
+    None). Обёртка пишет его в target-каталог после проверки бандла, до
+    старта модели; узел читает и сверяет, но не создаёт: готовность --
+    факт обёртки, узел её лишь предъявляет. Битое -- не готовность."""
+    path = os.path.join(target_dir(name), READY)
+    try:
+        got = json.loads(open(path).read() or "null")
+    except (OSError, ValueError):
+        return None, f"{name}: the ready proof is unreadable or absent"
+    if not isinstance(got, dict):
+        return None, f"{name}: the ready proof is malformed"
+    return got, None
 
 
 def _session_live(fact):
-    """Живая сессия и её идентификатор -> (жива, id | None). Строка строго
-    «<status> <alive> <listen> <id...>»: известный статус, живой сокет,
-    дальше -- идентификатор сессии (хвост токенов, день смены сессии --
-    факт для кэша). Усечённая и мусорная строка -- не живая: «примерно
-    живая» сессия готовности не доказывает."""
-    tokens = (fact.get("session") or "").split()
-    if len(tokens) < 3 or tokens[0] not in ("starting", "running") \
-            or tokens[1] != "1":
+    """Живая сессия и её идентификатор -> (жива, id | None).
+
+    Только структурная запись state (#222/#468): alive === True,
+    listen === True и непустой sessionId -- его session.py даёт лишь
+    слушающей живой сессии. Строка «<status> <alive> <listen>» статусы
+    не перечисляет (idle/busy/waiting/shell -- всё живые), записи нет --
+    fail closed: неугаданное состояние не готовность, и никакой роли не
+    позволено «примерно живой» быть."""
+    st = fact.get("state")
+    if not isinstance(st, dict):
         return False, None
-    return True, " ".join(tokens[2:])
+    sid = st.get("sessionId")
+    if st.get("alive") is not True or st.get("listen") is not True \
+            or not (isinstance(sid, str) and sid):
+        return False, None
+    return True, sid
 
 
 async def _soul_fact(conn, project, name, fact):
@@ -1976,7 +2000,7 @@ async def _soul_fact(conn, project, name, fact):
     live, sid = _session_live(fact)
     if not fact.get("present") or not live:
         return None
-    key = (project, name, None, sid)
+    key = (project, name, sid)
     hit = _soul_cache.get(key)
     if hit and hit[0] > time.time():
         return hit[1]
@@ -1985,19 +2009,26 @@ async def _soul_fact(conn, project, name, fact):
         soul_fact = {"ready": False, "why": why}
     else:
         marker, mwhy = await _read_marker(name)
+        ready, rwhy = (await _read_ready(name)) if marker is not None \
+            and marker["inc"] == got["soul_inc"] else (None, None)
         if marker is None:
             soul_fact = {"ready": False, "why": mwhy}
         elif marker["inc"] != got["soul_inc"]:
             soul_fact = {"ready": False,
-                         "why": f"{name}: the runtime marker names incarnation "
+                         "why": f"{name}: the identity marker names incarnation "
                                 f"{marker['inc']}, the binding names {got['soul_inc']}"}
+        elif ready is None:
+            soul_fact = {"ready": False, "why": rwhy}
+        elif ready.get("soul") != got["role"] or ready.get("soul_inc") != got["soul_inc"] \
+                or ready.get("soul_digest") != got["soul_digest"]:
+            soul_fact = {"ready": False,
+                         "why": f"{name}: the ready proof names another soul "
+                                f"({ready.get('soul')}, {ready.get('soul_inc')}, "
+                                f"{ready.get('soul_digest')})"}
         else:
             soul_fact = {"ready": True, "role": got["role"],
                          "soul_inc": got["soul_inc"], "soul_digest": got["soul_digest"]}
-    # Инкарнация в ключе кэша не нужна: ключ среза -- та же сессия, а у
-    # живой сессии та же инкарнация; смена инкарнации -- новое тело, новая
-    # строка сессии с её идентификатором.
-    _soul_cache[(project, name, None, sid)] = (time.time() + SOUL_FACT_TTL, soul_fact)
+    _soul_cache[(project, name, sid)] = (time.time() + SOUL_FACT_TTL, soul_fact)
     return soul_fact
 
 

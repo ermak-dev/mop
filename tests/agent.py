@@ -3515,6 +3515,9 @@ def check_startup_soul_584(c):
     async def project(name):
         return "mop"
 
+    async def local(name):
+        return name in clones
+
     def live_fact(status="idle", sid="s-1", alive=True, listen=True, state=True):
         """Живой факт по настоящей форме session.state (#222/#468): строка
         «<status> <alive> <listen>» и структурная запись state с sessionId
@@ -3552,10 +3555,16 @@ def check_startup_soul_584(c):
     with restored(agent, "bsh", "clone_facts", "clone_dir", "target_dir",
                   "_event", "puppet_project", "_owner_locks", "_lease_generations",
                   "_lease_claims", "_lease_holder", "IDENTITY_WAIT",
-                  "SOUL_FACT_TTL", "_soul_cache"), restored(bus, "arequest"):
+                  "SOUL_FACT_TTL", "_soul_cache", "facts"), restored(bus, "arequest"):
         agent.bsh, agent.clone_facts = bash, clonefacts
+        agent.clone_dir = lambda name: clones[name]
         agent.target_dir = lambda name: targets[name]
+
+        async def facts_of(name):
+            return st["facts"].get(name, {"present": False})
+        agent.facts = facts_of
         agent._event, agent.puppet_project = no_event, project
+        agent.local_puppet = local
         agent.IDENTITY_WAIT, agent.SOUL_FACT_TTL = 0.1, 0
         bus.arequest = arequest
 
@@ -3573,13 +3582,10 @@ def check_startup_soul_584(c):
                     soul == {"ready": True, "role": "puppet", "soul_inc": INC_1,
                              "soul_digest": "a" * 32}, (soul, got))
 
-        # 2. Чего-то нет -- не готовность, а причина; ничего нет -- нет факта.
-        # Структурной записи нет (легаси-сессия) -- fail closed: не угадываем.
+        # 2. Чего-то нет -- не готовность: живой сессии нет вовсе (записи
+        # state нет, сокет мёртв, sessionId пуст) -- факта нет; привязка,
+        # маркер или ready-файл не сходятся -- причина.
         for label, fact, marker, ready, why_word in (
-                ("no structured state", live_fact(state=False), True, True, "state"),
-                ("dead in state", live_fact(alive=False), True, True, "state"),
-                ("socket down", live_fact(listen=False), True, True, "state"),
-                ("no session id", live_fact(sid=""), True, True, "state"),
                 ("no marker", live_fact(), False, True, "identity"),
                 ("marker of another incarnation", live_fact(), INC_2, True, "identity"),
                 ("no ready proof", live_fact(), True, False, "ready"),
@@ -3588,9 +3594,7 @@ def check_startup_soul_584(c):
             reset()
             st["facts"] = {"pu-mop-1": fact}
             if marker:
-                marked_584(clones["pu-mop-1"], INC_1 if marker is True else INC_1)
-                if marker != INC_1 and marker is not True:
-                    marked_584(clones["pu-mop-1"], INC_2)
+                marked_584(clones["pu-mop-1"], marker if isinstance(marker, str) else INC_1)
             if ready:
                 if isinstance(ready, tuple):
                     ready_584(targets["pu-mop-1"], role=ready[0], digest=ready[2])
@@ -3605,6 +3609,10 @@ def check_startup_soul_584(c):
                     and why_word in (soul.get("why") or "") else False, soul)
         for label, fact in (("dead session string", {"present": True, "session": "none"}),
                             ("no body", {"present": False}),
+                            ("no structured state", live_fact(state=False)),
+                            ("dead in state", live_fact(alive=False)),
+                            ("socket down", live_fact(listen=False)),
+                            ("no session id", live_fact(sid="")),
                             ("state says no session", live_fact(state=True)
                              | {"state": {"status": None, "waitingFor": None,
                                           "alive": False, "listen": False, "turn": None,
