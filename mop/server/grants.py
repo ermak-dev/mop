@@ -310,13 +310,18 @@ def bundle(digest, root=None):
     return {"manifest": manifest, "prompt": prompt}
 
 
-def resolve(principal, service, verb, root=None):
-    """Вердикт ИСТОЧНИКУ: глагол службы -- по спискам роли, fail closed.
+def resolve(principal, service, verb, target=None, root=None):
+    """Вердикт ИСТОЧНИКУ по wire-contrакту #579: один вызов -- один
+    атомарный снимок реестра, источник и цель из одного чтения.
 
-    Поля роли/digest/owner -- об источнике; цель резолвится отдельно
-    (resolve_target): сервер читает реестр, узлу Nomad не нужен (#579).
-    Кэша нет: отсутствие -- максимальный TTL."""
-    rec = binding(principal, root=root)
+    Ответ: эхо источника (principal, job, soul_inc, owner, project,
+    soul_digest, role, active, capabilities, source_dispatch) и, при
+    названной цели, вложенный блок target{found, job, project, role,
+    receives_dispatch, soul_inc, ...}. Глагол -- по спискам роли, fail
+    closed; кэша нет: отсутствие -- максимальный TTL. resolve_target --
+    внутренний помощник того же снимка, отдельного wire-глагола нет."""
+    reg = _read(_root_dir(root))
+    rec = reg.get(principal)
     if rec is None:
         return {"allow": False,
                 "reason": f"grants: unknown principal {principal}"}
@@ -328,13 +333,21 @@ def resolve(principal, service, verb, root=None):
         return {"allow": False,
                 "reason": f"grants: bundle {rec.get('soul_digest')} "
                           f"is not in the store"}
-    verbs = _role_verbs(got["manifest"], service)
+    parsed = soul.parse(json.dumps(got["manifest"]))
+    verbs = tuple(getattr(parsed.capabilities,
+                          "node_verbs" if service == "node"
+                          else "cluster_verbs"))
     out = {"allow": verb in verbs,
-           "role": rec.get("role"), "soul_digest": rec.get("soul_digest"),
+           "principal": principal,
+           "job": rec.get("job"), "soul_inc": rec.get("soul_inc"),
            "owner": rec.get("owner"), "project": rec.get("project"),
-           "active": True, "dispatch": _flag(got["manifest"], "dispatch"),
-           "receives_dispatch": _runtime(got["manifest"],
-                                         "receives_dispatch")}
+           "soul_digest": rec.get("soul_digest"), "role": rec.get("role"),
+           "active": True,
+           "capabilities": {"node_verbs": list(parsed.capabilities.node_verbs),
+                            "cluster_verbs": list(parsed.capabilities.cluster_verbs)},
+           "source_dispatch": parsed.capabilities.dispatch}
+    if target:
+        out["target"] = _target_block(reg, rec.get("project"), target, root)
     if not out["allow"]:
         out["reason"] = (f"{principal} may not {service} {verb}: the role "
                          f"{rec.get('role')} allows "
@@ -344,19 +357,27 @@ def resolve(principal, service, verb, root=None):
     return out
 
 
-def resolve_target(project, target, root=None):
-    """Вердикт ЦЕЛИ: роль и receives_dispatch цели из реестра.
-
-    Сервер отвечает за право адресата (#579): узел не спрашивает Nomad,
-    которого у него нет; транзакцию аренды/git держит узел (#584)."""
-    for rec in _read(_root_dir(root)).values():
+def _target_block(reg, project, target, root):
+    """Вложенный блок цели из ТОГО ЖЕ снимка реестра: второй ход в шину
+    за целью разорвал бы атомарность одного эффекта (#579)."""
+    for rec in reg.values():
         if rec.get("project") == project and rec.get("job") == target:
-            return {"found": True, "role": rec.get("role"),
+            return {"found": True, "job": rec.get("job"),
+                    "project": rec.get("project"),
+                    "role": rec.get("role"),
                     "receives_dispatch": _target_flag(root, rec),
-                    "owner": rec.get("owner"), "job": rec.get("job"),
                     "soul_inc": rec.get("soul_inc"),
+                    "owner": rec.get("owner"),
                     "active": bool(rec.get("active"))}
     return {"found": False}
+
+
+def resolve_target(project, target, root=None):
+    """Вердикт ЦЕЛИ как внутренний помощник: тот же блок, что resolve
+    вкладывает в ответ. Сервер отвечает за право адресата (#579): узел
+    не спрашивает Nomad, которого у него нет; транзакцию аренды/git
+    держит узел (#584)."""
+    return _target_block(_read(_root_dir(root)), project, target, root)
 
 
 def _target_flag(root, rec):

@@ -179,7 +179,7 @@ def check_resolve_endpoint_today(c):
     from mop.server import bootstrap
 
     anon = bootstrap.answer("mop", {"verb": "resolve", "principal": "grant-x",
-                                    "service": "node", "action": "state"})
+                                    "service": "node", "verb_name": "state"})
     c.check("#581 the bootstrap service answers a resolve request "
             "with a verdict, not a missing verb",
             not (anon.get("error") or "").startswith("no such verb"),
@@ -189,7 +189,7 @@ def check_resolve_endpoint_today(c):
             anon.get("allow") is False and "grant-" not in json.dumps(anon)
             and not (anon.get("role") or anon.get("owner")), anon)
     out = bootstrap.answer("mop", {"verb": "resolve", "principal": "grant-x",
-                                   "service": "node", "action": "state",
+                                   "service": "node", "verb_name": "state",
                                    "_caller": "node-pve1"})
     c.check("#581 a node caller gets the fail-closed verdict "
             "for an unknown principal",
@@ -197,11 +197,9 @@ def check_resolve_endpoint_today(c):
             (out.get("reason") or ""), out)
     out = bootstrap.answer("mop", {"verb": "resolve_target",
                                    "target": "pu-mop-7"})
-    err = out.get("error") or ""
-    c.check("#581 the bootstrap service answers resolve_target "
-            "from the registry, anonymously fail-closed",
-            not err.startswith("no such verb") and out.get("found") is False,
-            f"сегодня: {err!r}")
+    c.check("#581 resolve_target is internal: the wire carries one "
+            "resolve verb only",
+            (out.get("error") or "").startswith("no such verb"), out)
 
 
 # ─── хранилищная половина: mop/server/grants.py ──────────────────────────
@@ -455,13 +453,19 @@ def check_resolve(c):
         mod.activate(rec["principal"], root=root.name)
         got = mod.resolve(rec["principal"], "node", "state", root=root.name)
         c.check("#581 resolve allows a verb of the role's node list "
-                "with the source binding facts",
+                "with the full source echo",
                 got.get("allow") is True and got.get("role") == "puppet"
                 and got.get("soul_digest") == PUPPET_DIGEST
                 and got.get("owner") == "anton"
                 and got.get("project") == "mop"
-                and got.get("dispatch") is False
-                and got.get("receives_dispatch") is True, got)
+                and got.get("principal") == rec["principal"]
+                and got.get("job") == "pu-mop-9"
+                and got.get("soul_inc") == incarnation("nine")
+                and got.get("source_dispatch") is False
+                and got.get("capabilities", {}).get("node_verbs")
+                == PUPPET["capabilities"]["node_verbs"]
+                and got.get("capabilities", {}).get("cluster_verbs") == [],
+                got)
         got = mod.resolve(rec["principal"], "node", "restart", root=root.name)
         c.check("#581 resolve denies a verb outside the list, naming it",
                 got.get("allow") is False and "restart" in (got.get("reason")
@@ -469,9 +473,25 @@ def check_resolve(c):
         got = mod.resolve(rec["principal"], "cluster", "roster", root=root.name)
         c.check("#581 resolve checks cluster verbs against the cluster list",
                 got.get("allow") is False, got)
+        nested = mod.resolve(rec["principal"], "node", "send",
+                              target="pu-mop-9", root=root.name)
+        c.check("#581 a named target rides the same resolve as a nested "
+                "block, one atomic snapshot",
+                nested.get("target", {}).get("found") is True
+                and nested.get("target", {}).get("job") == "pu-mop-9"
+                and nested.get("target", {}).get("project") == "mop"
+                and nested.get("target", {}).get("role") == "puppet"
+                and nested.get("target", {}).get("soul_inc")
+                == incarnation("nine")
+                and nested.get("target", {}).get("receives_dispatch")
+                is True, nested)
+        missed = mod.resolve(rec["principal"], "node", "send",
+                              target="pu-mop-1", root=root.name)
+        c.check("#581 an unbound target fails closed inside the block",
+                missed.get("target", {}).get("found") is False, missed)
         target = mod.resolve_target("mop", "pu-mop-9", root=root.name)
-        c.check("#581 resolve_target answers the target's eligibility "
-                "from the registry",
+        c.check("#581 resolve_target stays an internal helper "
+                "of the same registry",
                 target.get("receives_dispatch") is True
                 and target.get("role") == "puppet"
                 and target.get("job") == "pu-mop-9", target)
