@@ -2713,8 +2713,18 @@ def readers_stub():
 # текущего номера и числа сохранённых кадров под тем же замком.
 # RESULT: кадры после 100 доезжают, replay при новом соединении отсутствует.
 # STATUS: FIXED — see #604
+# HYPOTHESIS (#616): completion соседней проверки дописывает в общий буфер.
+# SOLUTION: отдельный экземпляр реального HTTP-модуля, не фильтрация кадров.
+# RESULT: подставленный чужой callback давал два RED, теперь полный список
+# 115 кадров и отсутствие replay проверяются без ослабления утверждений.
+# STATUS: FIXED — see #616
 def check_operation_stream_capacity_604(c):
-    from mop.cli.server import web as webcli
+    from mop.cli.server import web as shared_web
+    import importlib.util
+    foreign_completion = shared_web._on_operation
+    spec = importlib.util.spec_from_file_location("mop.cli.server._capacity_616", shared_web.__file__)
+    webcli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(webcli)
 
     class Collector:
         def __init__(self, batches):
@@ -2726,6 +2736,9 @@ def check_operation_stream_capacity_604(c):
                 batch = next(self.batches)
             except StopIteration:
                 raise BrokenPipeError()
+            if self.version == 0:
+                foreign_completion({"id": "foreign-completion-616", "action": "send",
+                                    "target": "pu-other-1", "status": "refused"})
             for number in batch:
                 webcli._on_operation({"id": f"op-{number}", "action": "add",
                                       "target": f"pu-demo-{number}", "status": "done"})
