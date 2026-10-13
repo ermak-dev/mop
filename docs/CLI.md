@@ -914,6 +914,51 @@ mop secret var list               names only
 mop secret var remove VAR...
 ```
 
+### session: private live-session history and terminal control: mop session <verb>
+
+#### mop session
+
+```text
+private live-session history and terminal control: mop session <verb>
+
+  mop session history <name> [--cursor cursor]
+  mop session terminal <name> <action> [tid] [options]
+
+History follows the current conversation. Terminal attaches to the same tmux
+session, never a second Claude process. Terminal control is an operator-only
+capability: it can execute commands in the body. No automatic input replay.
+```
+
+#### mop session history
+
+```text
+mop session history <name> [--cursor cursor]: read private conversation records
+
+Returns bounded JSON with epoch, session_id, cursor, records, reset, has_more
+and partial. Keep the returned cursor for the next read; a reset replaces the
+old live conversation. Incomplete JSON lines remain pending. This is not a
+token stream. No arbitrary transcript path is accepted.
+```
+
+#### mop session terminal
+
+```text
+mop session terminal <name> <action> [tid] [options]: private terminal RPC
+
+Actions: open, read, input, interrupt, resize, close.
+  open       --mode ro|rw --cols N --rows N (default ro, 100 by 30)
+  read       --cursor N --wait N (default 0, at most 15 seconds)
+  input      --seq N --data BASE64 (at most 4096 decoded bytes)
+  interrupt  --seq N (Escape to the existing CLI, not job stop)
+  resize     --cols N --rows N (writer only)
+  close      detaches this client, never kills the puppet
+
+Open returns a private tid. Every subsequent action needs it. Input sequences
+start at 1 and advance consecutively; an unknown receipt must not be retried
+with a new sequence. Terminal output is base64 bytes for an emulator, not text
+with terminal escapes removed. Operator-only node verbs enforce read-only and ownership.
+```
+
 ## Server
 
 Run on the installation's server, the controller, not on a client.

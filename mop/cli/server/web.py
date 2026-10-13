@@ -16,16 +16,19 @@ as a thread-per-operation executor: the verdict lands as an SSE `operation`
 frame and an ops.record audit line in the journal. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 """
+import hashlib
 import json
 import os
 import threading
 import time
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
 from mop.common import bus, busnames, config, ops, puppets, state
 from mop.common.domain import Alloc
 from mop.server import adminapi, opworker, web, websession
+from mop.server.terminal import BridgeError, TerminalBridge
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
 # исходниками (docs/WEB.md); собирает `mop dev web build`, сверяет CI.
@@ -39,6 +42,7 @@ BODY_MAX = 16 * 1024       # байт тела входа: {login, password} -- 
 COLLECTOR = web.Collector()
 SESSIONS = websession.SessionStore()
 RATE = websession.RateLimiter()
+TERMINALS = TerminalBridge(audit=lambda record: _on_audit(record))
 
 def _registry_projects():
     """Origin'ы реестра сервера (#571): один источник для списка формы
@@ -489,6 +493,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.llm_api(self.path)
         if path == "/api/admin/ops":
             return ADMINAPI.post(self)
+        if path.startswith("/api/puppet/"):
+            return self.api_chat(path)
         self._send(404, "no such path\n", "text/plain")
 
     def do_PUT(self):
@@ -676,10 +682,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self._origin_ok() or (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self._json(403, {"error": "origin refused"})
         raw = self.headers.get("Cookie") or ""
+        errors = []
         for part in raw.split(";"):
             if part.strip().startswith(websession.COOKIE + "="):
-                SESSIONS.close(part.strip().split("=", 1)[1])
-        return self._json(200, {"login": None, "role": None})
+                token = part.strip().split("=", 1)[1]
+                SESSIONS.close(token)
+                released = TERMINALS.revoke(hashlib.sha256(token.encode()).hexdigest())
+                errors.extend(released["errors"])
+        result = {"login": None, "role": None}
+        if errors:
+            result["terminal_errors"] = errors
+        return self._json(200, result)
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -713,6 +726,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/journal":
             return self.api_journal()
         if path.startswith("/api/puppet/"):
+            sub = path[len("/api/puppet/"):].partition("/")[2]
+            if sub == "history" or sub == "term" or sub.startswith("term/"):
+                return self.api_chat(path)
             return self.api_puppet(path)
         if path == "/api/admin/models":
             return ADMINAPI.models(self)
@@ -759,6 +775,129 @@ class Handler(BaseHTTPRequestHandler):
         with COLLECTOR._cond:
             entries = list(COLLECTOR.admin_journal)
         return self._json(200, {"journal": entries})
+
+    def _session_token(self):
+        """Cookie, действительно принятая провайдером, а не первая по имени."""
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            key, separator, token = part.strip().partition("=")
+            if separator and key == websession.COOKIE:
+                who = SESSIONS.get(token)
+                if who:
+                    return token, who
+        return None
+
+    def _session_actor(self):
+        """Текущий admin и непрозрачная привязка к принятой HTTP-сессии."""
+        try:
+            login, role = self._who()
+            accepted = self._session_token() if login and role == "admin" else None
+        except Exception:
+            raise BridgeError(503, "login provider unavailable") from None
+        if not login:
+            raise BridgeError(401, "login required")
+        if role != "admin":
+            raise BridgeError(403, "admin only")
+        if accepted is None or accepted[1] != (login, role):
+            raise BridgeError(401, "browser session changed")
+        return login, role, hashlib.sha256(accepted[0].encode()).hexdigest()
+
+    def _chat_body(self):
+        """Ограниченное JSON-тело клавиатуры; произвольного RPC здесь нет."""
+        if not self._origin_ok():
+            raise BridgeError(403, "origin refused")
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
+            raise BridgeError(415, "JSON required")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise BridgeError(400, "bad content length") from None
+        if length < 0:
+            raise BridgeError(400, "bad content length")
+        if length > BODY_MAX:
+            raise BridgeError(413, "request too large")
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError()
+            value = json.loads(raw)
+        except (OSError, ValueError, UnicodeError):
+            self.close_connection = True
+            raise BridgeError(400, "invalid JSON body") from None
+        if not isinstance(value, dict):
+            raise BridgeError(400, "JSON object required")
+        return value
+
+    def api_chat(self, path):
+        """Приватные history/PTY endpoints, вне admin Operations и public SSE."""
+        try:
+            self._session_actor()
+            rest = path[len("/api/puppet/"):]
+            name, separator, sub = rest.partition("/")
+            if not separator or web.puppet_card(getattr(COLLECTOR, "rows", None) or [], name) is None:
+                raise BridgeError(404, "no such puppet")
+            raw_query = urlsplit(self.path).query
+            if len(raw_query) > 4096:
+                raise BridgeError(400, "query too large")
+            try:
+                query = parse_qs(raw_query, keep_blank_values=True, strict_parsing=True)
+            except ValueError:
+                raise BridgeError(400, "invalid query") from None
+            if any(len(values) != 1 for values in query.values()):
+                raise BridgeError(400, "duplicate query parameter")
+            params = {key: values[0] for key, values in query.items()}
+            if self.command == "GET" and sub == "history":
+                if set(params) - {"cursor"}:
+                    raise BridgeError(400, "unsupported history parameter")
+                context = TERMINALS.resolve(name)
+                got = bus.request(context["node"], "history", project=context["project"],
+                                  name=name, **({"cursor": params["cursor"]} if "cursor" in params else {}))
+                self._session_actor()
+                if not isinstance(got, dict):
+                    raise BridgeError(502, "history returned an invalid response")
+                if got.get("error"):
+                    raise BridgeError(409, str(got["error"]))
+                fields = {"epoch", "session_id", "cursor", "records", "reset", "has_more", "partial"}
+                if not fields.issubset(got) or not isinstance(got["records"], list):
+                    raise BridgeError(502, "history returned an invalid response")
+                return self._json(200, {key: got[key] for key in fields})
+            if self.command == "POST":
+                if params:
+                    raise BridgeError(400, "keyboard requests take no query parameters")
+                body = self._chat_body()
+                if sub == "term":
+                    if set(body) != {"mode", "cols", "rows"}:
+                        raise BridgeError(400, "terminal open takes mode and dimensions")
+                    return self._json(200, TERMINALS.open(name, body["mode"], body["cols"],
+                                                         body["rows"], self._session_actor))
+            pieces = sub.split("/")
+            if len(pieces) != 3 or pieces[0] != "term":
+                raise BridgeError(404, "no such session route")
+            _, tid, action = pieces
+            if self.command == "GET" and action == "read":
+                if set(params) - {"cursor", "wait"}:
+                    raise BridgeError(400, "unsupported terminal parameter")
+                try:
+                    cursor, wait = int(params.get("cursor", "0")), int(params.get("wait", "15"))
+                except ValueError:
+                    raise BridgeError(400, "invalid terminal cursor or wait") from None
+                return self._json(200, TERMINALS.read(name, tid, cursor, self._session_actor, wait=wait))
+            if self.command != "POST":
+                raise BridgeError(405, "session route method refused")
+            if action == "input" and set(body) == {"seq", "data"}:
+                result = TERMINALS.write(name, tid, body["seq"], body["data"], self._session_actor)
+            elif action == "resize" and set(body) == {"cols", "rows"}:
+                result = TERMINALS.resize(name, tid, body["cols"], body["rows"], self._session_actor)
+            elif action == "close" and not body:
+                result = TERMINALS.close(name, tid, self._session_actor)
+            else:
+                raise BridgeError(400, "unsupported terminal action or fields")
+            return self._json(200, result)
+        except BridgeError as e:
+            return self._json(e.code, {"error": e.error})
+        except bus.Refused as e:
+            return self._json(409, {"error": str(e)})
+        except Exception:
+            return self._json(502, {"error": "session request could not be confirmed"})
 
     def api_puppet(self, path):
         """Карточка папета и его хвост -- только актуальному admin (#462).
