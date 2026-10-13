@@ -53,6 +53,17 @@ _FROM_OUTCOME = {"registered": "succeeded", "accepted": "partial",
                  "unknown": "unknown"}
 
 
+def effective_target(action, target, params):
+    """Устойчивая идентичность операции и её полосы (#569): target, а
+    для операции без цели -- origin из params. Одна точка правила:
+    дедуп-ключ адаптера и полоса воркера считаются одной функцией, и
+    два add одного origin -- одна полоса (одна очередь к цели), разных
+    origin'ов -- независимые. Адаптер делегирует сюда."""
+    if target is None:
+        return (params or {}).get("origin")
+    return target
+
+
 def status_of(verdict):
     """Вердикт операции -> терминальный статус #476. Одна точка карты для
     обоих видов: вердикт воркера (status) и вердикт workflow #458
@@ -269,16 +280,21 @@ def _wrap_model(target, login, model, now=None, sleep=None, observe_wait=30):
         observe_wait=observe_wait))
 
 
-def _wrap_send(target, login, message):
+def _wrap_send(target, login, message, context=None):
     """Доставка от HTTP-принципала: факты и проект не берутся из запроса."""
     if not login or not isinstance(target, str) or not target.startswith(puppets.JOB_PREFIX):
         return ops.outcome(ops.REFUSED, target, error="send needs an authenticated actor and a puppet target")
+    project = None   # подтверждается спекой ниже; отказ до -- честный None
     try:
         spec = puppets._cluster("spec", name=target) or {}
         origin = (spec.get("meta") or {}).get("origin")
         if not origin:
             return ops.outcome(ops.REFUSED, target, error="cannot determine the target project")
         project = ops.target_project(origin)
+        if context is not None:
+            # Аудит-факт (#575): спека подтвердила проект ДО доставки --
+            # зависшая доставка его больше не отнимает.
+            context["project"] = project
         if not project or project == bus.ADMIN:
             return ops.outcome(ops.REFUSED, target, error="cannot determine the target project")
         node = puppets.node_of(target)
@@ -289,28 +305,72 @@ def _wrap_send(target, login, message):
         facts = node_call(node, "state", name=target)
         safe, why = ops.safety(target, project, owner=login, facts=facts)
         if not safe:
-            return ops.outcome(ops.REFUSED, target, error=why)
+            return ops.outcome(ops.REFUSED, target, error=why,
+                               project=project)
     except (bus.BusError, bus.Refused, LookupError):
-        return ops.outcome(ops.REFUSED, target, error="cannot inspect the target before sending")
+        # Проект уже подтверждён спекой -- везём его аудиту (#575)
+        return ops.outcome(ops.REFUSED, target,
+                           error="cannot inspect the target before sending",
+                           project=project)
     try:
         # У веб-чата нет инбокса на шине: from_name не выдаёт выдуманный
         # адрес за ответный. HTTP-принципал едет владельцем, force запрещён.
         got = ops.send_to_puppet(node_call, node, target, message, owner=login, force=False)
     except bus.Refused as e:
-        return ops.outcome(ops.REFUSED, target, error=str(e))
+        return ops.outcome(ops.REFUSED, target, error=str(e),
+                           project=project)
     except Exception:
         # Запрос мог дойти до сокета до потери ответа: повторять нельзя.
-        return ops.outcome(ops.UNKNOWN, target, error="message delivery could not be confirmed")
+        return ops.outcome(ops.UNKNOWN, target,
+                           error="message delivery could not be confirmed",
+                           project=project)
     if got.get("error"):
-        return ops.outcome(ops.REFUSED, target, error=got["error"])
+        if got.get("timeout"):
+            # Неопределённая доставка (#574, review-3 п.5): тело молчит,
+            # сообщение могло доехать -- это НЕ подтверждённый отказ, и
+            # повтор автоматически не делается: он мог бы продублировать
+            # уже выполненное. Проект аудита остаётся при вердикте (#575).
+            return ops.outcome(ops.UNKNOWN, target, error=got["error"],
+                               project=project)
+        return ops.outcome(ops.REFUSED, target, error=got["error"],
+                           project=project)
     if not isinstance(got.get("msg_id"), str) or not got["msg_id"].strip():
-        return ops.outcome(ops.UNKNOWN, target, error="message delivery could not be confirmed")
-    return ops.outcome(ops.REGISTERED, target)
+        return ops.outcome(ops.UNKNOWN, target,
+                           error="message delivery could not be confirmed",
+                           project=project)
+    return ops.outcome(ops.REGISTERED, target, project=project)
 
 
 # Регистрация disruptive (#460): снос клона, джоба или тела под занятой
 # сессией -- отказ даже со своей арендой; run зовёт safety им.
 DISRUPTIVE = frozenset({"restart", "recycle", "delete", "wipe"})
+
+
+class _LaneToken:
+    """Токен-держатель полосы цели (#569). Заводится _reserve ДО старта
+    нитки эффекта; release идемпотентен и снимает токен из слота цели.
+    held -- флаг жизни: пока True, полоса занята этим токеном (нитка
+    эффекта ещё не кончилась), drain другой операции его ждёт. Пустой
+    токен (target None, lanes None) -- операция без полосы (add без
+    origin): release -- no-op."""
+
+    def __init__(self, target, lock=None, lanes=None):
+        self.target = target
+        self.held = True
+        self._lock, self._lanes = lock, lanes
+
+    def release(self):
+        """Снять себя из слота; повторный вызов -- no-op."""
+        if not self.held:
+            return
+        self.held = False
+        if self._lanes is not None:
+            with self._lock:
+                slot = self._lanes.get(self.target)
+                if slot is not None:
+                    slot.discard(self)
+                    if not slot:
+                        self._lanes.pop(self.target, None)
 
 
 class Worker:
@@ -342,40 +402,110 @@ class Worker:
         # Реестр заведённых проектов (callable -> set origin'ов): gate add
         # (#470). None -- не подключён, add отказывает (fail closed).
         self._registry = registry
+        # Полосы целей (#569): target -> живые нитки-держатели эффектов.
+        # Слот живёт до фактического конца нитки; см. _limited/_drain.
+        self._lanes = {}
+        self._lanes_lock = threading.Lock()
 
     # ── исполнение ──────────────────────────────────────────────────────
     def run(self, verb, target, params, login, transport=None,
-            safety=None, role="admin"):
+            safety=None, role="admin", prepare=None, context=None):
         """Исполнить операцию -> вердикт-словарь #476 ({status, error, ...}).
 
         Роль -- ДО первого эффекта: не admin -- отказ, эффектов нет.
         safety -- ops.safety-подобный предикат ДО эффекта; None -- общий
-        слой сам решает (send проверяет facts своейafety-функцией).
+        слой сам решает (send проверяет facts своей safety-функцией).
+        prepare -- сборка предиката и транспорта ИЗ ЖИВОЙ ШИНЫ (#566):
+        вызывается внутри срока эффекта (#569), до ворот и эффекта;
+        (safety, transport, None) | (None, None, отказ) -- отказ до
+        эффекта, с причиной, без мутаций. Что собирает prepare, то и
+        исполняется: префетч -- часть локального workflow, а не фоновая
+        подготовка, и виснуть он обязан под тем же дедлайном, что и
+        эффект, -- иначе его bus-запрос держал бы полосу цели без срока.
         transport -- глаголы сервиса кластера (#496/#498); воркер своего
-        не строит. Вердикт синхронен: поток операции даёт адаптер (#499),
-        сюда приходит уже свободная цель (семафор адаптера отпирает
-        исполнение)."""
+        не строит. Вердикт синхронен: поток операции даёт адаптер (#499).
+        context (#575) -- словарь аудита операции: эффекты (send/add)
+        кладут в него подтверждённые факты (проект спеки/реестра,
+        доверенное имя регистрации) В МОМЕНТ факта, до зависания
+        позднейших шагов; словарь принадлежит вызову, не воркеру, --
+        параллельные операции его не смешивают.
+        Полоса цели (#569): срок #497 ограничивает ОТВЕТ, не жизнь
+        эффекта -- нитка эффекта переживает таймаут и остаётся держателем
+        полосы (rider). run той же цели сперва ждёт живых хвостов в
+        пределах того же срока; не дождался -- отказ: эффект начат не
+        был, это не «цель свободна» и не автоповтор. Ответ ограничен
+        терпением + сроком эффекта, вечного accepted нет."""
         if role != "admin":
             return {"status": "refused", "error": "admin only"}
-        if safety is not None:
-            ok, why = safety(target, self._project_of(verb, target),
-                             owner=login,
-                             disruptive=verb in DISRUPTIVE)
-            if not ok:
-                return {"status": "refused", "error": why}
+
+        def whole():
+            # Весь локальный workflow одной ниткой под одним сроком:
+            # сбор фактов (#566), ворота, эффект. Что-то одно висит --
+            # дедлайн терминирует ответ, нитка остаётся держателем полосы.
+            gate_pred, gate_tr = safety, transport
+            if prepare is not None:
+                gate_pred, gate_tr, refusal = prepare()
+                if refusal is not None:
+                    return {"status": "refused", "error": refusal}
+            if gate_pred is not None:
+                ok, why = gate_pred(target, self._project_of(verb, target),
+                                    owner=login,
+                                    disruptive=verb in DISRUPTIVE)
+                if not ok:
+                    return {"status": "refused", "error": why}
+            return self._effect(verb, target, params or {}, login, gate_tr,
+                                context)
+
+        # Резервирование полосы существует ДО старта нитки эффекта и
+        # переживает её ответ (#569, ревью): между start() и выполнением
+        # первой инструкции нитки планировщик может держать её сколь
+        # угодно долго, и всё это окно полоса обязана быть занята --
+        # допущенная, но ещё не исполняющаяся операция не есть свободная
+        # цель. Держатель -- токен операции (объект, не нитка):
+        # вызывающий занимает его до start, finally самой нитки снимает
+        # по фактическому концу эффекта; неуспешный старт снимает
+        # вызывающий. Слот == 1 всегда: одна операция -- один токен.
+        target_key = self._lane_key(verb, target, params)
+        token = self._reserve(target_key)
         try:
-            verdict = self._limited(
-                lambda: self._effect(verb, target, params or {}, login,
-                                     transport))
+            drained = self._drain(target_key, ignore={token})
+        except BaseException:
+            # Admission упал ДО старта (fault часов в drain): эффекта
+            # нет, владение нитке не передавалось -- резерв снимает тот,
+            # кто его завёл. Снятие и подъём, не заглушка: причина
+            # идёт наверх (#569, ревью 3).
+            token.release()
+            raise
+        if not drained:
+            token.release()
+            who = target_key if target_key is not None else "the target"
+            return {"status": "refused", "error":
+                    f"{who}: the previous operation on this target "
+                    f"is still finishing; this one did not start"}
+        # Снятие держателя -- ровно два места, и оба по одну сторону
+        # границы владения (#569, ревью 3): ДО успешного старта нитки
+        # резерв снимает вызывающий -- неуспешный start (on_start_fail
+        # в _wait_effect) и упавший admission выше; ПОСЛЕ успешного
+        # старта -- ТОЛЬКО finally самой нитки эффекта по фактическому
+        # концу (успех/отказ/крах/пережил срок). Ошибка наблюдателя
+        # при подтверждённом старте полосу не отпускает: эффект жив,
+        # его исход неизвестен, и следующая операция ждёт его в drain.
+        try:
+            verdict = self._limited(whole, target=target_key, token=token)
         except _TimedOut as e:
             # Срок вышел, а не эффект отказал (#497): он мог дойти до
             # цели -- исход неизвестен, повтор автоматом запрещён
-            # (#476: unknown не failed), цель свободна.
+            # (#476: unknown не failed). Хвост эффекта держит полосу
+            # цели (#569): пока нитка жива, следующая операция этой цели
+            # не начинается -- неизвестность не превращается в «свободно».
             return {"status": "unknown", "error": str(e)}
         except ValueError as e:
             # Валидация params (add/update/model/send_request) -- отказ
             # приёма, не сбой: кривой запрос не оставляет «оно сломалось».
             return {"status": "refused", "error": str(e)}
+        if isinstance(verdict, dict) and verdict.get("status") in TERMINAL:
+            # Готовый вердикт статуса (отказ ворот/префетча) -- как есть.
+            return dict(verdict)
         try:
             if isinstance(verdict, dict) and verdict.get("outcome"):
                 kind = verdict.get("outcome")
@@ -387,30 +517,103 @@ class Worker:
             return {"status": "failed", "error": str(e)}
         return {"status": "partial"}
 
-    def _limited(self, effect):
-        """Эффект под сроком (#497): вернувшемуся -- его ответ, молчащему --
-        исключение _TimedOut, которое run терминирует честным unknown.
+    def _limited(self, effect, target=None, token=None):
+        """Эффект под сроком ответа (#497, #569): вернувшемуся -- его
+        результат, молчащему -- _TimedOut, которое run терминирует
+        честным unknown.
 
-        Эффект ходит в шину без своего таймаута: адресат-узел умер -- поток
-        стоит в bus-запросе вечно. С #499 цель держит семафор адаптера, и
-        зависший эффект запирал бы её навсегда; дедлайн возвращает run
-        вердиктом unknown, семафор адаптера освобождается в его finally.
-        Сам поток эффекта НЕ убиваем: Python этого не умеет; он остаётся
-        демоном и умирает с процессом службы. Цели он больше не держит,
-        так что зомби-нитка одной зависшей операции не запирает другие
-        операции по цели.
-        """
-        box = []
+        Эффект ходит в шину без своего таймаута: адресат-узел умер --
+        поток стоит в bus-запросе вечно. Срок #497 возвращает run вердикт
+        unknown за конечное время. Но срок отвечает за ОТВЕТ, не за жизнь
+        эффекта (#569): пока нитка эффекта жива, она ещё может писать
+        цель, и полоса обязана оставаться занятой ею -- прежний контракт
+        «цели он больше не держит» отпускал семафор адаптера, и следующая
+        операция мутировала до того, как старая закончила. Держатель
+        полосы -- токен операции, занятый ДО старта нитки (окно между
+        start и первой инструкцией -- тоже занятая полоса, ревью #569):
+        finally самой нитки снимает его по фактическому концу -- честно
+        завершившийся эффект (успех, отказ, крах) полосу освобождает
+        сразу, переживший срок -- ровно до реального конца, и следующая
+        операция той же цели ждёт его в _drain. Граница владения ровно
+        одна (#569, ревью 3): ДО успешного старта ошибки снимает
+        вызывающий (упавший admission -- run, неуспешный start --
+        on_start_fail), ПОСЛЕ -- только сама нитка; ошибка наблюдателя
+        при подтверждённом старте исход эффекта не определяет и полосу
+        не отпускает. Нитку убить нельзя: она остаётся демоном и умирает
+        с процессом. Пустой ключ (add без origin) держателя не заводит:
+        полосы без имени нет."""
+        if target is None:
+            try:
+                return self._wait_effect(effect)
+            finally:
+                if token is not None:
+                    token.release()
 
         def ride():
             try:
-                box.append((False, effect()))
+                return effect()
+            finally:
+                # Фактический конец эффекта: токен снимает сама нитка --
+                # ответ run (успех/таймаут/крах наблюдателя) тут ни при чём.
+                token.release()
+
+        # Ошибки ЗДЕСЬ токен не трогают: после успешного старта владение
+        # у нитки, и сбой наблюдателя -- не факт о эффекте (#569, ревью 3).
+        # Неудавшийся старт (start бросил до ride) -- единственный случай
+        # снятия на этом пути: колбэк зовёт _wait_effect ДО того, как
+        # нитка стала владельцем. Исключение самого эффекта приходит уже
+        # мёртвой ниткой: ride снял токен сам, повтор был бы no-op.
+        return self._wait_effect(ride, on_start_fail=token.release)
+
+    def _lane_key(self, verb, target, params):
+        """Ключ полосы операции (#569) -- effective_target: одна точка
+        правила для воркера и адаптера. Пустое имя (add приходит как
+        "") -- нормализация к None: иначе все targetless-операции
+        делили бы одну полосу «»."""
+        return effective_target(None, target or None, params)
+
+    def _reserve(self, target_key):
+        """Токен-держатель полосы цели (#569): None-ключ -- пустой токен.
+
+        Токен -- объект операции, не нитка: занятый ДО старта нитки
+        эффекта, он закрывает и окно между start и первой инструкцией
+        (допущенная, но не исполняющаяся операция -- не свободная цель).
+        release идемпотентен: снимают и finally самой нитки по
+        фактическому концу, и вызывающий при неуспешном старте."""
+        token = _LaneToken(target_key, self._lanes_lock, self._lanes)
+        if target_key is not None:
+            with self._lanes_lock:
+                self._lanes.setdefault(target_key, set()).add(token)
+        return token
+
+    def _wait_effect(self, ride, on_start_fail=None):
+        """Ждать эффекта под дедлайном ответа (#497).
+
+        ride занимает и отпускает полосу сам: пережившее срок остаётся
+        держателем, а здесь видны только эффект и срок. on_start_fail --
+        колбэк неудачного СТАРТА (#569, ревью 3): зовётся только когда
+        Thread.start бросил, то есть нитка-эффект не существует и
+        владельца у полосы нет; ошибки ожидания после успешного старта
+        (дедлайн, сбой _sleep/_now наблюдателя) колбэк не зовут -- эффект
+        жив, и полоса остаётся за ним до его фактического конца."""
+        box = []
+
+        def carry():
+            try:
+                box.append((False, ride()))
             except Exception as e:      # тоже результат: его ждёт run
                 box.append((True, e))
 
-        worker = threading.Thread(target=ride, daemon=True,
+        worker = threading.Thread(target=carry, daemon=True,
                                   name="mop-op-effect")
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            # Нитки нет -- владельца нет: резерв снимает колбэк, причину
+            # несём наверх без заглушки.
+            if on_start_fail is not None:
+                on_start_fail()
+            raise
         deadline = self._now() + self.effect_timeout
         while worker.is_alive():
             if self._now() >= deadline:
@@ -422,7 +625,32 @@ class Worker:
             raise value
         return value
 
-    def _effect(self, verb, target, params, login, transport):
+    def _drain(self, target, ignore=frozenset()):
+        """Ждать конца живых хвостов цели (#569) в пределах срока эффекта.
+
+        -> True -- полоса свободна, эффект можно начинать; False -- хвост
+        пережил терпение: отказ без эффекта, с именем причины в run.
+        Терпение -- срок эффекта: ответ операции остаётся ограниченным
+        (терпение + собственный срок), вечного accepted нет. Хвост не
+        обязан умирать к сроку: он держит полосу до фактического конца,
+        следующий run повторит drain. Снявший себя держатель из слота
+        исчезает. ignore -- токен своего вызова: его занятость --
+        ожидаемая, а не хвост."""
+        if target is None:
+            return True
+        deadline = self._now() + self.effect_timeout
+        while True:
+            with self._lanes_lock:
+                slot = self._lanes.get(target)
+                live = [t for t in (slot or ())
+                        if t.held and t not in ignore]
+            if not live:
+                return True
+            if self._now() >= deadline:
+                return False
+            self._sleep(0.1)
+
+    def _effect(self, verb, target, params, login, transport, context=None):
         """Вызов библиотечного workflow #458: воркер не держит копий.
 
         Рестарт -- наблюдаемым режимом (#464): снимок берёт сама операция
@@ -442,11 +670,23 @@ class Worker:
             origin, fields = add_request(params)
             why = self._registry_refusal(origin)
             if why:
+                # Реестр ОТВЕРГ просьбу (ревью 2 #575): projectName из
+                # незарегистрированного origin -- выдумка, его в аудите
+                # нет; тема публикации -- нейтральная admin.
                 return ops.outcome(ops.REFUSED, None, error=why)
             target = origin
+            # Проект решает реестр: он УЖЕ подтвердил origin (#575),
+            # чистая функция без сети. Факт -- В МОМЕНТ подтверждения,
+            # до зависания placement.
+            project = ops.target_project(origin)
+            if context is not None:
+                context["project"] = project
             text, sent = self._source(origin)
-            return ops.add(transport, origin, (text, sent),
-                           branch=params.get("branch"))
+            got = ops.add(transport, origin, (text, sent),
+                          branch=params.get("branch"), context=context)
+            if isinstance(got, dict):
+                got.setdefault("project", project)
+            return got
         if verb == "update":
             fields = update_request(params)
             spec = transport("spec", name=target) or {}
@@ -474,7 +714,7 @@ class Worker:
         if fn is None:
             raise RuntimeError(f"no library operation for {verb}")
         if verb == "send":
-            return fn(target, login, send_request(params))
+            return fn(target, login, send_request(params), context=context)
         return fn(target, login)
 
     def _source(self, origin):

@@ -778,11 +778,18 @@ async def destroy(name, branch=None):
 
     У host на этом месте чистка клона — узел снести нельзя. Здесь можно, и
     это ровно то, чего от рецикла ждут: чистое дерево без следов прошлой
-    работы, включая то, что `git clean` не выметает."""
+    работы, включая то, что `git clean` не выметает.
+
+    Глагол обёртки -- destroy-body с ожидаемым именем (#565/#568): VMID --
+    хеш имени, коллизия возможна, и снос по номеру без сверки уходил бы
+    соседу под тем же номером. Любой отказ обёртки (несовпадение имени,
+    нечитаемое состояние, таймаут, «нет такого глагола» на старой
+    обёртке) -- отказ с причиной, без fallback: снос по номеру без имени
+    и есть дефект, fallback на него возвращал бы его же."""
     if not valid_name(name):
         return {"error": bad_name(name)}
     vmid = vmid_of(name)
-    out, code = await _pve("destroy", vmid, timeout=DESTROY_TIMEOUT)
+    out, code = await _pve("destroy-body", vmid, name, timeout=DESTROY_TIMEOUT)
     if code != 0:
         return {"error": f"{name}: body {vmid} won't go: {why(out, code, DESTROY_TIMEOUT)}"}
     await _forget_host_key(name)

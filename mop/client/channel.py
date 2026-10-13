@@ -184,10 +184,16 @@ def undelivered(kind, to, error):
 
 # ─── вердикт -> текст ────────────────────────────────────────────────────
 def failure(v):
-    """Строка отказа, либо None, если доставлено."""
+    """Строка отказа, либо None, если доставлено.
+
+    Неопределённая доставка (timeout, #574 review-3 п.5) -- своей строкой:
+    «неизвестно» не «отказано», сообщение могло доехать -- повтор мог бы
+    продублировать уже выполненное и автоматически не делается."""
     if v.get("dead"):
         return f"{v['to']}: inbox not listening — session is dead"
     if v.get("error") is not None:
+        if v.get("timeout"):
+            return f"{v['to']}: DELIVERY UNKNOWN — {v['error']}"
         return f"{v['to']}: NOT DELIVERED — {v['error']}"
     return None
 
@@ -203,7 +209,9 @@ def text(v):
         if v.get("owner_note"):
             out += f"; {v['owner_note']}"
         if wait:
-            out += f", idle: {v.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
+            # Причина ошибки наблюдения (#574) -- вместо безымянного «не
+            # дождался»: узел сказал, чем кончилось ожидание.
+            out += f", idle: {v.get('idle_error') or v.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
         if v.get("notify"):
             out += "; will notify when it frees up"
     elif v["kind"] == "local" and wait:

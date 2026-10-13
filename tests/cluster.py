@@ -26,6 +26,7 @@ from _lib import Checks, FakeNomad, NoLiveNomad, offline, patched, restored, GAT
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import cluster  # noqa: E402
+from mop.common import bus, puppets  # noqa: E402
 from mop.common import service  # noqa: E402
 
 RUGENT = "git@git.ermak.dev:rugent/rugent.git"
@@ -119,8 +120,13 @@ def check_gone_job(c):
     глаголов, которые что-то делают.
     STATUS: FIXED — see #89
     """
+    # Подтверждённое отсутствие -- путём клиента: Nomad-заглушка отвечает
+    # пусто, latest_alloc даёт None (NotFound/пустой список), и это ответ,
+    # а не отказ (#89; до #572 тест держался на глотании connection error
+    # без токена -- то есть проверял не то, что заявлял).
     gone = {"verb": "alloc", "name": "pu-rugent-9"}
-    got = cluster.answer("admin", gone)
+    with cluster.using(FakeNomad()):
+        got = cluster.answer("admin", gone)
     if c.check("alloc of a job that is gone must answer, not refuse",
                not (got.get("error") or "alloc" not in got), got):
         c.check("alloc of a job that is gone must be None",
@@ -844,11 +850,18 @@ def check_bootstrap_334(c):
     c.expect("#334 bootstrap_result: project scope, named and acting like spec",
              (row.scope, row.named, row.acting), (cluster.PROJECT, True, True))
     root = tempfile.mkdtemp(prefix="mop-test-cluster-334-")
+    # Реестр проекта (#567): add проверяет наличие проекта в реестре, без
+    # него -- отказ; прежняя среда #334 жила без реестра вовсе.
+    reg334 = tempfile.mkdtemp(prefix="mop-test-cluster-334r-")
+    with open(os.path.join(reg334, "projects.json"), "w") as f:
+        json.dump({"version": 1,
+                   "projects": [{"origin": "git@h:g/mop.git"}]}, f)
     prov = {"source": "origin", "commit": "5b92b440c952fad2", "dirty": False,
             "tasks": 2, "present": True}
     text = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
     own = {"ID": "pu-mop-1", "Version": 3, "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
-    with patched(bootstrap, ROOT=root), \
+    with patched(cluster.projects, SNAPSHOT_DIR=reg334), \
+            patched(bootstrap, ROOT=root), \
             patched(cluster.spec, job_spec=lambda *a, **kw: {"Job": {"ID": a[0]}},
                     respec=lambda name, meta, cont=False, node=None: {"Job": {"ID": name}}), \
             patched(cluster, _live_count=lambda target: 0, next_name=lambda target: "pu-mop-1",
@@ -2016,6 +2029,710 @@ def _no_lock_534():
     return _PassThrough()
 
 
+# ── #567: одновременный add одного проекта ──────────────────────────────
+# HYPOTHESIS: глаголы сервиса идут в потоках петли, а _add делает
+# limit/count → name → workspace → register раздельно и без замка: два add
+# одного проекта оба читают пустой список джобов, оба выбирают
+# pu-<проект>-1, и вторая регистрация перезаписывает спеку первой -- чужой
+# мастер получает чужую ветку; другой interleaving (count второго до
+# регистрации первого) проводит оба мимо последнего слота квоты.
+# _projects_lock здесь не защитил бы и не должен: он про реестр, а реестр
+# add не пишет.
+# SOLUTION: ворота по проекту держат count→name→workspace→register одним
+# куском; project_limit и project_delete берут те же ворота внутри
+# _projects_lock -- порядок замков один (реестровый снаружи, ворота
+# внутри), инверсии нет; независимые проекты заперты каждый своим замком,
+# долгого общего замка нет. Граница гарантии -- один процесс cluster.
+# STATUS: FIXED — see #567
+# (корректирующий коммит: повторная проверка наличия проекта внутри ворот;
+# поведенческие порядки delete/add, содержимое workspace, interleaving лимита)
+import threading  # noqa: E402
+
+ALPHA567 = "git@h:g/alpha.git"
+BETA567 = "git@h:g/beta.git"
+PLAYS567 = {"one": "- name: b1\n  tasks:\n    - name: t1\n      ansible.builtin.command: \"true\"\n",
+            "two": "- name: b2\n  tasks:\n    - name: t2\n      ansible.builtin.command: \"true\"\n"}
+BRANCH567 = {"one": "feature/one", "two": "feature/two"}
+
+
+def tasks_text567(play):
+    """Текст tasks.yml, который bootstrap.store пишет для этого playbook:
+    задачи, как их разбирает manifest.play -- содержимое для сравнения."""
+    from mop.common import manifest
+    _vars, tasks = manifest.play(play)
+    import yaml
+    return yaml.safe_dump(tasks, allow_unicode=True, default_flow_style=False)
+
+
+class _RacyNomad567(FakeNomad):
+    """Номад с барьером: все четыре чтения обоих потоков ЗАВЕРШЕНЫ до
+    любой регистрации. У каждого add ровно два чтения списка (count и
+    name); регистрация ждёт, пока каждое чтение не только пришло, но и
+    прочитало список -- иначе GIL успевает впустить чужую регистрацию
+    между барьером и чтением, и гонка недетерминирована. Так оба add
+    выбирают имя по пустому списку -- всегда, не по везению."""
+
+    READS = 4  # два add по два чтения (count, name)
+
+    def __init__(self):
+        super().__init__()
+        self._m = threading.Lock()
+        self._done = 0                     # чтения, прочитай список
+        self._all_read = threading.Event()  # все четыре чтения завершены
+
+    def get_jobs(self, prefix, meta=False):
+        got = super().get_jobs(prefix, meta)
+        with self._m:
+            self._done += 1
+            if self._done == self.READS:
+                self._all_read.set()
+        return got
+
+    def register(self, spec):
+        if not self._all_read.wait(timeout=10):
+            raise TimeoutError("racy nomad: reads never finished")
+        super().register(spec)
+
+
+class _OverflowNomad567(FakeNomad):
+    """Переполнение последнего слота: count второго -- ДО регистрации
+    первого, name второго -- ПОСЛЕ. Живой pu-alpha-1 уже есть, лимит 2:
+    без ворот оба проходят count=1<2 и регистрируют -2 и -3 -- три живых
+    джоба при потолке два, с разными именами. Порядок держат события:
+    регистрация первого ждёт count второго, name второго ждёт регистрации
+    первого -- цикла нет, оба порядка обязаны случиться."""
+
+    def __init__(self):
+        super().__init__(jobs={"pu-alpha-1": {"ID": "pu-alpha-1", "Status": "run"}})
+        self._m = threading.Lock()
+        self._reads = {}
+        self._t1 = None
+        self._t2_counted = threading.Event()     # второй посчитал живых
+        self._t1_registered = threading.Event()  # первый зарегистрировал
+
+    def _seen(self, extra=()):
+        return [{"ID": "pu-alpha-1", "Status": "run"}, *extra]
+
+    def get_jobs(self, prefix, meta=False):
+        with self._m:
+            me = threading.get_ident()
+            if self._t1 is None:
+                self._t1 = me
+            self._reads[me] = self._reads.get(me, 0) + 1
+            first, n = me == self._t1, self._reads[me]
+        if first:
+            return self._seen()
+        if n == 1:
+            # count второго: только семя, регистрации первого ещё нет
+            self._t2_counted.set()
+            return self._seen()
+        if not self._t1_registered.wait(timeout=10):
+            raise TimeoutError("overflow nomad: the first register never came")
+        return self._seen(extra=[{"ID": "pu-alpha-2", "Status": "run"}])
+
+    def register(self, spec):
+        with self._m:
+            first = threading.get_ident() == self._t1
+        if first:
+            if not self._t2_counted.wait(timeout=10):
+                raise TimeoutError("overflow nomad: the second count never came")
+            super().register(spec)
+            self._t1_registered.set()
+        else:
+            super().register(spec)
+
+
+def _no_gate_567():
+    """Ворота-пустышка: вызов как _project_gate(name), защиты нет --
+    сценарий гонки отключает ворота, как _no_lock_534 отключал замок."""
+    class _PassThrough:
+        def __call__(self, name):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    return _PassThrough()
+
+
+@contextlib.contextmanager
+def _add_env_567(entries, api):
+    """Среда глагола add: снимок реестра, каталог bootstrap, Nomad-заглушка.
+
+    entries -- [(origin, limit|None)] снимка; api подменяет живой Nomad
+    дефолтом контекстной переменной: поток обработчика наследует дефолт, а
+    не контекст потока-родителя. -> каталог bootstrap (файлы workspace)."""
+    import contextvars
+    d = tempfile.mkdtemp(prefix="mop-test-567r-")
+    boot = tempfile.mkdtemp(prefix="mop-test-567w-")
+    try:
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            json.dump({"version": 1,
+                       "projects": [{"origin": o} if l is None
+                                    else {"origin": o, "limit": l}
+                                    for o, l in entries]}, f)
+
+        def stub_spec(name, origin, cont=False, branch=None, node=None):
+            return {"Job": {"ID": name, "Meta": {"origin": origin, "branch": branch}}}
+        cv = contextvars.ContextVar("nomad_api", default=api)
+        with patched(cluster.projects, SNAPSHOT_DIR=d), \
+                patched(_bootstrap, ROOT=boot), \
+                patched(cluster.spec, job_spec=stub_spec), \
+                patched(cluster, _API=cv):
+            yield boot
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(boot, ignore_errors=True)
+
+
+def check_add_race_567(c):
+    """Одновременный add: имена, спеки, квота, независимость, сговор с
+    реестровыми глаголами. Сценарии 1-2 (ворота отключены) документируют
+    гонку и остаются зелёными всегда; сценарии 3+ требуют ворота и красные
+    до реализации."""
+    def adds(requests, project="alpha"):
+        """Одновременные answer(add) в потоках. -> {тег: ответ} | None."""
+        out = {}
+
+        def run(tag, req):
+            out[tag] = cluster.answer(project, {**req, "verb": "add"})
+        ts = [threading.Thread(target=run, args=(t, r)) for t, r in requests.items()]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=15)
+            if t.is_alive():
+                c.fail("#567 a racing add hung", "join timed out")
+                return None
+        return out
+
+    def two(origin=ALPHA567):
+        return {"one": {"origin": origin, "branch": BRANCH567["one"],
+                        "workspace": PLAYS567["one"]},
+                "two": {"origin": origin, "branch": BRANCH567["two"],
+                        "workspace": PLAYS567["two"]}}
+
+    # 1. Гонка без ворот: барьер держит регистрации до всех чтений -- оба
+    # add видят пустой список, берут одно имя, вторая регистрация затирает
+    # спеку первой (жив один джоб, ветка одного из мастеров потеряна).
+    fake = _RacyNomad567()
+    with _add_env_567([(ALPHA567, 2)], fake), \
+            patched(cluster, _project_gate=_no_gate_567()):
+        out = adds(two())
+    if out is None:
+        return
+    names = sorted(v["name"] for v in out.values() if v.get("ok"))
+    c.check("#567 without the gate both adds take the same name -- the race reproduces",
+            len(out) == 2 and all(v.get("ok") for v in out.values())
+            and len(names) == 2 and names[0] == names[1],
+            f"answers: {out}, jobs: {sorted(fake.jobs)}")
+    c.check("#567 without the gate one live job remains: the first spec was overwritten",
+            sorted(fake.jobs) == ["pu-alpha-1"], f"jobs: {sorted(fake.jobs)}")
+
+    # 2. Переполнение последнего слота без ворот: count второго до
+    # регистрации первого, имя -- после; три живых при потолке два.
+    fake = _OverflowNomad567()
+    with _add_env_567([(ALPHA567, 2)], fake), \
+            patched(cluster, _project_gate=_no_gate_567()):
+        out = adds(two())
+    if out is None:
+        return
+    c.check("#567 without the gate the last quota slot is exceeded",
+            len(out) == 2 and all(v.get("ok") for v in out.values())
+            and sorted(fake.jobs) == ["pu-alpha-1", "pu-alpha-2", "pu-alpha-3"],
+            f"answers: {out}, jobs: {sorted(fake.jobs)}, limit: 2")
+
+    # 3. Ворота проекта: без них гарантий нет -- красное до реализации.
+    gate = getattr(cluster, "_project_gate", None)
+    if not c.check("#567 add runs behind the project gate (count-name-workspace-register as one piece)",
+                   callable(gate), "cluster._project_gate отсутствует: гонка открыта"):
+        return
+
+    # 4. За воротами одновременные add одного проекта: разные имена, своя
+    # спека (ветка) и свой workspace у каждого.
+    fake = FakeNomad()
+    with _add_env_567([(ALPHA567, 2)], fake) as boot:
+        out = adds(two())
+        if out is None:
+            return
+        oks = {t: v for t, v in out.items() if v.get("ok")}
+        names = sorted(v["name"] for v in oks.values())
+        c.check("#567 behind the gate both adds pass with different names",
+                len(oks) == 2 and len(set(names)) == 2, f"answers: {out}")
+        for tag, ans in oks.items():
+            job = fake.jobs.get(ans["name"]) or {}
+            path = os.path.join(boot, f"{ans['name']}-tasks.yml")
+            got_ws = open(path).read() if os.path.exists(path) else None
+            c.check(f"#567 the name of {tag} carries its branch and its workspace",
+                    (job.get("Meta") or {}).get("branch") == BRANCH567[tag]
+                    and got_ws == tasks_text567(PLAYS567[tag]),
+                    f"answer: {ans}, job: {job}, workspace: {got_ws!r}")
+
+    # 5. Последний слот: лимит 1, два одновременных add -- ровно один
+    # проходит, второй получает отказ про потолок, джоб один.
+    fake = FakeNomad()
+    with _add_env_567([(ALPHA567, 1)], fake):
+        out = adds(two())
+        if out is None:
+            return
+        oks = [v for v in out.values() if v.get("ok")]
+        refused = [v for v in out.values() if not v.get("ok")]
+        c.check("#567 behind the gate the last slot is not exceeded",
+                len(oks) == 1 and len(refused) == 1
+                and "limit" in refused[0].get("error", "")
+                and sorted(fake.jobs) == [oks[0]["name"]],
+                f"answers: {out}, jobs: {sorted(fake.jobs)}")
+
+    # 6. Ошибка регистрации освобождает ворота: следующий add того же
+    # проекта проходит, а не стоит навсегда.
+    class _OnceBroken(FakeNomad):
+        def __init__(self):
+            super().__init__()
+            self.broken = True
+
+        def register(self, spec):
+            if self.broken:
+                self.broken = False
+                raise RuntimeError("nomad is down for a moment")
+            super().register(spec)
+
+    fake = _OnceBroken()
+    with _add_env_567([(ALPHA567, None)], fake):
+        broken = cluster.answer("alpha", {"verb": "add", "origin": ALPHA567})
+        again = adds({"one": {"origin": ALPHA567}})
+        if again is None:
+            return
+        c.check("#567 a failed registration does not lock the project forever",
+                "error" in broken and again["one"].get("ok"),
+                f"broken: {broken}, again: {again}")
+
+    # 7. Независимость: ворота -- по проекту, свои совпадают от вызова к
+    # вызову, чужие разные; чужой проект не ждёт чужих ворот.
+    c.check("#567 the gate is per project: same name -- same gate, different -- different",
+            cluster._project_gate("alpha") is cluster._project_gate("alpha")
+            and cluster._project_gate("alpha") is not cluster._project_gate("beta"))
+    fake = FakeNomad()
+    with _add_env_567([(ALPHA567, None), (BETA567, None)], fake):
+        held = cluster._project_gate("alpha")
+        held.acquire()
+        try:
+            out = adds({"one": {"origin": BETA567}}, project="beta")
+            if out is None:
+                return
+            c.check("#567 another project works while this gate is held",
+                    out["one"].get("ok"), str(out))
+        finally:
+            held.release()
+        mine = adds({"one": {"origin": ALPHA567}})
+        if mine is None:
+            return
+        c.check("#567 the gated project passes after the gate is released",
+                mine["one"].get("ok"), str(mine))
+
+    # 8. Сговор с удалением, двумя порядками -- поведенчески, без записи
+    # взятых замков. add раньше: delete отказывает живому джобу, проект и
+    # реестр живы. delete раньше: add отказывает, ничего не регистрирует и
+    # не пишет workspace. Это дыра из приёмки: _add читал только лимиты,
+    # отсутствующий проект читался как unlimited, и допущенный add
+    # регистрировал джоба снятому проекту. Среда -- только реестр и его
+    # соседи: ростер обязан видеть настоящего Nomad-заглушку, поэтому
+    # patched_env с его пустым nomad_jobs здесь не годится.
+    def stub_spec(name, origin, cont=False, branch=None, node=None):
+        # Type=service: ростер различает папетов от sysbatch по типу джоба
+        # (puppets.visible), без него delete не увидит живого.
+        return {"Job": {"ID": name, "Type": "service",
+                        "Meta": {"origin": origin}}}
+
+    def registry_env_567(limits):
+        """Реестр в своём каталоге, ростер и bootstrap -- заглушками.
+
+        -> (контекст, каталог): список файлов bootstrap в контексте, чтобы
+        проверять «не пишет workspace» по разнице до/после."""
+        from mop.common import projects as _projects
+        d = tempfile.mkdtemp(prefix="mop-test-567r-")
+        boot = tempfile.mkdtemp(prefix="mop-test-567w-")
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            json.dump({"version": 1,
+                       "projects": [{"origin": o} if l is None
+                                    else {"origin": o, "limit": l}
+                                    for o, l in (("git@git.ermak.dev:ermak/rudesktop.git", None),
+                                                 (MOP534, limits))]}, f)
+
+        def read_users(path=None):
+            return None
+
+        def apply_stub(names, verify_user=None):
+            return False
+
+        @contextlib.contextmanager
+        def inner():
+            try:
+                with patched(_projects, SNAPSHOT_DIR=d,
+                             SNAPSHOT=os.path.join(d, "projects.json")), \
+                        patched(_natsconf, read_users=read_users,
+                                read_base=lambda: {"service": "pw"}), \
+                        patched(cluster, _users_apply=apply_stub), \
+                        patched(_bootstrap, ROOT=boot):
+                    yield boot
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.rmtree(boot, ignore_errors=True)
+        return inner(), boot
+
+    # add раньше: delete отказывает живому джобу.
+    ctx, _ = registry_env_567(None)
+    with ctx, patched(cluster.spec, job_spec=stub_spec):
+        fake = FakeNomad()
+        got = cluster.answer("mop", {"verb": "add", "origin": MOP534,
+                                     "workspace": PLAYS567["one"]}, api=fake)
+        c.check("#567 add of a registered project answers ok", got.get("ok"), str(got))
+        drop = cluster.answer("admin", {"verb": "project_delete", "name": "mop"}, api=fake)
+        c.check("#567 delete refuses while the project has a live puppet",
+                "error" in drop, f"delete: {drop}")
+
+    # delete раньше: add отказывает, ничего не регистрирует, workspace не
+    # пишет. Порядок «add уже стоит у ворот» не искусственный: delete и add
+    # врезаются в один проект, ворота дают ровно один порядок, и в обоих
+    # итог обязателен: отказ после снятого проекта.
+    ctx, boot = registry_env_567(None)
+    with ctx, patched(cluster.spec, job_spec=stub_spec):
+        fake = FakeNomad()
+        drop = cluster.answer("admin", {"verb": "project_delete", "name": "mop"}, api=fake)
+        c.check("#567 delete of an empty project answers ok", drop.get("ok"), str(drop))
+        before = set(os.listdir(boot))
+        ans = cluster.answer("mop", {"verb": "add", "origin": MOP534,
+                                     "workspace": PLAYS567["two"]}, api=fake)
+        written = sorted(set(os.listdir(boot)) - before)
+        c.check("#567 an add after delete refuses instead of registering",
+                "error" in ans, f"answer: {ans}")
+        c.check("#567 the refused add registers no job",
+                fake.jobs == {}, f"jobs: {sorted(fake.jobs)}")
+        c.check("#567 the refused add writes no workspace",
+                written == [], f"written: {written}")
+
+
+def check_add_limit_interleaving_567(c):
+    """Смена лимита против add: контракт по точкам мутаций, не по порядку
+    ответов.
+
+    Порядок ответов -- не порядок мутаций: поток add может завершить
+    регистрацию и отпустить ворота, а его ответ -- задержаться; лимит
+    успевает сохраниться и ответить раньше, и это законный
+    add-before-limit. Поэтому наблюдение -- сами точки: регистрация add
+    (register у Nomad-заглушки) и запись нового лимита (cluster._save).
+    Два контролируемых порядка:
+      A. add регистрируется до сохранения нового лимита -- add паркится у
+         register, лимит стучится в ворота; обоим ok допустимо, третий
+         джоб законен по старому потолку, и в журнале мутаций register
+         раньше save;
+      B. новый лимит сохранён до решения add -- add отказывает, без
+         register и workspace.
+    Красное при снятии координации: без ворот (у лимита или у add) save
+    врезается между чтением потолка и регистрацией -- журнал даёт save
+    раньше register при ok-ответе add. Никаких timestamp'ов: только
+    события и журнал мутаций."""
+    import time
+
+    class _ParkNomad(FakeNomad):
+        """Регистрация паркится до разрешения координатора; сам факт --
+        строка в журнале мутаций."""
+
+        def __init__(self, jobs):
+            super().__init__(jobs=jobs)
+            self.at_register = threading.Event()
+            self.release_register = threading.Event()
+
+        def register(self, spec):
+            self.at_register.set()
+            if not self.release_register.wait(timeout=10):
+                raise TimeoutError("567 limit race: register was never released")
+            super().register(spec)
+            with m:
+                log.append("register")
+
+    class _GateProbe:
+        """Замок-наблюдатель: тот же замок, но стук в него виден."""
+
+        def __init__(self, real, knock):
+            self.real, self.knock = real, knock
+
+        def acquire(self, *a, **k):
+            self.knock.set()
+            return self.real.acquire(*a, **k)
+
+        def release(self):
+            self.real.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    def wait_first(*events, timeout=10):
+        """Первое из событий. Координация, не доказательство: таймаут --
+        FAIL вызывающего, как страховка у #534."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for e in events:
+                if e.is_set():
+                    return True
+            time.sleep(0.005)
+        return False
+
+    def job(i):
+        return {"ID": f"pu-mop-{i}", "Status": "run", "Meta": {"origin": MOP534}}
+
+    def stub_spec(name, origin, cont=False, branch=None, node=None):
+        return {"Job": {"ID": name, "Type": "service", "Meta": {"origin": origin}}}
+
+    real_gate = cluster._project_gate
+
+    # A. Register раньше save: add паркится у register (держит ворота),
+    # лимит отпускают только у самых ворот -- координатор ждёт стука (или,
+    # если координация снята, самой записи) и после неё завершает add.
+    m, log = threading.Lock(), []
+    knock = threading.Event()   # лимит у ворот
+    saved = threading.Event()   # новый лимит записан
+    real_save = cluster._save
+
+    def saving(snapshot):
+        real_save(snapshot)
+        with m:
+            log.append("save")
+            saved.set()
+
+    fake = _ParkNomad({j["ID"]: j for j in (job(1), job(2))})
+    env = _Registry534(limits={"mop": 3})
+    try:
+        with env.patched_env():
+            out = {}
+
+            def run_add():
+                out["add"] = cluster.answer(
+                    "mop", {"verb": "add", "origin": MOP534,
+                            "workspace": PLAYS567["one"]}, api=fake)
+
+            def run_limit():
+                out["limit"] = cluster.answer(
+                    "admin", {"verb": "project_limit", "name": "mop",
+                              "value": "1"}, api=fake)
+
+            def probing(name):
+                return _GateProbe(real_gate(name), knock)
+
+            with patched(cluster, _project_gate=probing, _save=saving), \
+                    patched(cluster.spec, job_spec=stub_spec), \
+                    patched(_bootstrap, ROOT=tempfile.mkdtemp(prefix="mop-test-567d-")):
+                a = threading.Thread(target=run_add)
+                a.start()
+                if not fake.at_register.wait(timeout=10):
+                    c.fail("#567 the limit race coordinator timed out",
+                           "add never reached register")
+                    a.join(timeout=15)
+                    return
+                # knock общий у любого acquire: сам add уже стукнул при
+                # входе в ворота. Стираем его ЗДЕСЬ, между подтверждённым
+                # register и стартом лимита -- wait_first ниже ждёт стука
+                # потока лимита (или его save), а не следа add.
+                knock.clear()
+                l = threading.Thread(target=run_limit)
+                l.start()
+                # Стук лимита в ворота -- либо, без координации, его запись:
+                # в обоих случаях add можно отпускать, порядок мутаций
+                # решит журнал, а не таймер.
+                if not wait_first(knock, saved):
+                    c.fail("#567 the limit race coordinator timed out",
+                           "limit neither knocked nor saved")
+                    fake.release_register.set()
+                    a.join(timeout=15)
+                    l.join(timeout=15)
+                    return
+                fake.release_register.set()
+                a.join(timeout=15)
+                l.join(timeout=15)
+                for t, n in ((a, "add"), (l, "limit")):
+                    if t.is_alive():
+                        c.fail(f"#567 the interleaved {n} hung", "join timed out")
+                        return
+            add, lim = out.get("add") or {}, out.get("limit") or {}
+            if not c.check("#567 the limit change answers ok in the race",
+                           lim.get("ok"), f"limit: {lim}, add: {add}"):
+                return
+            with m:
+                order = list(log)
+            c.check("#567 a passing add registers before the new limit is saved",
+                    add.get("ok") and "register" in order and "save" in order
+                    and order.index("register") < order.index("save"),
+                    f"add: {add}, mutations: {order}")
+            c.check("#567 the third puppet is legal under the old ceiling",
+                    sorted(fake.jobs) == ["pu-mop-1", "pu-mop-2", "pu-mop-3"],
+                    f"jobs: {sorted(fake.jobs)}")
+    finally:
+        env.cleanup()
+
+    # B. Save раньше решения add: лимит завершён, add приходит следом --
+    # отказ про потолок, ни регистрации, ни workspace. Ответ add может
+    # задержаться сколько угодно: проверка смотрит содержание, не порядок.
+    m, log = threading.Lock(), []
+    saved = threading.Event()
+    fake = _ParkNomad({j["ID"]: j for j in (job(1), job(2))})
+    env = _Registry534(limits={"mop": 3})
+    try:
+        with env.patched_env():
+            def saving_b(snapshot):
+                real_save(snapshot)
+                with m:
+                    log.append("save")
+                    saved.set()
+
+            boot = tempfile.mkdtemp(prefix="mop-test-567e-")
+            with patched(cluster, _save=saving_b), \
+                    patched(cluster.spec, job_spec=stub_spec), \
+                    patched(_bootstrap, ROOT=boot):
+                lim = cluster.answer("admin", {"verb": "project_limit",
+                                               "name": "mop", "value": "1"}, api=fake)
+                if not c.check("#567 the limit saved first answers ok",
+                               lim.get("ok") and saved.wait(timeout=0),
+                               f"limit: {lim}"):
+                    return
+                add = cluster.answer("mop", {"verb": "add", "origin": MOP534,
+                                             "workspace": PLAYS567["two"]}, api=fake)
+                written = sorted(p for p in os.listdir(boot)
+                                 if p.startswith("pu-"))
+            c.check("#567 the add decided after the save refuses on the ceiling",
+                    "error" in add and "limit" in add.get("error", ""),
+                    f"add: {add}")
+            c.check("#567 the refused add registers nothing",
+                    "register" not in log and sorted(fake.jobs) == ["pu-mop-1", "pu-mop-2"],
+                    f"mutations: {log}, jobs: {sorted(fake.jobs)}")
+            c.check("#567 the refused add writes no workspace",
+                    written == [], f"written: {written}")
+    finally:
+        env.cleanup()
+
+
+# ── #572: ошибка чтения аллокации -- не отсутствие ──────────────────────
+# HYPOTHESIS: _alloc ловит ВСЕ исключения latest_alloc и отвечает
+# ok=true, alloc=None. Подтверждённое отсутствие джоба уже закрывает
+# nomad.latest_alloc (NotFound -> None), сюда доезжают только сбои:
+# сеть, лежащий API, чужая 500. Ответ «аллокации нет» при сбое чтения --
+# достоверная ложь: puppets.delete забывает узел и сносит джоб без
+# cleanup, _wait_stopped принимает сбой за завершённый stop.
+# SOLUTION: не глотать: сбой чтения доезжает до просителя ошибкой с
+# причиной через существующий RPC-boundary (_answer -> describe_error);
+# None остаётся только подтверждённому отсутствию (NotFound/пусто).
+# Публичная форма успешного ответа не меняется.
+# STATUS: FIXED — see #572
+
+
+def check_alloc_errors_572(c):
+    """Глагол alloc: сбой чтения -- ошибка с причиной, не ok+None.
+
+    Через реальный boundary answer(): исключение обработчика несёт
+    describe_error из _answer, проситель видит отказ, а не «нет
+    аллокации». Нормальная аллокация и подтверждённое отсутствие --
+    прежние ответы байт в байт."""
+    def raw_alloc(node="hyper", status="running"):
+        return {"ID": "a1", "JobID": "pu-mop-1", "NodeName": node,
+                "ClientStatus": status, "DesiredStatus": "run"}
+
+    # Нормальная аллокация: прежний ответ, driver из меты узла.
+    fake = FakeNomad(allocs={"pu-mop-1": raw_alloc()}, meta={"hyper": {"mop_driver": "pve"}})
+    with cluster.using(fake):
+        got = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+    ok_row = got.get("alloc") or {}
+    c.check("#572 a live allocation answers as before",
+            got.get("ok") and got.get("driver") == "pve"
+            and ok_row.get("NodeName") == "hyper"
+            and ok_row.get("ClientStatus") == "running",
+            f"answer: {got}")
+
+    # Подтверждённое отсутствие: NotFound уже превращён в None клиентом --
+    # это ответ, а не отказ.
+    fake = FakeNomad()
+    with cluster.using(fake):
+        got = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+    c.expect("#572 a confirmed absence answers ok with alloc None",
+             got, {"ok": True, "alloc": None, "driver": None})
+
+    # Сбой чтения: transport-обрыв и ошибка API -- отказ с причиной, не
+    # «аллокации нет». Не «наличие строки»: три разные ошибки и полный
+    # answer-boundary.
+    class _BrokenNomad(FakeNomad):
+        def __init__(self, bang):
+            super().__init__()
+            self.bang = bang
+
+        def latest_alloc(self, job_id):
+            raise self.bang
+
+    for bang in (ConnectionError("bus: node down"),
+                 RuntimeError("nomad API returned 500"),
+                 TimeoutError("nomad read timed out")):
+        with cluster.using(_BrokenNomad(bang)):
+            got = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+        c.check(f"#572 a read failure ({type(bang).__name__}) answers an error, not ok+None",
+                got.get("error") and "alloc" not in got
+                and type(bang).__name__.lower() not in ("",)
+                and str(bang) in got["error"],
+                f"answer: {got}")
+
+    # Дающие-сдался (#345) живут как жили: с аллокацией и без.
+    fake = FakeNomad()
+    with cluster.using(fake):
+        gave = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+    c.expect("#572 without gave_up the answer stays byte-for-byte today's",
+             gave, {"ok": True, "alloc": None, "driver": None})
+
+
+def check_alloc_error_stops_delete_572(c):
+    """Сбой чтения не ведёт мутации: delete не забывает узел из-за
+    ошибки чтения, wait не принимает сбой за завершённый stop.
+
+    Через библиотечный вход puppets.delete с заглушенным _cluster: глагол
+    alloc отвечает error (как обязан после фикса), и delete обязан
+    остановиться ДО ворот снятия -- ни delete-глагола, ни wait, ни wipe.
+    Аналогично _wait_stopped: error поднимается наверх исключением (штатный
+    контракт _cluster), не читается как «остановился»."""
+    calls = []
+
+    def cluster_refusing(verb, **fields):
+        calls.append((verb, fields))
+        raise bus.Refused("alloc: Nomad connection error: node down")
+
+    with patched(puppets, _cluster=cluster_refusing, _wait_stopped=None, wipe=None), \
+            patched(bus, login=lambda: "anton"):
+        refused = None
+        try:
+            puppets.delete("pu-mop-1", force=True)
+        except bus.Refused as e:
+            refused = e
+        c.check("#572 delete stops on a read failure before any mutation",
+                refused is not None and calls == [("alloc", {"name": "pu-mop-1"})],
+                f"refused: {refused}, calls: {calls}")
+
+    # _wait_stopped: сбой чтения -- исключение наружу, не «остановился».
+    polled = {"n": 0}
+
+    def cluster_flaky(verb, **fields):
+        polled["n"] += 1
+        raise bus.Refused("alloc: Nomad API error: 500")
+
+    with patched(puppets, _cluster=cluster_flaky):
+        stopped = None
+        try:
+            puppets._wait_stopped("pu-mop-1")
+        except bus.Refused as e:
+            stopped = e
+        c.check("#572 wait_stopped raises on a read failure instead of passing",
+                stopped is not None and polled["n"] == 1,
+                f"raised: {stopped}, polls: {polled}")
+
+
 def main():
     c = Checks()
     check_join_config_404(c)
@@ -2033,6 +2750,8 @@ def main():
                   check_nomad_api_275, check_stderr_verb_333,
                   check_update_origin_365, check_nodes_api_375,
                   check_registry_verbs_534, check_concurrent_534,
+                  check_add_race_567, check_add_limit_interleaving_567,
+                  check_alloc_errors_572, check_alloc_error_stops_delete_572,
                   ):
         check(c)
     return c.report("cluster")

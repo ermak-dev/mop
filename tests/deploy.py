@@ -2544,6 +2544,209 @@ def check_llm_alias_gone_546(c, can_render):
             got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
 
 
+# ── #565: destroy сверяет ожидаемое имя тела ────────────────────────────
+# HYPOTHESIS (#565): глагол destroy принимает один VMID и проверяет лишь
+# префикс pu- (check_host по файлу конфига, conf_hostname), а VMID -- хеш
+# имени (vmid_of). При коллизии имён (ensure ловит её на подъёме, но не при
+# сносе) cleanup упавшего тела B с VMID занятого живого тела A уничтожает
+# A: сверять не с кем, ожидаемое имя в вызов не приехало.
+# SOLUTION: новый глагол destroy-body <vmid> <expected-name>. Имя стоящего
+# тела -- `pct config` с точным сравнением перед любой мутацией. Отсутствие
+# тела обёртка различает от нечитаемого состояния: номера нет в `pct list`
+# -- идемпотентный успех; `pct config` или `pct list` упали -- отказ
+# fail-closed, без stop/destroy. Прежний destroy (сборка и образы, имя
+# знает сам плейбук) не меняется и проверяется прежним успехом по VMID:
+# путь conf_hostname на время теста подменяется одной контролируемой
+# заменой /etc/pve/lxc/ на каталог фикстур, чтобы стенд не зависел от
+# машины и не читал настоящие конфиги гипервизора.
+# RESULT: RED на b9dfc2a -- глагола destroy-body нет, и падают ровно
+# кейсы нового глагола (отказ вместо удаления, отсутствие вместо отказа
+# при нечитаемом ростере); прежний destroy при этом проходит, как и
+# должен: дефект был в нехватке контракта, а не в нём.
+# STATUS: FIXED — see #565
+def check_pve_destroy_body_565(c, can_render):
+    if not can_render:
+        return
+    import subprocess
+    import tempfile
+    import textwrap
+
+    # Рендер обёртки с теми же подстановками, что ставит роль pve.
+    src = open(os.path.join(DEPLOY, "roles", "pve", "templates", "mop-pve.j2"),
+               encoding="utf-8").read()
+    with tempfile.TemporaryDirectory() as d:
+        # Фикстуры конфигов для conf_hostname: прежний destroy (и только он)
+        # читает hostname из /etc/pve/lxc/<vmid>.conf напрямую (#138). Путь
+        # абсолютный, и подменяется он одной заменой в ОТРЕНДЕРЕННОМ тестовом
+        # скрипте -- production-шаблон не меняется. Подстановок ровно одна:
+        # исчезни путь из шаблона, проверка заметит.
+        conf_dir = os.path.join(d, "lxc")
+        os.makedirs(conf_dir)
+        # 9101 -- «наш» pu-mop-1; 9102 -- чужое pu-other-3, жертва, которую
+        # снёс бы чужой cleanup, будь проверка только по префиксу.
+        for vmid, host in (("9101", "pu-mop-1"), ("9102", "pu-other-3")):
+            with open(os.path.join(conf_dir, f"{vmid}.conf"), "w") as f:
+                f.write(f"arch: amd64\nhostname: {host}\ncores: 2\n")
+        wrapper = render(src, {"pve_vmid_min": "9000",
+                               "pve_facts": {"vmid_max": 9999},
+                               "MOP_USER": "mopuser"})
+        real, fake = "/etc/pve/lxc/", conf_dir + "/"
+        c.check("#565 the wrapper renders with the role's substitutions",
+                wrapper.startswith("#!/bin/bash"), wrapper[:40])
+        n_paths = wrapper.count(real)
+        c.check("#565 exactly one /etc/pve/lxc/ path to substitute",
+                n_paths == 1, f"{n_paths} in the template")
+        if n_paths:
+            wrapper = wrapper.replace(real, fake)
+        c.check("#565 no absolute /etc/pve path remains in the stand",
+                "/etc/pve" not in wrapper, "left as is")
+
+        # Подставной pct: журнал вызовов, конфиги и ростер. Реакции как у
+        # настоящего: config несуществующего -- код 2, ростер -- таблица
+        # VMID'ов; PCT_CONFIG_FAIL/PCT_LIST_FAIL делают чтение нечитаемым
+        # (любой ненулевой код, не только «нет такого CT»).
+        calls = os.path.join(d, "calls")
+        pct = os.path.join(d, "pct")
+        conf = {"9101": "hostname: pu-mop-1\ncores: 2\n",
+                "9102": "hostname: pu-other-3\nmemory: 2048\n"}
+        with open(pct, "w") as f:
+            f.write(textwrap.dedent("""\
+                #!/bin/bash
+                echo "$*" >> "$CALLS"
+                if [[ "$1 $2" == "config 9101" && -n "$PCT_CONFIG_FAIL" ]]; then
+                    echo "pct config error: cluster not ready" >&2
+                    exit 255
+                fi
+                case "$1" in
+                list)
+                    if [[ -n "$PCT_LIST_FAIL" ]]; then
+                        echo "cluster not ready" >&2; exit 255
+                    fi
+                    echo "VMID  Status"
+                    echo "9101  stopped"
+                    echo "9102  running"
+                    ;;
+                config)
+                    case "$2" in
+                    9101) printf '%s' "$PCT_CONF_9101" ;;
+                    9102) printf '%s' "$PCT_CONF_9102" ;;
+                    *) echo "no such CT ($2)" >&2; exit 2 ;;
+                    esac
+                    ;;
+                esac
+                exit 0
+                """))
+        os.chmod(pct, 0o755)
+        env = dict(os.environ, PATH=f"{d}:{os.environ['PATH']}", CALLS=calls,
+                   PCT_CONF_9101=conf["9101"], PCT_CONF_9102=conf["9102"])
+
+        def run(*args, extra=None):
+            e = dict(env, **(extra or {}))
+            return subprocess.run(["bash", "/dev/stdin"] + list(args),
+                                  input=wrapper, env=e, capture_output=True,
+                                  text=True, timeout=30)
+
+        # Журнал pct накапливается между прогонами -- каждый сценарий читает
+        # его с чистого листа, чтобы «мутаций не было» значило «в ЭТОМ
+        # прогоне», а не «за всю жизнь подставного pct».
+        def clear():
+            if os.path.exists(calls):
+                os.unlink(calls)
+
+        def ran():
+            """Журнал pct. Мутации -- stop и destroy; ростер и конфиг --
+            чтение, и их отсутствие не требуется: отказ обязан быть без
+            ИЗМЕНЕНИЙ, а не без вопросов."""
+            return open(calls).read() if os.path.exists(calls) else ""
+
+        def mutated():
+            return any(l.startswith(("stop ", "destroy "))
+                       for l in ran().splitlines())
+
+        # Несовпадение имени: отказ с именем стоящего тела, ни stop, ни destroy.
+        clear()
+        r = run("destroy-body", "9101", "pu-mop-2")
+        c.check("#565 mismatch -> refusal naming the standing body",
+                r.returncode != 0 and "pu-mop-1" in r.stderr,
+                f"rc={r.returncode} stderr={r.stderr!r}")
+        c.check("#565 mismatch -> neither stop nor destroy ran",
+                not mutated(), ran())
+
+        # Совпадение имени: тело сносится -- stop, потом destroy.
+        clear()
+        r = run("destroy-body", "9101", "pu-mop-1")
+        c.check("#565 match -> success",
+                r.returncode == 0, f"rc={r.returncode} stderr={r.stderr!r}")
+        c.check("#565 match -> stop then destroy of that vmid",
+                [l for l in ran().splitlines() if not l.startswith(("list", "config"))]
+                == ["stop 9101", "destroy 9101 --force 1 --purge 1"],
+                ran())
+
+        # Подтверждённое отсутствие (номера нет в ростере): успех без мутаций.
+        clear()
+        r = run("destroy-body", "9998", "pu-mop-9")
+        c.check("#565 confirmed absence -> idempotent success",
+                r.returncode == 0, f"rc={r.returncode} stderr={r.stderr!r}")
+        c.check("#565 confirmed absence -> no mutation",
+                not mutated(), ran())
+
+        # Ошибка чтения конфига (pct config упал) -- НЕ отсутствие.
+        clear()
+        r = run("destroy-body", "9101", "pu-mop-1",
+                extra={"PCT_CONFIG_FAIL": "1"})
+        c.check("#565 config read error -> refusal, not absence",
+                r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
+        c.check("#565 config read error -> no mutation",
+                not mutated(), ran())
+
+        # И ростер нечитаем (pct list упал) -- тоже отказ: состояние неизвестно.
+        clear()
+        r = run("destroy-body", "9998", "pu-mop-9", extra={"PCT_LIST_FAIL": "1"})
+        c.check("#565 roster read error -> refusal, not absence",
+                r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
+        c.check("#565 roster read error -> no mutation",
+                not mutated(), ran())
+
+        # Доводы валидации: без имени, не-число, вне диапазона, имя не pu-,
+        # недопустимый символ в имени. Отказ каждого -- ДО любого вызова pct:
+        # журнал пуст целиком, не «без stop/destroy».
+        for args, why_not in ((("destroy-body", "9001"), "one argument"),
+                          (("destroy-body", "abc", "pu-mop-1"), "vmid not a number"),
+                          (("destroy-body", "8000", "pu-mop-1"), "vmid outside the range"),
+                          (("destroy-body", "9101", "other-1"), "name not pu-"),
+                          (("destroy-body", "9101", "pu-mo p-1"), "name with a space")):
+            clear()
+            r = run(*args)
+            c.check(f"#565 invalid call ({why_not}) -> refusal",
+                    r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
+            c.check(f"#565 invalid call ({why_not}) -> pct never called",
+                    ran() == "", ran())
+
+        # Прежний destroy сборки не тронут: плейбук зовёт его без имени, и он
+        # по-прежнему сносит по одному VMID после префиксной проверки --
+        # настоящим прежним успехом, на изолированных фикстурах конфигов.
+        clear()
+        r = run("destroy", "9102")
+        c.check("#565 the build's destroy still succeeds by vmid alone",
+                r.returncode == 0
+                and [l for l in ran().splitlines()
+                     if not l.startswith("config")]
+                == ["stop 9102", "destroy 9102 --force 1 --purge 1"],
+                f"rc={r.returncode} stderr={r.stderr!r} calls={ran()!r}")
+
+        # Прежний destroy на отсутствующем теле -- идемпотентный успех:
+        # конфига в фикстурах нет, pct config отвечает кодом 2.
+        clear()
+        r = run("destroy", "9997")
+        c.check("#565 the build's destroy stays idempotent on absence",
+                r.returncode == 0 and ran() == "config 9997\n",
+                f"rc={r.returncode} stderr={r.stderr!r} calls={ran()!r}")
+
+        # Новый глагол заявлен в подсказке об отказе.
+        c.check("#565 destroy-body is an advertised verb",
+                "destroy-body" in wrapper, "not in the usage line")
+
+
 def main():
     c = Checks()
     check_cluster_key_copy_402(c)
@@ -2565,6 +2768,7 @@ def main():
     check_root_v1_proxy_529(c, can_render)
     check_llm_alias_gone_546(c, can_render)
     check_llmproxy_loopback_558(c, can_render)
+    check_pve_destroy_body_565(c, can_render)
     check_private_ca_517(c, can_render)
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})

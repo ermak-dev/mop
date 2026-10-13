@@ -156,12 +156,31 @@ OWNER_LINES = ["anton\t1000000\n", "anton\t1000000", "  anton \t 5", "garbage",
                "", "\t5", "anton\tsoon", "a\tb\tc"]
 
 
+def _fresh_clone(tmp):
+    """Настоящий запушенный клон: чистый и дома, как клон папета после
+    подъёма. С #564 проба читает только читаемый git-ом репозиторий:
+    каталог с пустым .git/ обязательные команды больше не разбирают, и
+    факты (а с ними аренда) читались неизвестными."""
+    import subprocess
+    origin, seed = os.path.join(tmp, "origin.git"), os.path.join(tmp, "seed")
+
+    def git(*args, cwd=None):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                       cwd=cwd, check=True, capture_output=True)
+    git("init", "-q", "-b", "master", "--bare", origin)
+    git("init", "-q", "-b", "master", seed)
+    git("commit", "-q", "--allow-empty", "-m", "seed", cwd=seed)
+    git("push", "-q", origin, "master", cwd=seed)
+    clone = os.path.join(tmp, "clone")
+    git("clone", "-q", origin, clone, cwd=seed)
+    return clone
+
+
 def agent_forms():
     """Факты клона с владельцем -- ответ агента по шине; файл аренды --
-    настоящий шелл над временным клоном, как tests/agent.py (#189)."""
+    настоящий шелл над настоящим клоном, как tests/agent.py (#189)."""
     out = {}
-    root = tempfile.mkdtemp(prefix="mop-test-204-")
-    os.makedirs(os.path.join(root, ".git"))
+    root = _fresh_clone(tempfile.mkdtemp(prefix="mop-test-204-"))
     path = os.path.join(root, ".git", "mop-owner")
 
     async def canned(name, script, timeout=20):

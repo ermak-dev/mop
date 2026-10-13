@@ -350,6 +350,16 @@ def main():
         mcp.send(PUPPET, "hi", force=True)
         c.expect("mcp force travels", s.calls[-1][3]["force"], True)
 
+        # #574 ревью 3 п.5: тело молчит -- {"error", "timeout"}: доставка
+        # неизвестна, не отказана. Отдельная строка, не «NOT DELIVERED»:
+        # повторять высланное можно, звать чужую аренду заново -- нет.
+        s.answers["request"] = {"error": "pu-mop-9: the body did not answer in 20s",
+                                "timeout": True}
+        c.expect("mcp indeterminate delivery",
+                 mcp.send(PUPPET, "hi"),
+                 "pu-mop-9: DELIVERY UNKNOWN — pu-mop-9: the body did not answer in 20s")
+        s.answers["request"] = {"msg_id": "m1"}
+
         s.answers["request"] = bus.BusError("node agent n1 did not answer in 20s")
         c.expect("mcp bus error", mcp.send(PUPPET, "hi"),
                  "pu-mop-9: NOT DELIVERED — node agent n1 did not answer in 20s")
@@ -362,6 +372,13 @@ def main():
         s.answers["request"] = {"msg_id": "m1"}
         c.expect("mcp wait not idle", mcp.send(PUPPET, "hi", wait_seconds=30),
                  "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s")
+        # #574: ошибка наблюдения простоя -- не молчаливое «не дождался»:
+        # узел называет причину, и она доезжает тем же вердиктом.
+        s.answers["request"] = {"msg_id": "m1", "idle": None,
+                                "idle_error": "idle observation failed"}
+        c.expect("mcp idle error keeps the reason",
+                 mcp.send(PUPPET, "hi", wait_seconds=30),
+                 "pu-mop-9: delivered (msg_id=m1), idle: idle observation failed")
         mcp.send(PUPPET, "hi", wait_seconds=9999)
         c.expect("mcp wait clamped", s.calls[-1][3]["wait"], 600)
         mcp.send(PUPPET, "hi", wait_seconds=-5)
@@ -497,8 +514,14 @@ def main():
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "owner_note": NOTE},
              f"pu-mop-9: delivered (msg_id=m1); {NOTE}"),
             ({"kind": "puppet", "to": PUPPET, "error": OWNED}, f"pu-mop-9: NOT DELIVERED — {OWNED}"),
+            ({"kind": "puppet", "to": PUPPET,
+              "error": "pu-mop-9: the body did not answer in 20s", "timeout": True},
+             "pu-mop-9: DELIVERY UNKNOWN — pu-mop-9: the body did not answer in 20s"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "wait": 30},
              "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s"),
+            ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "wait": 30,
+              "idle": None, "idle_error": "idle observation failed"},
+             "pu-mop-9: delivered (msg_id=m1), idle: idle observation failed"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "notify": True},
              "pu-mop-9: delivered (msg_id=m1); will notify when it frees up"),
             ({"kind": "local", "to": "s1", "dead": True}, "s1: inbox not listening — session is dead"),
@@ -510,6 +533,13 @@ def main():
     c.expect("failure of delivered", channel.failure({"kind": "puppet", "to": PUPPET, "msg_id": "m1"}), None)
     c.expect("failure of refused", channel.failure({"kind": "puppet", "to": PUPPET, "error": OWNED}),
              f"pu-mop-9: NOT DELIVERED — {OWNED}")
+    # Неопределённая доставка (#574 ревью 3 п.5) -- тоже «не доставлено»
+    # для канона failure (выход -- с причиной), но своей строкой.
+    c.expect("failure of indeterminate",
+             channel.failure({"kind": "puppet", "to": PUPPET,
+                              "error": "the body did not answer in 20s",
+                              "timeout": True}),
+             "pu-mop-9: DELIVERY UNKNOWN — the body did not answer in 20s")
 
     # Копий во фронтендах больше нет: потолок, тексты отказа, своя сессия.
     here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))

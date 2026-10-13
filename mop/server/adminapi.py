@@ -17,8 +17,10 @@ waiting), а не отказывает 409 (#497: отказ висел часа
 
 Сериализация -- семафор на устойчивую идентичность цели (effective_
 target): операции одной цели едут по очереди, разных -- параллельно.
-Семафор освобождается в finally: зависший эффект (#497 -- таймаут
-отдельным слоем) встаёт сюда без переделки этого слоя.
+Семафор адаптера держится до ОТВЕТА операции (терминал), а полосу цели
+держит воркер (#569): пережившая срок нитка эффекта остаётся держателем
+до фактического конца, и следующая операция ждёт её там (drain), а не
+здесь.
 
 Вердикт (#499) публикуется терминальным SSE-кадром operation в
 существующий поток /events (#424) -- через on_terminal-крючок адаптера;
@@ -82,6 +84,7 @@ import time
 import uuid
 
 from ..common import config, puppets
+from . import opworker
 from .opworker import TERMINAL, status_of
 
 # ─── лимиты ──────────────────────────────────────────────────────────────
@@ -259,6 +262,15 @@ class Api:
         # цель -> семафор: одна операция на цель, вторая ждёт (#497).
         self._gates = {}
         self._on_terminal = []
+        # Внутренний аудит завершения (#575): отдельная проекция от
+        # публичного кадра /events.
+        self._on_completion = []
+        # Контексты аудита по id операций (#575): заводит исполнитель
+        # веб-слоя ДО старта эффекта, забирает _execute по терминалу.
+        self._audit_context = {}
+        # id операции, исполняемой текущим потоком (#575): фабрика
+        # эффектов узнаёт его без смены сигнатуры.
+        self._current = threading.local()
 
     # ─── роль: перечитывается на каждом запросе ────────────────────────
     def _admin(self, who=None, asked=False):
@@ -338,12 +350,13 @@ class Api:
     # ─── приём и повторы ───────────────────────────────────────────────
     @staticmethod
     def effective_target(action, target, params):
-        """Устойчивая идентичность операции (#470): target, а для операции
-        без цели -- origin из params. Две подачи одного origin -- один
-        спор, подачи разных origin'ов друг другу не мешают."""
-        if target is None:
-            return params.get("origin")
-        return target
+        """Устойчивая идентичность операции (#470) и полосы цели (#569):
+        target, а для операции без цели -- origin из params. Правило
+        живёт в opworker.effective_target -- одной точке для дедуп-ключа
+        адаптера и полосы воркера: два слоя не могут разойтись. Две
+        подачи одного origin -- один спор, подачи разных origin'ов друг
+        другу не мешают."""
+        return opworker.effective_target(action, target or None, params)
 
     def submit(self, action, target, params, who):
         """Операция -> поток исполнения + запись результата. Повтор того же
@@ -384,15 +397,22 @@ class Api:
 
     def _execute(self, record, key, params, who):
         """Поток операции (#499): waiting -> семафор цели -> running ->
-        эффект -> терминал. Семафор освобождается в finally: зависший
-        эффект (#497 -- таймаут отдельным слоем) не запирает цель навсегда
-        и не требует переделки этого слоя."""
+        эффект -> терминал. Семафор адаптера отпирается по ОТВЕТУ
+        операции (терминал); полосу цели после ответа держит воркер
+        (#569): пережившая срок нитка эффекта остаётся держателем до
+        фактического конца, и следующая операция той же цели ждёт её
+        там (drain), не здесь -- иначе мутации двух операций гонялись бы
+        по одной цели вперегонки."""
         gate = self._gate(self.effective_target(record["action"],
                                                 record["target"], params))
         self._mark(record, "waiting")
         gate.acquire()
         try:
             self._mark(record, "running")
+            # Контекст потока -- ДО фабрики эффектов (#575): фабрика
+            # читает current_op() и регистрирует контекст аудита до
+            # старта эффекта; сигнатура фабрики не меняется.
+            self._current.op_id = record["id"]
             effect = self.executor(record["action"], record["target"],
                                    params, who)
             verdict = effect() if callable(effect) else effect
@@ -409,9 +429,23 @@ class Api:
                     rec["error"] = verdict["error"]
                 if self._by_key.get(key) == record["id"]:
                     self._by_key.pop(key, None)
-        # Кадр публичен (/events): статус и закрытая фраза, без payload.
-        frame = {"id": record["id"], "action": record["action"],
-                 "target": record["target"], "status": status}
+        # Одно внутреннее completion-событие (#575): запись приёма +
+        # подтверждённый контекст эффекта -- источник обеих проекций.
+        # Контекст -- заводит исполнитель веб-слоя (audit-словарь на
+        # операцию): имя цели из записи приёма (existing-target), проект
+        # -- факт в момент подтверждения; вердикт доопределяет пустое
+        # (add называет созданного). Никаких сетевых lookup после
+        # эффекта: не подтвердился -- честный None.
+        ctx = self._audit_context.pop(record["id"], None) or {}
+        name = ctx.get("name") or record["target"]
+        audit = {"id": record["id"], "action": record["action"],
+                 "status": status, "login": record["login"],
+                 "name": name if isinstance(name, str) and name else None,
+                 "project": ctx.get("project")}
+        # Публичный кадр (/events) -- ПРОЕКЦИЯ completion: статус,
+        # закрытая фраза, без payload; login и проект в него не идут.
+        frame = {"id": audit["id"], "action": audit["action"],
+                 "target": record["target"], "status": audit["status"]}
         reason = result_error(status, rec.get("error") if rec else None)
         if reason:
             frame["error"] = reason
@@ -431,12 +465,37 @@ class Api:
                   file=sys.stderr, flush=True)
         for cb in list(self._on_terminal):
             cb(frame)
+        for cb in list(self._on_completion):
+            cb(audit)
 
     def on_terminal(self, callback):
         """Крючок терминала (#499): кадр {id, action, target, status,
         error?} -- в SSE /events (#424) и в журнал службы. Payload в кадре
         нет; причина -- закрытая фраза result_error, не сырой error."""
         self._on_terminal.append(callback)
+
+    def on_completion(self, callback):
+        """Крючок внутреннего аудита завершения (#575): событие {id,
+        action, status, login, name?, project?} -- источник ops.record
+        на шину. Публичный кадр /events шире не становится: login и
+        project в него не попадают; сюда они доходят из записей
+        адаптера, а не из payload запроса."""
+        self._on_completion.append(callback)
+
+    def current_op(self):
+        """id операции, исполняемой ЭТИМ потоком (#575), | None.
+
+        Фабрика эффектов зовёт его в потоке операции и регистрирует
+        контекст аудита до старта эффекта."""
+        return getattr(self._current, "op_id", None)
+
+    def audit_context(self, op_id, context):
+        """Завести контекст аудита операции (#575): {name?, project?} --
+        факты подтверждённого контекста эффекта. Зовёт исполнитель
+        веб-слоя ДО старта эффекта; _execute забирает словарь по
+        терминалу. Контекст одного op не смешивается с соседним."""
+        with self._lock:
+            self._audit_context[op_id] = context
 
     # ─── GET результата ────────────────────────────────────────────────
     def result(self, op_id, who):

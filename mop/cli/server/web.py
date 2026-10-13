@@ -23,7 +23,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, ops, puppets
+from mop.common import bus, busnames, config, ops, puppets, state
+from mop.common.domain import Alloc
 from mop.server import adminapi, opworker, web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
@@ -39,13 +40,33 @@ COLLECTOR = web.Collector()
 SESSIONS = websession.SessionStore()
 RATE = websession.RateLimiter()
 
+def _registry_projects():
+    """Origin'ы реестра сервера (#571): один источник для списка формы
+    (#472/#486) и ворот add воркера (#470) -- снимок v1 глазами читателя
+    (#534: view_of), а не замороженная легаси-пара, которую writer #534
+    больше не пишет. Читать -- не менять; отказ читателя едет наружу
+    исключением: у формы его ловит существующая граница Api.projects
+    (503 фразой), у ворот воркера он становится failed-вердиктом с
+    причиной -- пустым множеством он не подменяется: проглоченная ошибка
+    выдала бы битый реестр за «проекта нет в реестре» и потеряла бы
+    диагноз; пустой же реестр отказывает origin (fail closed) и
+    разрешением не бывает."""
+    from mop.common import projects as registry
+    from mop.common.projects import snapshot_origins, view_of
+    return set(snapshot_origins(view_of(registry.SNAPSHOT_DIR)))
+
+
 # Операции дашборда (#486): реестр -- та же точка стыковки, что у воркера
 # (opworker.register, #470/#471), исполнитель и адаптер -- рядом; Origin для
 # POST -- публичный https-origin установки (#415). Личность каждого запроса
 # адаптер берёт сам из handler.who (куки -> SESSIONS -> провайдер).
 OPS = adminapi.Operations()
 opworker.register(OPS)
-WORKER = opworker.Worker()
+# Ворота add (#470) получают источник реестра (#571): тот же, что у
+# списка формы, -- origin'ы реестра сервера, снимок v1 глазами читателя
+# (#534). Без него воркер отказывал каждый origin (fail closed на None),
+# и веб-add не работал вовсе.
+WORKER = opworker.Worker(registry=_registry_projects)
 
 # Кэш ростера для резолвера проекта (#498): [момент, {имя -> проект}].
 # #498 вёз функцию без этих определений -- первый же вызов резолвера
@@ -84,11 +105,170 @@ RESOLVER = _resolve_project
 
 # Исполнитель #499: эффект операции -- воркер run тем же транспортом,
 # что CLI (#496/#498); поток на операцию даёт адаптер (adminapi), сюда
-# приходит уже свободная цель. Личность -- (login, role) HTTP-сессии.
+# приходит цель, свободная по семафору адаптера. Полосу цели держит
+# воркер (#569): переживший срок эффект остаётся держателем до
+# фактического конца, следующая операция ждёт его там (drain). Личность
+# -- (login, role) HTTP-сессии. Действие с целью проходит обязательный
+# ops.safety (#566): сбор фактов -- prepare ВНУТРИ срока эффекта, до
+# ворот и эффекта; факты и занятость собирает ЭТА обвязка, из живых
+# источников, -- сам по себе предикат их не спрашивает, а без фактов
+# инвариант #460 молчит. Add -- без цели (его ворота -- реестр #470),
+# send -- за своими воротами _wrap_send: оба идут без предиката.
+UNSAFE_VERBS = frozenset(("restart", "recycle", "delete", "wipe",
+                          "update", "model"))
+
+
+def _safety_of(target, owner, audit=None):
+    """Предикат #460 для run: свежие факты и занятость под target gate.
+
+    -> (predикат, транспорт, None, проект) | (None, None, отказ, None).
+    Транспорт --
+    подтверждённый проектом цели: эффект воркера едет им же, а не
+    глобальным резолвером, чья догадка могла быть stale. Отказ --
+    готовая причина для вердикта run'а: контекст цели не собрался
+    (спека, аллокация, узел) -- «не знаю» не значит «можно», действие
+    не исполняется вовсе.
+    Субъект -- ПРОЕКТ ЦЕЛИ (#498): префетч едет тем же адресным
+    транспортом, что и эффект воркера, а не субъектом процесса --
+    проектному веб-процессу belongs-отказ ответил бы до того, как
+    известен origin. Кандидат проекта -- из ростера (резолвер); спека
+    подтверждает его origin'ом, и подтверждённый проект ПЕРЕВЯЗЫВАЕТ
+    транспорт своей связкой резолвера -- иначе alloc и эффект
+    продолжали бы ехать первой догадкой ростера, и stale-кандидат
+    оставлял мутацию на субъекте процесса. Узел -- последней аллокации
+    в любом статусе (#377): легитимный wipe -- по остановленному.
+    Свидетельство сессии -- ответ state, и он не заменяется целиком:
+    fallback на глагол clone берёт у него ТОЛЬКО факты клона, и только
+    для подтверждённо остановленной цели (present False: state фактов
+    клона без tmux не даёт, #40) -- живой или неразобранный ответ
+    fallback'ом не подменяется, неизвестность сессии не становится
+    idle. Занятость -- общий вердикт сессии (#501): слово статуса
+    разобралось -- всё, что не free и не hung, живая работа, и
+    незнакомое слово тоже; не разобралось или её нет -- жив ли tmux
+    (present) решает, и живый ответ без строки сессии -- занят. Флаг
+    disruptive предикат передаёт ops.safety как пришёл от run:
+    model/update сессию не убивают (#468) и не получают ложный отказ
+    над живой чистой целью."""
+    transport = opworker.default_transport(RESOLVER)
+    try:
+        project = RESOLVER(target)
+        spec = transport("spec", name=target) or {}
+        origin = (spec.get("meta") or {}).get("origin")
+        if not origin:
+            return (None, None, f"{target}: carries no origin — whose target it "
+                                f"is cannot be told, and acting on it is not "
+                                f"for the web", None)
+        confirmed = ops.target_project(origin)
+        if audit is not None:
+            # Контекст аудита (#575): спека подтвердила проект --
+            # фиксируем В МОМЕНТ ФАКТА, до любых позднейших ошибок
+            # префетча/узла (BusError state, зависший alloc, крах
+            # эффекта): подтверждённое из аудита не исчезает.
+            audit["project"] = confirmed
+        if confirmed != project:
+            # Ростер мог соврать (поздний meta-фикс), а спека авторитетна:
+            # перевязываем транспорт подтверждённым проектом, а не только
+            # локальную переменную -- дальше едут alloc, узел и эффект.
+            transport = opworker.default_transport(lambda _name: confirmed)
+            project = confirmed
+        alloc = Alloc.from_dict(transport("alloc", name=target).get("alloc"))
+        if not alloc or not alloc.node:
+            raise LookupError(f"{target}: no allocation — node unknown")
+        node = alloc.node
+        got = bus.request(node, "state", name=target, project=project)
+        # Ошибка state -- уже ответ «не знаю», safety откажет ею; глагол
+        # clone -- не обход ошибки, а дорога к фактам ПОДТВЕРЖДЁННО
+        # остановленной цели. Берём у него только клон: present/session
+        # ответа state -- свидетельство сессии, и оно не стирается. Ответ
+        # с ошибкой кладём как есть: его причина безопасна и обязана
+        # доехать до вердикта, а не подменяться голым «no facts».
+        if (isinstance(got, dict) and got.get("present") is False
+                and not got.get("clone") and not got.get("error")):
+            extra = bus.request(node, "clone", name=target, project=project)
+            got = extra if isinstance(extra, dict) and extra.get("error") \
+                else {**got, "clone": (extra or {}).get("clone")}
+    except Exception as e:  # noqa: BLE001 -- отказ с причиной, не тишина
+        return (None, None,
+                f"{target}: cannot inspect it before acting — {e}", None)
+    st = state._session_state((got or {}).get("session"))
+    if st is not None:
+        busy = state._state_from_session(st, None).kind not in ("free", "hung")
+    else:
+        # Строки сессии нет или не разобралась: жив ли tmux -- единственное
+        # свидетельство; жив -- занята (не idle), мёртв -- сессии нет.
+        busy = (got or {}).get("present") is not False
+
+    def predicate(name, _project, disruptive=True, **_):
+        return ops.safety(name, project, owner=owner, facts=got,
+                          busy=busy, disruptive=disruptive)
+
+    # Четвёртый элемент (#575) -- подтверждённый проект цели: спека
+    # подтвердила origin, аудиту нужен факт, а не вторая прогулка.
+    return predicate, transport, None, project
+
+
 def _execute(action, target, params, who):
     login = (who or (None,))[0]
-    return lambda: WORKER.run(action, target or "", params, login,
-                              transport=opworker.default_transport(RESOLVER))
+    name = target or ""
+    # Контекст аудита операции (#575): словарь на всю жизнь операции.
+    # Имя existing-target глаголов -- из записи приёма (известно ДО
+    # любых ворот: gate-отказ, unknown, крах -- имя цели не теряется);
+    # проект -- подтверждённый факт В МОМЕНТ подтверждения (спека/реестр
+    # add), он переживает любую позднейшую ошибку. Финальный вердикт
+    # доопределяет: add называет созданного папета, send/add везут
+    # проект из своего подтверждённого контекста. Вердикт не перебивает
+    # подтверждённое: только заполняет пустое.
+    audit = {"name": (name if name else None), "project": None}
+    # Регистрация ДО старта эффекта (#575): контекст живёт с записи
+    # приёма и переживает всё -- ворота, зависание, крах. Вне потока
+    # операции (прямые вызовы в проверках) current_op None -- контекст
+    # остаётся локальным словарём замыканий.
+    op_id = ADMINAPI.current_op()
+    if op_id is not None:
+        ADMINAPI.audit_context(op_id, audit)
+    if action in UNSAFE_VERBS and name:
+        # Сбор фактов #566 -- не фон и не подготовка до полосы: это
+        # ЧАСТЬ локального workflow операции (#569), и едет она внутрь
+        # срока эффекта воркера (prepare), под тем же дедлайном и той
+        # же полосой цели. Висящий префетч держит полосу, как и эффект,
+        # -- и отпускается тем же порядком мутаций, а не раньше ответа.
+        owner = login
+
+        def prepare():
+            pred, tr, refusal, _ctx = _safety_of(name, owner, audit=audit)
+            return pred, tr, refusal
+
+        def effect():
+            got = WORKER.run(action, name, params, login, prepare=prepare,
+                             context=audit)
+            # Вердикт доопределяет контекст (#575): проект эффекта (send
+            # с собственным резолвом) достовернее догадки префетча, имя
+            # existing-target цели уже в контексте из записи приёма.
+            if isinstance(got, dict):
+                if got.get("project"):
+                    audit["project"] = got["project"]
+                if got.get("name"):
+                    audit["name"] = got["name"]
+            return got
+        return effect
+    return lambda: audit_context(
+        WORKER.run(action, name, params, login,
+                   transport=opworker.default_transport(RESOLVER),
+                   context=audit), audit)
+
+def audit_context(verdict, audit):
+    """Довести контекст аудита (#575) фактами вердикта и вернуть вердикт.
+
+    Targetless-ветка _execute (send/add): вердикт несёт подтверждённые
+    имя/проект -- отправляем их в контекст, адаптер строит завершение
+    из записи приёма и контекста, не из публичного кадра."""
+    if isinstance(verdict, dict):
+        if verdict.get("project"):
+            audit["project"] = verdict["project"]
+        if verdict.get("name"):
+            audit["name"] = verdict["name"]
+    return verdict
+
 
 # Очередь кадров operation для /events (#499): терминал приходит из
 # потока операции, SSE-читатель забирает своим темпом.
@@ -112,23 +292,42 @@ class _LiveApi(adminapi.Api):
 
 ADMINAPI = _LiveApi(OPS, origin=None, executor=_execute)
 
-# Терминал операции (#499): SSE-кадр operation в /events и аудит-запись
-# ops.record в журнал шины -- подписка listen_events кладёт её в
-# COLLECTOR (/api/journal), событие уходит и остальным мастерам.
+# Терминал операции (#499): SSE-кадр operation в /events. Публичный кадр
+# узкий {id, action, target, status, error?}: ни login, ни проекта.
 def _on_operation(frame):
     payload = json.dumps(frame, ensure_ascii=False)
     with _OP_LOCK:
         _OP_FRAMES.append(payload)
         del _OP_FRAMES[:-100]
     COLLECTOR.kick()
+
+
+# Аудит завершения (#575) -- внутренняя проекция адаптера, не публичный
+# кадр: проверенный принципал HTTP-сессии, id операции, терминальный
+# исход, имя из доверенного вердикта и проект из подтверждённого
+# контекста эффекта (спека/Meta.origin, реестр add). ops.record едет на
+# шину темой проекта записи -- поле и тема не противоречат друг другу;
+# подписка listen_events кладёт запись в COLLECTOR (/api/journal), и
+# событие уходит остальным мастерам. Payload и сырые ошибки сюда не
+# попадают; отказ публикации -- тишина: журнал вторичен и вердикт не
+# роняет.
+def _on_audit(event):
     try:
-        bus.emit(ops.record(frame.get("action"), frame.get("target"),
-                            None, frame.get("login")))
+        # Тема -- проект записи; не подтвердился -- ЯВНАЯ нейтральная
+        # admin (#575, ревью): project=None у emit фактически берёт
+        # субъект процесса (bus.PROJECT), что не гарантированно
+        # нейтрально на проектном веб-процессе.
+        bus.emit(ops.record(event.get("action"), event.get("name"),
+                            event.get("project"), event.get("login"),
+                            op=event.get("id"),
+                            status=event.get("status")),
+                 project=event.get("project") or bus.ADMIN)
     except Exception:
         pass  # журнал вторичен: тишина не роняет вердикт
 
 
 ADMINAPI.on_terminal(_on_operation)
+ADMINAPI.on_completion(_on_audit)
 
 
 class Gateway:
@@ -515,7 +714,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/models":
             return ADMINAPI.models(self)
         if path == "/api/admin/projects":
-            return ADMINAPI.projects(self, _registry_projects())
+            return ADMINAPI.projects(self, _registry_projects)
         if path.startswith("/api/admin/ops/"):
             return self._json(200, ADMINAPI.result(path.rsplit("/", 1)[-1], self.who))
         if path == "/llm/management.html":
@@ -652,16 +851,6 @@ def listen_events():
     except bus.BusError as e:
         with COLLECTOR._cond:
             COLLECTOR.errors["events"] = str(e)
-
-
-def _registry_projects():
-    """Реестр сервера для GET /api/admin/projects (#472/#486): набор
-    origin'ов, как его держит сервер; читать -- не менять."""
-    from mop.common import projects as registry
-    try:
-        return registry.read()
-    except Exception:
-        return set()
 
 
 def main(argv):
