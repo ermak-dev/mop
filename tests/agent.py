@@ -3034,6 +3034,24 @@ def resolver_584(req, project, mode=None):
             t = dict(t, soul_digest="zz!")
         if mode == "bad-inc" and t.get("found"):
             t = dict(t, soul_inc="not-a-uuid")
+        # Контракт #581 (by_job dd1e357): точная инкарнация возвращает
+        # запись С её состоянием -- отвергать неактивную обязан
+        # вызывающий; без инкарнации -- только живая. Вопрос узла
+        # обязан нести ожидаемую инкарнацию (soul_inc поля конверта).
+        if mode == "inactive" and t.get("found"):
+            if req.get("soul_inc"):
+                t = dict(t, active=False)
+            else:
+                t = {"found": False}
+        if mode == "revoked" and t.get("found"):
+            if req.get("soul_inc"):
+                t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
+            else:
+                t = {"found": False}
+        if mode == "ambiguous" and t.get("found"):
+            t = {"found": False,
+                 "reason": "grants: mop/pu-mop-1/… has ambiguous bindings: "
+                           "grant-a…, grant-b…"}
         return t
     g = GRANTS_584.get(principal)
     if g is None:
@@ -3816,6 +3834,31 @@ def check_startup_soul_584(c):
         c.check("584 startup of another project does not reach this binding",
                 bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                 (got, holder("pu-mop-1")))
+
+        # 7b. Контракт поиска #581: вопрос несёт ожидаемую инкарнацию
+        # (by_job точной записью -- с состоянием), и неактивная либо
+        # отозванная запись не пишет identity, как и неоднозначная --
+        # отказ с причиной, а не молчаливый пустой ответ.
+        reset()
+        ask("mop.mop.node.hyper.startup",
+            {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+            startup=True)
+        incs = [r.get("soul_inc") for r in binding_asks()]
+        c.check("584 the binding lookup carries the expected incarnation",
+                incs == [INC_1], (incs, asks))
+        for mode, word in (("inactive", "not active"), ("revoked", "revoked"),
+                           ("ambiguous", "ambiguous")):
+            reset()
+            st["mode"] = mode
+            got = ask("mop.mop.node.hyper.startup",
+                      {"verb": "initial_identity", "name": "pu-mop-1",
+                       "soul_inc": INC_1}, startup=True)
+            c.check(f"584 startup refuses a binding that is {mode} for the "
+                    "named incarnation",
+                    bool((got or {}).get("error")) and word in (got or {}).get("error", "")
+                    and holder("pu-mop-1") is None
+                    and marker_584(clones["pu-mop-1"]) is None,
+                    (got, holder("pu-mop-1"), marker_584(clones["pu-mop-1"])))
 
         # 8. Один глагол на канале; чужие субъекты его не имеют.
         reset()

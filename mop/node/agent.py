@@ -1884,15 +1884,19 @@ async def resolve_actor(conn, project, principal, verb, target=None):
     return (None, why) if why else (got, None)
 
 
-async def target_binding(conn, project, name):
+async def target_binding(conn, project, name, soul_inc=None):
     """Привязка цели из реестра сервера. -> (цель | None, причина | None).
 
     Свежий вопрос без принципала (target-вид резолвера): тот же сервис,
-    тот же узловой кред. Проверяем и форму тройки: битый digest или
-    инкарнация -- не готовность, а причина; «примерно та» привязка прав
-    не даёт. Кэш -- только у читающего глагола (_soul_fact), мутации
-    зовут этот свежий вопрос."""
+    тот же узловой кред. Инкарнация в вопросе -- контракт by_job #581:
+    точная запись приходит С состоянием (неактивная, отозванная), и
+    отвергает её вызывающий; без инкарнации ответ -- только живая.
+    Проверяем и форму тройки: битый digest или инкарнация -- не
+    готовность, а причина; «примерно та» привязка прав не даёт. Кэш --
+    только у читающего глагола (_soul_fact), мутации зовут свежо."""
     fields = {"service": "node", "target": name}
+    if soul_inc is not None:
+        fields["soul_inc"] = soul_inc
     try:
         msg = await bus.arequest(conn, busnames.server(project),
                                  bus.envelope("resolve", **fields), RESOLVE_WAIT)
@@ -1900,7 +1904,19 @@ async def target_binding(conn, project, name):
     except Exception as e:
         return None, f"the resolver did not answer ({type(e).__name__})"
     if not isinstance(got, dict) or got.get("found") is not True:
+        why = got.get("reason") if isinstance(got, dict) else None
+        if soul_inc is not None and isinstance(got, dict) \
+                and (got.get("revoked_at") or got.get("active") is False):
+            return None, (f"binding of {name} {soul_inc} is revoked"
+                          if got.get("revoked_at") else
+                          f"binding of {name} {soul_inc} is not active")
+        if why:
+            return None, f"{name}: {why}"
         return None, f"puppet {name} has no binding"
+    if soul_inc is not None and got.get("revoked_at"):
+        return None, f"binding of {name} {soul_inc} is revoked"
+    if soul_inc is not None and got.get("active") is False:
+        return None, f"binding of {name} {soul_inc} is not active"
     if got.get("job") != name:
         return None, f"the resolver answered about {got.get('job')}, not {name}"
     if got.get("project") != project:
@@ -2064,7 +2080,8 @@ async def v_startup(conn, req):
         return {"error": driver.bad_name(name)}
     if not await local_puppet(name):
         return {"error": f"{name}: not a job of this node"}
-    got, why = await target_binding(conn, req["_project"], name)
+    got, why = await target_binding(conn, req["_project"], name,
+                                    soul_inc=req.get("soul_inc"))
     if got is None:
         return {"error": why}
     if req.get("soul_inc") != got["soul_inc"]:
