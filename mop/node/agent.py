@@ -51,7 +51,8 @@ import time
 
 from ..common import bus, busnames, config, fsutil, lease, paths, service
 from .. import driver, usage
-from ..common.domain import CloneFacts, Owner, Verb
+from ..common.domain import CloneFacts, Owner, Verb, holds_work
+from . import terminal
 from ..driver import Tmux, clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -476,15 +477,21 @@ def _settle(path, generation):
         _prune_claims(claims, _lease_holder.get(path))
 
 
-async def _claim(name, req):
+async def _claim(name, req, guard=None):
     """Аренда задания перед доставкой. -> (отказ|None, откат|None, заметка|None).
 
     Откат -- прежняя запись: не доехало сообщение -- возвращаем её, иначе
-    неудачный `send` держал бы папета окно диспатча впустую."""
+    неудачный `send` держал бы папета окно диспатча впустую.
+    guard проверяет именно снимок захвата для терминала (#598); обычный send
+    оставляет guard пустым и идёт прежним путём."""
     me = lease.caller(req)[0]
     if not me:
         return None, None, None
     clone = CloneFacts.from_dict(await clone_facts(name))
+    if guard:
+        refused = guard(clone, me, time.time())
+        if refused:
+            return refused, None, None
     owner = clone and clone.owner
     act, note = lease.verdict(owner, me, clone, time.time(), bool(req.get("force")))
     if act == "refuse":
@@ -1418,6 +1425,119 @@ async def v_wipe(conn, req):
     return await _gated(name, req, act)
 
 
+def terminal_access(clone, owner, now):
+    """Admin даёт транспорт, но не право на чужую работу (#598)."""
+    if clone is None or not clone.known:
+        return "terminal refused: clone state is unknown"
+    if holds_work(clone) and (clone.owner is None or clone.owner.user != owner):
+        return "terminal refused: work belongs to another owner or nobody"
+    refused, _ = lease.gate("terminal", clone, owner, now)
+    return refused
+
+
+async def _terminal_owner(name, owner, claim=False, require_owner=False):
+    clone = CloneFacts.from_dict(await clone_facts(name))
+    refused = terminal_access(clone, owner, time.time())
+    if refused:
+        raise ValueError(refused)
+    if require_owner and (clone.owner is None or clone.owner.user != owner):
+        raise ValueError("terminal writer ownership changed; reopen required")
+    # Без owner-lock: interrupt не ждёт долгой доставки normal send.
+    # Это снимок, не атомарная аренда вместе с записью в удалённый PTY.
+    return clone
+
+
+async def _terminal_prepare(conn, name, owner, claim=False):
+    clone = await _terminal_owner(name, owner)
+    if not claim or (clone.owner and clone.owner.user == owner):
+        return
+    # Новый держатель чистого клона: тот же порядок claim -> identity,
+    # что у send. Админский actor здесь явный, не loginless мастер.
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        clone = await _terminal_owner(name, owner)
+        if clone.owner and clone.owner.user == owner:
+            return
+        req = {"owner": owner, "_caller": owner}
+        refused, undo, _ = await _claim(name, req, guard=terminal_access)
+        if refused:
+            raise ValueError(refused)
+        _, failed, snap, safe = await _install_identity(conn, name, owner, undo)
+        if failed:
+            if safe:
+                undone = await _unclaim(name, undo)
+                if undone:
+                    failed += "; " + undone
+            raise ValueError(failed)
+        if undo:
+            _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
+            _settle(undo[0], undo[3])
+
+
+async def _terminal_probe(name):
+    script = terminal.probe_script(DRIVER.SESSION_PY, clone_dir(name), name)
+    out, code = await bsh(name, script, timeout=5)
+    if code != 0:
+        # Не отдаём traceback тела: там могут быть пути и чужие данные.
+        raise ValueError("terminal session identity unavailable")
+    return terminal.Identity.from_dict(_last_json(out)).__dict__
+
+
+async def _terminal_spawn(name, mode, cols, rows, on_data, on_exit):
+    terminal.actor(name, "attach")
+    # read_only keyword добавляет #614. Нет его -- отказ, не rw fallback.
+    argv = DRIVER.attach_argv(name, read_only=(mode == "ro"))
+    return await terminal.PTY.spawn(argv, cols, rows, on_data, on_exit)
+
+
+TERMINALS = terminal.Registry(_terminal_probe, _terminal_owner, _terminal_spawn)
+
+
+async def _terminal_rpc(conn, req, verb):
+    # Повтор ворот для прямых внутренних вызовов, до схемы/проб/attach.
+    if req.get("_project") != busnames.ADMIN:
+        return {"error": "terminal requires the private admin node subject"}
+    try:
+        terminal.validate(verb, req)
+        name, owner = req["name"], req["owner"]
+        if verb == "term_open":
+            async def prepare(name, owner, claim=False):
+                return await _terminal_prepare(conn, name, owner, claim)
+            return await TERMINALS.open(name, owner, req["mode"], req["cols"], req["rows"], prepare)
+        tid = req["tid"]
+        if verb == "term_read":
+            return await TERMINALS.read(name, owner, tid, req["cursor"], req["wait"])
+        if verb == "term_write":
+            return await TERMINALS.write(name, owner, tid, req["seq"], req["data"])
+        if verb == "term_resize":
+            return await TERMINALS.resize(name, owner, tid, req["cols"], req["rows"])
+        return await TERMINALS.close(name, owner, tid)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        # Ни bytes, ни tid, ни traceback в общий журнал/ответ.
+        return {"error": f"terminal operation failed ({type(exc).__name__})"}
+
+
+async def v_term_open(conn, req):
+    return await _terminal_rpc(conn, req, "term_open")
+
+
+async def v_term_read(conn, req):
+    return await _terminal_rpc(conn, req, "term_read")
+
+
+async def v_term_write(conn, req):
+    return await _terminal_rpc(conn, req, "term_write")
+
+
+async def v_term_resize(conn, req):
+    return await _terminal_rpc(conn, req, "term_resize")
+
+
+async def v_term_close(conn, req):
+    return await _terminal_rpc(conn, req, "term_close")
+
+
 async def v_type(conn, req):
     """Напечатать слэш-команду в пейн и вернуть экран после неё.
 
@@ -1438,6 +1558,8 @@ async def v_type(conn, req):
 
 async def _type(conn, name, command):
     """Ввод в пейн, когда ворота уже пустили."""
+    if TERMINALS.writer_open(name):
+        return {"error": "terminal writer is open; close it before type"}
     if command in KEYS_ALLOWED:
         # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
         # диалог, а Enter после него отправил бы пустой ход.
@@ -1675,6 +1797,11 @@ VERBS = {
     "junk":   Verb(v_junk,   NODE,   False),
     "clone":  Verb(v_clone,  MASTER, True),
     "sweep":  Verb(v_sweep,  NODE,   False),
+    "term_open":   Verb(v_term_open,   NODE, True),
+    "term_read":   Verb(v_term_read,   NODE, True),
+    "term_write":  Verb(v_term_write,  NODE, True),
+    "term_resize": Verb(v_term_resize, NODE, True),
+    "term_close":  Verb(v_term_close,  NODE, True),
 }
 # Прежние наборы -- выводом из таблицы, для тех, кто их читает.
 PUBLIC_VERBS = tuple(v for v, d in VERBS.items() if d.scope == PUBLIC)
