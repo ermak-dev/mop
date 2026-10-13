@@ -202,7 +202,10 @@ class TerminalBridge:
                     e.error += f"; {reason}"
                 raise
             self._touch(tid, entry)
-            return {key: got[key] for key in ("tid", "epoch", "cursor", "mode", "cols", "rows")}
+            result = {key: got[key] for key in ("tid", "epoch", "cursor", "mode", "cols", "rows")}
+            if _integer(got.get("interrupt_delay_ms"), 100, 10100):
+                result["interrupt_delay_ms"] = got["interrupt_delay_ms"]
+            return result
         finally:
             with self._lock:
                 self._pending -= 1
