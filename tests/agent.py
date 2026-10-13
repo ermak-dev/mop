@@ -16,7 +16,6 @@ SOLUTION: одна таблица {глагол: Verb(fn, scope, named)}, пре
 STATUS: FIXED — see #150
 """
 import dataclasses
-import glob
 import os
 import sys
 
@@ -2261,22 +2260,93 @@ def check_identity_before_delivery_574(c):
                 f"{os.path.exists(os.path.join(state['clone'], lease.FILE))}, "
                 f"hooks {hooks(state['clone'])}")
 
-        # T4. Временный файл stderr не остаётся: ни одного mop574-остатка
-        # в /tmp после установки -- приватный уникальный файл убирают на
-        # каждом выходе, не оставляют предсказуемый след в общем /tmp.
-        # Свод ловит обе формы: старый mop574-err.<pid> и новый
-        # mop574.<случайные> из mktemp. Сначала зачистить следы старого
-        # кода, затем свежая установка: её остатки и только её.
-        for stale in glob.glob("/tmp/mop574*"):
-            os.remove(stale)
+        # T4. Временный файл stderr не остаётся:mktemp установки убирает
+        # свой файл trap'ом на каждом выходе. Проверка изолирована: свой
+        # приватный TMPDIR (mktemp установки пишет туда), а СТАРЫЙ
+        # hardcoded-путь /tmp/mop574-err.$$ подменяется в тексте скрипта
+        # туда же -- контролируемый redirect в фикстуру, не уборка чужих
+        # файлов из общего /tmp. Чужой sentinel с тем же префиксом стоит
+        # в той же папке: проверка обязана его не тронуть и не счесть
+        # своим остатком. Остатки этой вызванной установки -- ровно всё,
+        # что в фикстуре сверх sentinel.
+        t4dir = tempfile.mkdtemp(prefix="mop574-isolated-")
+        sentinel = os.path.join(t4dir, "mop574.foreign-sentinel")
+        with open(sentinel, "w") as f:
+            f.write("another process's scratch\n")
+
+        async def isolated_bsh(name, script, timeout=20):
+            run = script.replace("/tmp/mop574-err.$$",
+                                 os.path.join(t4dir, "mop574-err.$$"))
+            r = subprocess.run(["bash", "-c", run], capture_output=True,
+                               text=True, env={**os.environ, "TMPDIR": t4dir})
+            return r.stdout + r.stderr, r.returncode
         state["clone"] = clone(profiles["petr"])
         rearm()
         agent.session_json = deliver_spy
+        agent.bsh = isolated_bsh
         got = send(_caller="olga")
-        leftovers = [f for f in glob.glob("/tmp/mop574*")]
+        agent.bsh = bash
+        leftovers = sorted(f for f in os.listdir(t4dir)
+                           if f != os.path.basename(sentinel))
         c.check("T4 the install leaves no temp file behind",
                 not leftovers,
                 f"reply {got!r}, leftovers {leftovers!r}")
+        c.check("T4 a foreign temp file survives the check",
+                open(sentinel).read() == "another process's scratch\n",
+                sentinel)
+
+        # T5. Обязательное чтение каталога хуков тоже fail closed
+        # (review-4): _hooks_var глотал rc rev-parse --absolute-git-dir и
+        # подставлял /hooks -- «каталога нет». Обёртка git отказывает
+        # ТОЛЬКО ПЕРВОМУ process-wide вызову rev-parse (метка-файл):
+        # lookup установки падает, повторный lookup отката -- успешен.
+        # Установка принимает неизвестный каталог за отсутствие хуков
+        # (ложный A в снимке) и доставку пытается выполнить; откат затем
+        # УДАЛЯЕТ исходный собственный хук. Требования: доставка не
+        # начинается при неизвестном каталоге; исходный хук остаётся.
+        own_hook = agent.owner_hook() + "# the project's own line\n"
+        state["clone"] = clone(own_hook=own_hook)
+        rearm()
+        sent[:] = []
+        agent.session_json = undelivered
+        hook_path = os.path.join(state["clone"], ".git", "hooks", "pre-commit")
+        mark = os.path.join(root, "git-lookup-failed-once")
+        wrap = os.path.join(root, "git-lookup-once")
+        # Вызов -- «git -C <клон> rev-parse --absolute-git-dir»:
+        # $3=rev-parse, $4=--absolute-git-dir.
+        with open(wrap, "w") as f:
+            f.write("#!/bin/sh\n"
+                    f'if [ "$3" = rev-parse ] && [ "$4" = --absolute-git-dir ] '
+                    f'&& [ ! -f {shlex.quote(mark)} ]; then\n'
+                    f": > {shlex.quote(mark)}\n"
+                    "exit 128\n"
+                    "fi\n"
+                    "exec git \"$@\"\n")
+        os.chmod(wrap, 0o755)
+
+        def lookup_once(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            return real.replace("git -C", f"{wrap} -C")
+        agent.identity_script = lookup_once
+        got = send(_caller="olga", force=True)
+        agent.identity_script = real_identity_script
+        hook_now = (open(hook_path).read()
+                    if os.path.exists(hook_path) else None)
+        c.check("T5 an unknown hooks directory stops the delivery",
+                not (not got.get("error")
+                     or "hooks" not in got["error"]
+                     or sent
+                     or hook_now != own_hook),
+                f"reply {got!r}, delivered {sent!r}, hook {hook_now!r}")
+        # Исходный хук обязан остаться и после отката подтверждённой
+        # недоставки: установки не было, ложного A в реестре нет, снимать
+        # нечего. Аренда возвращается прежнему владельцу (код 1: до
+        # неизвестного каталога ни одной записи не случилось).
+        c.check("T5 the project's own hook survives the failed install",
+                not (hook_now != own_hook
+                     or os.path.exists(os.path.join(state["clone"], lease.FILE))),
+                f"hook {hook_now!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}")
 
 
 

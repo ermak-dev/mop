@@ -328,8 +328,8 @@ def _wrap_send(target, login, message, context=None):
         if got.get("timeout"):
             # Неопределённая доставка (#574, review-3 п.5): тело молчит,
             # сообщение могло доехать -- это НЕ подтверждённый отказ, и
-            # повторять высланное можно, а звать чужую аренду заново -- нет.
-            # Проект аудита остаётся при вердикте (#575).
+            # повтор автоматически не делается: он мог бы продублировать
+            # уже выполненное. Проект аудита остаётся при вердикте (#575).
             return ops.outcome(ops.UNKNOWN, target, error=got["error"],
                                project=project)
         return ops.outcome(ops.REFUSED, target, error=got["error"],

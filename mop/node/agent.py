@@ -755,13 +755,32 @@ exit 0
 
 
 def _hooks_var(clone):
-    """Шелл: каталог хуков клона в $hooks. Нет git-каталога -- $hooks пуст.
+    """Шелл: каталог хуков клона в $hooks. -> (присваивание, шлюз).
 
-    Без выхода из скрипта: пустой $hooks (значение «/hooks») -- управлять
-    хуками нельзя, и скрипт говорит об этом строкой, а не молча выходит:
-    выход здесь резал бы и установку identity, что стоит раньше."""
-    return (f"hooks=$(git -C {shlex.quote(clone)} rev-parse --absolute-git-dir "
-            f"2>/dev/null)/hooks; ")
+    Присваивание создаёт и временный файл $t с trap EXIT (review-3 п.4):
+    его же заполняют геттеры конфига и сверки. rev-parse различается по
+    ДОКУМЕНТИРОВАННОМУ признаку (review-4): rc 0 -- каталог; rc 128 с
+    «not a git repository» в stderr -- git-каталога нет, $hooks пуст
+    («/hooks»: управлять хуками нельзя, скрипт скажет строкой, а не
+    выйдет -- выход резал бы и установку identity, что стоит раньше).
+    Иное (молчаливый 128, прочие коды) -- каталог НЕИЗВЕСТЕН, и $hfail
+    включает шлюз: установка отказывает ДО записи и ДО доставки --
+    неизвестный каталог не «отсутствие хуков», ложный A в снимке затем
+    удалял исходный хук при откате."""
+    q = shlex.quote
+    assign = (
+        't=$(mktemp "${TMPDIR:-/tmp}/mop574.XXXXXXXX") || exit 2; '
+        "trap 'rm -f \"$t\"' EXIT; "
+        f'hooks=$(git -C {q(clone)} rev-parse --absolute-git-dir 2>"$t"); '
+        'hr=$?; hfail=; '
+        'if [ $hr -eq 0 ]; then hooks=$hooks/hooks; '
+        'elif [ $hr -eq 128 ] && grep -q "not a git repository" "$t"; then '
+        'hooks=/hooks; '
+        'else hfail=1; hooks=/hooks; fi; ')
+    gate = ('if [ -n "$hfail" ]; then '
+            'echo "git hooks directory lookup failed: '
+            'the prior state is unknown"; exit 1; fi; ')
+    return assign, gate
 
 
 def _ours(f):
@@ -904,7 +923,10 @@ def _restore_script(clone, path, mine, snap):
         parts.append(_unset(git, key))
         if flag == "P":
             parts.append(f"{git} user.{key} {q(value)} || exit 1; ")
-    parts.append(_hooks_var(clone))
+    hooks_assign, hooks_gate = _hooks_var(clone)
+    # Неизвестный каталог (review-4) -- отказ отката с причиной, не
+    # «восстановление» в /hooks: xуки там не те, сверка соврёт.
+    parts.append(hooks_assign + hooks_gate)
     for h in GUARDED_HOOKS:
         v = h.replace("-", "_")
         f = f"$hooks/{h}"
@@ -924,10 +946,9 @@ def _restore_script(clone, path, mine, snap):
                          f'echo "hook {h} removal failed"; exit 1; fi; fi; ')
     # Сверка с снимком (review-3 п.3): пара -- как в снимке (отсутствие --
     # код 1 пустым stderr), созданное -- снято, воссозданное -- теми байтами
-    # и режимом. Недостоверное чтение -- тоже отказ.
-    parts.append(
-        'c=ok; t=$(mktemp "${TMPDIR:-/tmp}/mop574.XXXXXXXX") || exit 1; '
-        'trap \'rm -f "$t"\' EXIT; ')
+    # и режимом. Недостоверное чтение -- тоже отказ. Временный файл $t и
+    # trap уже создал каталог-блок _hooks_var.
+    parts.append('c=ok; ')
     for key in ("name", "email"):
         flag, value = snap["identity"][key]
         want = q(value) if flag == "P" else None
@@ -981,25 +1002,24 @@ def identity_script(clone, path, mine, profile):
     q = shlex.quote
     guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
     git = f"git -C {q(clone)} config --local"
+    # Каталог хуков: неизвестный каталог (иной rc rev-parse, review-4) --
+    # отказ ДО записи и ДО доставки, не «отсутствие хуков».
+    hooks_assign, hooks_gate = _hooks_var(clone)
     # Чтение с различением исходов (review-3 п.1): отсутствие -- ТОЛЬКО
     # документированный код 1 геттера с пустым stderr; любой другой
     # ненулевой код (молчаливый 128 в том числе) -- операционный отказ (X):
     # пустой stderr не доказательство отсутствия. Значение сразу в base64-
-    # переменную: назад пишем её же. Файл stderr -- mktemp: приватный и
-    # непредсказуемый (review-3 п.4); trap EXIT убирает его на каждом
-    # выходе (0/1/2), файл живёт до конца -- его же читает сверка.
-    read = (
-        't=$(mktemp "${TMPDIR:-/tmp}/mop574.XXXXXXXX") || exit 2; '
-        'trap \'rm -f "$t"\' EXIT; '
-        + "".join(
-            f'e_{k}=$({git} user.{k} 2>"$t"); r_{k}=$?; '
-            f'if [ $r_{k} -eq 1 ] && [ ! -s "$t" ]; then '
-            f'f_{k}=A; v_{k}=; printf \'mop574-{k}\\tA\\n\'; '
-            f'elif [ $r_{k} -ne 0 ]; then f_{k}=X; v_{k}=; '
-            f'printf \'mop574-{k}\\tX\\n\'; '
-            f'else f_{k}=P; v_{k}=$(printf %s "$e_{k}" | base64 -w0); '
-            f'printf \'mop574-{k}\\tP%s\\n\' "$v_{k}"; fi; '
-            for k in ("name", "email")))
+    # переменную: назад пишем её же. Временный файл $t и trap уже создал
+    # каталог-блок _hooks_var: файл живёт до конца -- его же читает сверка.
+    read = "".join(
+        f'e_{k}=$({git} user.{k} 2>"$t"); r_{k}=$?; '
+        f'if [ $r_{k} -eq 1 ] && [ ! -s "$t" ]; then '
+        f'f_{k}=A; v_{k}=; printf \'mop574-{k}\\tA\\n\'; '
+        f'elif [ $r_{k} -ne 0 ]; then f_{k}=X; v_{k}=; '
+        f'printf \'mop574-{k}\\tX\\n\'; '
+        f'else f_{k}=P; v_{k}=$(printf %s "$e_{k}" | base64 -w0); '
+        f'printf \'mop574-{k}\\tP%s\\n\' "$v_{k}"; fi; '
+        for k in ("name", "email"))
     v = [h.replace("-", "_") for h in GUARDED_HOOKS]
     # Операционный отказ чтения (X) -- ДО любой записи: прежнее состояние
     # неизвестно, «восстанавливать пустоту» нельзя, установка не начинается.
@@ -1080,8 +1100,8 @@ def identity_script(clone, path, mine, profile):
             f'elif [ "$hooks" = /hooks ]; then '
             f'echo "owner guard skipped: no git directory"; '
             f'else {manage}fi; ')
-    return (guard + _hooks_var(clone) + read + gate_x + snap_hooks
-            + set_new + skip + "exit 0")
+    return (guard + hooks_assign + read + gate_x + hooks_gate
+            + snap_hooks + set_new + skip + "exit 0")
 
 
 async def _install_identity(conn, name, login, undo):
