@@ -422,9 +422,14 @@ class Api:
         finally:
             gate.release()
         with self._lock:
+            ctx = self._audit_context.pop(record["id"], None) or {}
             rec = self._records.get(record["id"])
             if rec is not None:
                 rec["status"] = status
+                if rec["action"] == "add" and rec["target"] is None:
+                    name = ctx.get("name")
+                    if isinstance(name, str) and name:
+                        rec["target"] = name
                 if isinstance(verdict, dict) and verdict.get("error"):
                     rec["error"] = verdict["error"]
                 if self._by_key.get(key) == record["id"]:
@@ -436,7 +441,6 @@ class Api:
         # -- факт в момент подтверждения; вердикт доопределяет пустое
         # (add называет созданного). Никаких сетевых lookup после
         # эффекта: не подтвердился -- честный None.
-        ctx = self._audit_context.pop(record["id"], None) or {}
         name = ctx.get("name") or record["target"]
         audit = {"id": record["id"], "action": record["action"],
                  "status": status, "login": record["login"],
@@ -508,6 +512,10 @@ class Api:
         with self._lock:
             stored = self._records.get(op_id)
             got = dict(stored) if stored is not None else None
+            if got is not None and got["action"] == "add" and got["target"] is None:
+                name = (self._audit_context.get(op_id) or {}).get("name")
+                if isinstance(name, str) and name:
+                    got["target"] = name
         if got is None:
             return {"status": "unknown",
                     "error": "operation outcome is unknown; "
