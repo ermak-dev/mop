@@ -355,7 +355,7 @@
     # контейнеров вышел из игры до stage_name -- его и пропускаем.
     - name: Take the body into the inventory for the rest of the run
       ansible.builtin.add_host:
-        name: "{{ hostvars[item].stage_name }}"
+        name: "{{ hostvars[item].stage_name }}-{{ item }}"
         groups: mop_building
         ansible_host: "{{ hostvars[item].stage_ip }}"
         ansible_user: "{{ MOP_USER }}"

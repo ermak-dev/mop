@@ -860,6 +860,57 @@ def check_add_host_loop_278(c):
           "build_key" in body and f"hostvars[{var}].build_key" not in body, body)
 
 
+
+# HYPOTHESIS: одинаковое stage_name перезаписывает inventory-host следующего
+# узла; цикл add_host не доказывает, что игры настройки увидят каждое тело.
+# SOLUTION: ключ inventory-host включает узел; hostname контейнера не меняется.
+# RESULT: три тела сохраняют адрес, VMID и SSH-прыжок до игр настройки.
+# STATUS: FIXED — see #577
+def check_distinct_build_inventory_577(c, can_render):
+    if not can_render:
+        return
+    from jinja2 import Environment, StrictUndefined
+    env = Environment(undefined=StrictUndefined)
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
+    task = next(t for p in plays for t in p.get("tasks", [])
+                if "ansible.builtin.add_host" in t)
+    hosts = {
+        "node-a": {"stage_name": "pu-tmpl-proj-build", "stage_ip": "10.77.1.2",
+                   "stage_vmid": 10999, "ansible_host": "a.example", "ansible_user": "root"},
+        "node-b": {"stage_name": "pu-tmpl-proj-build", "stage_ip": "10.77.2.2",
+                   "stage_vmid": 11999, "ansible_host": "b.example", "ansible_user": "pool",
+                   "ansible_port": 2222},
+        "node-c": {"stage_name": "pu-tmpl-proj-build", "stage_ip": "10.77.3.2",
+                   "stage_vmid": 12999},
+    }
+    variables = {"hostvars": hosts, "ansible_play_hosts_all": list(hosts),
+                 "MOP_USER": "pool", "build_key": "/tmp/build-key",
+                 "lookup": lambda kind, name: "/home/control"}
+    inventory = {}
+    for item in hosts:
+        context = dict(variables, item=item)
+        for key, value in task.get("vars", {}).items():
+            context[key] = env.from_string(value).render(**context)
+        body = {key: env.from_string(value).render(**context) if isinstance(value, str)
+                else value for key, value in task["ansible.builtin.add_host"].items()}
+        inventory[body.pop("name")] = body
+    c.expect("#577 all three build guests remain in the inventory", len(inventory), 3)
+    actual = {body["mop_body_of"]: body for body in inventory.values()}
+    c.expect("#577 configuration reaches each node's guest", sorted(actual), sorted(hosts))
+    for node, hop in (("node-a", "root@a.example"),
+                      ("node-b", "pool@b.example:2222"), ("node-c", "node-c")):
+        if node not in actual:
+            continue
+        body = actual[node]
+        c.expect(f"#577 {node} keeps its own guest address", body["ansible_host"],
+                 hosts[node]["stage_ip"])
+        c.expect(f"#577 {node} keeps its own VMID", str(body["mop_body_vmid"]),
+                 str(hosts[node]["stage_vmid"]))
+        c.check(f"#577 {node} keeps its own SSH hop",
+                f"-o ProxyJump={hop}" in body["ansible_ssh_common_args"], body)
+        c.expect(f"#577 {node} joins the configuration play", body["groups"], "mop_building")
+
+
 def check_users_reload_199(c):
     """users.conf менялся -- nats перезагружается; решает контрольная сумма."""
     # Кто ещё читает вывод командлета: список закреплён. pve-facts печатает
@@ -3084,6 +3135,7 @@ def main():
     check_routes_gateway_wait_502(c, can_render)
     check_include_loop_var(c)
     check_add_host_loop_278(c)
+    check_distinct_build_inventory_577(c, can_render)
     check_users_reload_199(c)
     check_one_node_280(c)
 
