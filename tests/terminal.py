@@ -20,6 +20,7 @@ import os
 import unittest
 
 import hermetic  # noqa: F401
+from _lib import Checks
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 IDENT = dict(pid=123, start="456", sessionId="session-one", pane="%0", tty="/dev/pts/7")
@@ -505,5 +506,56 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["exit"], 17)
 
 
+# HYPOTHESIS: unittest.main обходит общий счётчик проверок (#598), поэтому
+# tests_lib и вслед за ним hermetic красные. SOLUTION: оставляем утверждения,
+# async-фикстуры и subTest stdlib, но каждый результат идёт в Checks вместе
+# с полным traceback; пропуски не считаются успехом.
+# STATUS: FIXED — see #598
+class CheckResults(unittest.TestResult):
+    def __init__(self, checks):
+        super().__init__()
+        self.checks = checks
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self.checks.check(test.id(), True)
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self.checks.fail(test.id(), self.failures[-1][1])
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self.checks.fail(test.id(), self.errors[-1][1])
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            records = self.failures if issubclass(err[0], test.failureException) else self.errors
+            self.checks.fail(subtest.id(), records[-1][1])
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self.checks.fail(test.id(), f"skipped: {reason}")
+
+    def addExpectedFailure(self, test, err):
+        super().addExpectedFailure(test, err)
+        self.checks.fail(test.id(), self.expectedFailures[-1][1])
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self.checks.fail(test.id(), "unexpected success")
+
+
+def main():
+    c = Checks()
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Terminal)
+    count = suite.countTestCases()
+    result = CheckResults(c)
+    suite.run(result)
+    c.expect("all terminal cases ran", result.testsRun, count)
+    return c.report("terminal")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    sys.exit(main())
