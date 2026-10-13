@@ -255,6 +255,57 @@ def binding(principal, root=None):
         return dict(_read(_root_dir(root)).get(principal) or {}) or None
 
 
+def by_request(request_id, root=None):
+    """Сохранённая запись запроса, либо None (#582: ретрай).
+
+    Слепа к состоянию -- и нарочно: ретрай после неопределённого исхода
+    Nomad обязан найти СОХРАНЁННУЮ привязку в любом состоянии, включая
+    отозванную (идемпотентность переживает отзыв), и выбрать про неё,
+    а не заводить дубль. Две записи с одним request_id -- повреждение
+    реестра: громкий отказ, не произвольный выбор."""
+    got = [rec for rec in _read(_root_dir(root)).values()
+           if rec.get("request_id") == request_id]
+    if len(got) > 1:
+        raise ValueError(f"grants: request {request_id} is registered "
+                         f"twice: {', '.join(sorted(r.get('principal', '?')
+                                                    for r in got))}")
+    return dict(got[0]) if got else None
+
+
+def _select_job(reg, project, job, soul_inc=None):
+    """Привязка имени джоба из СНИМКА реестра -- ядро by_job и блока цели.
+
+    Без инкарнации -- только живая запись (pending/revoked невидимы);
+    две живых на одном имени -- ValueError: переиспользованное имя (#579)
+    держит Новый грант, молчаливый выбор одной из них адресовал бы чужую
+    душу. С инкарнацией -- та самая запись С её состоянием: bootstrap
+    (#590) сверяет фактическую инкарнацию Nomad, а не только имя, и сам
+    решает, что значит отозванная или ещё не подтверждённая."""
+    got = [rec for rec in reg.values()
+           if rec.get("project") == project and rec.get("job") == job
+           and (soul_inc is None or rec.get("soul_inc") == soul_inc)]
+    if soul_inc is None:
+        got = [rec for rec in got
+               if rec.get("active") and not rec.get("revoked_at")]
+    if len(got) > 1:
+        which = f"{project}/{job}" + (f"/{soul_inc}" if soul_inc else "")
+        raise ValueError(f"grants: {which} has ambiguous bindings: "
+                         f"{', '.join(sorted(r.get('principal', '?')
+                                            for r in got))}")
+    return dict(got[0]) if got else None
+
+
+def by_job(project, job, soul_inc=None, root=None):
+    """Живая привязка имени джоба (#584/#590), либо None.
+
+    Публичный поиск поверх _select_job: потребители не открывают реестр
+    на прямую. Живость без инкарнации -- active и не отозвана; точная
+    запись по инкарнации приходит с её состоянием -- решение о ней
+    за вызывающим."""
+    with _THREAD_LOCK:
+        return _select_job(_read(_root_dir(root)), project, job, soul_inc)
+
+
 def admit(principal, root=None):
     """Годен ли принципал к НОВОМУ входу: активная связанная привязка.
 
@@ -344,17 +395,19 @@ def resolve(principal, service, verb, target=None, root=None):
 
 def _target_block(reg, project, target, root):
     """Вложенный блок цели из ТОГО ЖЕ снимка реестра: второй ход в шину
-    за целью разорвал бы атомарность одного эффекта (#579)."""
-    for rec in reg.values():
-        if rec.get("project") == project and rec.get("job") == target:
-            return {"found": True, "job": rec.get("job"),
-                    "project": rec.get("project"),
-                    "role": rec.get("role"),
-                    "receives_dispatch": _target_flag(root, rec),
-                    "soul_inc": rec.get("soul_inc"),
-                    "owner": rec.get("owner"),
-                    "active": bool(rec.get("active"))}
-    return {"found": False}
+    за целью разорвал бы атомарность одного эффекта (#579). Выбор -- то
+    же ядро, что by_job: неоднозначные живые привязки цели -- тот же
+    громкий отказ, не произвольная первая подошедшая."""
+    rec = _select_job(reg, project, target)
+    if rec is None:
+        return {"found": False}
+    return {"found": True, "job": rec.get("job"),
+            "project": rec.get("project"),
+            "role": rec.get("role"),
+            "receives_dispatch": _target_flag(root, rec),
+            "soul_inc": rec.get("soul_inc"),
+            "owner": rec.get("owner"),
+            "active": bool(rec.get("active"))}
 
 
 def resolve_target(project, target, root=None):

@@ -505,6 +505,107 @@ def check_resolve(c):
                 got.get("allow") is False and (got.get("reason") or ""), got)
 
 
+def check_lookup(c):
+    """Публичные поиски #582/#584/#590: потребители не открывают реестр
+    на прямую. Контракт жизненного цикла: by_request слеп к состоянию
+    (ретрай после неопределённого исхода Nomad обязан найти СОХРАНЁННУЮ
+    запись -- и после отзыва: идемпотентность переживает его); by_job без
+    инкарнации -- только живая привязка, две живых на одном имени --
+    громкий отказ, не произвольный выбор; с инкарнацией -- та самая
+    запись с её состоянием: bootstrap сверяет фактическую инкарнацию
+    Nomad, а не только переиспользованное имя (#590)."""
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, request_id="req-look", job="pu-mop-7",
+                         soul_inc=incarnation("look"))
+    with root:
+        got = mod.by_request("req-look", root=root.name)
+        c.check("#581 by_request returns the saved pending record",
+                (got or {}).get("principal") == rec.get("principal")
+                and got.get("active") is False, got)
+        c.check("#581 by_request on an unknown request is None",
+                mod.by_request("req-nope", root=root.name) is None,
+                "пустой поиск родил запись")
+        c.check("#581 by_job sees no active binding while the grant "
+                "is pending",
+                mod.by_job("mop", "pu-mop-7", root=root.name) is None,
+                "pending прочитана как живая")
+        mod.activate(rec["principal"], root=root.name)
+        got = mod.by_job("mop", "pu-mop-7", root=root.name)
+        c.check("#581 by_job returns the single active binding",
+                (got or {}).get("principal") == rec.get("principal")
+                and got.get("soul_inc") == incarnation("look"), got)
+        # Переиспользованное имя (#579): новый грант на тот же job --
+        # другой запрос, другая инкарнация; обе живых -- неоднозначность.
+        second = mod.prepare(project="mop", role=rec["role"],
+                             digest=MASTER_DIGEST, manifest=MASTER,
+                             prompt=MASTER_PROMPT, owner="anton",
+                             request_id="req-look-2", job="pu-mop-7",
+                             soul_inc=incarnation("look2"), intent="intent-B",
+                             root=root.name)
+        mod.activate(second["principal"], root=root.name)
+        try:
+            picked = mod.by_job("mop", "pu-mop-7", root=root.name)
+            c.fail("#581 by_job rejects ambiguous active bindings",
+                   f"молча выбрана {picked!r}")
+        except ValueError:
+            c.check("#581 by_job rejects ambiguous active bindings",
+                    True, True)
+        got = mod.by_job("mop", "pu-mop-7", soul_inc=incarnation("look2"),
+                         root=root.name)
+        c.check("#581 by_job with the actual incarnation picks the exact "
+                "record, not the reused name",
+                (got or {}).get("principal") == second.get("principal"), got)
+        c.check("#581 by_job with an unknown incarnation is None",
+                mod.by_job("mop", "pu-mop-7",
+                           soul_inc=incarnation("nope"),
+                           root=root.name) is None, "нет такой инкарнации")
+        try:
+            silent = mod.resolve(rec["principal"], "node", "send",
+                                 target="pu-mop-7", root=root.name)
+            c.fail("#581 a resolve target block rides the same rejection",
+                   f"произвольная цель: {silent!r}")
+        except ValueError:
+            c.check("#581 a resolve target block rides the same rejection",
+                    True, True)
+        mod.revoke(rec["principal"], root=root.name)
+        got = mod.by_job("mop", "pu-mop-7", root=root.name)
+        c.check("#581 by_job resolves once the rival binding is revoked",
+                (got or {}).get("principal") == second.get("principal"), got)
+        got = mod.by_job("mop", "pu-mop-7", soul_inc=incarnation("look"),
+                         root=root.name)
+        c.check("#581 by_job with an incarnation returns the revoked "
+                "record for the caller to judge",
+                (got or {}).get("principal") == rec.get("principal")
+                and got.get("revoked_at"), got)
+        got = mod.by_request("req-look", root=root.name)
+        c.check("#581 by_request is lifecycle-blind: a revoked request "
+                "still returns its saved record",
+                (got or {}).get("principal") == rec.get("principal")
+                and got.get("revoked_at"), got)
+        c.check("#581 by_job stays inside its project",
+                mod.by_job("other", "pu-mop-7", root=root.name) is None,
+                "чужой проект дал запись")
+        # Повреждение реестра: две записи с одним request_id -- произвольный
+        # выбор запрещён и здесь.
+        path = os.path.join(root.name, "registry.json")
+        with open(path) as f:
+            reg = json.load(f)
+        dup = dict(rec)
+        dup["principal"] = "grant-" + secrets_token(32)
+        reg[dup["principal"]] = dup
+        with open(path, "w") as f:
+            json.dump(reg, f)
+        try:
+            picked = mod.by_request("req-look", root=root.name)
+            c.fail("#581 by_request rejects a duplicated request_id",
+                   f"молча выбрана {picked!r}")
+        except ValueError:
+            c.check("#581 by_request rejects a duplicated request_id",
+                    True, True)
+
+
 def handmade(c, mod, role=MASTER, digest=None, prompt=None, job="pu-mop-7",
              inc=None, active=True, project="mop", owner="anton"):
     """Хранилище, собранное руками: prepare заблокирован дефектом #580
@@ -753,7 +854,8 @@ def main():
                check_resolve_endpoint_today, check_channel_fence,
                check_prepare, check_request_id, check_immutable_bundle,
                check_activate, check_revoke_cut, check_admit,
-               check_password, check_resolve, check_permissions,
+               check_password, check_resolve, check_lookup,
+               check_permissions,
                check_provider, check_concurrency, check_parallel_requests):
         try:
             fn(c)
