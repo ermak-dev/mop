@@ -3,12 +3,15 @@
 Started by a claude session. --check shows the local profile and connection
 settings; the available tools depend on the session's access.
 """
-# Три профиля, и решают их креды на шине, а не флаги (is_master):
+# Профили решают креды на шине, а не флаги (channel.actor):
 #
 #   * кред оператора + MOP_PROJECT -> мастер проекта: канал и управление, но
 #     только своим срезом пула (`mop master` ставит проект);
 #   * кред оператора без проекта -> оператор: то же самое, но по всему пулу;
-#   * кред `puppet-<проект>` -> узел: один канал, ростер -- опросом самой шины.
+#   * кред `puppet-<проект>` -> узел: один канал, ростер -- опросом самой шины;
+#   * принципал роли `grant-<id>` (#585) -> папет с ролью: инструменты -- по
+#     capabilities его бандла, адрес -- имя джоба. Каталог -- не граница
+#     прав: её держат сервер и узел по резолверу.
 #
 # Управление -- сами командлеты: командлет с объявлением `MCP = {...}`
 # становится инструментом, своей реализации операций здесь нет.
@@ -93,12 +96,25 @@ def is_master():
     тоже можно, но это секунды на старте каждого папета и отказ прав в логе
     на ровном месте — а ответ уже лежит в кредах, локально."""
     try:
-        return not busnames.is_puppet(bus.config()["user"])
+        return channel.actor(bus.config()["user"]) == channel.HUMAN
     except Exception:
         return False
 
 
 MASTER = is_master()
+# Принципал роли -- не мастер (#585): grant-<id> не puppet-<проект>, и
+# прежнее `not is_puppet` выдавало ему весь каталог и owner человеком.
+KIND = channel.actor(channel.bus_user())
+BUNDLE, NO_BUNDLE = channel.own_bundle() if KIND == channel.GRANT else (None, None)
+CAPS = BUNDLE.manifest.capabilities if BUNDLE else None
+
+
+def kind():
+    """Вид говорящего этого процесса. MASTER -- прежний шов профиля
+    человека/узла; роль -- только по кредам."""
+    if KIND == channel.GRANT:
+        return channel.GRANT
+    return channel.HUMAN if MASTER else channel.LEGACY
 
 
 def master_id(user):
@@ -148,11 +164,14 @@ def tool(**kw):
     return deco
 
 
-def master_tool(**kw):
-    """Инструмент, который есть только у мастера. На узле функция остаётся
-    обычной питоновской и просто не попадает в список инструментов."""
+def role_tool(**kw):
+    """Инструмент по профилю (channel.tools_for): у мастера -- все ручные,
+    кроме dispatch, у узла -- канал, у роли -- по её capabilities. Не
+    положенный остаётся обычной питоновской функцией вне списка."""
+    allowed = channel.tools_for(kind(), CAPS, {})
+
     def deco(fn):
-        return tool(**kw)(fn) if MASTER else fn
+        return tool(**kw)(fn) if fn.__name__ in allowed else fn
     return deco
 
 
@@ -167,8 +186,17 @@ SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status", "Escape")
 # Маршрут, своя сессия и доставка -- mop/client/channel.py (#148); здесь только
 # профиль процесса, от имени которого канал говорит.
 def me():
-    """Как этот процесс представляется адресату (channel.my_name)."""
+    """Как этот процесс представляется адресату (channel.my_name). Роль --
+    именем своего джоба: инбокс процесса MCP -- транспорт, не адрес."""
+    if kind() == channel.GRANT:
+        return channel.role_name()
     return channel.my_name(MASTER, MASTER_ID)
+
+
+def node_of(name):
+    """Узел папета: у человека и роли -- глаголом alloc сервиса кластера
+    (роль -- если он ей выдан), у узла -- опросом агентов."""
+    return channel.puppet_node(name, kind() != channel.LEGACY)
 
 
 def on_inbox(m):
@@ -181,6 +209,9 @@ def on_inbox(m):
     `who` — единственный глагол, который не кладут в сессию: им спрашивают
     общий инбокс проекта, «кто из мастеров жив»."""
     if m.get("verb") == "who":
+        if kind() != channel.HUMAN:
+            # Инбокс роли -- транспорт вестей, не запись в списке мастеров.
+            return {"error": "not a master: a role answers no who-poll"}
         d = channel.my_session() or {}
         # Схема ответа -- одна (#319): domain.MasterAnswer. sessionId -- имя
         # файла сессии: личность сессии уникальна (#421), имя -- нет.
@@ -205,12 +236,16 @@ def on_inbox(m):
 
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
-@tool(annotations=READ_ONLY, description=(
+@role_tool(annotations=READ_ONLY, description=(
     "List pool puppets, project masters and local sessions. Check before "
     "dispatch: free means no unsaved work in the clone, not just an idle "
     "session. Reply to a master's address only from the masters table "
     "or a received message."))
 def agents(project: str = "") -> str:
+    if kind() == channel.GRANT:
+        # Роль: ростер -- глаголом roster под своим токеном; ни опроса
+        # мастеров, ни сокетов хоста -- они не её адресаты.
+        return "\n".join(_roster(project, sizes=False))
     out = _roster(project) if MASTER else _roster_from_bus()
     out += _masters()
 
@@ -224,11 +259,11 @@ def agents(project: str = "") -> str:
     return "\n".join(out)
 
 
-def _roster(project):
+def _roster(project, sizes=True):
     """Ростер мастера: Nomad знает про папета то, чего не знает узел, —
     состояние аллокации, профиль LLM, репозиторий."""
     rows = [("PUPPET", "NODE", "ALLOC", "STATE", "OWNER", "LLM", "REPOSITORY")]
-    for r in puppets.puppet_rows():
+    for r in puppets.puppet_rows(sizes=sizes):
         # Проект -- одно определение (project_of), не подстрока origin: mop
         # сидит внутри rumop (#371). Без origin -- «?», как row_project.
         if project and (puppets.project_of(r.origin) if r.origin else "?") != project:
@@ -280,7 +315,7 @@ def _masters():
     return ["", "masters of project:", *table(rows)]
 
 
-@tool(description=(
+@role_tool(description=(
     "Message a puppet, a project master or a local session. Use the address "
     "from agents or a received message. Returns a delivery verdict; "
     "notify_when_idle arranges a later notice. Messaging a puppet claims "
@@ -293,36 +328,61 @@ def send(to: str, message: str, priority: str = "next",
         return f"priority must be one of {', '.join(session.PRIORITIES)}"
     if not message.strip():
         return "empty message, nothing to send"
-    kind, where = channel.route(to)
+    who = kind()
+    kind_, where = channel.route(to, who)
     try:
-        if kind == "puppet":
-            node = channel.puppet_node(to, MASTER)
+        if kind_ == "puppet":
+            node = node_of(to)
+            # Кто пишет (from-name -- адрес для ответа) и владелец задания
+            # (#161): мастер называет себя логином, папет и роль -- никем и
+            # аренды не берут (channel.send_fields).
             v = channel.send_to_puppet(
                 node, to, message, priority, wait_seconds, notify=notify_when_idle,
-                # Кто пишет. Едет в конверт полем from-name, и подсказка
-                # канала называет его папету как адрес для ответа: без этого
-                # «ответь мне» указывает в никуда.
-                from_name=me(),
-                # Владелец задания (#161): мастер называет себя логином,
-                # папет -- никем и аренды не берёт.
-                owner=bus.login() if MASTER else None,
-                force=force, reply_to=MY_INBOX)
-        elif kind == "local":
+                via=channel.send_channel(who),
+                **channel.send_fields(who, me(), MY_INBOX, force, bus.login()))
+        elif kind_ == "local":
             v = channel.send_local(where, message, priority, wait_seconds,
                                    from_name=me())
         else:
             v = channel.send_to_master(to, message, priority, me())
     except bus.BusError as e:
-        v = channel.undelivered(kind, to, e)
+        v = channel.undelivered(kind_, to, e)
     return channel.text(v)
 
 
-@tool(annotations=READ_ONLY, description=(
+@role_tool(annotations=DESTRUCTIVE, description=(
+    "Hand a task to a puppet that receives dispatch: unlike send, the server "
+    "may give you its lease and your owner's git identity. Leave `to` empty "
+    "to pick a free receiving puppet of this project."))
+def dispatch(to: str, message: str, priority: str = "next") -> str:
+    if kind() != channel.GRANT or not (CAPS and CAPS.dispatch):
+        return "dispatch: not permitted for this role — use send"
+    if priority not in session.PRIORITIES:
+        return f"priority must be one of {', '.join(session.PRIORITIES)}"
+    if not message.strip():
+        return "empty message, nothing to send"
+    if not to:
+        to = channel.pick(channel.candidates(puppets.puppet_rows(sizes=False)),
+                          bus.PROJECT, None)
+        if not to:
+            return ("dispatch: no puppet of this project receives dispatch with a "
+                    "free clone and no lease — see agents")
+    if not channel.is_puppet(to):
+        return f"dispatch: {to} is not a puppet's job name"
+    try:
+        v = channel.dispatch_to_puppet(node_of(to), to, message, priority,
+                                       from_name=me())
+    except bus.BusError as e:
+        v = channel.undelivered("puppet", to, e)
+    return channel.text(v)
+
+
+@role_tool(annotations=READ_ONLY, description=(
     "Read recent output from a puppet's screen, including dialogs and "
     "errors missing from its state."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
     try:
-        buf = puppets.pane_lines(channel.puppet_node(name, MASTER), name)
+        buf = puppets.pane_lines(node_of(name), name)
     except (LookupError, RuntimeError) as e:
         # Сессии нет (#333) -- тот же текст, что у `mop tail`: stderr
         # аллокации. Спросить сервис кластера может только мастер.
@@ -335,14 +395,14 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 
 
 # ─── инструменты: управление ─────────────────────────────────────────────
-@master_tool(annotations=DESTRUCTIVE, description=(
+@role_tool(annotations=DESTRUCTIVE, description=(
     "Type a permitted slash command or Escape in a puppet's session. "
     f"Allowed: {', '.join(SLASH_ALLOWED)}. force=true overrides another "
     "master's ownership only if that master agrees or is gone."))
 def slash(name: str, command: str, force: bool = False) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"only allowed: {', '.join(SLASH_ALLOWED)}"
-    node = channel.puppet_node(name, MASTER)
+    node = node_of(name)
     if command.startswith("/model "):
         puppets.switch_model(node, name, command.split(None, 1)[1], force)
         return f"{name}: {command}"
@@ -424,13 +484,20 @@ def command_tool(name, words, path, decl):
 
 
 def command_tools():
-    """Все объявленные командлеты -- инструменты. Только у мастера: узлу
-    управление не положено, и его креды в сервис кластера не пишут."""
-    if not MASTER:
+    """Объявленные командлеты -- инструменты. У мастера -- все, у роли --
+    назвавшие свои глаголы в пределах её capabilities (#585), у узла --
+    никаких: управление ему не положено, и его креды в сервис кластера не
+    пишут."""
+    if kind() == channel.LEGACY:
         return
+    found = {}
     for name, words, path in cli.tool_commands(cli.scan(), cli.verbs()):
         decl = cli.declared(path)
         if decl is not None:
+            found[name] = (words, path, decl)
+    allowed = channel.tools_for(kind(), CAPS, {n: d for n, (_, _, d) in found.items()})
+    for name, (words, path, decl) in found.items():
+        if name in allowed:
             command_tool(name, words, path, decl)
 
 
@@ -485,12 +552,16 @@ def watch_inbox():
     Молчим, если сессии нет: мастер, которому некуда положить весть, не имеет
     права называться живым адресом — папет получит честное «нет на шине»
     вместо доставленного в никуда."""
-    if not MASTER or not channel.master_socket():
+    who = kind()
+    if who == channel.LEGACY or not channel.master_socket():
         return
     bus.ERROR_LISTENERS.append(on_bus_error)
     try:
         bus.subscribe(MY_INBOX, on_inbox)
-        bus.subscribe(bus.inbox(bus.ALL_MASTERS), on_inbox)
+        # Роль слушает только свой инбокс -- транспорт вестей (#585): в
+        # опросе мастеров её нет, и процессов MCP в теле сколько угодно.
+        if who == channel.HUMAN:
+            bus.subscribe(bus.inbox(bus.ALL_MASTERS), on_inbox)
     except bus.BusError:
         # Без шины сервер всё равно поднимется: доставка отобьётся понятной
         # ошибкой на первом же send, а молчащая подписка не соврёт успехом.
@@ -504,7 +575,10 @@ def main(argv=None):
             where = bus.config()["url"]
         except bus.BusError as e:
             where = f"none ({e})"
-        who = profile_name(MASTER, bus.PROJECT)
+        if kind() == channel.GRANT:
+            who = f"role {BUNDLE.role}" if BUNDLE else f"role without a bundle ({NO_BUNDLE})"
+        else:
+            who = profile_name(MASTER, bus.PROJECT)
         # Ни адреса, ни инбокса (#226): --check -- отдельный процесс, и его
         # pid не pid живого сервера сессии. Напечатанный адрес не слушал бы
         # никто, а отданный папету увёл бы ответ в пустоту. Адрес мастера --

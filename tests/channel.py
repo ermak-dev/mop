@@ -396,14 +396,11 @@ def check_role_channel_585(c):
         c.expect("#585 legacy send names its clone", kw.get("from_name"), "pu-mop-4")
     # Человек -- байт в байт прежний запрос (характеристика выше): без channel.
 
-    # Грант: адрес -- имя джоба, ни владельца, ни force, ни reply_to;
-    # узел адресата -- verb peers своего узла, не broadcast.
-    env = {"MOP_PUPPET": "pu-mop-3", "MOP_NODE": "n7"}
-    peers = {"peers": [
-        {"name": "pu-mop-3", "node": "n7", "role": "master", "receives_dispatch": False,
-         "free": True, "owner": "anton"},
-        {"name": PUPPET, "node": "n1", "role": "puppet", "receives_dispatch": True,
-         "free": True, "owner": None}]}
+    # Грант: адрес -- имя джоба, ни владельца, ни force; reply_to -- только
+    # транспорт вестей в инбокс процесса (решение мастера по C5). Узел
+    # адресата -- глаголом alloc кластера под своим токеном (C4: roster/alloc
+    # выдаются ролям декларативно), не broadcast.
+    env = {"MOP_PUPPET": "pu-mop-3"}
     with Stubs() as s, patched_env(**env):
         # Профиль -- тот, что модуль вывел бы из кредов гранта, а не
         # подставленный руками.
@@ -416,15 +413,10 @@ def check_role_channel_585(c):
         s.put(bus, "login", lambda: GRANT)
         s.put(bus, "gather", lambda *a, **kw: c.fail("#585 grant never broadcasts", a))
 
-        def request(node, verb, **kw):
-            s.calls.append(("request", node, verb, kw))
-            return peers if verb == "peers" else {"msg_id": "m1"}
-        s.put(bus, "request", request)
         got = mcp.send(PUPPET, "hi", force=True)
         c.expect("#585 grant send delivered", got, "pu-mop-9: delivered (msg_id=m1)")
-        c.expect("#585 grant locates over its own node",
-                 [x[1:3] for x in s.calls if x[0] == "request"],
-                 [("n7", "peers"), ("n1", "send")])
+        c.expect("#585 grant reaches the target's node",
+                 [x[1:3] for x in s.calls if x[0] == "request"], [("n1", "send")])
         kw = s.calls[-1][3]
         c.expect("#585 grant send is plain rpc", kw.get("channel", "rpc"), "rpc")
         c.expect("#585 grant names itself by its job",
@@ -432,7 +424,9 @@ def check_role_channel_585(c):
         c.expect("#585 no false owner binding", "owner" in kw, False)
         c.expect("#585 plain send takes no lease: force does not travel",
                  "force" in kw, False)
-        c.expect("#585 no per-process inbox as reply_to", "reply_to" in kw, False)
+        c.expect("#585 the process inbox is transport only (reply_to), not the sender",
+                 (kw.get("reply_to"), kw.get("from_name")),
+                 (f"mop.mop.master.{GRANT}.host-77.inbox", "pu-mop-3"))
         c.expect("#585 me() of a grant", mcp.me(), "pu-mop-3")
     return True
 
@@ -454,44 +448,44 @@ def check_role_api_585(c):
         c.expect("#585 a grant is no human owner", channel.human_login(), None)
     with patched(bus, config=lambda *a: {"user": "anton"}):
         c.expect("#585 a person is still owner", channel.human_login(), "anton")
-    env = {"MOP_PUPPET": "pu-mop-3", "MOP_NODE": "n7"}
-    peers = {"peers": [
-        {"name": "pu-mop-3", "node": "n7", "role": "master", "receives_dispatch": False,
-         "free": True, "owner": "anton"},
-        {"name": PUPPET, "node": "n1", "role": "puppet", "receives_dispatch": True,
-         "free": True, "owner": None}]}
+    env = {"MOP_PUPPET": "pu-mop-3"}
     with Stubs() as s, patched_env(**env):
         s.put(mcp, "MASTER", False)
         s.put(mcp, "KIND", channel.GRANT)
         s.put(mcp, "CAPS", caps_of("puppet"))
+        s.put(mcp, "MASTER_ID", f"{GRANT}.host-77")
+        s.put(mcp, "MY_INBOX", f"mop.mop.master.{GRANT}.host-77.inbox")
         s.put(bus, "login", lambda: GRANT)
-
-        def request(node, verb, **kw):
-            s.calls.append(("request", node, verb, kw))
-            return peers if verb == "peers" else {"msg_id": "m1"}
-        s.put(bus, "request", request)
+        s.put(bus, "gather", lambda *a, **kw: c.fail("#585 grant never broadcasts", a))
 
         # Адреса: старые адреса мастеров-людей работают в переходе, имя
-        # роли адресом не является.
+        # роли адресом не является, сокеты соседей по хосту -- не путь роли.
         old = "anton%2Eermak.wate.lan-7"
         c.expect("#585 grant may answer a human master's address",
                  channel.route(old, channel.GRANT), ("master", old))
         c.expect("#585 legacy master address without login",
                  channel.route("host-1", channel.GRANT), ("master", "host-1"))
-        try:
-            got = channel.route("builder", channel.GRANT)
-            c.fail("#585 a role label is not an address", got)
-        except LookupError as e:
-            c.check("#585 the refusal says how to address", "job name" in str(e), str(e))
+        for label in ("builder", "s1"):
+            try:
+                got = channel.route(label, channel.GRANT)
+                c.fail(f"#585 {label!r} is not an address of a role", got)
+            except LookupError as e:
+                c.check("#585 the refusal says how to address", "job name" in str(e), str(e))
         c.expect("#585 a human still routes any name to a master inbox",
                  channel.route("builder"), ("master", "builder"))
+        c.expect("#585 a human still reaches a session on its host",
+                 channel.route("s1"), ("local", SESS))
 
-        # Многопроцессный MCP одного тела: ни одной подписки на шине.
+        # Многопроцессный MCP одного тела: свой инбокс -- транспорт вестей,
+        # опрос мастеров (who) роль не слушает и мастером не считается.
         subs = []
         s.put(bus, "subscribe", lambda subj, h: subs.append(subj))
+        s.put(bus, "ERROR_LISTENERS", [])
         with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]):
             mcp.watch_inbox()
-        c.expect("#585 a role MCP subscribes no inbox", subs, [])
+            c.expect("#585 a role answers no who-poll", "error" in mcp.on_inbox({"verb": "who"}), True)
+        c.expect("#585 a role MCP subscribes its own inbox only",
+                 subs, [f"mop.mop.master.{GRANT}.host-77.inbox"])
 
         # dispatch: без права -- отказ; с правом -- свой канал, без owner.
         c.check("#585 dispatch refused without the capability",
@@ -504,30 +498,54 @@ def check_role_api_585(c):
                  ("n1", "dispatch", "dispatch"))
         c.expect("#585 dispatch body carries no authority",
                  [k for k in ("owner", "force", "role", "_caller") if k in last[3]], [])
+        c.expect("#585 dispatch names the sender by its job", last[3].get("from_name"), "pu-mop-3")
         # autopick: мастер-роль чистая, но не принимает -- выбран рабочий.
-        mcp.dispatch("", "task")
-        c.expect("#585 autopick dispatches to the receiving puppet",
-                 s.calls[-1][3].get("name"), PUPPET)
+        from mop.common.state import PuppetRow
+
+        def row(name, kind, receives, owner=None):
+            r = PuppetRow(name, "n1", "running", kind, kind, owner,
+                          origin="git@h:ermak/mop.git", soul="x")
+            object.__setattr__(r, "receives_dispatch", receives) if receives is not None else None
+            return r
+        s.put(puppets, "puppet_rows", lambda sizes=True: [
+            row("pu-mop-1", "free", False), row("pu-mop-2", "busy", True),
+            row(PUPPET, "free", True), row("pu-mop-8", "free", None)])
+        s.put(bus, "PROJECT", "mop")
+        got = mcp.dispatch("", "task")
+        c.expect("#585 autopick dispatches to the receiving free puppet",
+                 (got, s.calls[-1][3].get("name")), ("pu-mop-9: delivered (msg_id=m1)", PUPPET))
+        s.put(puppets, "puppet_rows", lambda sizes=True: [row("pu-mop-1", "free", False)])
+        c.check("#585 autopick with nobody eligible refuses with a reason",
+                "no puppet" in mcp.dispatch("", "task"))
+        s.put(mcp, "KIND", channel.HUMAN)
+        s.put(mcp, "MASTER", True)
+        c.check("#585 a human has no dispatch: send keeps its lease semantics",
+                "not permitted" in mcp.dispatch(PUPPET, "task"))
 
     # Каталог инструментов: из capabilities и объявлений командлетов.
     decls = {"wipe": {"node_verbs": ["wipe"]}, "add": {"cluster_verbs": ["add"]},
              "drain": {"cluster_verbs": ["drain"]}, "models": {}}
     hand = channel.HAND_TOOLS
     c.expect("#585 a human keeps every tool",
-             channel.tools_for(channel.HUMAN, None, decls), set(hand) | set(decls) - {"dispatch"})
+             channel.tools_for(channel.HUMAN, None, decls), (set(hand) | set(decls)) - {"dispatch"})
     c.expect("#585 legacy puppet: the channel only",
              channel.tools_for(channel.LEGACY, None, decls), {"agents", "send", "tail"})
-    c.expect("#585 puppet role: the channel by node_verbs",
+    decls["profile"] = {"cluster_verbs": []}
+    c.expect("#585 puppet role as preset today: no discovery without roster",
              channel.tools_for(channel.GRANT, caps_of("puppet"), decls),
-             {"agents", "send", "tail"})
+             {"send", "tail", "profile"})
+    c.expect("#585 puppet role with declared roster/alloc: discovery",
+             channel.tools_for(channel.GRANT, caps_of("puppet", cluster_verbs=["roster", "alloc"]),
+                               decls),
+             {"agents", "send", "tail", "profile"})
     c.expect("#585 master role: its verbs, dispatch, declared commandlets",
              channel.tools_for(channel.GRANT, caps_of("master"), decls),
-             {"agents", "send", "tail", "slash", "dispatch", "wipe", "add"})
-    c.expect("#585 empty node_verbs: discovery only",
+             {"agents", "send", "tail", "slash", "dispatch", "wipe", "add", "profile"})
+    c.expect("#585 empty node_verbs: no channel tools",
              channel.tools_for(channel.GRANT, caps_of("puppet", node_verbs=[]), decls),
-             {"agents"})
+             {"profile"})
     c.expect("#585 a grant without a bundle fails closed",
-             channel.tools_for(channel.GRANT, None, decls), {"agents"})
+             channel.tools_for(channel.GRANT, None, decls), set())
 
     # autopick: чистая функция.
     rows = [
@@ -966,7 +984,11 @@ def main():
         check_role_api_585(c)
     except Exception as e:
         c.fail("#585 role api", f"{type(e).__name__}: {e}")
-    # STATUS: IN PROGRESS — #585
+    # RESULT: красный на сегодняшнем маршруте (grant -- мастер-профиль,
+    # owner/force грантом, from-name инбоксом, легаси по rpc), зелёный после.
+    # Решение мастера по C5 сменило одно ожидание до реализации: инбокс
+    # процесса роли остаётся транспортом reply_to, адрес -- имя джоба.
+    # STATUS: FIXED — see #585
 
     return c.report("channel")
 

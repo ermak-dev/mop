@@ -1491,9 +1491,45 @@ def main():
     check_node_memory_197(c)
     check_fallback_model_183(c)
     check_agent_on_node_172(c)
+    check_role_declarations_585(c)
     check_bus_import_169(c)      # последними: перезагружают модули
     check_nomad_import_187(c)
     return c.report("cli")
+
+
+def check_role_declarations_585(c):
+    """HYPOTHESIS (#585): каталог инструментов роли строится из
+    capabilities её бандла и объявлений командлетов, но объявление не
+    умеет сказать, какие глаголы командлету нужны: `MCP keys are
+    annotations, args, background` -- и роль либо получает все командлеты
+    (ложная стена наоборот), либо ни одного.
+    SOLUTION: объявление называет node_verbs/cluster_verbs (словарь
+    soul.NODE_VERBS/CLUSTER_VERBS) и dispatch (bool); чужой глагол или не
+    тот тип -- громкий отказ на старте mop mcp; молчащее объявление роли
+    не открывается (channel.tools_for). STATUS: FIXED — see #585"""
+    d = tempfile.mkdtemp(prefix="mop-test-mcp-585-")
+    p = os.path.join(d, "x.py")
+    with open(p, "w") as f:
+        f.write('MCP = {"annotations": "destructive", "node_verbs": ["wipe"], '
+                '"cluster_verbs": ["alloc", "stop"], "dispatch": False}\n')
+    try:
+        got = cli.declared(p)
+    except ValueError as e:
+        got = e
+    c.expect("#585 a declaration names the verbs it needs",
+             got, {"annotations": "destructive", "node_verbs": ["wipe"],
+                   "cluster_verbs": ["alloc", "stop"], "dispatch": False})
+    for bad in ('MCP = {"node_verbs": ["disk"]}',          # админский, не роли
+                'MCP = {"cluster_verbs": ["drain"]}',
+                'MCP = {"cluster_verbs": "roster"}',       # не список
+                'MCP = {"dispatch": "yes"}'):
+        with open(p, "w") as f:
+            f.write(bad + "\n")
+        try:
+            cli.declared(p)
+        except ValueError:
+            continue
+        c.fail(f"#585 declared must refuse: {bad}")
 
 
 def check_mcp_declarations(c):
