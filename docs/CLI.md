@@ -449,6 +449,30 @@ mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue
 Sets status::wip and, unless --no-branch, creates the issue's branch.
 ```
 
+#### mop dev chat-probe
+
+```text
+mop dev chat-probe [--output DIR] [--timeout seconds]: probe the installed interactive Claude
+
+Uses a fresh home/workdir, a private randomly named tmux server and a loopback
+Messages fixture with a dummy key. No existing session is resumed. All responses
+are fixture-backed, not paid-provider evidence. Uses --bare to disable discovery
+and keychain reads, with explicit Bash/AskUserQuestion tools where supported;
+this may expose fewer tools than normal mode. Default permission mode remains
+in force. External HTTP/HTTPS proxy attempts are refused, not OS-sandboxed. Each scenario reports observed, unsupported or unknown independently;
+a partial probe is not a claim that every scenario works.
+
+Writes report.json, lossless base64 terminal/input frames, pane snapshots and
+fixture request bodies in a new private directory (default: ./chat-probe-UUID).
+The directory must not already exist. --timeout is a per-wait bound, 1 to 30
+seconds; each scenario is bounded below 120 seconds. Stops only its own tmux
+server and fixture listener on exit. Requires installed claude and tmux.
+
+Prints the report path and one verdict per scenario. Exit 1 for runner errors,
+not for unsupported or unknown scenarios. Does not contact the pool or load
+installation credentials.
+```
+
 #### mop dev ci
 
 ```text
