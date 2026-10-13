@@ -111,10 +111,104 @@ def main():
             "fixture-backed recover complete old"))
     c.check("#613 fresh response is recovery", p.completion_seen(requests, "recover", 1,
             "fixture-backed recover complete new"))
+    # HYPOTHESIS: HOME не меняет системную SSH identity и длинный cwd ломает сокет.
+    # SOLUTION: запрет git transport, короткий собственный runtime, явные ворота.
+    # RESULT: сначала проверки отсутствующих ворот и неверного окружения красные.
+    # STATUS: FIXED — see #613
+    for key, value in {"GIT_ALLOW_PROTOCOL": "file", "GIT_SSH_COMMAND": "false",
+                       "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+                       "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CEILING_DIRECTORIES": "/"}.items():
+        c.expect("#613 git guard " + key, env.get(key), value)
+    injected = p.isolated_env({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.sshCommand",
+        "GIT_CONFIG_VALUE_0": "ssh", "GIT_CONFIG_PARAMETERS": "bad"}, "/isolated", "http://127.0.0.1:1234")
+    c.check("#613 git injection removed", not any(k in injected for k in
+        ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS")))
+    functions = ("tmux_socket", "unexpected_home_paths", "fixture_auth_ok", "cleanup_verdict",
+                 "snapshot_projection", "valid_history_argument", "managed_preflight")
+    available = {name: c.check("#613 safety function " + name,
+                              callable(getattr(p, name, None))) for name in functions}
+    if available["tmux_socket"]:
+        c.check("#613 long output cannot lengthen tmux socket", len(p.tmux_socket("/tmp/mp-123456")) < 108)
+        c.expect("#613 explicit private socket", p.tmux_socket("/tmp/mp-123456"), "/tmp/mp-123456/s")
+    if available["unexpected_home_paths"]:
+        c.expect("#613 ordinary own transcript allowed", p.unexpected_home_paths([
+            ".claude/projects/project/session.jsonl", ".claude/sessions/123.key", ".claude/settings.json"]), [])
+        bad = [".claude/plugins/marketplaces/official/.git/config", ".git/config", ".ssh/id_ed25519",
+               ".claude/.credentials.json", ".git-credentials", ".claude/plugins/installed_plugins.json"]
+        c.expect("#613 marketplace/git/credential touches fail", p.unexpected_home_paths(bad), sorted(bad))
+    if available["fixture_auth_ok"]:
+        c.check("#613 dummy fixture auth allowed", p.fixture_auth_ok({"x-api-key": "chat-probe-dummy-key"}))
+        for headers in ({}, {"x-api-key": "real"}, {"x-api-key": "chat-probe-dummy-key", "authorization": "Bearer real"}):
+            c.check("#613 other fixture auth refused", not p.fixture_auth_ok(headers))
+    if available["cleanup_verdict"]:
+        c.check("#613 no leftovers is clean", p.cleanup_verdict(True, []) )
+        c.check("#613 leftover not cleanup success", not p.cleanup_verdict(True, [{"pid": 12, "start_ticks": "33"}]))
+        c.check("#613 kill error not cleanup success", not p.cleanup_verdict(False, []))
+    if available["snapshot_projection"]:
+        projected = p.snapshot_projection({"pid": 123, "sessionId": "sid", "cwd": "/own",
+            "messagingSocketPath": "/tmp/own/s", "private": "secret"},
+            {"peerToken": "secret", "procStart": "12345", "extra": "secret"}, "/own/.claude",
+            {"pid": 123, "start_ticks": "12345"}, True)
+        c.check("#613 snapshot never leaks peer token/unknown fields", "secret" not in json.dumps(projected))
+        c.expect("#613 key raw procStart contract", projected["key"],
+            {"fields": ["extra", "peerToken", "procStart"], "peer_token_present": True,
+             "procStart": "12345", "procStart_type": "str"})
+        c.expect("#613 actual registry session id", projected["sessionId"], "sid")
+        c.expect("#613 raw numeric procStart stays numeric", p.snapshot_projection({}, {"procStart": 123},
+            "/own", None, False)["key"]["procStart_type"], "int")
+    if available["valid_history_argument"]:
+        c.check("#613 explicit source argument", p.valid_history_argument("/explicit/mop/session.py"))
+        for value in ("session.py", "https://example/session.py", "/explicit/other.py", "/a/../session.py"):
+            c.check("#613 history argument refused", not p.valid_history_argument(value))
+    if available["managed_preflight"]:
+        c.check("#613 absent managed settings allowed", p.managed_preflight([]))
+        c.check("#613 present managed settings refused without contents", not p.managed_preflight(["/etc/claude-code/managed-settings.json"]))
+    # HYPOTHESIS: bare не публикует inbox без явного пути, а error_present скрывает причину.
+    # SOLUTION: явный короткий messaging socket и безопасная проекция history.
+    # RESULT: воспроизведено в новом живом прогоне, history отказал без сокета.
+    # STATUS: FIXED — see #613
+    if c.check("#613 probe command builder exists", callable(getattr(p, "probe_command", None))):
+        built = p.probe_command("/bin/claude", "/own/settings.json", "sid", "/tmp/mp-own/c.sock")
+        c.check("#613 probe still uses bare isolation", "--bare" in built)
+        c.expect("#613 explicit messaging socket", built[built.index("--messaging-socket-path") + 1], "/tmp/mp-own/c.sock")
+    if c.check("#613 history projection exists", callable(getattr(p, "history_projection", None))):
+        failed = p.history_projection({"error": "session registry socket is unknown"}, 1)
+        c.expect("#613 history refusal reason retained", failed["error"], "session registry socket is unknown")
+        safe = p.history_projection({"records": [{"type": "user", "private": "secret"}],
+            "cursor": "secret", "epoch": "secret", "session_id": "sid", "reset": True,
+            "has_more": False, "partial": False}, 0)
+        c.check("#613 history private values never projected", "secret" not in json.dumps(safe))
+        c.expect("#613 actual history records count", safe["records_count"], 1)
+    # HYPOTHESIS: пустой scaffold marketplaces не равен clone/install.
+    # SOLUTION: отдельно учитывать тип entry, не исключая вложенные установки.
+    # RESULT: первый guarded прогон ошибочно отказал на одном пустом каталоге.
+    # STATUS: FIXED — see #613
+    import inspect
+    if c.check("#613 directory-aware marketplace evidence", "directories" in inspect.signature(p.unexpected_home_paths).parameters):
+        scaffold = ".claude/plugins/marketplaces"
+        c.expect("#613 empty scaffold is not installation", p.unexpected_home_paths([scaffold], directories=[scaffold]), [])
+        c.expect("#613 nested marketplace directory still fails", p.unexpected_home_paths(
+            [scaffold, scaffold + "/official"], directories=[scaffold, scaffold + "/official"]), [scaffold + "/official"])
+        c.expect("#613 file at scaffold path is unexpected", p.unexpected_home_paths([scaffold]), [scaffold])
+    if c.check("#613 process config projection exists", callable(getattr(p, "process_config_projection", None))):
+        c.expect("#613 own config environment projected", p.process_config_projection(
+            b"HOME=/own\x00CLAUDE_CONFIG_DIR=/own/.claude\x00ANTHROPIC_API_KEY=secret\x00"),
+            {"HOME": "/own", "CLAUDE_CONFIG_DIR": "/own/.claude"})
+    if c.check("#613 live contract verdict exists", callable(getattr(p, "live_contract_observed", None))):
+        row = {"pid": 123, "sessionId": "sid", "process_config_matches": True,
+            "process": {"pid": 123, "start_ticks": "12345", "state": "S"},
+            "socket_path_present": True, "socket_peer": {"pid": 123, "start_ticks": "12345"},
+            "key": {"peer_token_present": True, "procStart": "12345", "procStart_type": "str"}}
+        c.check("#613 proven live contract observed", p.live_contract_observed([row]))
+        for modified in ({"socket_path_present": False}, {"socket_peer": None}, {"process_config_matches": False},
+                         {"key": {"procStart": 12345, "procStart_type": "int", "peer_token_present": True}},
+                         {"key": {"procStart": "54321", "procStart_type": "str", "peer_token_present": True}}):
+            c.check("#613 missing/mismatched contract unknown", not p.live_contract_observed([{**row, **modified}]))
+        c.check("#613 empty live capture unknown", not p.live_contract_observed([]))
     command = importlib.import_module("mop.cli.dev.chat-probe")
     calls = []
-    def fake_run(root, timeout):
-        calls.append((str(root), timeout))
+    def fake_run(root, timeout, history_module=None):
+        calls.append((str(root), timeout) if history_module is None else (str(root), timeout, history_module))
         return {"report_path": "/private/report.json", "scenarios": {
             "a": {"outcome": "observed"}, "b": {"outcome": "unsupported"},
             "c": {"outcome": "unknown"}}, "errors": []}
@@ -127,6 +221,14 @@ def main():
             _, _, code = run_command(command.main, args)
             c.check("#613 CLI refuses invalid arguments", bool(code))
         c.expect("#613 invalid CLI never launches process", len(calls), 1)
+        _, _, code = run_command(command.main, ["--output", "/private", "--history-module", "/explicit/mop/session.py"])
+        c.expect("#613 CLI accepts explicit history source", code, 0)
+        c.expect("#613 CLI forwards explicit history source", calls[-1], ("/private", 20, "/explicit/mop/session.py"))
+        count = len(calls)
+        for value in ("session.py", "/explicit/other.py", "https://example/session.py"):
+            _, _, code = run_command(command.main, ["--history-module", value])
+            c.check("#613 CLI rejects unsafe history source", bool(code))
+        c.expect("#613 rejected history never launches", len(calls), count)
     return c.report("chatprobe")
 
 

@@ -8,6 +8,7 @@ import base64
 import errno
 import fcntl
 import http.server
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,10 @@ import select
 import shlex
 import shutil
 import struct
+import socket
+import stat
+import signal
+import tempfile
 import subprocess
 import sys
 import termios
@@ -39,6 +44,10 @@ def isolated_env(source, home, endpoint):
             "XDG_CACHE_HOME": str(Path(home) / ".cache"),
             "XDG_DATA_HOME": str(Path(home) / ".local/share"),
             "TMPDIR": str(Path(home) / "tmp"), "TMUX_TMPDIR": str(Path(home) / "tmp"),
+            "GIT_ALLOW_PROTOCOL": "file", "GIT_SSH_COMMAND": "false",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CEILING_DIRECTORIES": "/",
+            "XDG_RUNTIME_DIR": str(Path(home) / "tmp"),
             "SHELL": "/bin/sh",
             "TERM": "xterm-256color", "LANG": "C.UTF-8",
             "CLAUDE_CONFIG_DIR": str(Path(home) / ".claude"),
@@ -48,6 +57,174 @@ def isolated_env(source, home, endpoint):
             "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1",
             "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1",
             "DISABLE_ERROR_REPORTING": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+
+
+def tmux_socket(runtime):
+    """Не зависит от длины каталога свидетельств или cwd вызывающего."""
+    path = str(Path(runtime) / "s")
+    if len(os.fsencode(path)) >= 108:
+        raise ValueError("private tmux socket path is too long")
+    return path
+
+
+def unexpected_home_paths(paths, directories=()):
+    """Пустой корневой scaffold не установка; вложенные entries всё ещё запрещены."""
+    paths = [path for path in paths if not
+             (path == ".claude/plugins/marketplaces" and path in directories)]
+    return sorted(path for path in paths if
+        any(part in (".git", ".ssh", ".gitconfig", ".git-credentials", ".credentials.json")
+            for part in Path(path).parts)
+        or any(part in ("marketplaces", "installed_plugins.json", "known_marketplaces.json")
+               for part in Path(path).parts)
+        or "credential" in Path(path).name.lower())
+
+
+def fixture_auth_ok(headers):
+    """Проверяется только равенство; значение заголовка не выходит наружу."""
+    headers = {key.lower(): value for key, value in headers.items()}
+    return (headers.get("x-api-key") == "chat-probe-dummy-key"
+            and not headers.get("authorization"))
+
+
+def cleanup_verdict(server_stopped, leftovers):
+    """kill-server сам по себе не доказывает, что дети завершились."""
+    return bool(server_stopped and not leftovers)
+
+
+def snapshot_projection(registry, key, config, peer, present):
+    """Белый список реестра и ключа: peerToken никогда не копируется."""
+    return {**{name: registry.get(name) for name in
+               ("pid", "sessionId", "cwd", "messagingSocketPath")},
+            "config_home": str(config), "socket_path_present": present, "socket_peer": peer,
+            "key": {"fields": sorted(key), "peer_token_present": bool(key.get("peerToken")),
+                    "procStart": key.get("procStart"),
+                    "procStart_type": type(key.get("procStart")).__name__}}
+
+
+def live_contract_observed(rows):
+    """Наличие JSON не доказывает socket/key identity: нужны все совпадения."""
+    if len(rows) != 1:
+        return False
+    row = rows[0]
+    process, peer, key = row.get("process"), row.get("socket_peer"), row.get("key", {})
+    return bool(process and peer and row.get("sessionId") and row.get("process_config_matches")
+        and row.get("socket_path_present") and key.get("peer_token_present")
+        and row.get("pid") == process.get("pid") == peer.get("pid")
+        and process.get("state") not in ("Z", "X") and key.get("procStart_type") == "str"
+        and isinstance(key.get("procStart"), str) and key["procStart"].isascii()
+        and key["procStart"].isdigit()
+        and key["procStart"] == process.get("start_ticks") == peer.get("start_ticks"))
+
+
+def valid_history_argument(value):
+    """Источник явно указан оператором; URL и относительный импорт запрещены."""
+    path = Path(value)
+    return path.is_absolute() and path.name == "session.py" and ".." not in path.parts
+
+
+def managed_preflight(present):
+    """Любая системная policy — неизвестное переопределение, запуск запрещён."""
+    return not present
+
+
+def process_identity(pid):
+    """start ticks плюс state защищают от чужого переиспользованного PID."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return {"pid": pid, "start_ticks": fields[19], "state": fields[0]}
+    except FileNotFoundError:
+        return None
+
+
+def process_config_projection(raw):
+    """Из собственного environ выходят только пути, не auth или loader значения."""
+    return {key.decode(): value.decode() for item in raw.split(b"\x00")
+            for key, sep, value in [item.partition(b"=")]
+            if sep and key in (b"HOME", b"CLAUDE_CONFIG_DIR")}
+
+
+def live_snapshot(config, work, expected_pid):
+    """Снимается при живом Claude: реестр, ключ и SO_PEERCRED без кадров."""
+    rows = []
+    for path in sorted((config / "sessions").glob("*.json")):
+        registry = json.loads(path.read_text())
+        if registry.get("cwd") != str(work):
+            continue
+        if registry.get("pid") != expected_pid:
+            raise RuntimeError("own registry PID differs from own tmux pane; snapshot refused")
+        identity_before = process_identity(expected_pid)
+        config_env = process_config_projection(Path(f"/proc/{expected_pid}/environ").read_bytes())
+        identity_after = process_identity(expected_pid)
+        if (not identity_before or not identity_after or
+                identity_before["start_ticks"] != identity_after["start_ticks"]):
+            raise RuntimeError("own process changed during config snapshot")
+        socket_path = registry.get("messagingSocketPath")
+        present = bool(socket_path and Path(socket_path).exists())
+        peer, peer_error = None, None
+        if present:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(1)
+                    connection.connect(socket_path)
+                    pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+                    peer = process_identity(pid)
+                    if peer:
+                        peer["uid"] = uid
+            except OSError as e:
+                peer_error = type(e).__name__
+        # Читаются только ключи собственного временного home; токен не сохраняется.
+        keys = list((config / "sessions").glob(str(registry.get("pid")) + ".*.key"))
+        for key_path in keys or [None]:
+            key = json.loads(key_path.read_text()) if key_path else {}
+            row = snapshot_projection(registry, key, config, peer, present)
+            row["process_config"] = config_env
+            row["process_config_matches"] = config_env.get("CLAUDE_CONFIG_DIR") == str(config)
+            row["registry_file"] = path.name
+            row["key_file"] = key_path.name if key_path else None
+            row["process"] = process_identity(registry.get("pid"))
+            row["socket_peer_error"] = peer_error
+            rows.append(row)
+    return rows
+
+
+def probe_command(claude, settings, session_id, messaging_socket):
+    """Явный inbox нужен для живого контракта, bare isolation сохраняется."""
+    return [claude, "--bare", "--model", MODEL, "--session-id", session_id,
+            "--messaging-socket-path", messaging_socket,
+            "--permission-mode", "default", "--tools", "Bash,AskUserQuestion",
+            "--settings", str(settings), "--setting-sources", "user",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+
+
+def history_projection(body, returncode):
+    """Штатный отказ адаптера сохраняет причину, records и cursor не копируются."""
+    if returncode or "error" in body:
+        return {"returncode": returncode, "outcome": "unknown",
+                "error": body.get("error", "history adapter failed without a reason"),
+                "header_fields": sorted(body)}
+    return {"returncode": returncode, "outcome": "observed", "header_fields": sorted(body),
+            "session_id": body.get("session_id"), "records_count": len(body.get("records", [])),
+            "record_types": sorted({r.get("type", "unknown") for r in body.get("records", [])}),
+            "reset": body.get("reset"), "has_more": body.get("has_more"), "partial": body.get("partial"),
+            "cursor_present": bool(body.get("cursor")), "epoch_present": bool(body.get("epoch"))}
+
+
+def history_snapshot(module, work, env):
+    """Явный локальный stdlib адаптер; приватные records/cursor не пишутся."""
+    before = Path(module).read_bytes()
+    source = {"sha256": hashlib.sha256(before).hexdigest(), "size": len(before)}
+    result = subprocess.run([sys.executable, "-I", module, "history", str(work)],
+        env=env, cwd="/", capture_output=True, text=True, timeout=10)
+    source["unchanged_during_call"] = Path(module).read_bytes() == before
+    try:
+        body = json.loads(result.stdout)
+    except ValueError:
+        return {"returncode": result.returncode, "outcome": "unknown", "error": "invalid history JSON"}
+    summary = {**history_projection(body, result.returncode), "source": source}
+    if not source["unchanged_during_call"]:
+        summary.update(outcome="unknown", error="history source changed during call")
+    return summary
 
 
 def prompt_kind(body):
@@ -139,6 +316,7 @@ class Fixture(http.server.ThreadingHTTPServer):
         self.release = threading.Event()
         self.unsupported = set()
         self.errors = []
+        self.auth_checks = []
 
     def handle_error(self, request, client_address):
         error = sys.exception()
@@ -162,6 +340,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.path.startswith("/v1/messages") or self.path.startswith("http"):
             self.server.denied.append(self.path)
             self.send_error(403, "No such fixture")
+            return
+        authenticated = fixture_auth_ok(dict(self.headers))
+        self.server.auth_checks.append(authenticated)
+        if not authenticated:
+            self.server.errors.append("fixture request rejected: dummy API key gate failed")
+            self.send_error(403, "Dummy API key required")
             return
         size = int(self.headers.get("Content-Length", "0"))
         if size > 8 * 1024 * 1024:
@@ -228,6 +412,9 @@ class Terminal:
     def __init__(self, tmux, label, env, work, command, root):
         self.tmux, self.label, self.env = tmux, label, env
         self.root = root
+        self.owned = {}
+        self.cleanup = {"verified": False, "leftovers": [], "errors": []}
+        self.server_identity = None
         self.seq = 0
         self.input_seq = 0
         self.raw = bytearray()
@@ -239,13 +426,14 @@ class Terminal:
         try:
             self.call("new-session", "-d", "-s", "probe", "-x", "140", "-y", "40",
                       "-c", str(work), *command)
+            self.server_identity = process_identity(int(self.call("display-message", "-p", "#{pid}")))
             self.call("set-option", "-g", "escape-time", "0")
             self.call("set-option", "-g", "focus-events", "on")
             self.call("set-option", "-g", "status", "off")
             def controlling_tty():
                 os.setsid()
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-            self.proc = subprocess.Popen([tmux, "-L", label, "-f", "/dev/null", "attach-session",
+            self.proc = subprocess.Popen([tmux, "-S", label, "-f", "/dev/null", "attach-session",
                                           "-t", "probe"], env=env, cwd=work,
                                          stdin=slave, stdout=slave, stderr=slave,
                                          preexec_fn=controlling_tty)
@@ -256,7 +444,7 @@ class Terminal:
             os.close(slave)
 
     def call(self, *args):
-        r = subprocess.run([self.tmux, "-L", self.label, "-f", "/dev/null", *args],
+        r = subprocess.run([self.tmux, "-S", self.label, "-f", "/dev/null", *args],
                            env=self.env, capture_output=True, timeout=10)
         if r.returncode:
             raise RuntimeError("own tmux operation failed: " + r.stderr.decode(errors="replace"))
@@ -315,31 +503,97 @@ class Terminal:
         return {"pid": pid, "start_ticks": stat[19], "foreground_pgid": stat[5],
                 "command": self.call("display-message", "-p", "-t", "probe", "#{pane_current_command}")}
 
+    def track_owned(self):
+        """Сначала доказанная цепочка от pane; PID из файлов не даёт права kill."""
+        pane = int(self.call("display-message", "-p", "-t", "probe", "#{pane_pid}"))
+        processes = {}
+        for path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                raw = path.read_text()
+                fields = raw.rsplit(")", 1)[1].split()
+                processes[int(path.parent.name)] = (int(fields[1]), fields[19], raw.split("(", 1)[1].rsplit(")", 1)[0])
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        descendants = {pane}
+        while True:
+            children = {pid for pid, (parent, _, _) in processes.items() if parent in descendants}
+            if children <= descendants:
+                break
+            descendants |= children
+        for pid in descendants:
+            if pid in processes:
+                _, start, command = processes[pid]
+                # Только Claude, собственная оболочка и sleep этого сценария.
+                if pid == pane or command in ("claude", "bash", "sh", "sleep"):
+                    self.owned[pid] = {"pid": pid, "start_ticks": start, "command": command}
+
+    def remaining(self):
+        """Zombie тоже остаётся процессом: сообщаем, а не выдаём за cleanup."""
+        leftovers = []
+        for pid, owned in self.owned.items():
+            identity = process_identity(pid)
+            if identity and identity["start_ticks"] == owned["start_ticks"]:
+                leftovers.append({**owned, "state": identity["state"]})
+        return leftovers
+
     def close(self):
-        # Удаляется только случайно названный собственный сервер, включая детей pane.
-        stopped = subprocess.run([self.tmux, "-L", self.label, "-f", "/dev/null", "kill-server"],
+        errors = []
+        try:
+            self.track_owned()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            errors.append("cleanup ownership capture failed: " + str(e))
+        stopped = subprocess.run([self.tmux, "-S", self.label, "-f", "/dev/null", "kill-server"],
                                  env=self.env, capture_output=True, timeout=10)
-        cleanup_error = stopped.returncode and b"no server running" not in stopped.stderr
+        kill_succeeded = stopped.returncode == 0
+        server_after = process_identity(self.server_identity["pid"]) if self.server_identity else None
+        until = time.monotonic() + 2
+        while (server_after and self.server_identity and
+               server_after["start_ticks"] == self.server_identity["start_ticks"] and time.monotonic() < until):
+            time.sleep(.1)
+            server_after = process_identity(self.server_identity["pid"])
+        server_stopped = bool(kill_succeeded and self.server_identity and not (server_after and
+            server_after["start_ticks"] == self.server_identity["start_ticks"]))
+        if not server_stopped:
+            errors.append("own tmux kill-server failed")
         if self.proc:
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        # Проверка start непосредственно перед сигналом; чужие PID не затрагиваются.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for owned in self.remaining():
+                identity = process_identity(owned["pid"])
+                if identity and identity["start_ticks"] == owned["start_ticks"] and identity["state"] != "Z":
+                    try:
+                        os.kill(owned["pid"], sig)
+                    except ProcessLookupError:
+                        pass
+            until = time.monotonic() + 2
+            while self.remaining() and time.monotonic() < until:
+                time.sleep(.1)
+        leftovers = self.remaining()
+        verified = cleanup_verdict(server_stopped, leftovers) and not errors
+        self.cleanup = {"verified": verified, "kill_server_succeeded": kill_succeeded,
+                        "server_identity": self.server_identity, "server_after": server_after,
+                        "server_pid_start_gone": server_stopped, "owned_processes": list(self.owned.values()), "leftovers": leftovers, "errors": errors}
         os.close(self.master)
         self.frames.close()
         self.inputs.close()
-        if cleanup_error:
-            raise RuntimeError("own tmux cleanup failed: " + stopped.stderr.decode(errors="replace"))
-        return True
+        if not verified:
+            raise RuntimeError("own process cleanup not verified; see cleanup evidence")
+        return verified
 
 
-def run(root, timeout=30):
+def run(root, timeout=30, history_module=None):
     """Возвращает независимые наблюдения и пути доказательств; ничего не печатает."""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
     os.chmod(root, 0o700)
-    home, work = root / "home", root / "work"
+    # Короткий runtime вне репозитория: длина output не влияет на Unix sockets.
+    runtime = Path(tempfile.mkdtemp(prefix="mp-", dir="/tmp"))
+    home, work = runtime / "h", runtime / "w"
     work.mkdir()
     (home / "tmp").mkdir(parents=True)
     (home / ".claude").mkdir()
@@ -356,10 +610,12 @@ def run(root, timeout=30):
     settings.write_text(json.dumps({"permissions": {"defaultMode": "default"}}))
     server_thread = threading.Thread(target=fixture.serve_forever, daemon=True)
     server_thread.start()
-    label = "mop-chat-probe-" + uuid.uuid4().hex
+    label = tmux_socket(runtime)
     session_id = str(uuid.uuid4())
     report = {"fixture_backed": True, "paid_provider_tested": False,
-              "tmux_server": label, "requested_session_id": session_id,
+              "tmux_socket": label, "requested_session_id": session_id,
+              "runtime_path": str(runtime), "home": str(home), "work": str(work),
+              "live_snapshots": {}, "history_module": history_module, "history": {},
               "report_path": str(root / "report.json"), "scenarios": {},
               "terminal_path": str(root / "terminal.jsonl"), "errors": []}
     terminal = None
@@ -369,6 +625,13 @@ def run(root, timeout=30):
         screen = terminal.screen()
         (root / (name + ".txt")).write_text(screen)
         return screen
+    def capture_live(name, with_history=False):
+        rows = live_snapshot(home / ".claude", work, terminal.identity()["pid"])
+        report["live_snapshots"][name] = rows
+        (root / (name + "-registry.json")).write_text(json.dumps(rows, indent=2) + "\n")
+        if with_history and history_module:
+            report["history"][name] = history_snapshot(history_module, work, env)
+        return rows
     def sessions():
         return sorted(p.stem for p in (home / ".claude" / "projects").glob("**/*.jsonl")
                       if p.parent.name != "subagents")
@@ -379,6 +642,30 @@ def run(root, timeout=30):
         terminal.text(text or "probe:" + kind)
         return terminal.wait(lambda: completion_seen(fixture.requests, kind, since, terminal.screen()), timeout)
     try:
+        managed = [str(path) for path in (Path("/etc/claude-code/managed-settings.json"),
+            Path("/etc/claude-code/managed-settings.d"), Path("/etc/claude-code/managed-mcp.json"))
+            if path.exists() or path.is_symlink()]
+        report["managed_settings_absent"] = managed_preflight(managed)
+        if not report["managed_settings_absent"]:
+            raise RuntimeError("managed settings could override probe isolation; Claude not started")
+        if history_module:
+            if (not valid_history_argument(history_module) or Path(history_module).is_symlink()
+                    or not stat.S_ISREG(Path(history_module).stat().st_mode)):
+                raise ValueError("history module requires an explicit regular local session.py source")
+        git = shutil.which("git")
+        if not git:
+            raise RuntimeError("chat probe requires git for the transport preflight")
+        guard = subprocess.run([git, "ls-remote", "git@github.com:anthropics/claude-plugins-official.git"],
+            env=env, cwd=work, capture_output=True, timeout=10)
+        report["git_ssh_transport_blocked"] = (guard.returncode != 0 and
+            b"transport 'ssh' not allowed" in guard.stderr)
+        if not report["git_ssh_transport_blocked"]:
+            raise RuntimeError("git SSH transport guard not confirmed; Claude not started")
+        metadata = subprocess.run([git, "rev-parse", "--git-dir"], env=env, cwd=work,
+            capture_output=True, timeout=10)
+        report["caller_git_metadata_absent"] = metadata.returncode != 0
+        if not report["caller_git_metadata_absent"]:
+            raise RuntimeError("probe workdir inherited git metadata; Claude not started")
         report["claude_version"] = subprocess.run([claude, "--version"], env=env, cwd=work,
             capture_output=True, text=True, timeout=10, check=True).stdout.strip()
         help_text = subprocess.run([claude, "--help"], env=env, cwd=work,
@@ -390,12 +677,11 @@ def run(root, timeout=30):
         report["isolation_mode"] = "bare; explicit temporary settings; default permissions"
         report["limitations"] = ["Fixture-backed responses only; no paid provider evidence.",
             "Bare mode skips discovery/keychain and may expose fewer tools than normal mode.",
-            "External HTTP/HTTPS proxy attempts are refused; this is not an OS network sandbox.",
+            "External HTTP/HTTPS proxy attempts are refused and git SSH transport is disabled; not an OS network sandbox.",
+            "Managed settings presence refuses launch; no global configuration or real credentials are read.",
+            "Temporary runtime is retained privately for inspection; projected key evidence excludes peerToken.",
             "Linux /proc identity and English UI observations; unknown means insufficient evidence."]
-        command = [claude, "--bare", "--model", MODEL, "--session-id", session_id,
-                   "--permission-mode", "default", "--tools", "Bash,AskUserQuestion",
-                   "--settings", str(settings),
-                   "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+        command = probe_command(claude, settings, session_id, str(runtime / "c.sock"))
         report["command"] = command
         terminal = Terminal(tmux, label, env, work, command, root)
         terminal.pump(3)
@@ -406,6 +692,8 @@ def run(root, timeout=30):
         startup = snapshot("ready")
         before = terminal.identity()
         report["initial_identity"] = before
+        terminal.track_owned()
+        ready_registry = capture_live("ready")
         framing_text = "probe:framing\nsecond line with Unicode: Проба"
         framing = turn("framing", framing_text)
         sent = request("framing")
@@ -437,7 +725,9 @@ def run(root, timeout=30):
             snapshot("model-applied")
         model_answer = turn("after-model")
         model_requests = request("after-model")
-        record("model-identity", model_answer and bool(model_requests) and
+        model_registry = capture_live("after-model", with_history=True)
+        record("model-identity", bool(ready_registry) and bool(model_registry) and
+               [r["sessionId"] for r in ready_registry] == [r["sessionId"] for r in model_registry] and model_answer and bool(model_requests) and
                model_requests[-1]["body"].get("model") == SECOND_MODEL and terminal.identity() == before
                and sessions() == initial_sessions,
                {"before": before, "after": terminal.identity(), "sessions": sessions(),
@@ -449,8 +739,22 @@ def run(root, timeout=30):
         clear_answer = turn("after-clear")
         new_sessions = sessions()
         clear_requests = request("after-clear")
+        clear_registry = capture_live("after-clear", with_history=True)
+        report["registry_session_id_changed"] = (bool(model_registry) and bool(clear_registry) and
+            {r["sessionId"] for r in model_registry} != {r["sessionId"] for r in clear_registry})
         history = json.dumps(clear_requests[-1]["body"].get("messages", [])) if clear_requests else ""
-        record("clear-identity", clear_answer and terminal.identity() == before and
+        record("live-registry-contract", all(live_contract_observed(rows) for rows in
+               (ready_registry, model_registry, clear_registry)),
+               {"snapshots": ["ready-registry.json", "after-model-registry.json", "after-clear-registry.json"]})
+        history_calls = report["history"]
+        history_observed = bool(history_module and model_registry and clear_registry
+            and report["registry_session_id_changed"] and all(
+                history_calls.get(name, {}).get("outcome") == "observed"
+                and history_calls[name].get("session_id") == rows[0]["sessionId"] for name, rows in
+                (("after-model", model_registry), ("after-clear", clear_registry))))
+        record("history-adapter", history_observed,
+               {"calls": history_calls, "selected": bool(history_module)})
+        record("clear-identity", report["registry_session_id_changed"] and clear_answer and terminal.identity() == before and
                bool(set(new_sessions) - set(initial_sessions)) and "probe:framing" not in history,
                {"before_sessions": initial_sessions, "after_sessions": new_sessions,
                 "before": before, "after": terminal.identity(), "old_prompt_in_request": "probe:framing" in history})
@@ -478,6 +782,7 @@ def run(root, timeout=30):
         if prompted:
             terminal.send(b"\r")
         bash_started = terminal.wait(lambda: (work / "bash.started").exists(), min(timeout, 10))
+        terminal.track_owned()
         terminal.send(b"\x1b")
         terminal.pump(2)
         bash_pid = int((work / "bash.pid").read_text()) if bash_started else None
@@ -523,11 +828,21 @@ def run(root, timeout=30):
         (root / "requests.json").write_text(json.dumps(fixture.requests, indent=2, ensure_ascii=False))
         report["errors"].extend(fixture.errors)
         report["denied_network_requests"] = fixture.denied
-        report["cleanup"] = {"own_tmux_server_stopped": tmux_stopped,
+        report["fixture_auth"] = {"requests_checked": len(fixture.auth_checks),
+            "all_dummy_key": bool(fixture.auth_checks) and all(fixture.auth_checks)}
+        entries = list(home.rglob("*"))
+        unexpected = unexpected_home_paths([str(p.relative_to(home)) for p in entries],
+            directories=[str(p.relative_to(home)) for p in entries if p.is_dir() and not p.is_symlink()])
+        report["unexpected_home_paths"] = unexpected
+        if unexpected:
+            report["errors"].append("unexpected git/marketplace/credential touches in own temporary home")
+        report["cleanup"] = {"own_processes": terminal.cleanup if terminal else {"verified": False},
+                             "own_tmux_server_stopped": tmux_stopped,
                              "fixture_listener_closed": fixture.socket.fileno() == -1,
                              "fixture_thread_stopped": not server_thread.is_alive()}
         for name in ("terminal-framing", "foreground-slash", "model-identity", "clear-identity",
-                     "stream-interrupt", "permissions-default", "bash-interrupt", "ask-user-question"):
+                     "live-registry-contract", "history-adapter", "stream-interrupt",
+                     "permissions-default", "bash-interrupt", "ask-user-question"):
             if name not in report["scenarios"]:
                 record(name, False, {"reason": "scenario not reached"})
         (root / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
