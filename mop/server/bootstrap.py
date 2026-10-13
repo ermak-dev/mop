@@ -55,6 +55,7 @@ import time
 
 from ..common import (bus, busnames, config, creds, fsutil, manifest, paths, project_secrets,
                       service)
+from ..common import soul as souls
 from .. import driver
 from . import identity, playvars
 
@@ -265,6 +266,23 @@ def refusal(req, project):
 _VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _allow_of(role):
+    """Роль на входе селекции -> словарь allowlist {"files", "vars"}.
+
+    Два входа, два уровня доверия, один выход. soul.Bundle -- бандл из
+    доверенного хранения сервера (#581: хранилище бандлов по дайджесту):
+    allowlist -- блок secrets разобранного манифеста, второго разбора
+    soul.yaml на сервере нет. Словарь -- переходный внутренний вход шва
+    (пока резолвер #581 не кладёт бандл в каждое обращение): его грамматию
+    проверяет secrets_of, но сам он не «роль», а её тень -- по шине так
+    приезжать не должно (#592: allowlist из тела запроса -- самовыданная
+    роль)."""
+    if isinstance(role, souls.Bundle):
+        return {"files": list(role.manifest.secrets.files),
+                "vars": list(role.manifest.secrets.vars)}
+    return role
+
+
 def _canonical_file_name(name):
     """Имя секретного файла, каноническое, без масок. Нормализация --
     валидатор, а не пропуск: 'a/../b' и './b' остаются собой и
@@ -334,7 +352,7 @@ def role_staging(root, project, allow):
     мутируется. Убирается на каждом выходе, включая исключение, и сбой
     уборки -- слышен, а не проглочен: за каталогом секретов нельзя
     молча оставить след."""
-    files, names = secrets_of(root, project, allow)
+    files, names = secrets_of(root, project, _allow_of(allow))
     base = project_secrets.project_dir(root, project)
     _no_links(base, "", f"store of {project}")
     stage = tempfile.mkdtemp(prefix=f"mop-secrets-{project}-")
@@ -419,23 +437,24 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
 
 
 # ─── сервер ──────────────────────────────────────────────────────────────
-def play(req, project, role=None):
+def play(req, project, role=None, bundle=None):
     """Сыграть bootstrap проекта в песочницу папета. -> {ok, played, ...}.
 
     Нет файла — ok без прогона: большинству проектов хватает общего.
-    role — allowlist секретов из доверенного бандла роли (#592): None —
-    легаси-джоб, каталог секретов целиком, как сегодня; словарь — селекция
-    в приватный временный staging. Словарь приходит из бандла по привязке
-    сервера (#581: grants.bundle через job/инкарнацию), не из тела
-    запроса: тело запроса ненадёжно, allowlist из него — самовыданная
-    роль. Пустой allowlist тоже играет: прогон вычищает прежний staging
-    тела, «нечего играть» оставило бы старое жить в
-    ~/.config/mop/project-secrets."""
+    bundle — soul.Bundle из доверенного хранения сервера (#592, #580):
+    allowlist секретов — блок secrets его манифеста, не тело запроса и
+    не локальный YAML. role — переходный внутренний вход того же шва
+    (голый allowlist-словарь): его переводит _allow_of, наружу он не
+    виден; оба заданы -- роль у бандла. None и тот и другой -- легаси-джоб
+    без роли, каталог секретов целиком, как сегодня. Пустой allowlist
+    тоже играет: прогон вычищает прежний staging тела, «нечего играть»
+    оставило бы старое жить в ~/.config/mop/project-secrets."""
     # workspace -- файл папета (#133): копия того, кто стартует, а не проекта.
     tasks, of_vars = files_of(ROOT, req["name"])
     store_dir = project_secrets.project_dir(project_secrets.ROOT, project)
     store_dir = store_dir if os.path.isdir(store_dir) else None
-    if role is None:
+    picked = bundle if bundle is not None else role
+    if picked is None:
         if not needs_play(tasks, store_dir):
             return {"ok": True, "played": False, "text": f"no bootstrap for {project}"}
         return _run(req, project, tasks, of_vars, store_dir)
@@ -444,7 +463,7 @@ def play(req, project, role=None):
     # staging тела вычищает только прогон, молчаливый ok оставил бы
     # удалённый из роли секрет жить в ~/.config/mop/project-secrets.
     try:
-        with role_staging(project_secrets.ROOT, project, role) as staged:
+        with role_staging(project_secrets.ROOT, project, picked) as staged:
             return _run(req, project, tasks, of_vars, staged)
     except ValueError as e:
         # Отказ до прогона: узел читает его как отказ старта, и модель не

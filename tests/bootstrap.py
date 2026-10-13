@@ -718,6 +718,126 @@ def check_role_secrets_hard_592(c):
             not (stage_of.get("p") and os.path.exists(stage_of["p"])), stage_of)
 
 
+def check_bundle_seam_592(c):
+    """HYPOTHESIS (#592, интеграция с #580): play() принимает роль голым
+    словарём {"files","vars"} -- у сервера нет шва, куда пришить реальный
+    бандл из общего API: allowlist нельзя получить из soul.Bundle, и
+    селекцию секрeтов остаётся кормить самодельным словарём, каким его
+    соберёт будущий резолвер #581 из мета джоба.
+    SOLUTION: play()/role_staging() принимают бандл soul.Bundle из
+    доверенного хранения (#581): allowlist -- bundle.manifest.secrets,
+    никакого второго разбора soul.yaml на сервере; словарь остаётся
+    внутренним переходным входом (его переведёт сам шов), а грамматика
+    имён и весь харденинг d68117d (ссылки, канонические имена, один
+    слепок, громкая уборка) -- без изменений.
+    RESULT: STATUS: RED — see #592"""
+    from mop.common import project_secrets, soul
+    import subprocess as _sp
+    from _lib import patched as _patched
+
+    def fake_run(cmd, **kw):
+        played = fake_run.played = getattr(fake_run, "played", {})
+        played["argv"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "PLAY RECAP ***\nh : ok=1 failed=0\n"
+            stderr = ""
+        return R()
+
+    # Настоящий бандл из общего API #580: каталог роли с блоком secrets.
+    base = tempfile.mkdtemp(prefix="mop-test-bundle-592-")
+    role_dir = os.path.join(base, "deployer")
+    os.makedirs(role_dir)
+    manifest = """soul: deployer
+version: 1
+runtime: {driver: any, receives_dispatch: false}
+capabilities:
+  node_verbs: [ping]
+  cluster_verbs: []
+  dispatch: false
+  spawn: []
+secrets:
+  files: [gitlab-token]
+  vars: [DEPLOY_KEY]
+prompt: soul.md
+"""
+    with open(os.path.join(role_dir, "soul.yaml"), "w") as f:
+        f.write(manifest)
+    with open(os.path.join(role_dir, "soul.md"), "wb") as f:
+        f.write(b"You deploy.\n")
+    bundle = soul.load(role_dir)
+    c.check("#592 the fixture bundle carries the secret allowlist",
+            (list(bundle.manifest.secrets.files),
+             list(bundle.manifest.secrets.vars)) == (["gitlab-token"],
+                                                     ["DEPLOY_KEY"]),
+            bundle.manifest.secrets)
+
+    # Хранилище с именованными секретами.
+    root = tempfile.mkdtemp(prefix="mop-test-store-592-")
+    project_secrets.put_file(root, "proj", "gitlab-token", b"TOKEN")
+    project_secrets.set_var(root, "proj", "DEPLOY_KEY", "dep")
+    project_secrets.set_var(root, "proj", "OTHER", "alien")
+
+    # (1) role_staging принимает бандл: в staging -- ровно allowlist роли.
+    try:
+        with bootstrap.role_staging(root, "proj", bundle) as stage:
+            with open(os.path.join(stage, "files", "gitlab-token"), "rb") as f:
+                c.expect("#592 the bundle stages its allowed file",
+                         f.read(), b"TOKEN")
+            with open(os.path.join(stage, "vars.env")) as f:
+                c.expect("#592 the bundle stages its allowed var",
+                         f.read(), "DEPLOY_KEY=dep\n")
+            c.check("#592 an unallowed var stays out of the staging",
+                    not os.path.exists(os.path.join(stage, "files", "other")))
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 role_staging must accept a soul.Bundle", e)
+
+    # (2) play() с бандлом кормит плейбук staging'ом бандла; словарь из
+    #     тела запроса путь не проходит: бандл -- доверенный вход, словарь
+    #     остаётся внутренним переходом шва.
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(root, "no-ws")), \
+                _patched(project_secrets, ROOT=root), \
+                _patched(bootstrap, TIMEOUT=120), \
+                _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""},
+                                 "proj", bundle=bundle)
+        c.check("#592 play with a bundle runs and succeeds",
+                not (not got.get("played") or not got.get("ok")), got)
+        argv = getattr(fake_run, "played", {}).get("argv") or []
+        extra = json.loads(argv[argv.index("-e", argv.index("-e") + 1) + 1])
+        staged = extra.get("mop_secrets_dir")
+        c.check("#592 play feeds the bundle's staging, not the store",
+                not (not staged
+                     or staged == project_secrets.project_dir(root, "proj")),
+                extra)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 play must accept a soul.Bundle", e)
+
+    # (3) Бандл без блока secrets -- пустой allowlist: прогон всё равно
+    #     играется и вычищает прежнее тело (d68117d #1).
+    plain_dir = os.path.join(base, "plain")
+    os.makedirs(plain_dir)
+    with open(os.path.join(plain_dir, "soul.yaml"), "w") as f:
+        f.write(manifest.replace(
+            "secrets:\n  files: [gitlab-token]\n  vars: [DEPLOY_KEY]\n", ""))
+    with open(os.path.join(plain_dir, "soul.md"), "wb") as f:
+        f.write(b"Plain.\n")
+    plain = soul.load(plain_dir)
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(root, "no-ws")), \
+                _patched(project_secrets, ROOT=root), \
+                _patched(bootstrap, TIMEOUT=120), \
+                _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""},
+                                 "proj", bundle=plain)
+        c.check("#592 a secrets-less bundle still plays to clear the body",
+                not (not got.get("played") or not got.get("ok")), got)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 a secrets-less bundle must still play", e)
+
+
 def main():
     c = Checks()
     check_journal_no_secrets_349(c)
@@ -725,6 +845,7 @@ def main():
     check_result_334(c)
     check_role_secrets_592(c)
     check_role_secrets_hard_592(c)
+    check_bundle_seam_592(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 
     # HYPOTHESIS: механизма нет вовсе — ничто не играет манифест при старте.
