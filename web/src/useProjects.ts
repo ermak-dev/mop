@@ -13,6 +13,7 @@ export interface ProjectRow { name: string; origin: string }
 
 export interface ProjectsState {
   projects: ProjectRow[];
+  loading: boolean;
   error: string | null;
   /** Загрузить список, если он ещё не в памяти. Повторные ask -- бесплатно. */
   ask: () => void;
@@ -20,6 +21,7 @@ export interface ProjectsState {
 
 export function useProjects(session: Session, want: boolean): ProjectsState {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const asked = useRef(false);
   const seq = useRef(0);
@@ -34,6 +36,7 @@ export function useProjects(session: Session, want: boolean): ProjectsState {
       asked.current = false;
       seq.current += 1;
       setProjects([]);
+      setLoading(false);
       setError(null);
     }
   }, [source, stale]);
@@ -43,6 +46,7 @@ export function useProjects(session: Session, want: boolean): ProjectsState {
     asked.current = true;
     if (session.role !== "admin") return;   // форме не-admin не видна вовсе
     const at = ++seq.current;
+    setLoading(true);
     fetch("/api/admin/projects", { credentials: "same-origin" })
       .then(async (r) => {
         if (at !== seq.current) return;
@@ -55,6 +59,9 @@ export function useProjects(session: Session, want: boolean): ProjectsState {
       .catch(() => {
         if (at !== seq.current) return;
         setError(refuseText(503));
+      })
+      .finally(() => {
+        if (at === seq.current) setLoading(false);
       });
   }, [session.role, want]);
 
@@ -63,6 +70,6 @@ export function useProjects(session: Session, want: boolean): ProjectsState {
     if (want) ask();
   }, [want, ask]);
 
-  if (stale) return { projects: [], error: null, ask };
-  return { projects, error, ask };
+  if (stale) return { projects: [], loading: false, error: null, ask };
+  return { projects, loading, error, ask };
 }
