@@ -69,6 +69,15 @@ class PuppetRow:
     branch: str = None
     origin: str = None
     disk_kb: int = None
+    # Тройка роли (#580): имя, digest бандла, инкарнация. Отсутствующая
+    # роль -- None и НЕ меняет прежний провод: ключи душ появляются на
+    # проводе только у папета с ролью (идиома CloneFacts.home, #272), иначе
+    # снимок дашборда и страница читали бы новую колонку у всех легаси-
+    # папетов разом. Роль в строке -- данные ростера (#587), не политика:
+    # прав по ней не выдают.
+    soul: str = None
+    soul_digest: str = None
+    soul_inc: str = None
 
     def render(self):
         """Строка для человека, модели и страницы: None -- прежним прочерком
@@ -80,8 +89,14 @@ class PuppetRow:
         return out
 
     def to_dict(self):
-        """Провод дашборда -- показанная строка: страница читает прочерки."""
-        return self.render()
+        """Провод дашборда -- показанная строка: страница читает прочерки.
+        Ключи роли -- только у папета с ролью (#580): легаси-строка байт в
+        байт прежняя."""
+        out = self.render()
+        if not self.soul:
+            for key in ("soul", "soul_digest", "soul_inc"):
+                out.pop(key)
+        return out
 
     @classmethod
     def from_dict(cls, d):

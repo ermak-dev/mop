@@ -33,10 +33,23 @@ def everything(project=None):
     return f"{ROOT}.>" if project is None else f"{ROOT}.{project}.>"
 
 
+DISPATCH_CHANNEL = "dispatch"  # канал dispatch (#579): операция, не «send с флагом»
+
+
 def node(project, name, channel="rpc", login=None):
-    """Агент узла. login -- токен вызывающего (#207), только в rpc."""
+    """Агент узла. login -- токен вызывающего (#207), только в rpc --
+    человека (#207) или принципала роли (grant-id, #579): caller() читает
+    оба, канал dispatch -- тем же токеном (#584)."""
     subj = f"{ROOT}.{project}.node.{name}.{channel}"
     return f"{subj}.{_token(login)}" if login and channel == CALLER_CHANNEL else subj
+
+
+def dispatch_subject(project, name, grant_id):
+    """Субъект dispatch (#579): node.<p>.<узел>.dispatch.<grant-id>.
+    Токен -- id принципала (grant_user без префикса): hex без точек и
+    масок, кодировать нечего. Узел (#584) решает по каналу, что это
+    диспетчер, а не соседское сообщение, и зовёт резолвер сервера."""
+    return f"{ROOT}.{project}.node.{name}.{DISPATCH_CHANNEL}.{grant_id}"
 
 
 def broadcast(project):
@@ -185,6 +198,11 @@ def service_subscriptions():
 SERVICE = "service"      # машинный пользователь сервисов сервера (#104)
 CALLOUT = "callout"      # сервис auth callout (#206): отвечает NATS, кто входит
 MASTER_PREFIX, PUPPET_PREFIX, NODE_PREFIX = "master-", "puppet-", "node-"
+# Принципал делегированной роли (#579): grant-<id>, id -- 32 знака hex.
+# Префикс новый и зарезервированный: имени проекта не суффиксируется, и с
+# легаси-пользователем puppet-<проект> не сталкивается. Кодировки id --
+# mop/common/soul.py (grant_user/grant_id), здесь только имя префикса.
+GRANT_PREFIX = "grant-"
 
 
 def master_user(project):
@@ -210,7 +228,7 @@ def is_machine(user):
 
 # Имена ролей на шине: человеку их не выдать (operators.RESERVED).
 RESERVED = (ADMIN, SERVICE, CALLOUT)
-RESERVED_PREFIXES = (MASTER_PREFIX, PUPPET_PREFIX, NODE_PREFIX)
+RESERVED_PREFIXES = (MASTER_PREFIX, PUPPET_PREFIX, NODE_PREFIX, GRANT_PREFIX)
 
 
 # ─── файлы паролей: те же имена, что в secrets/ сервера ──────────────────
