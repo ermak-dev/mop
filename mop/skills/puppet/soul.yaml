@@ -1,0 +1,12 @@
+soul: puppet
+version: 1
+runtime: {driver: any, receives_dispatch: true}
+capabilities:
+  # Рабочий (#579): принимает dispatch, отчитывается, ничего не поднимает
+  # и пулом не управляет. Минимальный набор глаголов -- чтение состояния и
+  # связь.
+  node_verbs: [send, tail, state, states, ping, local]
+  cluster_verbs: []
+  dispatch: false
+  spawn: []
+prompt: soul.md

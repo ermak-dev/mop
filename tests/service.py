@@ -220,10 +220,75 @@ def check_errors(c):
             not (got != {"ok": True, "p": "mop"} or called != [{}]))
 
 
+# ─── рамка доверия: каркасные ключи тела (#580) ──────────────────────────
+# Тело запроса пишет отправитель, и единственное, что отличает каркасный
+# ключ (проверенный субъектом) от подделки, -- подчёркивание. До #580 рамка
+# снимала один _caller (#207); следующий каркасный ключ (грант роли, актёр)
+# пришлось бы снимать каждый своим правилом -- или он доезжал бы из тела.
+def forged_580():
+    """Тело с подделкой: каркасные ключи вперемешку с честными полями."""
+    return {"verb": "ping", "owner": "bob", "_caller": "bob",
+            "_grant": "role=admin", "_actor": "pu-mop-1", "_project": "admin"}
+
+
+def check_trusted_body_580(c):
+    """HYPOTHESIS (#580): answer снимает с тела только _caller; любой другой
+    ключ с '_' (_grant, _actor, _project) доезжает обработчику из тела, и
+    отличить подделку от поставленного субъектом нельзя -- схема ролей #579
+    закрепит новые каркасные ключи поверх той же дыры.
+    SOLUTION: service.trusted(req, caller) -- один общий помощник: снимает
+    с тела ВСЕ ключи с '_' и кладёт проверенный логин субъектом; answer
+    проводит через него каждое тело. Узловой агент берёт того же помощника
+    (#584), а не свою копию рамки.
+    RESULT: подделка _grant/_actor/_project снимается на обоих путях
+    (логин из субъекта и прежний субъект без логина); честные поля тела
+    доезжают; проверенный _caller ставится поверх. Мутации (правило
+    ослаблено до одного ключа; answer отвязан от trusted) ловятся.
+    STATUS: FIXED — see #580"""
+    import asyncio
+    import json
+    from mop.common import service
+
+    def echo(project, req, send):
+        return {"req": req}
+
+    body = json.dumps(forged_580()).encode()
+    for caller, want in (
+            ("alice", {"verb": "ping", "owner": "bob", "_caller": "alice"}),
+            (None, {"verb": "ping", "owner": "bob"})):
+        got = asyncio.run(service.answer("t", "mop", body, echo,
+                                         lambda *a: [], lambda line: None, None,
+                                         caller=caller))
+        c.expect(f"#580 the handler must see a trusted body, caller {caller!r}",
+                 got.get("req"), want)
+    # Тот же удар мимо answer -- напрямую помощником: узел #584 зовёт его
+    # без каркаса answer.
+    helper = getattr(service, "trusted", None)
+    if helper is None:
+        c.fail("#580 service.trusted must be the one common helper for the node (#584)",
+               "mop.common.service has no attribute 'trusted'")
+        return
+    c.expect("#580 trusted() strips every underscore key and stamps the caller",
+             helper(forged_580(), "alice"),
+             {"verb": "ping", "owner": "bob", "_caller": "alice"})
+    c.expect("#580 trusted() on the legacy subject stamps no caller",
+             helper(forged_580(), None),
+             {"verb": "ping", "owner": "bob"})
+    body = forged_580()
+    helper(body, "alice")
+    c.expect("#580 trusted() must not mutate the body it was given",
+             body, forged_580())
+    # Пустой логин -- как прежний субъект: busnames.caller пустоту не несёт,
+    # и пустой _caller отличался бы от «вызывающего нет».
+    c.expect("#580 trusted() with an empty caller stamps nothing",
+             helper({"verb": "x", "_caller": ""}, ""),
+             {"verb": "x"})
+
+
 def main():
     c = Checks()
     for fn in (check_project, check_journal, check_banner, check_silent,
-               check_errors):
+               check_errors, check_trusted_body_580):
         try:
             fn(c)
         except Exception as e:
