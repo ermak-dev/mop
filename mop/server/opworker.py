@@ -673,7 +673,8 @@ class Worker:
                 # Реестр ОТВЕРГ просьбу (ревью 2 #575): projectName из
                 # незарегистрированного origin -- выдумка, его в аудите
                 # нет; тема публикации -- нейтральная admin.
-                return ops.outcome(ops.REFUSED, None, error=why)
+                return ops.outcome(ops.REFUSED, None, error=why,
+                                   public_error=ops.PublicError("project is not registered in the pool; use mop project add"))
             target = origin
             # Проект решает реестр: он УЖЕ подтвердил origin (#575),
             # чистая функция без сети. Факт -- В МОМЕНТ подтверждения,
