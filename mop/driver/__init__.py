@@ -324,6 +324,15 @@ def project_creds(project):
     return paths.under(HOME, f"bus-{project}.json")
 
 
+def soul_dir(name, inc):
+    """Бандл и кред принципала роли в теле (#590): их кладёт `mop driver
+    run` на подъёме, читает обёртка (#583). Свой каталог у каждой
+    инкарнации каждого папета: у host дом общий, и две роли одного проекта
+    не делят файл, а старая инкарнация того же имени не читается новой.
+    Имя и инкарнацию проверяет звавший (valid_name, JobMeta)."""
+    return paths.under(HOME, "souls", name, inc)
+
+
 def project_secrets_dir(project):
     """Секреты проекта в теле (#127): их кладёт bootstrap при каждом старте."""
     return paths.under(HOME, "project-secrets", project)

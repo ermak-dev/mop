@@ -227,21 +227,25 @@ def main():
     del no_password["bus"]["password"]
     bad_manifest = payload("puppet", digest, INC, GRANT, SECRET,
                            {**manifest, "version": 2}, prompt)
-    for what, bad, menv in (
-            ("a foreign incarnation", other_inc, env),
-            ("a prompt that does not hash to the job's digest", tampered, env),
-            ("a payload naming another role", claims_builder, env),
-            ("another role's bundle", builder_bundle, env),
-            ("a credential of another user", alien_user, env),
-            ("a principal that is not grant-<id>", not_grant, env),
-            ("a credential without a password", no_password, env),
-            ("a manifest of an unknown schema", bad_manifest, env),
+    # Причина названа -- иначе отказ по попутной причине (битая Meta)
+    # прошёл бы проверку любого рассогласования.
+    for what, bad, menv, why in (
+            ("a foreign incarnation", other_inc, env, "soul_inc"),
+            ("a prompt that does not hash to the job's digest", tampered, env,
+             "hashes to"),
+            ("a payload naming another role", claims_builder, env, "role 'builder'"),
+            ("another role's bundle", builder_bundle, env, "bundle is role 'builder'"),
+            ("a credential of another user", alien_user, env, "credential is not"),
+            ("a principal that is not grant-<id>", not_grant, env, "not grant-<id>"),
+            ("a credential without a password", no_password, env, "has no password"),
+            ("a manifest of an unknown schema", bad_manifest, env, "does not parse"),
             ("a job digest that is not the bundle's",
-             good["soul"], meta_env("puppet", bdigest, INC))):
+             good["soul"], meta_env("puppet", bdigest, INC), "soul_digest")):
         body = Body()
         code, out, log = launch(body, {"ok": True, "soul": bad}, menv)
         c.check(f"#590 refused before the model: {what}",
-                refused(code) and not launched(log), (code, brief(log)))
+                refused(code) and why in code and not launched(log),
+                (code, brief(log)))
         c.check(f"#590 no credential written: {what}",
                 not any(p.endswith("bus.json") for p in body.files)
                 and project_path not in body.files, sorted(body.files))
@@ -274,19 +278,21 @@ def main():
                  ready, {"role": "puppet", "soul_inc": INC, "soul_digest": digest,
                          "principal": GRANT})
         pushes = [p for kind, p in log if kind == "push"]
+        order = [pushes.index(f"{d}/{f}") if f"{d}/{f}" in pushes else -1
+                 for f in ("bus.json", "prompt", "manifest.json", "ready.json")]
         c.check("#590 the ready mark is the last role file written",
-                pushes.index(f"{d}/ready.json") > max(
-                    pushes.index(f"{d}/{f}") for f in ("bus.json", "prompt", "manifest.json")),
-                pushes)
+                min(order) >= 0 and order[-1] > max(order[:-1]), pushes)
+        at = [i for i, e in enumerate(log) if e == ("push", f"{d}/ready.json")]
         first_launch = [i for i, (k, _) in enumerate(log) if k == "launch"]
         c.check("#590 the model starts after the ready mark",
-                first_launch and first_launch[0] > log.index(("push", f"{d}/ready.json")), brief(log))
+                at and first_launch and first_launch[0] > at[0], brief(log))
         # Метка прошлого старта той же инкарнации снята ДО записи новых
         # файлов: оборванная запись не оставит «готово» над половиной.
         rm = [i for i, (k, a) in enumerate(log)
               if k == "sh" and "ready.json" in " ".join(a) and "rm" in " ".join(a)]
+        bus_at = [i for i, e in enumerate(log) if e == ("push", f"{d}/bus.json")]
         c.check("#590 a stale ready mark is removed before the role files",
-                rm and rm[0] < log.index(("push", f"{d}/bus.json")), brief(log))
+                rm and bus_at and rm[0] < bus_at[0], brief(log))
     c.check("#590 a role job has no project credential in its body",
             project_path not in body.files, sorted(body.files))
     c.check("#590 the password never reaches argv",
@@ -303,9 +309,11 @@ def main():
     if hasattr(driver, "soul_dir"):
         c.expect("#590 the second role launches", code, 0)
         c.expect("#590 the first role keeps its credential",
-                 creds_in(both, f"{driver.soul_dir(NAME, INC)}/bus.json")["password"], SECRET)
+                 (creds_in(both, f"{driver.soul_dir(NAME, INC)}/bus.json") or {}).get("password"),
+                 SECRET)
         c.expect("#590 the second role has its own credential",
-                 creds_in(both, f"{driver.soul_dir(OTHER, INC2)}/bus.json")["password"], SECRET2)
+                 (creds_in(both, f"{driver.soul_dir(OTHER, INC2)}/bus.json") or {}).get("password"),
+                 SECRET2)
 
     # Отказ записи на любом файле роли -- модель не стартует, метки нет.
     for f in ("bus.json", "prompt", "manifest.json", "ready.json"):
