@@ -579,7 +579,7 @@ def check_update_keeps_branch_257(c):
                                       "branch": "swarm"}}
     with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
         # cred и node -- та же сигнатура, что у настоящей job_spec (#284,
-        # #289), тройка роли -- с #582/#583.
+        # #289), тройка роли -- с #582.
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
             cred=None, node=None, soul=None, soul_digest=None, soul_inc=None: \
             calls.append(branch) or {"Job": {"ID": name}}

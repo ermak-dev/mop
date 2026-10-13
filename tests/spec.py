@@ -278,16 +278,41 @@ def render(name, origin, cont):
 
 # Ролевой вход слепка (#583): тройка из поставляемой роли (mop/skills) --
 # стабильный digest реального бандла, едет в спеку и в слепок байт в байт.
+# Бандл обязан лежать в хранилище сервера (#582: закрепление до джоба), для
+# слепка его сеет seed_role_store.
 ROLE_RENDER = ("pu-mop-9", "git@git.example.dev:someone/mop.git", False)
 
 
-def render_role(name, origin, cont):
-    """Ролевая спека -- так же в Nomad: с тройкой роли (#583)."""
+def seed_role_store(role="puppet"):
+    """Хранилище бандлов с одной закреплённой ролью: тот же посев, что у
+    tests/soul_lifecycle.py (#582), -- grants.prepare пишет бандл
+    write-once, спека без него отказывает. -> (корень, digest)."""
+    import yaml
+    from mop.server import grants
+    manifest, prompt, digest = role_triple(role)
+    root = tempfile.mkdtemp(prefix="mop-583-store-")
+    grants.prepare(project_of(ROLE_RENDER[1]), role=role, digest=digest,
+                   manifest=manifest, prompt=prompt, owner="snapshot",
+                   request_id=f"seed-{digest[:8]}", job=ROLE_RENDER[0],
+                   soul_inc=INC, intent=f"seed-{digest[:8]}", root=root)
+    return root, digest
+
+
+def project_of(origin):
+    """Имя проекта тем же правилом, что спека (driver.project_of)."""
+    from mop import driver
+    return driver.project_of(origin)
+
+
+def render_role(name, origin, cont, store=None):
+    """Ролевая спека -- так же в Nomad: с тройкой роли (#583). Сторы --
+    параметром проверки, слепок сеет свой."""
     manifest, prompt, digest = role_triple("puppet")
-    return json.dumps(spec.job_spec(name, origin, cont=cont,
-                                    soul=manifest["soul"],
-                                    soul_digest=digest, soul_inc=INC),
-                      ensure_ascii=False, indent=1)
+    with patched(spec, SOUL_STORE=store or seed_role_store()[0]):
+        return json.dumps(spec.job_spec(name, origin, cont=cont,
+                                        soul=manifest["soul"],
+                                        soul_digest=digest, soul_inc=INC),
+                          ensure_ascii=False, indent=1)
 
 
 # ── #557: корень сервера в теле -- из той же раздачи, что и ключ ─────────
@@ -1431,10 +1456,11 @@ def check_role_startup_583(c):
                 not (set(role["PU_CARRY"].split(",")) <
                      {"PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC", "PU_SOUL_DIR"}),
                 role.get("PU_CARRY"))
-        c.check("#583 a role adds only its four keys to the task env",
-                not (set(role) - set(legacy)
-                     != {"PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC",
-                         "PU_SOUL_DIR"}),
+        c.check("#583 the role fills exactly the PU_SOUL transport keys",
+                not (set(role) != set(legacy)
+                     or sorted(k for k in role if k.startswith("PU_SOUL"))
+                     != ["PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_DIR",
+                         "PU_SOUL_INC"]),
                 sorted(set(role) ^ set(legacy)))
         c.check("#583 the role env carries no dollar and no secret",
                 not any("$" in v or "password" in v.lower()

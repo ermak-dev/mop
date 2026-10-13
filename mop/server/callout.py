@@ -32,7 +32,7 @@ import asyncio
 import os
 import re
 
-from ..common import busnames, config, fsutil
+from ..common import busnames, config, fsutil, soul
 from . import identity, natsconf, nkjwt, operators
 
 SUBJECT = "$SYS.REQ.USER.AUTH"
@@ -109,11 +109,22 @@ def _side(allow, deny=()):
     return out
 
 
-def rights(login, ctype, password, humans, puppets):
+def rights(login, ctype, password, humans, puppets, souls=None):
     """Кто входит -> (имя, права JWT {pub, sub}), либо identity.Refused.
-    Чистая функция, кроме провайдеров."""
+    Чистая функция, кроме провайдеров. souls -- провайдер принципалов душ
+    (grants.Provider): без него grant-логин отказан, а не «провалился»
+    в ветку человека (#581)."""
     if not login:
         raise identity.Refused("no login given")
+    from . import grants
+    if soul.is_grant(login):
+        if souls is None:
+            raise identity.Refused(f"{login}: grant principals are not served "
+                                   f"by this callout")
+        rec = souls.authenticate(login, password)
+        perms = souls.permissions(login)
+        return login, {"pub": _side(perms["publish"]),
+                       "sub": _side(perms["subscribe"])}
     if busnames.is_puppet(login):
         perms = natsconf.puppet_permissions(puppets.authenticate(login, password))
         return login, {"pub": _side(perms["publish"]), "sub": _side(perms["subscribe"])}
