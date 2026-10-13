@@ -3722,10 +3722,12 @@ def check_dev_help_433(c):
     # глагол обязателен в каталоге, а не повод ослабить его полноту.
     # STATUS: FIXED — see #444
     # #484: проверки и локальный просмотр веба тоже идут через диспетчер.
-    if not c.check("#433 dev subtree: 4 groups, 24 verbs including web checks and preview",
+    # #613: отдельный интерактивный probe добавляет ещё один обязательный глагол.
+    if not c.check("#433/#613 dev subtree: 4 groups, 25 verbs including chat probe",
                    len([d for d in docs if d.endswith("__init__.py")]) == 4
                    and len([d for d in docs
-                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 24
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 25
+                   and docs.get("dev/chat-probe.py", "").startswith("mop dev chat-probe")
                    and docs.get("dev/bug/evidence.py", "").startswith("mop dev bug evidence")
                    and docs.get("dev/web/test.py", "").startswith("mop dev web test")
                    and docs.get("dev/web/preview.py", "").startswith("mop dev web preview"),
