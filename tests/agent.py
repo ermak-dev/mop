@@ -25,7 +25,7 @@ from _lib import Checks, Msg, bash, canned, patched, patched_env, restored, GATE
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.node import agent  # noqa: E402
-from mop.common import busnames  # noqa: E402
+from mop.common import busnames, soul  # noqa: E402
 
 # ─── до #150: наборы и логика handle, переписанные дословно ──────────────
 OLD_VERBS = ("ping", "local", "state", "states", "sizes", "send", "tail",
@@ -2961,7 +2961,20 @@ GRANTS_584 = {
 INC_1 = "11111111-1111-1111-1111-111111111111"
 INC_2 = "22222222-2222-2222-2222-222222222222"
 MARK_584 = "mop-soul-inc"       # маркер identity этой инкарнации (агент, .git/)
-READY_584 = "ready.json"        # готовность 590/583 в target-каталоге тела
+READY_584 = "ready.json"        # готовность 590/583 в каталоге инкарнации (souls/)
+
+# Настоящие digest'ы бандлов -- формулой пакета (#580: SHA256, не
+# подставки из 32 знаков): привязка и ready-файл обязаны совпасть с тем,
+# что реальный реестр и реальная обёртка кладут в тело.
+PUPPET_MANIFEST = {"soul": "puppet", "version": 1,
+                   "runtime": {"driver": "any", "receives_dispatch": True},
+                   "capabilities": {"node_verbs": ["send", "tail", "state", "states",
+                                                   "ping", "local"],
+                                    "cluster_verbs": [], "dispatch": False,
+                                    "spawn": []},
+                   "prompt": "soul.md"}
+DIGEST_1 = soul.digest(PUPPET_MANIFEST, b"You are the role.\n")
+DIGEST_2 = soul.digest(PUPPET_MANIFEST, b"You are the other one.\n")
 
 
 def marked_584(root, inc):
@@ -2981,25 +2994,28 @@ def marker_584(root):
 
 
 def ready_584(root, role="puppet", inc=INC_1, digest=None):
-    """Доказательство готовности 590: обёртка пишет его в target-каталог
-    после проверки бандла, до старта модели."""
+    """Доказательство готовности 590: обёртка пишет его ПОСЛЕДНИМ и
+    отдельным файлом в каталог инкарнации (souls/<name>/<inc>/), уже
+    сверив бандл с Meta -- ключ роли в нём role, не soul."""
+    os.makedirs(root, exist_ok=True)   # каталог инкарнации создаёт обёртка
     path = os.path.join(root, READY_584)
     open(path, "w").write(json.dumps(
-        {"soul": role, "soul_inc": inc, "soul_digest": digest or "a" * 32}))
+        {"ready": True, "role": role, "soul_inc": inc,
+         "soul_digest": digest or DIGEST_1}))
 
 
 TARGETS_584 = {
     "pu-mop-1": {"found": True, "job": "pu-mop-1", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
-                 "soul_digest": "a" * 32, "receives_dispatch": True},
+                 "soul_digest": DIGEST_1, "receives_dispatch": True},
     "pu-mop-2": {"found": True, "job": "pu-mop-2", "project": "mop",
                  "role": "master", "owner": "anton",
                  "soul_inc": "33333333-3333-3333-3333-333333333333",
-                 "soul_digest": "b" * 32, "receives_dispatch": False},
+                 "soul_digest": DIGEST_2, "receives_dispatch": False},
     "pu-mop-3": {"found": False},
     "pu-mop-5": {"found": True, "job": "pu-mop-5", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
-                 "soul_digest": "a" * 32, "receives_dispatch": True},
+                 "soul_digest": DIGEST_1, "receives_dispatch": True},
 }
 
 
@@ -3024,7 +3040,8 @@ def resolver_584(req, project, mode=None):
         return {"allow": False, "reason": f"unknown principal {principal}"}
     out = {"principal": principal, "role": g["role"], "owner": g["owner"],
            "project": g["project"], "job": g["job"], "soul_inc": g["soul_inc"],
-           "soul_digest": "f" * 32, "receives_dispatch": g["receives_dispatch"],
+           "soul_digest": DIGEST_1 if g["role"] == "puppet" else DIGEST_2,
+           "receives_dispatch": g["receives_dispatch"],
            "capabilities": {"dispatch": g["dispatch"], "node_verbs": g["node_verbs"]}}
     if target is not None:
         out["target"] = dict(TARGETS_584.get(target, {"found": False}))
@@ -3564,6 +3581,7 @@ def check_startup_soul_584(c):
 
     def reset(*names):
         asks.clear()
+        souls.clear()
         st.update(mode=None, facts={})
         agent.__dict__.update(_owner_locks={}, _lease_generations={},
                               _lease_claims={}, _lease_holder={}, _soul_cache={},
@@ -3576,13 +3594,19 @@ def check_startup_soul_584(c):
     binding_asks = lambda: [r for _s, r in asks  # noqa: E731
                             if r.get("verb") == "resolve" and "principal" not in r]
 
-    with restored(agent, "bsh", "clone_facts", "clone_dir", "target_dir",
+    souls = {}
+
+    def soul_root(name):
+        souls.setdefault(name, tempfile.mkdtemp(prefix="soul-"))
+        return souls[name]
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "target_dir", "soul_dir",
                   "_event", "puppet_project", "_owner_locks", "_lease_generations",
                   "_lease_claims", "_lease_holder", "IDENTITY_WAIT",
                   "SOUL_FACT_TTL", "_soul_cache", "facts"), restored(bus, "arequest"):
         agent.bsh, agent.clone_facts = bash, clonefacts
         agent.clone_dir = lambda name: clones[name]
         agent.target_dir = lambda name: targets[name]
+        agent.soul_dir = lambda name, inc: os.path.join(soul_root(name), inc)
 
         async def facts_of(name):
             return st["facts"].get(name, {"present": False})
@@ -3598,13 +3622,13 @@ def check_startup_soul_584(c):
             reset()
             st["facts"] = {"pu-mop-1": live_fact(status=status)}
             marked_584(clones["pu-mop-1"], INC_1)
-            ready_584(targets["pu-mop-1"])
+            ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
             got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
             c.check(f"584 a real live session status ({status}) is ready when "
                     "the proofs match",
                     soul == {"ready": True, "role": "puppet", "soul_inc": INC_1,
-                             "soul_digest": "a" * 32}, (soul, got))
+                             "soul_digest": DIGEST_1}, (soul, got))
 
         # 2. Чего-то нет -- не готовность: живой сессии нет вовсе (записи
         # state нет, сокет мёртв, sessionId пуст) -- факта нет; привязка,
@@ -3614,16 +3638,17 @@ def check_startup_soul_584(c):
                 ("marker of another incarnation", live_fact(), INC_2, True, "identity"),
                 ("no ready proof", live_fact(), True, False, "ready"),
                 ("ready of another role", live_fact(), True, "master", "ready"),
-                ("ready of another digest", live_fact(), True, ("puppet", INC_1, "c" * 32), "ready")):
+                ("ready of another digest", live_fact(), True,
+                 ("puppet", INC_1, DIGEST_2), "ready")):
             reset()
             st["facts"] = {"pu-mop-1": fact}
             if marker:
                 marked_584(clones["pu-mop-1"], marker if isinstance(marker, str) else INC_1)
             if ready:
                 if isinstance(ready, tuple):
-                    ready_584(targets["pu-mop-1"], role=ready[0], digest=ready[2])
+                    ready_584(os.path.join(soul_root("pu-mop-1"), INC_1), role=ready[0], digest=ready[2])
                 else:
-                    ready_584(targets["pu-mop-1"],
+                    ready_584(os.path.join(soul_root("pu-mop-1"), INC_1),
                              role=ready if isinstance(ready, str) else "puppet")
             got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
@@ -3644,18 +3669,32 @@ def check_startup_soul_584(c):
                                           "model": None}})):
             reset()
             marked_584(clones["pu-mop-1"], INC_1)
-            ready_584(targets["pu-mop-1"])
+            ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
             st["facts"] = {"pu-mop-1": fact}
             got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
             c.check(f"584 no soul fact without a live session ({label})",
                     soul is None and not binding_asks(), (soul, asks))
 
-        # 3. Конверт вопроса о привязке -- точно target-вид.
+        # 2b. ready-файл в target-каталоге (старое место) -- не
+        # доказательство: путь 590 -- каталог инкарнации, и файл не в
+        # нём узел не читает вовсе.
         reset()
         st["facts"] = {"pu-mop-1": live_fact()}
         marked_584(clones["pu-mop-1"], INC_1)
         ready_584(targets["pu-mop-1"])
+        got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+        c.check("584 a ready proof outside the incarnation directory is ignored",
+                soul == {"ready": False} | {"why": (soul or {}).get("why")}
+                if isinstance(soul, dict) and soul.get("ready") is False else False,
+                (soul, got))
+
+        # 3. Конверт вопроса о привязке -- точно target-вид.
+        reset()
+        st["facts"] = {"pu-mop-1": live_fact()}
+        marked_584(clones["pu-mop-1"], INC_1)
+        ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
         asks.clear()
         ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the binding lookup envelope is exactly target-shaped",
@@ -3674,7 +3713,7 @@ def check_startup_soul_584(c):
             name = "pu-mop-3" if mode is None else "pu-mop-1"
             st["facts"] = {name: live_fact()}
             marked_584(clones[name], INC_1)
-            ready_584(targets[name])
+            ready_584(os.path.join(soul_root(name), INC_1))
             got = ask("mop.mop.node.hyper.rpc.anton", {"verb": "states", "names": [name]})
             soul = (got or {}).get("puppets", {}).get(name, {}).get("soul")
             c.check(f"584 a malformed or missing binding is not ready ({mode})",
@@ -3688,7 +3727,7 @@ def check_startup_soul_584(c):
         agent.SOUL_FACT_TTL = 60
         st["facts"] = {"pu-mop-1": live_fact(sid="s-1")}
         marked_584(clones["pu-mop-1"], INC_1)
-        ready_584(targets["pu-mop-1"])
+        ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
         ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
         ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the soul fact is cached for the read within the TTL",
@@ -3706,7 +3745,7 @@ def check_startup_soul_584(c):
         c.check("584 startup initializes the body for the binding's owner",
                 not (got or {}).get("error") and holder("pu-mop-1") == "anton", (got, holder("pu-mop-1")))
         c.check("584 startup returns the role triple for the wrapper",
-                (got or {}).get("soul", {}).get("soul_digest") == "a" * 32, got)
+                (got or {}).get("soul", {}).get("soul_digest") == DIGEST_1, got)
         c.check("584 startup records the incarnation marker inside .git",
                 marker_584(clones["pu-mop-1"]) == {"inc": INC_1}, marker_584(clones["pu-mop-1"]))
         # Resume доказан маркером инкарнации: ничего не пишет.

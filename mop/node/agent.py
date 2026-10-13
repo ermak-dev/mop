@@ -89,7 +89,7 @@ RESOLVE_WAIT = 5         # сколько глагол актёра ждёт р�
 SOUL_FACT_TTL = 10       # кэш soul-факта ростера: только читающие глаголы (#584)
 STARTUP = "initial_identity"   # единственный глагол канала подъёма (#584/#590)
 MARK = "mop-soul-inc"          # маркер identity инкарнации (агент, .git/)
-READY = "ready.json"          # доказательство готовности 590/583 (target/)
+READY = "ready.json"          # доказательство готовности 590/583 (souls/)
 
 
 def node_name():
@@ -1910,7 +1910,7 @@ async def target_binding(conn, project, name):
     if not (isinstance(got.get("role"), str) and soul.NAME.match(got["role"])):
         return None, f"puppet {name} has a malformed role {got.get('role')!r}"
     if not (isinstance(got.get("soul_digest"), str)
-            and soul.HEX32.match(got["soul_digest"])):
+            and soul.HEX64.match(got["soul_digest"])):
         return None, f"puppet {name} has a malformed soul digest"
     import uuid as _uuid
     inc = got.get("soul_inc")
@@ -1965,12 +1965,21 @@ async def _write_marker(name, inc):
     return None if code == 0 else f"{name}: the identity marker is not recorded: {why(out, code)}"
 
 
-async def _read_ready(name):
+def soul_dir(name, inc):
+    """Каталог инкарнации роли в теле (#590 пишет, #603 опубликует
+    помощника в common): свой каталог у каждой инкарнации каждого имени --
+    старая инкарнация не читается новой. Формула -- та же, что у
+    driver.soul_dir 590."""
+    return paths.under(driver.HOME, "souls", name, inc)
+
+
+async def _read_ready(name, inc):
     """Доказательство готовности 590/583 -> (словарь | None, причина |
-    None). Обёртка пишет его в target-каталог после проверки бандла, до
-    старта модели; узел читает и сверяет, но не создаёт: готовность --
-    факт обёртки, узел её лишь предъявляет. Битое -- не готовность."""
-    path = os.path.join(target_dir(name), READY)
+    None). Обёртка пишет его последним и отдельным файлом в каталог
+    инкарнации (souls/<name>/<inc>/) после проверки бандла, до старта
+    модели; узел читает и сверяет, но не создаёт: готовность -- факт
+    обёртки, узел её лишь предъявляет. Битое -- не готовность."""
+    path = os.path.join(soul_dir(name, inc), READY)
     try:
         got = json.loads(open(path).read() or "null")
     except (OSError, ValueError):
@@ -2020,7 +2029,7 @@ async def _soul_fact(conn, project, name, fact):
         soul_fact = {"ready": False, "why": why}
     else:
         marker, mwhy = await _read_marker(name)
-        ready, rwhy = (await _read_ready(name)) if marker is not None \
+        ready, rwhy = (await _read_ready(name, got["soul_inc"])) if marker is not None \
             and marker["inc"] == got["soul_inc"] else (None, None)
         if marker is None:
             soul_fact = {"ready": False, "why": mwhy}
@@ -2030,11 +2039,11 @@ async def _soul_fact(conn, project, name, fact):
                                 f"{marker['inc']}, the binding names {got['soul_inc']}"}
         elif ready is None:
             soul_fact = {"ready": False, "why": rwhy}
-        elif ready.get("soul") != got["role"] or ready.get("soul_inc") != got["soul_inc"] \
+        elif ready.get("role") != got["role"] or ready.get("soul_inc") != got["soul_inc"] \
                 or ready.get("soul_digest") != got["soul_digest"]:
             soul_fact = {"ready": False,
                          "why": f"{name}: the ready proof names another soul "
-                                f"({ready.get('soul')}, {ready.get('soul_inc')}, "
+                                f"({ready.get('role')}, {ready.get('soul_inc')}, "
                                 f"{ready.get('soul_digest')})"}
         else:
             soul_fact = {"ready": True, "role": got["role"],
