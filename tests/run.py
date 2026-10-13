@@ -14,7 +14,11 @@ HYPOTHESIS (#590): лаунчер знает только легаси-путь:
 роли/инкарнации/digest не останавливает старт.
 SOLUTION: Meta джоба -- доверенное ожидание; ролевой ответ проверяется
 soul.from_manifest, сверяется с Meta и кладётся в каталог инкарнации
-(driver.soul_dir) до запуска; любой отказ -- выход до модели.
+(driver.soul_dir) до запуска; любой отказ -- выход до модели. Порядок
+старта роли: файлы -> identity хозяина глаголом живого агента (шов
+initial_identity, #584/#603) -> метка готовности последней; спрос
+bootstrap ролевого джоба идёт именованным каналом узла (шов
+role_bootstrap_ask), не анонимным server.rpc.
 """
 import asyncio
 import base64
@@ -90,8 +94,10 @@ class Body:
     временного дома (бандл читается soul.load, как его прочтёт обёртка),
     шелл -- в журнал. fail -- подстрока пути, на котором push откажет."""
 
-    def __init__(self, fail=None):
+    def __init__(self, fail=None, identity="ok"):
         self.files, self.log, self.fail = {}, [], fail
+        # Поведение глагола identity: ok | error | raise.
+        self.identity = identity
 
     async def ensure(self, name, params):
         return {"name": name, "body": None, "created": False}
@@ -121,9 +127,23 @@ class Body:
         return {"written": [p for p, _ in files]}
 
 
-def launch(body, reply, env, name=NAME):
+def fake_identity(body):
+    """Шов initial_identity: что сделает живой агент (#584), по режиму
+    тела -- успех, отказ с причиной, транспортный отказ."""
+    async def identity(name, inc, login, profile):
+        body.log.append(("identity", (name, inc, login, profile)))
+        if body.identity == "raise":
+            raise RuntimeError("the agent did not answer")
+        if body.identity == "error":
+            return {"error": "the clone belongs to another owner"}
+        return {"ok": True}
+    return identity
+
+
+def launch(body, reply, env, name=NAME, ask=None):
     """main() с подменённым миром. -> (код|SystemExit-текст, stdout, лог).
     Лог -- push'и, шеллы в теле и запуск врапера в порядке исполнения."""
+    ask = ask or (lambda: reply)
     class Proc:
         def __init__(self, argv, *a, **kw):
             body.log.append(("launch", argv))
@@ -150,11 +170,13 @@ def launch(body, reply, env, name=NAME):
     try:
         with patched_env(**{**base, **env}), \
                 patched(driver, current=lambda: body), \
-                patched(run, bootstrap_sandbox=lambda d, n, p: reply), \
+                patched(run, bootstrap_sandbox=lambda d, n, p, ask=None:
+                        ask() if ask is not None else reply), \
+                patched(run, initial_identity=fake_identity(body)), \
                 patched(run.subprocess, run=sh, Popen=Proc), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                code = run.main([name])
+                code = run.main([name], ask=ask)
             except SystemExit as e:
                 code = str(e.code)
     finally:
@@ -313,10 +335,21 @@ def main():
                            "ready.json")]
         c.check("#590 the ready mark is the last role file written",
                 min(order) >= 0 and order[-1] > max(order[:-1]), pushes)
-        at = [i for i, e in enumerate(log) if e == ("push", f"{d}/ready.json")]
+        at_ready = [i for i, e in enumerate(log) if e == ("push", f"{d}/ready.json")]
         first_launch = [i for i, (k, _) in enumerate(log) if k == "launch"]
         c.check("#590 the model starts after the ready mark",
-                at and first_launch and first_launch[0] > at[0], brief(log))
+                at_ready and first_launch and first_launch[0] > at_ready[0], brief(log))
+        ident = [i for i, (k, a) in enumerate(log) if k == "identity"]
+        last_file = [i for i, (k, p) in enumerate(log)
+                     if k == "push" and p.startswith(d + "/")
+                     and p != f"{d}/ready.json"]
+        c.check("#590 the owner identity settles after the files, before the mark",
+                ident and last_file and max(last_file) < ident[0]
+                and at_ready and ident[0] < at_ready[0], brief(log))
+        c.expect("#590 the identity verb hears the job and the owner",
+                 log[ident[0]][1] if ident else None,
+                 (NAME, INC, OWNER["login"],
+                  {"name": OWNER["name"], "email": OWNER["email"]}))
         # Метка прошлого старта той же инкарнации снята ДО записи новых
         # файлов: оборванная запись не оставит «готово» над половиной.
         rm = [i for i, (k, a) in enumerate(log)
@@ -329,6 +362,76 @@ def main():
     c.check("#590 the password never reaches argv",
             not any(SECRET in " ".join(a) for k, a in log if k in ("sh", "launch")), brief(log))
     c.check("#590 the password is not printed", SECRET not in out, out)
+
+    # Identity хозяина: отказ глагола -- отказ старта, без метки.
+    for mode, why in (("error", "another owner"), ("raise", "did not answer")):
+        body = Body(identity=mode)
+        code, out, log = launch(body, good, env)
+        c.check(f"#590 a refused identity ({mode}) stops before the model",
+                refused(code) and why in code and not launched(log), (code, brief(log)))
+        c.check(f"#590 a refused identity ({mode}) leaves no ready mark",
+                not any(p.endswith("ready.json") for p in body.files), sorted(body.files))
+        c.check(f"#590 a refused identity ({mode}) hides the password",
+                SECRET not in str(code) + out, (code, out))
+
+    # Хозяин-человек обязателен: без логина и без профиля -- отказ до модели.
+    for what, bad_soul in (
+            ("no owner", {k: v for k, v in good["soul"].items() if k != "owner"}),
+            ("no owner email", {**good["soul"], "owner": {"login": "ermak", "name": "A"}})):
+        body = Body()
+        code, out, log = launch(body, reply_for(bad_soul, creds(GRANT, SECRET)), env)
+        c.check(f"#590 a payload with {what} refuses",
+                refused(code) and "owner" in code and not launched(log)
+                and not any(p.endswith("ready.json") for p in body.files),
+                (code, brief(log)))
+
+    # Швы до появления транспорта (#603/#584): громкий отказ без тикета в тексте.
+    for name in ("role_bootstrap_ask", "initial_identity"):
+        seam = getattr(run, name, None)
+        if seam is None:
+            c.fail(f"#590 the seam {name} must exist", "no attribute")
+            continue
+        calls = {"role_bootstrap_ask": (run.role_bootstrap_ask,
+                                        ("mop", NAME, "10.0.0.5")),
+                 "initial_identity": (run.initial_identity,
+                                      (NAME, INC, OWNER["login"],
+                                       {"name": OWNER["name"],
+                                        "email": OWNER["email"]}))}
+        fn, args = calls[name]
+        try:
+            asyncio.run(fn(*args))
+            c.fail(f"#590 the unwired {name} must refuse", "no refusal")
+        except RuntimeError as e:
+            c.check(f"#590 the unwired {name} refuses with a ticket-free reason",
+                    bool(str(e)) and "#" not in str(e), str(e))
+
+    # Маршрут спроса bootstrap: роль -- именованный канал узла, легаси --
+    # прежний анонимный server.rpc; дверь в обоих исходах закрывается.
+    class D2:
+        def __init__(self):
+            self.doors = []
+
+        def address(self, name):
+            return "10.0.0.9"
+
+        async def admit(self, name, on):
+            self.doors.append(on)
+            return {}
+    d2, asked = D2(), []
+    ok_reply = {"ok": True, "played": False}
+    with patched(run.bus, connect=lambda *a, **k: None), \
+            patched(run.bus, ask_server=lambda *a, **k:
+                    asked.append("legacy") or dict(ok_reply)):
+        run.bootstrap_sandbox(d2, NAME, "mop",
+                              ask=lambda: asked.append("role") or dict(ok_reply))
+        c.expect("#590 a role job asks bootstrap on the node-qualified channel",
+                 asked, ["role"])
+        c.expect("#590 the door still closes for a role ask", d2.doors, [True, False])
+        asked.clear()
+        run.bootstrap_sandbox(d2, NAME, "mop")
+        c.expect("#590 a legacy job asks the anonymous server.rpc as before",
+                 asked, ["legacy"])
+        c.expect("#590 the door still closes for the legacy ask", d2.doors[-2:], [True, False])
 
     # Вторая роль того же проекта на том же доме (host): свои файлы, без
     # коллизии с первой.

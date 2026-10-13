@@ -141,9 +141,29 @@ def refusal(name, error):
     return f"bootstrap of {name} failed: {error}"
 
 
-def bootstrap_sandbox(d, name, project):
+async def initial_identity(name, soul_inc, login, profile):
+    """Начальная identity хозяина в клоне -- глагол живого агента узла
+    (#584/#603), не локальная запись: замок #573/#574 живёт в агенте, и
+    лаунчер -- другой процесс. Профиль -- из ответа сервера (провайдер
+    личностей), не из тела запроса. Шов до появления транспорта; ответ и
+    отказ -- словарь глагола. -> dict."""
+    raise RuntimeError("initial identity is not wired to the node agent yet")
+
+
+async def role_bootstrap_ask(project, name, address):
+    """Спрос bootstrap ролевого джоба: именованный канал узла (#603/#581),
+    не анонимный server.rpc (его зовут и люди проекта, а личный кред
+    принципала выдаёт только хозяину узла). Шов до появления транспорта.
+    -> ответ сервера."""
+    raise RuntimeError("role bootstrap is not wired to the node channel yet")
+
+
+def bootstrap_sandbox(d, name, project, ask=None):
     """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
     дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
+
+    ask -- чем спросить сервер вместо анонимного server.rpc (ролевой джоб,
+    #603): канал узла, а не проектный вопрос человека.
 
     Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
     любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
@@ -162,8 +182,11 @@ def bootstrap_sandbox(d, name, project):
         if r.get("error"):
             raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
-        out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT, project=project,
-                             name=name, address=address)
+        if ask is None:
+            out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
+                                 project=project, name=name, address=address)
+        else:
+            out = ask()
     finally:
         # Закрыть -- и после неудачного впуска: стоп мог прийти посреди него.
         asyncio.run(d.admit(name, False))
@@ -305,8 +328,9 @@ def deliver_legacy(d, name, b):
 
 
 def deliver_role(d, name, role, b, inside):
-    """Ролевой джоб: бандл и кред принципала в каталог инкарнации -- до
-    модели (#590). Любой отказ -- выход: обёртка не стартует.
+    """Ролевой джоб: бандл и кред принципала в каталог инкарнации, затем
+    identity хозяина глаголем агента, затем метка -- всё до модели (#590).
+    Любой отказ -- выход: обёртка не стартует.
 
     Метка готовности прошлого старта той же инкарнации снимается ДО записи:
     оборванная запись не оставит «готово» над половиной файлов, и повтор
@@ -324,6 +348,27 @@ def deliver_role(d, name, role, b, inside):
     if w.get("error"):
         sys.exit(f"role delivery of {name} refused: the role files did not "
                  f"reach the body: {w['error']}")
+    # Identity хозяина -- глагол живого агента (шов): чужой процесс не
+    # владеет замком #573/#574, и старт роли не пишет аренду сам. Отказ
+    # глагола -- отказ старта: метка готовности не ставится, обёртка не
+    # стартует.
+    owner = (b.get("soul") or {}).get("owner")
+    if not (isinstance(owner, dict) and busnames.valid_login(owner.get("login"))
+            and isinstance(owner.get("name"), str) and owner["name"]
+            and isinstance(owner.get("email"), str) and owner["email"]):
+        sys.exit(f"role delivery of {name} refused: the payload has no owner "
+                 f"with a login, name and email")
+    profile = {"name": owner["name"], "email": owner["email"]}
+    try:
+        r = asyncio.run(initial_identity(name, role.soul_inc, owner["login"],
+                                         profile))
+    except (RuntimeError, bus.BusError) as e:
+        sys.exit(f"role delivery of {name} refused: the owner identity did "
+                 f"not settle: {e}")
+    if not (isinstance(r, dict) and r.get("ok")):
+        why = r.get("error") if isinstance(r, dict) else _short(r)
+        sys.exit(f"role delivery of {name} refused: the owner identity did "
+                 f"not settle: {why}")
     w = asyncio.run(d.push(name, ready, mark))
     if w.get("error"):
         sys.exit(f"role delivery of {name} refused: the ready mark did not "
@@ -332,8 +377,11 @@ def deliver_role(d, name, role, b, inside):
           f"{os.path.dirname(ready)}", flush=True)
 
 
-def main(argv):
+def main(argv, ask=None):
     """Поднять тело и отработать в нём внутренний врапер. Зовётся из спеки.
+
+    ask -- чем ролевой джоб спрашивает bootstrap у сервера вместо
+    анонимного server.rpc (шов #603); None -- прежний проектный вопрос.
 
     Смерть врапера обязана убивать сессию. На «живой папет = живая tmux-сессия
     с именем джоба» стоит и ростер, и сбор сирот: умри внешний врапер молча,
@@ -406,7 +454,8 @@ def main(argv):
     # ненулём, Nomad перезапускает, ростер показывает падение. Папет не
     # поднимается «наполовину» с окружением, которого нет.
     try:
-        b = bootstrap_sandbox(d, name, driver.project_of_name(name))
+        b = bootstrap_sandbox(d, name, driver.project_of_name(name),
+                              ask=ask if role is not None else None)
     except (RuntimeError, bus.BusError) as e:
         sys.exit(refusal(name, e))
     print(f"{name}: bootstrap "
