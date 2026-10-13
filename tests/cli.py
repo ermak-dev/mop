@@ -1585,7 +1585,9 @@ def check_role_declarations_585(c):
             c.check(f"#585 {name}: {verb} is in the role grammar",
                     verb in soul.CLUSTER_VERBS)
     # Аннотация -- не декорация: с ней рабочий пресет видит командлеты в
-    # своих правах, а не пустой каталог.
+    # своих правах, а не пустой каталог. Пресет -- рабочий из docs/SOUL.md
+    # плюс чтение (usage/roster/alloc/spec), выданное каналом #585: stat
+    # требует pool, которого рабочему не дают, и остаётся невидимым.
     from mop.client import channel
     grant_caps = soul.from_manifest({
         "soul": "puppet", "version": 1,
@@ -1598,9 +1600,9 @@ def check_role_declarations_585(c):
     seen = channel.tools_for(channel.GRANT, grant_caps,
                              {n: d for n, d in declared_names.items()})
     c.check("#585 a grant's catalogue is not empty once declarations name verbs",
-            {"profile", "stat"} <= seen, seen)
+            "profile" in seen, seen)
     c.check("#585 a role with no matching verbs gains nothing",
-            "wipe" not in seen and "add" not in seen, seen)
+            not ({"wipe", "add", "stat"} & seen), seen)
     # STATUS: FIXED — see #585
 
 
