@@ -2960,24 +2960,34 @@ GRANTS_584 = {
 }
 INC_1 = "11111111-1111-1111-1111-111111111111"
 INC_2 = "22222222-2222-2222-2222-222222222222"
-MARK_584 = "soul-ready"   # имя маркера инициализации тела (шов #590/#583)
+MARK_584 = "mop-soul-inc"       # маркер identity этой инкарнации (агент, .git/)
+READY_584 = "ready.json"        # готовность 590/583 в target-каталоге тела
 
 
-def marked_584(root, inc, who="agent"):
-    """Маркер инициализации тела, какой пишет агент под замком (#584)."""
-    path = os.path.join(root, f".mop-{MARK_584}")
-    open(path, "w").write(json.dumps({"inc": inc, "by": who}))
+def marked_584(root, inc):
+    """Маркер identity инкарнации: пишет агент под замком, в .git/, как
+    файл аренды -- клон git не пачкает."""
+    path = os.path.join(root, ".git", MARK_584)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write(json.dumps({"inc": inc}))
 
 
 def marker_584(root):
-    path = os.path.join(root, f".mop-{MARK_584}")
     try:
-        got = json.loads(open(path).read() or "null")
+        got = json.loads(open(os.path.join(root, ".git", MARK_584)).read() or "null")
     except (OSError, ValueError):
-        return None, "unreadable"
-    if not isinstance(got, dict) or got.get("inc") is None:
-        return None, "malformed"
-    return got, None
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def ready_584(root, role="puppet", inc=INC_1, digest=None):
+    """Доказательство готовности 590: обёртка пишет его в target-каталог
+    после проверки бандла, до старта модели."""
+    path = os.path.join(root, READY_584)
+    open(path, "w").write(json.dumps(
+        {"soul": role, "soul_inc": inc, "soul_digest": digest or "a" * 32}))
+
+
 TARGETS_584 = {
     "pu-mop-1": {"found": True, "job": "pu-mop-1", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
@@ -2986,10 +2996,10 @@ TARGETS_584 = {
                  "role": "master", "owner": "anton",
                  "soul_inc": "33333333-3333-3333-3333-333333333333",
                  "soul_digest": "b" * 32, "receives_dispatch": False},
+    "pu-mop-3": {"found": False},
     "pu-mop-5": {"found": True, "job": "pu-mop-5", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
                  "soul_digest": "a" * 32, "receives_dispatch": True},
-    "pu-mop-3": {"found": False},
 }
 
 
@@ -3019,7 +3029,7 @@ def resolver_584(req, project, mode=None):
     if target is not None:
         out["target"] = dict(TARGETS_584.get(target, {"found": False}))
     if mode == "other-principal":
-        out["principal"] = B if principal != B else A
+        out["principal"] = GRANTS_584 and [k for k in GRANTS_584 if k != principal][0]
     if mode == "other-job" and target is not None:
         out["target"] = dict(TARGETS_584["pu-mop-1"], job="pu-mop-9")
     if mode == "other-target-project" and target is not None:
@@ -3052,9 +3062,7 @@ def check_role_node_gates_584(c):
     своим субъектом, аренда и identity -- хозяина-человека из ответа
     резолвера (политика аренды прежняя), актёр -- в аудите, from-name --
     его джоб; транзакция #574 целиком.
-    RESULT: RED на fa60d1e (21 провал: аренда и identity у рабочего, wipe
-    вне node_verbs и по dispatch-субъекту, отозванный и молчащий резолвер
-    пропускают); зелёный после правки агента.
+    RESULT: RED на fa60d1e (21 провал); зелёный после правки агента.
     STATUS: FIXED — see #584"""
     import asyncio
     import subprocess
@@ -3087,7 +3095,7 @@ def check_role_node_gates_584(c):
         path = os.path.join(clones[name], lease.FILE)
         return Owner.parse(open(path).read()).user if os.path.exists(path) else None
 
-    async def facts(name):
+    async def clonefacts(name):
         path = os.path.join(clones[name], lease.FILE)
         owner = Owner.parse(open(path).read()) if os.path.exists(path) else None
         return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
@@ -3159,7 +3167,7 @@ def check_role_node_gates_584(c):
                   "_lease_claims", "_lease_holder", "IDENTITY_WAIT", "tmux_alive",
                   "DRIVER"), \
             restored(agent.time, "time"), restored(bus, "arequest"):
-        agent.bsh, agent.clone_facts, agent.session_json = bash, facts, deliver
+        agent.bsh, agent.clone_facts, agent.session_json = bash, clonefacts, deliver
         agent._event, agent.puppet_project, agent.tmux_alive = event, project, dead
         agent.DRIVER, agent.IDENTITY_WAIT = Drv(), 0.1
         agent.clone_dir = lambda name: clones[name]
@@ -3168,14 +3176,13 @@ def check_role_node_gates_584(c):
         send = {"verb": "send", "name": "pu-mop-1", "message": "hi", "from_name": "anton"}
 
         # 1. Обычный send нового актёра -- сообщение соседу: доставка, без
-        # аренды и без identity; резолвер спрошен; from-name -- актёр, не тело.
+        # аренды и без identity; резолвер спрошен; from-name -- джоб актёра.
         reset()
         got = ask(rpc(W), send)
         c.check("584 grant send is authorized by the server resolver",
                 [(r.get("principal"), r.get("verb_name"), r.get("target"))
                  for r in resolves()] == [(W, "send", "pu-mop-1")], asks)
-        c.check("584 the resolver request carries exactly the decided envelope; "
-                "the project travels by subject, not by body",
+        c.check("584 the resolver request carries exactly the decided envelope",
                 [(s, sorted(r)) for s, r in asks if r.get("verb") == "resolve"]
                 == [("mop.mop.server.rpc",
                      ["principal", "service", "target", "verb", "verb_name"])], asks)
@@ -3362,26 +3369,6 @@ def check_role_node_gates_584(c):
         c.check("584 another human's live lease gates an actor's mutating verb",
                 not destroyed and bool(got and got.get("error")), (destroyed, got))
 
-        # 18. Шов #590: первая аренда и identity хозяина до первого хода.
-        reset()
-        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
-        c.check("584 initial identity: a fresh body gets the human lease and "
-                "identity", holder("pu-mop-1") == "anton"
-                and ident("pu-mop-1") == profiles["anton"] and not got.get("error"),
-                (holder("pu-mop-1"), ident("pu-mop-1"), got))
-        asks.clear()
-        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
-        c.check("584 initial identity: resume of the same owner touches nothing",
-                got == {"resumed": True} and not asks
-                and holder("pu-mop-1") == "anton", (got, asks))
-        reset()
-        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
-            f.write(Owner("petr", 1).render())       # чужая, и давно не живая
-        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
-        c.check("584 initial identity: a foreign lease refuses, nothing rewritten",
-                bool(got.get("error")) and holder("pu-mop-1") == "petr"
-                and ident("pu-mop-1") == profiles["petr"], (got, holder("pu-mop-1")))
-
         # 17. Легаси без изменений: человек по rpc -- аренда и identity, без
         # резолвера; публичный msg -- без владельца и без резолвера.
         reset()
@@ -3401,32 +3388,56 @@ def check_role_node_gates_584(c):
         c.check("584 node-level verbs are never given to an actor",
                 bool(got and got.get("error")), got)
 
-    # Чистый вердикт: только явное allow, иное -- отказ, не «пропустить».
-    ok = {"allow": True, "principal": A, "project": "mop", "owner": "anton",
-          "job": "pu-mop-7"}
-    for label, got in (("no allow", {k: v for k, v in ok.items() if k != "allow"}),
-                       ("truthy allow", dict(ok, allow="yes")),
-                       ("not a mapping", ["allow"]),
-                       ("owner not a string", dict(ok, owner=["anton"]))):
-        c.check(f"584 actor_verdict fails closed: {label}",
-                bool(agent.actor_verdict(got, A, "mop", "send")), got)
-    c.check("584 actor_verdict passes an explicit allow about the asked principal",
-            agent.actor_verdict(ok, A, "mop", "send") is None)
-    tgt = {"target": {"found": True, "job": "pu-mop-1", "project": "mop",
-                      "receives_dispatch": True}}
-    for label, extra, want in (
-            ("source_dispatch", {"source_dispatch": True}, None),
-            ("capabilities.dispatch", {"capabilities": {"dispatch": True}}, None),
-            ("bare top-level dispatch is not a source right", {"dispatch": True}, "deny"),
-            ("no source right", {}, "deny")):
-        got = agent.actor_verdict(dict(ok, **tgt, **extra), A, "mop", "dispatch", "pu-mop-1")
-        c.check(f"584 dispatch source right: {label}",
-                (got is None) == (want is None), got)
-    c.check("584 dispatch subject token must be a principal id",
-            agent.actor_of("mop.mop.node.hyper.dispatch.anton") == ("dispatch", None)
-            and agent.actor_of("mop.mop.node.hyper.rpc.anton") == ("rpc", None)
-            and agent.actor_of(rpc(W)) == ("rpc", W)
-            and agent.actor_of(dsp(A)) == ("dispatch", A))
+        # 18. Шов #590: первая аренда и identity хозяина до первого хода.
+        reset()
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
+        c.check("584 initial identity: a fresh body gets the human lease and "
+                "identity", holder("pu-mop-1") == "anton"
+                and ident("pu-mop-1") == profiles["anton"] and not got.get("error"),
+                (holder("pu-mop-1"), ident("pu-mop-1"), got))
+        c.check("584 initial identity records the incarnation marker inside .git",
+                marker_584(clones["pu-mop-1"]) == {"inc": INC_1}
+                and not os.path.exists(os.path.join(clones["pu-mop-1"], MARK_584)),
+                marker_584(clones["pu-mop-1"]))
+        asks.clear()
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
+        c.check("584 initial identity: resume of the same incarnation asks nothing",
+                got == {"resumed": True} and not asks
+                and holder("pu-mop-1") == "anton", (got, asks))
+        reset()
+        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
+            f.write(Owner("petr", 1).render())       # чужая, и давно не живая
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
+        c.check("584 initial identity: a foreign lease refuses, nothing rewritten",
+                bool(got.get("error")) and holder("pu-mop-1") == "petr"
+                and ident("pu-mop-1") == profiles["petr"], (got, holder("pu-mop-1")))
+
+        # Чистый вердикт: только явное allow, иное -- отказ, не «пропустить».
+        ok = {"allow": True, "principal": A, "project": "mop", "owner": "anton",
+              "job": "pu-mop-7"}
+        for label, got in (("no allow", {k: v for k, v in ok.items() if k != "allow"}),
+                           ("truthy allow", dict(ok, allow="yes")),
+                           ("not a mapping", ["allow"]),
+                           ("owner not a string", dict(ok, owner=["anton"]))):
+            c.check(f"584 actor_verdict fails closed: {label}",
+                    bool(agent.actor_verdict(got, A, "mop", "send")), got)
+        c.check("584 actor_verdict passes an explicit allow about the asked principal",
+                agent.actor_verdict(ok, A, "mop", "send") is None)
+        tgt = {"target": {"found": True, "job": "pu-mop-1", "project": "mop",
+                          "receives_dispatch": True}}
+        for label, extra, want in (
+                ("source_dispatch", {"source_dispatch": True}, None),
+                ("capabilities.dispatch", {"capabilities": {"dispatch": True}}, None),
+                ("bare top-level dispatch is not a source right", {"dispatch": True}, "deny"),
+                ("no source right", {}, "deny")):
+            got = agent.actor_verdict(dict(ok, **tgt, **extra), A, "mop", "dispatch", "pu-mop-1")
+            c.check(f"584 dispatch source right: {label}",
+                    (got is None) == (want is None), got)
+        c.check("584 dispatch subject token must be a principal id",
+                agent.actor_of("mop.mop.node.hyper.dispatch.anton") == ("dispatch", None)
+                and agent.actor_of("mop.mop.node.hyper.rpc.anton") == ("rpc", None)
+                and agent.actor_of(rpc(W)) == ("rpc", W)
+                and agent.actor_of(dsp(A)) == ("dispatch", A))
 
     subs = asyncio.run(_subjects_584())
     c.check("584 the agent listens on its dispatch subject",
@@ -3434,17 +3445,20 @@ def check_role_node_gates_584(c):
 
 
 def check_startup_soul_584(c):
-    """HYPOTHESIS (#584, решения по ревизии): канала подъёма нет --
-    initial_identity не виден с шины (no such verb), и ростер не несёт
-    тройку роли даже у проверенной привязки с живой сессией.
-    SOLUTION: канал mop.<p>.node.<узел>.startup под узловым кредом обёртки
-    (ACL #581/#603), единственный глагол initial_identity, хозяин и тройка
-    -- из привязки сервера, тело называет джоб и инкарнацию, расхождение --
-    отказ; state/states -- typed soul-факт: тройка только после проверенной
-    привязки и живой сессии, битое -- не готовность, а причина; читающий
-    кэш -- короткий TTL, мутации резолвера не касаются.
-    RESULT: RED -- канал и факт отсутствуют (no such verb, состояния без
-    soul); зелёный после правки агента.
+    """HYPOTHESIS (#584, ревизия-2): готовность роли в ростере опиралась на
+    угаданный список статусов и строку сессии без идентификатора, а «живая
+    сессия» по усечённой строке пускала любой мусор; структурной записи
+    state (alive/listen/sessionId) код не читал вовсе, и при отсутствующей
+    записи новая роль не отказывалась, а молчала. Доказательство готовности
+    было самодельным маркером в рабочем клоне -- git его видел грязью, и
+    доказывал он только initial_identity, а не проверенный обёрткой бандл.
+    SOLUTION: живость -- только структурный факт state: alive === True,
+    listen === True, непустой sessionId (session.py его даёт только живой);
+    записи нет -- fail closed, без угадывания статусов. Готовность =
+    привязка + маркер identity этой инкарнации (в .git, как файл аренды) +
+    ready-файл 590/583 в target-каталоге с той же ролью/инкарнацией/digest.
+    Кэш -- по (проект, имя, инкарнация, sessionId).
+    RESULT: RED до правки агента; зелёный после.
     STATUS: FIXED — see #584"""
     import asyncio
     import subprocess
@@ -3454,7 +3468,7 @@ def check_startup_soul_584(c):
     profiles = {"anton": {"name": "Anton E", "email": "anton@example.dev"},
                 "petr": {"name": "Petr P", "email": "petr@example.dev"}}
     root = tempfile.mkdtemp(prefix="mop-test-584b-")
-    clones = {}
+    clones, targets = {}, {}
 
     def fresh(name):
         d = tempfile.mkdtemp(dir=root)
@@ -3464,15 +3478,7 @@ def check_startup_soul_584(c):
         subprocess.run(["git", "-C", d, "config", "--local", "user.email",
                         profiles["petr"]["email"]], check=True)
         clones[name] = d
-
-    def ident(name):
-        got = {}
-        for key in ("name", "email"):
-            r = subprocess.run(["git", "-C", clones[name], "config", "--local",
-                                f"user.{key}"], capture_output=True, text=True)
-            if r.returncode == 0:
-                got[key] = r.stdout.strip()
-        return got
+        targets[name] = tempfile.mkdtemp(dir=root)
 
     def holder(name):
         path = os.path.join(clones[name], lease.FILE)
@@ -3484,17 +3490,8 @@ def check_startup_soul_584(c):
         return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
                 "cur": "master", "def": "master"}
 
-    st = {"mode": None, "facts": {}, "sessions": {}}
+    st = {"mode": None, "facts": {}}
     asks = []
-
-    def live_fact(name, sid="s-1"):
-        """Живой факт сессии с её идентификатором: строка целиком."""
-        st["sessions"][name] = sid
-        return {"present": True, "session": f"running 1 1 {sid}"}
-
-    async def local(name):
-        """Джоб этого узла: проверка startup-канала -- локальность цели."""
-        return name in clones
 
     class Reply:
         def __init__(self, body):
@@ -3512,14 +3509,23 @@ def check_startup_soul_584(c):
             return Reply(resolver_584(req, subject.split(".")[1], st["mode"]))
         return Reply({"error": f"no such verb {req.get('verb')}"})
 
-    async def facts(name):
-        return st["facts"].get(name, {"present": False})
-
     async def no_event(*a, **k):
         return None
 
     async def project(name):
         return "mop"
+
+    def live_fact(status="idle", sid="s-1", alive=True, listen=True, state=True):
+        """Живой факт по настоящей форме session.state (#222/#468): строка
+        «<status> <alive> <listen>» и структурная запись state с sessionId
+        живой сессии; sessionId есть только у слушающей."""
+        fact = {"present": True, "session": f"{status} {int(alive)} {int(listen)}"}
+        if state:
+            fact["state"] = {"status": status, "waitingFor": None, "alive": alive,
+                             "listen": listen, "turn": None,
+                             "sessionId": sid if (alive and listen) else None,
+                             "model_at": None, "model": None}
+        return fact
 
     def ask(subject, body, startup=False):
         m = Msg(subject, body=body)
@@ -3527,8 +3533,6 @@ def check_startup_soul_584(c):
             asyncio.run(agent.handle(None, m, public=subject.endswith(".msg"),
                                      startup=startup))
         except TypeError:
-            # До правки канала подъёма нет: запрос идёт прежним путём и
-            # обязан получить отказ «нет такого глагола».
             asyncio.run(agent.handle(None, m, public=subject.endswith(".msg")))
         return m.replies[-1] if m.replies else None
 
@@ -3545,84 +3549,100 @@ def check_startup_soul_584(c):
     binding_asks = lambda: [r for _s, r in asks  # noqa: E731
                             if r.get("verb") == "resolve" and "principal" not in r]
 
-    with restored(agent, "bsh", "clone_facts", "clone_dir", "facts", "_event",
-                  "puppet_project", "_owner_locks", "_lease_generations",
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "target_dir",
+                  "_event", "puppet_project", "_owner_locks", "_lease_generations",
                   "_lease_claims", "_lease_holder", "IDENTITY_WAIT",
                   "SOUL_FACT_TTL", "_soul_cache"), restored(bus, "arequest"):
-        agent.bsh, agent.clone_facts, agent.facts = bash, clonefacts, facts
+        agent.bsh, agent.clone_facts = bash, clonefacts
+        agent.target_dir = lambda name: targets[name]
         agent._event, agent.puppet_project = no_event, project
         agent.IDENTITY_WAIT, agent.SOUL_FACT_TTL = 0.1, 0
-        agent.clone_dir = lambda name: clones[name]
         bus.arequest = arequest
-        agent.local_puppet = local
-        live = {"present": True, "session": "running 1 1"}
 
-        # 1. Привязка и сессия без маркера тела -- НЕ готовность: это факт
-        # регистрации, а не рантайм-подтверждение роли (#584-ревизия).
+        # 1. Настоящие статусы (idle/busy -- живые) + маркер identity этой
+        # инкарнации + ready-файл 590 с той же тройкой -> готовность.
+        for status in ("idle", "busy", "waiting", "shell"):
+            reset()
+            st["facts"] = {"pu-mop-1": live_fact(status=status)}
+            marked_584(clones["pu-mop-1"], INC_1)
+            ready_584(targets["pu-mop-1"])
+            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 a real live session status ({status}) is ready when "
+                    "the proofs match",
+                    soul == {"ready": True, "role": "puppet", "soul_inc": INC_1,
+                             "soul_digest": "a" * 32}, (soul, got))
+
+        # 2. Чего-то нет -- не готовность, а причина; ничего нет -- нет факта.
+        # Структурной записи нет (легаси-сессия) -- fail closed: не угадываем.
+        for label, fact, marker, ready, why_word in (
+                ("no structured state", live_fact(state=False), True, True, "state"),
+                ("dead in state", live_fact(alive=False), True, True, "state"),
+                ("socket down", live_fact(listen=False), True, True, "state"),
+                ("no session id", live_fact(sid=""), True, True, "state"),
+                ("no marker", live_fact(), False, True, "identity"),
+                ("marker of another incarnation", live_fact(), INC_2, True, "identity"),
+                ("no ready proof", live_fact(), True, False, "ready"),
+                ("ready of another role", live_fact(), True, "master", "ready"),
+                ("ready of another digest", live_fact(), True, ("puppet", INC_1, "c" * 32), "ready")):
+            reset()
+            st["facts"] = {"pu-mop-1": fact}
+            if marker:
+                marked_584(clones["pu-mop-1"], INC_1 if marker is True else INC_1)
+                if marker != INC_1 and marker is not True:
+                    marked_584(clones["pu-mop-1"], INC_2)
+            if ready:
+                if isinstance(ready, tuple):
+                    ready_584(targets["pu-mop-1"], role=ready[0], digest=ready[2])
+                else:
+                    ready_584(targets["pu-mop-1"],
+                             role=ready if isinstance(ready, str) else "puppet")
+            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 not ready: {label}",
+                    soul == {"ready": False, "why": soul.get("why")}
+                    if isinstance(soul, dict) and soul.get("ready") is False
+                    and why_word in (soul.get("why") or "") else False, soul)
+        for label, fact in (("dead session string", {"present": True, "session": "none"}),
+                            ("no body", {"present": False}),
+                            ("state says no session", live_fact(state=True)
+                             | {"state": {"status": None, "waitingFor": None,
+                                          "alive": False, "listen": False, "turn": None,
+                                          "sessionId": None, "model_at": None,
+                                          "model": None}})):
+            reset()
+            marked_584(clones["pu-mop-1"], INC_1)
+            ready_584(targets["pu-mop-1"])
+            st["facts"] = {"pu-mop-1": fact}
+            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 no soul fact without a live session ({label})",
+                    soul is None and not binding_asks(), (soul, asks))
+
+        # 3. Конверт вопроса о привязке -- точно target-вид.
         reset()
-        st["facts"] = {"pu-mop-1": live}
-        got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
-        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
-        c.check("584 no runtime marker -- not ready, with a reason",
-                soul == {"ready": False, "why": soul.get("why")}
-                if isinstance(soul, dict) and soul.get("ready") is False
-                and "marker" in (soul.get("why") or "") else False, soul)
-        # Маркер этой инкарнации -- готовность: тройка в ростере.
+        st["facts"] = {"pu-mop-1": live_fact()}
         marked_584(clones["pu-mop-1"], INC_1)
-        agent._soul_cache.clear()
-        got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
-        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
-        c.check("584 states carry the soul triple of a validated live binding "
-                "with the body's runtime marker",
-                soul == {"ready": True, "role": "puppet", "soul_inc": INC_1,
-                         "soul_digest": "a" * 32}, (soul, got))
-        # Маркер другой инкарнации -- не готовность: имя переиспользовано.
-        marked_584(clones["pu-mop-1"], INC_2)
-        agent._soul_cache.clear()
-        got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
-        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
-        c.check("584 a marker of another incarnation is not readiness",
-                soul == {"ready": False, "why": soul.get("why")}
-                if isinstance(soul, dict) and soul.get("ready") is False
-                and "incarnation" in (soul.get("why") or "") else False, soul)
-        marked_584(clones["pu-mop-1"], INC_1)
-        agent._soul_cache.clear()
+        ready_584(targets["pu-mop-1"])
         asks.clear()
         ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the binding lookup envelope is exactly target-shaped",
                 [(s, sorted(r)) for s, r in asks
                  if r.get("verb") == "resolve" and "principal" not in r]
                 == [("mop.mop.server.rpc", ["service", "target", "verb"])], asks)
+        got = ask(rpc(W), {"verb": "state", "name": "pu-mop-1"})
+        c.check("584 state carries the soul fact too",
+                (got or {}).get("soul", {}).get("ready") is True, got)
 
-        # 2. Мёртвая сессия, отсутствующее тело, кривая строка -- факта нет.
-        for label, fact in (("no live session", {"present": True, "session": "none"}),
-                            ("no body", {"present": False}),
-                            ("bare status string", {"present": True, "session": "running"}),
-                            ("unknown word", {"present": True, "session": "bogus 1 1 s-1"})):
-            reset()
-            marked_584(clones["pu-mop-1"], INC_1)
-            st["facts"] = {"pu-mop-1": fact}
-            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
-            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
-            c.check(f"584 no soul fact without a fresh live session ({label})",
-                    soul is None and not binding_asks(), (soul, asks))
-            reset()
-            marked_584(clones["pu-mop-1"], INC_1)
-            st["facts"] = {"pu-mop-1": live}
-            got = ask(rpc(W), {"verb": "state", "name": "pu-mop-1"})
-            c.check("584 state carries the soul fact too",
-                    (got or {}).get("soul", {}).get("ready") is True, got)
-
-        # 3. Битая привязка -- не готовность, а причина; молчание -- тоже.
+        # 4. Битая привязка сервера -- не готовность, а причина.
         for mode, word in (("down", "resolver"), (None, "binding"),
                            ("bad-digest", "digest"), ("bad-inc", "incarnation")):
             reset()
             st["mode"] = mode
-            st["facts"] = {"pu-mop-3" if mode is None else "pu-mop-1": live}
             name = "pu-mop-3" if mode is None else "pu-mop-1"
-            # Человеческий субъект: путь актёра при молчании резолвера
-            # закрыт сам по себе, а soul-факт проверяем на читающем глаголе
-            # человека -- он не зависит от прав актёра.
+            st["facts"] = {name: live_fact()}
+            marked_584(clones[name], INC_1)
+            ready_584(targets[name])
             got = ask("mop.mop.node.hyper.rpc.anton", {"verb": "states", "names": [name]})
             soul = (got or {}).get("puppets", {}).get(name, {}).get("soul")
             c.check(f"584 a malformed or missing binding is not ready ({mode})",
@@ -3630,66 +3650,57 @@ def check_startup_soul_584(c):
                     if isinstance(soul, dict) and soul.get("ready") is False
                     and word in (soul.get("why") or "") else False, soul)
 
-        # 4. Кэш читающего глагола: короткий TTL, повтор -- без вопроса;
-        # новая сессия того же имени -- мимо кэша.
+        # 5. Кэш: повтор в пределах TTL -- без вопроса; другая сессия или
+        # инкарнация -- мимо кэша.
         reset()
         agent.SOUL_FACT_TTL = 60
-        st["facts"] = {"pu-mop-1": live_fact("pu-mop-1")}
+        st["facts"] = {"pu-mop-1": live_fact(sid="s-1")}
         marked_584(clones["pu-mop-1"], INC_1)
+        ready_584(targets["pu-mop-1"])
         ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the soul fact is cached for the read within the TTL",
                 len(binding_asks()) == 1, asks)
-        st["facts"] = {"pu-mop-1": live_fact("pu-mop-1", "s-2")}
+        st["facts"] = {"pu-mop-1": live_fact(sid="s-2")}
         ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 a new session of the same name misses the cache",
                 len(binding_asks()) == 2, asks)
 
-        # 5. Канал подъёма: initial_identity с шины, хозяин -- из привязки.
+        # 6. Канал подъёма: initial_identity с шины; хозяин -- из привязки.
         reset()
         got = ask("mop.mop.node.hyper.startup",
                   {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
                   startup=True)
         c.check("584 startup initializes the body for the binding's owner",
-                not (got or {}).get("error") and holder("pu-mop-1") == "anton"
-                and ident("pu-mop-1") == profiles["anton"], (got, holder("pu-mop-1")))
+                not (got or {}).get("error") and holder("pu-mop-1") == "anton", (got, holder("pu-mop-1")))
         c.check("584 startup returns the role triple for the wrapper",
                 (got or {}).get("soul", {}).get("soul_digest") == "a" * 32, got)
-        got_mark, got_why = marker_584(clones["pu-mop-1"])
-        c.check("584 startup installs the runtime marker of this incarnation "
-                "under the lock",
-                got_mark == {"inc": INC_1, "by": "agent"}
-                and holder("pu-mop-1") == "anton", (got_mark, holder("pu-mop-1")))
-        # Resume доказан маркером этой инкарнации, не арендой: свежий клон
-        # того же хозяина без маркера -- не resume, а полная инициализация.
+        c.check("584 startup records the incarnation marker inside .git",
+                marker_584(clones["pu-mop-1"]) == {"inc": INC_1}, marker_584(clones["pu-mop-1"]))
+        # Resume доказан маркером инкарнации: ничего не пишет.
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 startup resume of the same incarnation writes nothing",
+                (got or {}).get("resumed") is True
+                and marker_584(clones["pu-mop-1"]) == {"inc": INC_1},
+                (got, marker_584(clones["pu-mop-1"])))
+        # Свежее тело того же хозяина без маркера -- полный путь.
         fresh("pu-mop-5")
         ask("mop.mop.node.hyper.startup",
             {"verb": "initial_identity", "name": "pu-mop-5", "soul_inc": INC_1},
             startup=True)
         c.check("584 a fresh same-owner body without the marker is fully initialized",
                 holder("pu-mop-5") is not None
-                and marker_584(clones["pu-mop-5"])[0]["inc"] == INC_1,
+                and marker_584(clones["pu-mop-5"]) == {"inc": INC_1},
                 holder("pu-mop-5"))
+        # Маркер жив, аренда уехала законным dispatch'ем -- не наша война.
         reset("pu-mop-1")
-        marked_584(clones["pu-mop-1"], INC_1)
-        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
-            f.write(Owner("anton", 1).render())
         ask("mop.mop.node.hyper.startup",
             {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
             startup=True)
-        before = ident("pu-mop-1")
-        got = ask("mop.mop.node.hyper.startup",
-                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
-                  startup=True)
-        c.check("584 startup resume of the same incarnation writes nothing",
-                (got or {}).get("resumed") is True and ident("pu-mop-1") == before
-                and holder("pu-mop-1") == "anton"
-                and marker_584(clones["pu-mop-1"])[0]["inc"] == INC_1,
-                (got, ident("pu-mop-1")))
-        # Аренда уехала другому хозяину законным dispatch'ем -- маркер жив:
-        # сессию не перезаписываем, но готовность остаётся за телом.
         with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
-            f.write(Owner("petr", int(1)).render())
+            f.write(Owner("petr", 1).render())
         got = ask("mop.mop.node.hyper.startup",
                   {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
                   startup=True)
@@ -3697,14 +3708,8 @@ def check_startup_soul_584(c):
                 "lease moved on by a later dispatch",
                 not (got or {}).get("error"), got)
 
-        # 6. Власть -- не тело: хозяин из привязки, инкарнация сверяется.
-        reset()
-        got = ask("mop.mop.node.hyper.startup",
-                  {"verb": "initial_identity", "name": "pu-mop-1",
-                   "owner": "petr", "soul_inc": INC_1}, startup=True)
-        c.check("584 startup ignores the body owner",
-                holder("pu-mop-1") == "anton" and not (got or {}).get("error"),
-                (holder("pu-mop-1"), got))
+        # 7. Власть -- не тело: точная инкарнация обязательна, хозяин телом
+        # не назначается, ответ не о том джобе -- отказ.
         reset()
         got = ask("mop.mop.node.hyper.startup",
                   {"verb": "initial_identity", "name": "pu-mop-1"}, startup=True)
@@ -3713,59 +3718,59 @@ def check_startup_soul_584(c):
                 (got, holder("pu-mop-1")))
         reset()
         got = ask("mop.mop.node.hyper.startup",
-                  {"verb": "initial_identity", "name": "pu-mop-1",
-                   "soul_inc": INC_2}, startup=True)
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_2},
+                  startup=True)
         c.check("584 startup refuses an old incarnation of a reused name",
                 bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                 (got, holder("pu-mop-1")))
         reset()
         st["mode"] = "other-job"
         got = ask("mop.mop.node.hyper.startup",
-                  {"verb": "initial_identity", "name": "pu-mop-1"}, startup=True)
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
         c.check("584 startup refuses an answer about another job",
                 bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                 (got, holder("pu-mop-1")))
         reset()
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1",
+                   "owner": "petr", "soul_inc": INC_1}, startup=True)
+        c.check("584 startup ignores the body owner",
+                holder("pu-mop-1") == "anton" and not (got or {}).get("error"),
+                (holder("pu-mop-1"), got))
+        reset()
         got = ask("mop.other.node.hyper.startup",
-                  {"verb": "initial_identity", "name": "pu-mop-1"}, startup=True)
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
         c.check("584 startup of another project does not reach this binding",
                 bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                 (got, holder("pu-mop-1")))
 
-        # 6b. Канал подъёма -- только местные джобы: цель этого узла.
-        reset()
-        got = ask("mop.mop.node.hyper.startup",
-                  {"verb": "initial_identity", "name": "pu-other-1",
-                   "soul_inc": INC_1}, startup=True)
-        c.check("584 startup of a job that is not on this node refuses",
-                bool((got or {}).get("error")), got)
-
-        # 7. Один глагол на канале; чужие субъекты его не имеют.
+        # 8. Один глагол на канале; чужие субъекты его не имеют.
         reset()
         got = ask("mop.mop.node.hyper.startup", {"verb": "ping"}, startup=True)
         c.check("584 the startup channel carries initial_identity only",
                 bool((got or {}).get("error")), got)
-        for label, subj, body, startup in (
+        for label, subj, body in (
                 ("human rpc", "mop.mop.node.hyper.rpc.anton",
-                 {"verb": "initial_identity", "name": "pu-mop-1"}, False),
+                 {"verb": "initial_identity", "name": "pu-mop-1"}),
                 ("grant rpc", rpc(W),
-                 {"verb": "initial_identity", "name": "pu-mop-1"}, False),
+                 {"verb": "initial_identity", "name": "pu-mop-1"}),
                 ("dispatch subject", busnames.dispatch_subject(
                     "mop", "hyper", A[len("grant-"):]),
-                 {"verb": "initial_identity", "name": "pu-mop-1"}, False),
+                 {"verb": "initial_identity", "name": "pu-mop-1"}),
                 ("public msg", "mop.mop.node.hyper.msg",
-                 {"verb": "initial_identity", "name": "pu-mop-1"}, False)):
+                 {"verb": "initial_identity", "name": "pu-mop-1"})):
             reset()
-            got = ask(subj, body, startup=startup)
+            got = ask(subj, body)
             c.check(f"584 initial_identity is not callable via {label}",
                     bool((got or {}).get("error")) and holder("pu-mop-1") is None,
                     (got, holder("pu-mop-1")))
 
-        # 8. Совместимость: новый принципал не трогает легаси-цель без
+        # 9. Совместимость: новый принципал не трогает легаси-цель без
         # привязки -- закрыто до миграции, и это проверено, а не обещано.
         reset()
-        got = ask(rpc(W), {"verb": "send", "name": "pu-mop-4",
-                           "message": "hi"})
+        got = ask(rpc(W), {"verb": "send", "name": "pu-mop-4", "message": "hi"})
         c.check("584 a legacy target without a binding fails closed for a grant",
                 bool((got or {}).get("error"))
                 and "binding" in ((got or {}).get("error") or ""), got)
