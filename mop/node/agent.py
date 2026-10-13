@@ -49,7 +49,7 @@ import shlex
 import socket
 import time
 
-from ..common import bus, busnames, config, fsutil, lease, paths, service
+from ..common import bus, busnames, config, fsutil, lease, paths, service, soul
 from .. import driver, usage
 from ..common.domain import CloneFacts, Owner, Verb
 from ..driver import Tmux, clone_dir, target_dir, why
@@ -85,6 +85,7 @@ KEYS_ALLOWED = ("Escape",)
 
 IDLE_WAIT = 600          # потолок ожидания простоя для notify
 IDENTITY_WAIT = 5        # сколько send ждёт профиль владельца у сервера (#167)
+RESOLVE_WAIT = 5         # сколько глагол актёра ждёт резолвер сервера (#584)
 
 
 def node_name():
@@ -1179,9 +1180,17 @@ async def v_send(conn, req):
     name = req["name"]
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
     me, verified = lease.caller(req)
+    # Актёр роли (#584): обычный send -- сообщение соседу, без аренды и без
+    # identity; аренду берёт только dispatch, решённый субъектом и
+    # резолвером в handle (_dispatch), а не телом. Identity при dispatch --
+    # хозяина-человека из ответа резолвера, аренда -- за самим актёром:
+    # два мастера одного человека иначе забирали бы задания друг у друга.
+    actor = req.get("_actor")
+    leased = not actor or req.get("_dispatch") is True
+    signer = req.get("_owner") if actor else me
     out = {}
     async with _owner_locks.setdefault(name, asyncio.Lock()):
-        refused, undo, note = await _claim(name, req)
+        refused, undo, note = await _claim(name, req) if leased else (None, None, None)
         if refused:
             return {"error": refused}
         # Захват -> identity -> передача: под одним замком, окно -- вопрос
@@ -1192,7 +1201,7 @@ async def v_send(conn, req):
         # не подтвердилась -- аренда остаётся за пославшим, «восстановлено»
         # не говорится (review-2, п.2).
         if undo and verified:
-            inote, failed, snap, safe = await _install_identity(conn, name, me, undo)
+            inote, failed, snap, safe = await _install_identity(conn, name, signer, undo)
             if failed:
                 if safe:
                     undone = await _unclaim(name, undo)
@@ -1245,7 +1254,10 @@ async def v_send(conn, req):
             out["idle_error"] = r["error"]
         else:
             out["idle"] = r.get("state")
-    await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}")
+    # Аудит -- фактический актёр и его хозяин из резолвера, не поле тела.
+    await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}",
+                 **({"actor": actor, "owner": req.get("_owner"),
+                     "dispatch": req.get("_dispatch") is True} if actor else {}))
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
         # проектом, иначе два терминала в одном проекте получали бы вести друг
@@ -1708,6 +1720,114 @@ async def _mine(req, name):
     return req.get("_project") == bus.ADMIN or await puppet_project(name) == req.get("_project")
 
 
+# ─── делегированный актёр (#584) ─────────────────────────────────────────
+# Роль входит своим принципалом grant-<id> (docs/SOUL.md): rpc.<grant-id>
+# для глаголов node_verbs и dispatch.<id> -- для диспетчера. ACL шины
+# пускает в субъект только этот принципал, но его права на глагол, на цель
+# и сама живость привязки -- у сервера: узел спрашивает резолвер
+# bootstrap-сервиса (server.rpc, узловой кред) перед любым эффектом, каждый
+# раз, без кэша. Молчание, отказ, ответ не о том -- отказ: отозванная
+# привязка не действует и при живом соединении.
+DISPATCH = "dispatch"     # глагол в теле dispatch-субъекта и в резолвере
+# Поля тела, которыми легаси-путь называет власть: у актёра власть -- его
+# субъект и резолвер, тело их не пишет.
+ACTOR_STRIPPED = ("owner", "holder", "force")
+
+
+def actor_of(subject):
+    """Субъект -> (канал, принципал | None). rpc.<grant-id> -- актёр
+    обычного глагола, dispatch.<id> -- диспетчер; токен dispatch без
+    правильного id -- канал dispatch без актёра (отказ в handle). Логин
+    человека принципалом не бывает: префикс grant- зарезервирован."""
+    parts = (subject or "").split(".")
+    if len(parts) == 6 and parts[0] == busnames.ROOT and parts[2] == "node" \
+            and parts[4] == busnames.DISPATCH_CHANNEL:
+        user = busnames.GRANT_PREFIX + parts[5]
+        return DISPATCH, (user if soul.is_grant(user) else None)
+    login = busnames.caller(subject)
+    return "rpc", (login if soul.is_grant(login) else None)
+
+
+def actor_verdict(got, principal, project, verb, target=None):
+    """Ответ резолвера -> причина отказа | None. Чистая: решает узел, а не
+    вера в то, что сервер ответил о том, о чём спросили.
+
+    Пускает только явное allow о том же принципале в том же проекте, с
+    хозяином-человеком; названная цель -- найдена, та же и в том же
+    проекте; dispatch -- источник с dispatch и цель с receives_dispatch
+    (право цели -- отдельная проверка от свободы клона, её решает аренда)."""
+    if not isinstance(got, dict):
+        return f"the resolver answered {type(got).__name__}, not a verdict"
+    if got.get("allow") is not True:
+        return f"refused by the server: {got.get('reason') or got.get('error') or 'not allowed'}"
+    if got.get("principal") != principal:
+        return f"the resolver answered about {got.get('principal')}, not {principal}"
+    if got.get("project") != project:
+        return f"principal {principal} is not in project {project}"
+    if not (isinstance(got.get("owner"), str) and got["owner"]):
+        return f"principal {principal} has no human owner"
+    if target is not None:
+        t = got.get("target")
+        if not (isinstance(t, dict) and t.get("found") is True):
+            return f"puppet {target} has no binding"
+        if t.get("job") != target:
+            return f"the resolver answered about {t.get('job')}, not {target}"
+        if t.get("project") != project:
+            return foreign(target, project)
+    if verb == DISPATCH:
+        if got.get("dispatch") is not True:
+            return f"role {got.get('role')} does not dispatch"
+        if target is None or got["target"].get("receives_dispatch") is not True:
+            return f"puppet {target} does not receive dispatch"
+    return None
+
+
+async def resolve_actor(conn, project, principal, verb, target=None):
+    """Принципал, глагол, цель -> (ответ резолвера | None, отказ | None).
+
+    Свежий запрос к bootstrap-сервису проекта узловым кредом: ни Nomad,
+    ни каталога ролей узел не держит. Общий шов для подъёма роли (#590)."""
+    try:
+        msg = await bus.arequest(conn, busnames.server(project), bus.envelope(
+            "resolve", principal=principal, service="node", verb_name=verb,
+            project=project, target=target), RESOLVE_WAIT)
+        got = json.loads(msg.data.decode())
+    except Exception as e:
+        return None, f"the resolver did not answer ({type(e).__name__})"
+    why = actor_verdict(got, principal, project, verb, target)
+    return (None, why) if why else (got, None)
+
+
+async def _admit_actor(conn, req, actor, channel):
+    """Права актёра на запрос. -> отказ | None; пустил -- в req каркасные
+    поля актёра. Глагол, который проверили, и есть тот, что исполнят:
+    dispatch-субъект исполняет только dispatch (как send с арендой),
+    rpc-субъект -- только свой глагол, «dispatch» телом -- не глагол."""
+    verb = req.get("verb")
+    if channel == DISPATCH:
+        if verb != DISPATCH:
+            return f"subject {DISPATCH} carries verb {DISPATCH} only, not {verb}"
+        req["verb"] = verb = "send"
+    why = refusal(verb, False, req["_project"])
+    if why:
+        return why
+    named = VERBS[verb].named
+    if named and not await _mine(req, req.get("name") or ""):
+        return foreign(req.get("name"), req["_project"])
+    got, why = await resolve_actor(conn, req["_project"], actor,
+                                   DISPATCH if channel == DISPATCH else verb,
+                                   req.get("name") if named else None)
+    if why:
+        return why
+    for key in ACTOR_STRIPPED:
+        req.pop(key, None)
+    # _caller -- тот же актёр и на dispatch-субъекте, где busnames.caller
+    # его не читает: аренда и ворота (#40) спрашивают lease.caller.
+    req.update(_caller=actor, _actor=actor, _owner=got["owner"],
+               _dispatch=channel == DISPATCH, from_name=actor)
+    return None
+
+
 # ─── петля ───────────────────────────────────────────────────────────────
 async def handle(conn, msg, public):
     """Разбор и три проверки: глагол существует, субъект его допускает, папет
@@ -1725,20 +1845,26 @@ async def handle(conn, msg, public):
         # без ответа -- проситель ждал таймаут.
         return await msg.respond(
             json.dumps({"error": "request is not a JSON object"}).encode())
+    # Кто просит (#207) -- из субъекта, поверх тела: каркасные ключи ('_')
+    # тело не пишет, все до одного (service.trusted, #580). Публичный
+    # канал -- папетов: владельца он не несёт, и названный в теле не в счёт.
+    channel, actor = (None, None) if public else actor_of(msg.subject)
+    req = service.trusted(req, None if public else busnames.caller(msg.subject))
     # Одно правило на всех (#173): mop.<проект>.node.<узел>.<канал>.
     req["_project"] = service.project_from_subject(msg.subject)
-    # Кто просит (#207) -- из субъекта, поверх тела. Публичный канал --
-    # папетов: владельца он не несёт, и названный в теле не в счёт.
-    req.pop("_caller", None)
-    caller = None if public else busnames.caller(msg.subject)
-    if caller:
-        req["_caller"] = caller
     if public:
         req.pop("owner", None)
 
     verb = req.get("verb")
-    why = refusal(verb, public, req["_project"])
-    if why is None and VERBS[verb].named and not await _mine(req, req.get("name") or ""):
+    if actor:
+        why = await _admit_actor(conn, req, actor, channel)
+        verb = req.get("verb")
+    elif channel == DISPATCH:
+        why = f"subject {DISPATCH} needs a delegated principal token"
+    else:
+        why = refusal(verb, public, req["_project"])
+    if why is None and not actor and VERBS[verb].named \
+            and not await _mine(req, req.get("name") or ""):
         # Главная проверка проектирования. Прав NATS тут мало: мастер проекта A
         # законно пишет в свой субъект, но может назвать папета из B.
         why = foreign(req.get("name"), req["_project"])
@@ -1772,6 +1898,9 @@ async def attach(conn, node):
         asyncio.create_task(handle(conn, msg, public=True))
 
     subs = busnames.agent_subscriptions(node)
+    # dispatch (#584): свой субъект с id актёра, права узла его покрывают
+    # (natsconf.node_permissions: node.<узел>.>).
+    subs["rpc"] = subs["rpc"] + [busnames.dispatch_subject(busnames.ANY, node, busnames.ANY)]
     for subj in subs["rpc"]:
         await conn.subscribe(subj, cb=on_rpc)
     for subj in subs["msg"]:

@@ -3008,7 +3008,11 @@ def check_role_node_gates_584(c):
     свежим запросом к резолверу сервера (server.rpc, узловой кред) перед
     любым эффектом; send нового актёра -- без аренды и identity; dispatch --
     своим субъектом, аренда за актёром, identity -- хозяина-человека из
-    ответа резолвера, транзакция #574 целиком."""
+    ответа резолвера, транзакция #574 целиком.
+    RESULT: RED на fa60d1e (21 провал: аренда и identity у рабочего, wipe
+    вне node_verbs и по dispatch-субъекту, отозванный и молчащий резолвер
+    пропускают); зелёный после правки агента.
+    STATUS: FIXED — see #584"""
     import asyncio
     import subprocess
     import tempfile
@@ -3314,6 +3318,22 @@ def check_role_node_gates_584(c):
         got = ask(rpc(A), {"verb": "disk"})
         c.check("584 node-level verbs are never given to an actor",
                 bool(got and got.get("error")), got)
+
+    # Чистый вердикт: только явное allow, иное -- отказ, не «пропустить».
+    ok = {"allow": True, "principal": A, "project": "mop", "owner": "anton"}
+    for label, got in (("no allow", {k: v for k, v in ok.items() if k != "allow"}),
+                       ("truthy allow", dict(ok, allow="yes")),
+                       ("not a mapping", ["allow"]),
+                       ("owner not a string", dict(ok, owner=["anton"]))):
+        c.check(f"584 actor_verdict fails closed: {label}",
+                bool(agent.actor_verdict(got, A, "mop", "send")), got)
+    c.check("584 actor_verdict passes an explicit allow about the asked principal",
+            agent.actor_verdict(ok, A, "mop", "send") is None)
+    c.check("584 dispatch subject token must be a principal id",
+            agent.actor_of("mop.mop.node.hyper.dispatch.anton") == ("dispatch", None)
+            and agent.actor_of("mop.mop.node.hyper.rpc.anton") == ("rpc", None)
+            and agent.actor_of(rpc(W)) == ("rpc", W)
+            and agent.actor_of(dsp(A)) == ("dispatch", A))
 
     subs = asyncio.run(_subjects_584())
     c.check("584 the agent listens on its dispatch subject",
