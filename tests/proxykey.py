@@ -46,7 +46,20 @@ def check_write_in_bus_315(c):
                      | {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
                         for t in n.targets if isinstance(t, ast.Name) and t.id == "WRITE_TIMEOUT"})
         c.check(f"{rel}: no own copy of the write helpers", not own, own)
-        c.check(f"{rel}: no base64 of its own, the encoding lives in bus", "base64" not in src)
+        # Снимки lease/hooks (#574) кодируются отдельно от протокола write.
+        # Проверяем именно этот протокол, а не запрещаем base64 всему агенту.
+        encoding_scope = next((n for n in tree.body
+                               if isinstance(n, ast.AsyncFunctionDef) and n.name == "v_write"),
+                              tree)
+        own_codec = [n.lineno for n in ast.walk(encoding_scope)
+                     if isinstance(n, ast.Attribute)
+                     and n.attr in ("b64encode", "b64decode")]
+        c.check(f"{rel}: write has no base64 codec of its own", not own_codec, own_codec)
+        if rel.endswith("agent.py"):
+            c.check("agent.v_write uses the bus file decoder",
+                    any(isinstance(n, ast.Attribute) and n.attr == "file_data"
+                        and isinstance(n.value, ast.Name) and n.value.id == "bus"
+                        for n in ast.walk(encoding_scope)))
     for rel in ("mop/server/proxykey.py",):
         # Строка-результат, а не упоминание в докстринге: f"NOT REACHED: …".
         tree = ast.parse(open(os.path.join(root, rel)).read())
@@ -2070,8 +2083,115 @@ def check_owner_in_resume_flow_538(c):
                         owner == (real_stat(src).st_uid, real_stat(src).st_gid), owner)
 
 
+# HYPOTHESIS: sha прежнего ключа преждевременно закрывает доставку новым
+# узлам; FAILED считается дошедшим, а исчезнувшая копия прежнего узла
+# никогда не восстанавливается без ротации ключа.
+# SOLUTION: подтверждение и срок копии ведутся по получателю; новый узел,
+# FAILED/NOT REACHED и истёкший срок требуют write без смены ключа.
+# RESULT: неизменившийся ключ доставляется мигрировавшим узлам; прежнее имя
+# восстанавливается по сроку, новые получатели не откладывают этот срок.
+# STATUS: FIXED — see #607
+def check_recipient_delivery_607(c):
+    content = "MOP_PROXY_KEY=test-only-key\n"
+    checkpoint = {"sha": proxykey.sha(content), "at": 1000,
+                  "nodes": {"old1": "OK", "old2": "OK"}}
+    sent = []
+    saved = []
+    ready = ["new1", "new2", "new3"]
+    replies = {}
+
+    def read_state():
+        return checkpoint
+
+    def save_state(value):
+        nonlocal checkpoint
+        checkpoint = value
+        saved.append(value)
+
+    def write(verb, nodes, **kwargs):
+        sent.append(list(nodes))
+        c.expect("#607 delivery retains the allowed write verb", verb, "write")
+        c.expect("#607 delivery keeps the rendered blob",
+                 bus.file_data(kwargs["files"][0][1]).decode(), content)
+        return {node: replies.get(node, {"written": ["ok"]}) for node in nodes}
+
+    with patched(proxykey, _load=read_state, _save=save_state,
+                 _secrets_env=lambda env: {"MOP_PROXY_KEY": "test-only-key"}), \
+            patched(proxykey.puppets, ready_nodes=lambda: ready), \
+            patched(proxykey.bus, request_many=write):
+        out = proxykey.push(env={}, now=1001)
+        c.expect("#607 unchanged key reaches all new node identities",
+                 sent, [["new1", "new2", "new3"]])
+        c.expect("#607 migration records actual delivery outcomes", out,
+                 {"new1": "OK", "new2": "OK", "new3": "OK"})
+        c.expect("#607 successful delivery is quiet before refresh deadline",
+                 proxykey.push(env={}, now=1002), None)
+        c.expect("#607 quiet ticks send no duplicate writes", len(sent), 1)
+
+        ready.append("new4")
+        replies["new4"] = {"error": "write refused"}
+        out = proxykey.push(env={}, now=1003)
+        c.expect("#607 a new recipient does not resend already confirmed nodes",
+                 sent[-1:] if sent else [], [["new4"]])
+        c.check("#607 a refused recipient is visibly FAILED",
+                isinstance(out, dict) and str(out.get("new4", "")).startswith("FAILED"),
+                out)
+        replies["new4"] = {"written": ["ok"]}
+        out = proxykey.push(env={}, now=1004)
+        c.expect("#607 a refused write is retried with unchanged key",
+                 sent[-1:] if sent else [], [["new4"]])
+        c.expect("#607 retry records the recipient's actual success", out,
+                 {"new4": "OK"})
+        c.expect("#607 confirmed retry does not cause immediate duplicate delivery",
+                 proxykey.push(env={}, now=1005), None)
+
+        # Прежнее имя после переустановки: копии больше нет, sha и имя прежние.
+        # Ограниченное обновление обязано вернуть её без смены ключа.
+        out = proxykey.push(env={}, now=1001 + proxykey.TICK)
+        c.expect("#607 later additions do not postpone old recipients' refresh",
+                 sent[-1:] if sent else [], [["new1", "new2", "new3"]])
+        c.expect("#607 periodic recovery covers a reinstalled same-name node", out,
+                 {"new1": "OK", "new2": "OK", "new3": "OK"})
+        c.expect("#607 recovery remains quiet until each next deadline",
+                 proxykey.push(env={}, now=1002 + proxykey.TICK), None)
+
+        ready.append("silent")
+        replies["silent"] = bus.BusError("node did not answer")
+        out = proxykey.push(env={}, now=1003 + proxykey.TICK)
+        c.check("#607 silent delivery remains visibly unconfirmed",
+                isinstance(out, dict) and str(out.get("silent", "")).startswith("NOT REACHED"),
+                out)
+        replies["silent"] = {"written": ["ok"]}
+        out = proxykey.push(env={}, now=1004 + proxykey.TICK)
+        c.check("#607 a silent node is retried rather than hidden by partial success",
+                isinstance(out, dict) and out.get("silent") == "OK", out)
+        c.check("#607 checkpoint stores no secret value",
+                "test-only-key" not in json.dumps(checkpoint), checkpoint)
+
+        before = len(sent)
+        ready.clear()
+        c.expect("#607 an empty ready pool has no delivery outcome",
+                 proxykey.push(env={}, now=1400), {})
+        c.expect("#607 an empty pool does not acknowledge missing recipients",
+                 len(sent), before)
+
+    c.expect("#607 a changed key overrides recent recipient timestamps",
+             proxykey.delivery_targets("changed", checkpoint, ["new1"], 1400), ["new1"])
+    c.expect("#607 no blob does not schedule credential writes",
+             proxykey.delivery_targets(None, checkpoint, ["new1"], 1400), [])
+    legacy = {"sha": proxykey.sha(content), "at": 1000, "nodes": {"same": "OK"}}
+    c.expect("#607 recent legacy confirmations are retained during migration",
+             proxykey.delivery_targets(content, legacy, ["same"], 1001), [])
+    c.expect("#607 legacy confirmations do not disable same-name recovery forever",
+             proxykey.delivery_targets(content, legacy, ["same"], 1000 + proxykey.TICK),
+             ["same"])
+    c.expect("#607 a backwards clock never invents fresh delivery",
+             proxykey.delivery_targets(content, legacy, ["same"], 999), ["same"])
+
+
 def main():
     c = Checks()
+    check_recipient_delivery_607(c)
     check_source_393(c)
     check_strict_settled_538(c)
     check_begin_538(c)
@@ -2118,7 +2238,7 @@ def main():
     # нет -- громкий отказ, не молчаливое отсутствие: тело поднимется и
     # умрёт на TLS без причины в журнале.
     check_ca_source_557(c)
-    check_blob_ca_557(c)
+    return check_blob_ca_557(c)
 
 
 # HYPOTHESIS (#557): корень для раздачи выбирают по трём случаям #517.
