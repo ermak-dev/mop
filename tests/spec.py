@@ -1687,6 +1687,234 @@ def check_role_startup_583(c):
                 "the flag is absent from --help")
 
 
+# ── #583 (ревью 2587d78): закрытые замечания разбора ──────────────────────
+# HYPOTHESIS: ревью нашло шесть дыр в принятой версии и порядок старта.
+# (а) ветвление только по непустому PU_SOUL: джоб с DIGEST/INC/DIR без
+#     имени роли -- сломанная запись, а обёртка молча вела бы её легаси-путём;
+# (б) врата сверяли digest, но не имя роли в бандле с ожидаемым: чужой
+#     бандл с правильным digest и чужой меткой поднялся бы под именем роли;
+# (в) role_prompt/role_settings клеились в строку команды без кавычек:
+#     имя файла промпта с пробелом ломало argv, метасимволы -- синтаксис;
+#     грамматика имени файла в soul.py не запрещает ни того, ни другого;
+# (г) MOP_BUS_CONFIG ролевого ехал конкатенацией с проектным и перетирался
+#     вторым -e -- кред выбирался дважды и ни разу явно;
+# (д) легаси-хуки: `if ... && ... else echo` печатал «could not write»
+#     на каждом успешном ролевом старте -- ложный сбой в логе задачи;
+# (е) грамматика принципала дублировалась в heredoc вместо soul.is_grant;
+# (ж) #590 готовит клон ДО врапера (bootstrap, identity хозяина, метка), а
+#     CLONE_SH в врапере на чужом origin сносит клон и клонирует заново --
+#     снося поставленную identity и маркеры; после такого второго прогона
+#     подготовка роли исчезла бы до первого хода модели.
+# SOLUTION: (а) ролевая ветка выбирается по ЛЮБОМУ непустому PU_SOUL*, а
+# не по имени роли; неполный набор в теле -- отказ (легаси-конвенция -- все
+# четыре пустые); (б) врата сверяют и имя роли бандла; (в) argv собирается
+# массивом, пути -- отдельные элементы без склейки; (г) кред выбирается
+# один раз до запуска; (д) jq-блок хуков один, путь -- параметр; (е) врата
+# зовут soul.is_grant; (ж) ролевой старт валидирует ГОТОВЫЙ клон (origin
+# совпадает, .git на месте) и на расхождении отказывает -- пересоздавать
+# клон после инициализации обёртка не имеет права, легаси-путь не тронут.
+# STATUS: RED
+def check_role_review_583(c):
+    import shutil
+    import subprocess
+    import tempfile
+    from mop import driver
+    from mop.common import soul
+
+    manifest, prompt, digest = role_triple("puppet")
+
+    # (а) частичная ролевая мета -- отказ в ЛЮБОМ направлении: пустое имя
+    # роли при непустых спутниках и наоборот. Транспорт #582 держит все
+    # четыре ключа на обоих путях (легаси -- пустыми), поэтому раскладка
+    # «трое есть, имени нет» -- не легаси и не роль, а поломка.
+    for what, over in (("PU_SOUL is empty but the triple rides",
+                        {"PU_SOUL": ""}),
+                       ("PU_SOUL names a role, the digest is empty",
+                        {"PU_SOUL": "puppet", "PU_SOUL_DIGEST": ""})):
+        # Первый случай гасит только имя (остальное честно от доставки),
+        # второй -- только digest: каждое направление неполноты отдельно.
+        env, home, log = fake_body("pu-mop-1", "puppet")
+        env.update(over)
+        try:
+            r = run_wrapper(home, env)
+            argv, _ = launch_record(log)
+            c.check(f"#583 review {what}: refusal, never a silent legacy boot",
+                    not (r.returncode == 0 or argv is not None
+                         or not r.stderr.strip()),
+                    f"exit {r.returncode}, launched {argv is not None}")
+        finally:
+            shutil.rmtree(home)
+    # и легаси-конвенция «все четыре пустые» остаётся легаси
+    env, home, log = fake_body("pu-mop-1", env_extra={
+        "PU_SOUL": "", "PU_SOUL_DIGEST": "", "PU_SOUL_INC": "",
+        "PU_SOUL_DIR": ""})
+    try:
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        c.check("#583 review all-empty PU_SOUL keys stay the legacy path",
+                not (r.returncode or argv is None),
+                f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}")
+    finally:
+        shutil.rmtree(home)
+
+    # (б) чужое имя роли в бандле при верном digest: receipt и бандл лгут
+    # СОГЛАСОВАННО -- расписка называет роль джоба, digest совпадает с
+    # метой, а сам бандл собран с чужой меткой soul. Digest этого не ловит
+    # (он от бандла), ловит только сверка ИМЕНИ роли бандла с ожиданием.
+    liar = dict(manifest)
+    liar["soul"] = "impostor"
+    liar_bundle = soul.from_manifest(liar, prompt)
+    env, home, log = fake_body("pu-mop-1", plant=lambda h, n: None)
+    try:
+        root = plant_soul(home, "pu-mop-1", liar, prompt, liar_bundle.digest,
+                          ready={"ready": True, "role": "puppet",
+                                 "soul_inc": INC,
+                                 "soul_digest": liar_bundle.digest})
+        env.update({"PU_SOUL": "puppet", "PU_SOUL_DIGEST": liar_bundle.digest,
+                    "PU_SOUL_INC": INC, "PU_SOUL_DIR": root,
+                    "PU_NODE": "node-a"})
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        c.check("#583 review a bundle of another role name with a matching "
+                "digest refuses",
+                not (r.returncode == 0 or argv is not None
+                     or not r.stderr.strip()),
+                f"exit {r.returncode}, launched {argv is not None}")
+    finally:
+        shutil.rmtree(home)
+    # ...а честный бандл своей роли -- стартует
+    env, home, log = fake_body("pu-mop-1", "puppet")
+    try:
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        c.check("#583 review the matching bundle still launches",
+                not (r.returncode or argv is None),
+                f"exit {r.returncode}")
+    finally:
+        shutil.rmtree(home)
+
+    # (в) имя файла промпта с пробелом и метасимволами: грамматика
+    # soul._filename их не запрещает, доставка кладёт файл как есть -- argv
+    # обязан нести путь одним элементом. Роль строим from_manifest с
+    # именем промпта из пробелов/метасимволов и своим digest'ом ожидания.
+    weird = "a b;$(id).md"
+    wm, wp = dict(manifest), prompt
+    wm["prompt"] = weird
+    weird_bundle = soul.from_manifest(wm, wp)
+    env, home, log = fake_body("pu-mop-1", plant=lambda h, n: None)
+    try:
+        root = plant_soul(home, "pu-mop-1", wm, wp, weird_bundle.digest,
+                          ready={"ready": True, "role": "puppet",
+                                 "soul_inc": INC,
+                                 "soul_digest": weird_bundle.digest})
+        # ожидание джоба -- по digest'ом странного бандла
+        env.update({"PU_SOUL": "puppet", "PU_SOUL_DIGEST": weird_bundle.digest,
+                    "PU_SOUL_INC": INC, "PU_NODE": "node-a",
+                    "PU_SOUL_DIR": root})
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        if c.check("#583 review a space- and metachar-bearing prompt name "
+                   "launches as one argv element",
+                   not (r.returncode or argv is None),
+                   f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"):
+            body = argv.split(" ", 1)[1] if argv else ""
+            c.check("#583 review the weird prompt path is not shell-split",
+                    not (f"{root}/bundle/{weird}" not in body
+                         or "$(id)" in body and "$(" in body.split(
+                             "--append-system-prompt-file ")[-1].replace(
+                             f"$(id)", "", 1) is None),
+                    argv)
+            c.check("#583 review the id command never ran",
+                    not ("uid=" in (r.stdout + r.stderr)),
+                    r.stdout[:200])
+    finally:
+        shutil.rmtree(home)
+
+    # (г) кред выбирается один раз: в сессии -- только кред роли, и в
+    # тексте обёртки нет второй записи MOP_BUS_CONFIG (проверка текста --
+    # в check_role_startup_583 не лазит, здесь -- по журналу запуска)
+    env, home, log = fake_body("pu-mop-1", "puppet")
+    try:
+        r = run_wrapper(home, env)
+        _, senv = launch_record(log)
+        c.check("#583 review the role session carries the principal credential "
+                "once, never the project's",
+                not (senv.get("MOP_BUS_CONFIG")
+                     != f"{env['PU_SOUL_DIR']}/bus.json"),
+                senv.get("MOP_BUS_CONFIG"))
+        w = spec.WRAPPER
+        c.check("#583 review the wrapper names MOP_BUS_CONFIG exactly once",
+                not (w.count("MOP_BUS_CONFIG=") != 1),
+                w.count("MOP_BUS_CONFIG="))
+    finally:
+        shutil.rmtree(home)
+
+    # (д) успешный ролевой старт не пишет «could not write» в лог задачи
+    env, home, log = fake_body("pu-mop-1", "puppet")
+    try:
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        if c.check("#583 review a successful role boot still launches",
+                   not (r.returncode or argv is None), r.returncode):
+            c.check("#583 review a successful role boot logs no fake hooks "
+                    "failure",
+                    not ("could not write" in r.stderr),
+                    r.stderr[:200])
+            c.check("#583 review the hooks jq block appears once, path is a "
+                    "variable",
+                    not (spec.WRAPPER.count("--arg cmd") != 1),
+                    spec.WRAPPER.count("--arg cmd"))
+    finally:
+        shutil.rmtree(home)
+
+    # (е) грамматика принципала не дублируется: врата зовут soul.is_grant,
+    # своей проверки grant-<hex> в тексте нет
+    c.check("#583 review the grant grammar is soul.is_grant, not a wrapper "
+            "copy",
+            not ("grant-" in role_section() and "is_grant" not in role_section()),
+            "the heredoc re-implements the grant grammar")
+
+    # (ж) клон после подготовки #590: чужой origin в ГОТОВОМ клоне --
+    # отказ, не пересоздание. Identity хозяина и маркер обязаны пережить
+    # ролевой старт обёртки до первого хода модели.
+    env, home, log = fake_body("pu-mop-1", "puppet")
+    try:
+        clone = env["PU_CLONE"]
+        marker = os.path.join(clone, ".git", "mop-continue")
+        with open(marker, "w") as f:
+            f.write("identity marker")
+        subprocess.run(["git", "-C", clone, "remote", "set-url", "origin",
+                        "git@git.example.dev:someone/OTHER.git"], check=True)
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        c.check("#583 review a role refuses on a prepared clone with a wrong "
+                "origin, no re-clone",
+                not (r.returncode == 0 or argv is not None),
+                f"exit {r.returncode}, launched {argv is not None}")
+        c.check("#583 review the identity marker survives the refusal",
+                os.path.exists(marker) and open(marker).read() == "identity marker",
+                "the marker is gone -- the wrapper re-prepared the clone")
+    finally:
+        shutil.rmtree(home)
+    # ...а совпадающий origin клон не трогает и стартует
+    env, home, log = fake_body("pu-mop-1", "puppet")
+    try:
+        clone = env["PU_CLONE"]
+        marker = os.path.join(clone, ".git", "mop-continue")
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w") as f:
+            f.write("identity marker")
+        r = run_wrapper(home, env)
+        argv, _ = launch_record(log)
+        if c.check("#583 review a role launches on a matching prepared clone",
+                   not (r.returncode or argv is None),
+                   f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"):
+            c.check("#583 review the prepared clone keeps its marker",
+                    os.path.exists(marker), "the marker is gone")
+    finally:
+        shutil.rmtree(home)
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -1708,7 +1936,7 @@ def main():
                check_memory_197, check_project_asks_197, check_spec_memory_197,
                check_nomad_order_197, check_claude_hooks_223, check_hook_events_341,
                check_no_feedback_420, check_statusline_455, check_job_meta_265,
-               check_node_pin_289, check_role_startup_583):
+               check_node_pin_289, check_role_startup_583, check_role_review_583):
         fn(c)
 
     for what, j, want in STALE:
