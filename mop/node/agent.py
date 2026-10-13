@@ -88,6 +88,7 @@ IDENTITY_WAIT = 5        # сколько send ждёт профиль влад�
 RESOLVE_WAIT = 5         # сколько глагол актёра ждёт резолвер сервера (#584)
 SOUL_FACT_TTL = 10       # кэш soul-факта ростера: только читающие глаголы (#584)
 STARTUP = "initial_identity"   # единственный глагол канала подъёма (#584/#590)
+MARK = "soul-ready"            # маркер инициализации тела (агент, под замком)
 
 
 def node_name():
@@ -1197,29 +1198,43 @@ async def _prepare(conn, name, req):
     return None, undo, note
 
 
-async def initial_identity(conn, name, owner):
+async def initial_identity(conn, name, owner, inc):
     """Первая аренда и identity хозяина в теле роли ДО первого хода модели
     (docs/SOUL.md, шов для #590). -> {resumed | owner_note} либо {error}.
+    Успех ставит маркер инкарнации.
 
     Та же транзакция, что у dispatch (#574): замок папета, захват, снимок,
     установка, откат при провале. owner -- хозяин-человек из резолвера,
-    не из тела. Аренда уже за ним -- возобновление той же инкарнации: ни
-    аренду, ни git не трогаем, их мог законно переставить поздний
-    dispatch. Чужая аренда в неинициализированном теле -- отказ, а не
-    перезапись: работа в клоне не наша."""
+    не из тела. Резюм доказывает маркер ЭТОЙ инкарнации, не аренда:
+    клон могли снести и поднять заново тем же хозяином, и свежее тело без
+    маркера обязано пройти полный путь, а не «аренда та же -- значит
+    готово». Маркер жив -- возобновление: ни аренду, ни git не трогаем, их
+    мог законно переставить поздний dispatch. Маркера нет, а аренда
+    чужая -- отказ: работа в клоне не наша."""
     async with _owner_locks.setdefault(name, asyncio.Lock()):
-        clone = CloneFacts.from_dict(await clone_facts(name))
-        held = clone and clone.owner and clone.owner.user
-        if held == owner:
-            return {"resumed": True}
-        if held:
-            return {"error": f"{name}: lease is held by {held}, not {owner}"}
-        refused, undo, note = await _prepare(conn, name, {"_caller": owner})
-        if refused:
-            return {"error": refused}
-        if undo:
-            _settle(undo[0], undo[3])
-    return {"owner_note": note} if note else {}
+        marker, mwhy = await _read_marker(name)
+        if marker is None:
+            if mwhy and "absent" not in mwhy:
+                return {"error": mwhy}
+            clone = CloneFacts.from_dict(await clone_facts(name))
+            held = clone and clone.owner and clone.owner.user
+            if held:
+                return {"error": f"{name}: lease is held by {held}, not {owner}"}
+            refused, undo, note = await _prepare(conn, name, {"_caller": owner})
+            if refused:
+                return {"error": refused}
+            if undo:
+                _settle(undo[0], undo[3])
+        else:
+            if marker["inc"] != inc:
+                return {"error": f"{name}: the body carries incarnation "
+                                 f"{marker['inc']}, this registration is {inc}"}
+            note = None
+        failed = await _write_marker(name, inc)
+        if failed:
+            return {"error": failed}
+    return {"resumed": True} if note is None and marker else \
+        ({"owner_note": note} if note else {})
 
 
 async def v_send(conn, req):
@@ -1896,56 +1911,125 @@ async def target_binding(conn, project, name):
     return got, None
 
 
-# Кэш soul-факта ростера (#584): (проект, имя) -> (годен до, факт). Только
-# читающие глаголы и только на TTL: мутации резолвер спрашивают свежо.
+# Кэш soul-факта ростера (#584): (проект, имя, инкарнация, id сессии) ->
+# (годен до, факт). Ключ включает инкарнацию и сессию: переиспользованное
+# имя и новая сессия не наследуют готовность прежней. Только читающие
+# глаголы и только на TTL: мутации резолвер спрашивают свежо.
 _soul_cache = {}
 
 
+async def _read_marker(name):
+    """Маркер инициализации тела. -> (словарь | None, причина | None).
+
+    Маркер пишет агент канала подъёма под замком папета; чей это был
+    процесс и где клон -- его дело, здесь -- имя файла и форма записи.
+    Битый и нечитаемый маркер -- не готовность, а причина: «примерно
+    инициализированное» тело модель не пускает."""
+    out, code = await bsh(
+        name, f'cat {shlex.quote(os.path.join(clone_dir(name), ".mop-" + MARK))} 2>/dev/null')
+    if not (out or "").strip():
+        # Нет файла (rc 1) и пустой вывод -- маркера нет; таймаут и мусор
+        # вместо кода -- нечитаемо: «нет» и «не знаю» -- разные ответы.
+        if code in (1, 0, None):
+            return None, f"{name}: the runtime marker is absent"
+        return None, f"{name}: the runtime marker is unreadable"
+    try:
+        got = json.loads(out.strip().splitlines()[-1])
+    except ValueError:
+        return None, f"{name}: the runtime marker is malformed"
+    if not (isinstance(got, dict) and isinstance(got.get("inc"), str) and got["inc"]):
+        return None, f"{name}: the runtime marker carries no incarnation"
+    return got, None
+
+
+async def _write_marker(name, inc):
+    """Маркер инициализации этой инкарнации. Пишет агент, под замком
+    папета; тело(marker) при2лежит агенту, как и файл аренды."""
+    path = os.path.join(clone_dir(name), ".mop-" + MARK)
+    body = json.dumps({"inc": inc, "by": "agent"})
+    out, code = await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}")
+    return None if code == 0 else f"{name}: the runtime marker is not recorded: {why(out, code)}"
+
+
 def _session_live(fact):
-    """Свежая живая сессия в фактах ростера: строка «<status> <alive>
-    <listen>» с живым сокетом; мёртвая и отсутствующая -- не живая."""
+    """Живая сессия и её идентификатор -> (жива, id | None). Строка строго
+    «<status> <alive> <listen> <id...>»: известный статус, живой сокет,
+    дальше -- идентификатор сессии (хвост токенов, день смены сессии --
+    факт для кэша). Усечённая и мусорная строка -- не живая: «примерно
+    живая» сессия готовности не доказывает."""
     tokens = (fact.get("session") or "").split()
-    return bool(tokens) and tokens[0] != "none" and (len(tokens) < 2 or tokens[1] == "1")
+    if len(tokens) < 3 or tokens[0] not in ("starting", "running") \
+            or tokens[1] != "1":
+        return False, None
+    return True, " ".join(tokens[2:])
 
 
 async def _soul_fact(conn, project, name, fact):
-    """Тройка роли для ростера -- только после проверенной привязки и
-    живой сессии. -> факт либо None (нет сессии -- нет и факта).
+    """Тройка роли для ростера. -> факт либо None (нет живой сессии -- нет
+    и факта). Готовность -- рантайм-доказательство, а не факт регистрации:
+    проверенная привязка И живая сессия И маркер этой инкарнации, что
+    агент поставил под замком. Чего-то нет -- не готовность, а причина.
 
     Отказ привязки -- не отказ глагола: состояние папета -- факт узла,
     тройка роли -- знание сервера; незнание уезжает битым фактом с
     причиной, а ростер остаётся цел."""
-    if not fact.get("present") or not _session_live(fact):
+    live, sid = _session_live(fact)
+    if not fact.get("present") or not live:
         return None
-    hit = _soul_cache.get((project, name))
+    key = (project, name, None, sid)
+    hit = _soul_cache.get(key)
     if hit and hit[0] > time.time():
         return hit[1]
     got, why = await target_binding(conn, project, name)
-    soul_fact = ({"ready": True, "role": got["role"], "soul_inc": got["soul_inc"],
-                  "soul_digest": got["soul_digest"]} if got is not None
-                 else {"ready": False, "why": why})
-    _soul_cache[(project, name)] = (time.time() + SOUL_FACT_TTL, soul_fact)
+    if got is None:
+        soul_fact = {"ready": False, "why": why}
+    else:
+        marker, mwhy = await _read_marker(name)
+        if marker is None:
+            soul_fact = {"ready": False, "why": mwhy}
+        elif marker["inc"] != got["soul_inc"]:
+            soul_fact = {"ready": False,
+                         "why": f"{name}: the runtime marker names incarnation "
+                                f"{marker['inc']}, the binding names {got['soul_inc']}"}
+        else:
+            soul_fact = {"ready": True, "role": got["role"],
+                         "soul_inc": got["soul_inc"], "soul_digest": got["soul_digest"]}
+    # Инкарнация в ключе кэша не нужна: ключ среза -- та же сессия, а у
+    # живой сессии та же инкарнация; смена инкарнации -- новое тело, новая
+    # строка сессии с её идентификатором.
+    _soul_cache[(project, name, None, sid)] = (time.time() + SOUL_FACT_TTL, soul_fact)
     return soul_fact
 
 
 async def v_startup(conn, req):
     """Глагол канала подъёма: первая аренда и identity до первого хода
     модели (#590 зовёт обёрткой; субъект -- узловой кред тела). Хозяин и
-    тройка -- из привязки сервера, тело называет лишь джоб и инкарнацию:
-    расхождение (переиспользованное имя, старая инкарнация) -- отказ."""
+    тройка -- из привязки сервера, тело называет джоб и точную инкарнацию:
+    расхождение (переиспользованное имя, старая инкарнация) -- отказ.
+    Цель -- джоб этого узла: канал подъёма не обслуживает соседей.
+    Тройка -- только успешному ответу: ошибка не ходит с готовностью."""
     name = req.get("name")
     if not driver.valid_name(name):
         return {"error": driver.bad_name(name)}
+    if not await local_puppet(name):
+        return {"error": f"{name}: not a job of this node"}
     got, why = await target_binding(conn, req["_project"], name)
     if got is None:
         return {"error": why}
-    if req.get("soul_inc") and req["soul_inc"] != got["soul_inc"]:
-        return {"error": f"{name}: job name is reused, this body is a new "
-                         f"incarnation {got['soul_inc']}"}
-    out = await initial_identity(conn, name, got["owner"])
-    out["soul"] = {"ready": True, "role": got["role"], "soul_inc": got["soul_inc"],
-                   "soul_digest": got["soul_digest"]}
+    if req.get("soul_inc") != got["soul_inc"]:
+        return {"error": f"{name}: this body is incarnation {got['soul_inc']}, "
+                         f"the request names {req.get('soul_inc')!r}"}
+    out = await initial_identity(conn, name, got["owner"], got["soul_inc"])
+    if not out.get("error"):
+        out["soul"] = {"ready": True, "role": got["role"], "soul_inc": got["soul_inc"],
+                       "soul_digest": got["soul_digest"]}
     return out
+
+
+async def local_puppet(name):
+    """Джоб этого узла? По сокетам драйвера, как v_local: канал подъёма --
+    факт того же узла, и соседние тела не его дело."""
+    return name in [n for n in await DRIVER.bodies() if n == name]
 
 
 async def _admit_actor(conn, req, actor, channel):

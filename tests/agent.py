@@ -2986,6 +2986,9 @@ TARGETS_584 = {
                  "role": "master", "owner": "anton",
                  "soul_inc": "33333333-3333-3333-3333-333333333333",
                  "soul_digest": "b" * 32, "receives_dispatch": False},
+    "pu-mop-5": {"found": True, "job": "pu-mop-5", "project": "mop",
+                 "role": "puppet", "owner": "anton", "soul_inc": INC_1,
+                 "soul_digest": "a" * 32, "receives_dispatch": True},
     "pu-mop-3": {"found": False},
 }
 
@@ -3361,20 +3364,20 @@ def check_role_node_gates_584(c):
 
         # 18. Шов #590: первая аренда и identity хозяина до первого хода.
         reset()
-        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton"))
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
         c.check("584 initial identity: a fresh body gets the human lease and "
                 "identity", holder("pu-mop-1") == "anton"
                 and ident("pu-mop-1") == profiles["anton"] and not got.get("error"),
                 (holder("pu-mop-1"), ident("pu-mop-1"), got))
         asks.clear()
-        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton"))
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
         c.check("584 initial identity: resume of the same owner touches nothing",
                 got == {"resumed": True} and not asks
                 and holder("pu-mop-1") == "anton", (got, asks))
         reset()
         with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
             f.write(Owner("petr", 1).render())       # чужая, и давно не живая
-        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton"))
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
         c.check("584 initial identity: a foreign lease refuses, nothing rewritten",
                 bool(got.get("error")) and holder("pu-mop-1") == "petr"
                 and ident("pu-mop-1") == profiles["petr"], (got, holder("pu-mop-1")))
@@ -3584,6 +3587,8 @@ def check_startup_soul_584(c):
                 and "incarnation" in (soul.get("why") or "") else False, soul)
         marked_584(clones["pu-mop-1"], INC_1)
         agent._soul_cache.clear()
+        asks.clear()
+        ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the binding lookup envelope is exactly target-shaped",
                 [(s, sorted(r)) for s, r in asks
                  if r.get("verb") == "resolve" and "principal" not in r]
@@ -3602,6 +3607,7 @@ def check_startup_soul_584(c):
             c.check(f"584 no soul fact without a fresh live session ({label})",
                     soul is None and not binding_asks(), (soul, asks))
             reset()
+            marked_584(clones["pu-mop-1"], INC_1)
             st["facts"] = {"pu-mop-1": live}
             got = ask(rpc(W), {"verb": "state", "name": "pu-mop-1"})
             c.check("584 state carries the soul fact too",
@@ -3656,12 +3662,14 @@ def check_startup_soul_584(c):
                 and holder("pu-mop-1") == "anton", (got_mark, holder("pu-mop-1")))
         # Resume доказан маркером этой инкарнации, не арендой: свежий клон
         # того же хозяина без маркера -- не resume, а полная инициализация.
-        fresh("pu-mop-2")
+        fresh("pu-mop-5")
         ask("mop.mop.node.hyper.startup",
-            {"verb": "initial_identity", "name": "pu-mop-2", "soul_inc": INC_1},
+            {"verb": "initial_identity", "name": "pu-mop-5", "soul_inc": INC_1},
             startup=True)
         c.check("584 a fresh same-owner body without the marker is fully initialized",
-                holder("pu-mop-2") is not None, holder("pu-mop-2"))
+                holder("pu-mop-5") is not None
+                and marker_584(clones["pu-mop-5"])[0]["inc"] == INC_1,
+                holder("pu-mop-5"))
         reset("pu-mop-1")
         marked_584(clones["pu-mop-1"], INC_1)
         with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
