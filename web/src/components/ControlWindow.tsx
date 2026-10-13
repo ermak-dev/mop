@@ -43,10 +43,11 @@ import { restartReason, opWord, RESTART_EFFECTS } from "./RestartBox";
 import { MODES, UPDATE_WARNING } from "./UpdateBox";
 import { PREVIEW } from "./DestructiveBox";
 import { LABELS } from "./labels";
+import { STOP_EFFECTS } from "./StopBox";
 import { TERMINAL } from "../useAdminOp";
 
 /** Какое действие запускает визард (#520). */
-export type ControlEntry = "update" | "model" | "restart" | "recycle" | "delete" | "wipe";
+export type ControlEntry = "update" | "model" | "restart" | "stop" | "recycle" | "delete" | "wipe";
 
 /** Приказ движку (#520): токен меняется на каждый приказ, движок
  * срабатывает по изменению; mount молчит. */
@@ -91,14 +92,14 @@ const isRuin = (e: string | null): e is (typeof RUIN)[number] =>
 
 /** Слово GUI для действия -- словарь #521. */
 const ENTRY_WORD: Record<string, string> = {
-  update: LABELS.update, model: LABELS.model, restart: LABELS.restart,
+  update: LABELS.update, model: LABELS.model, restart: LABELS.restart, stop: LABELS.stop,
   recycle: LABELS.recycle, delete: LABELS.delete, wipe: LABELS.wipe,
 };
 
 /** Движок, отвечающий за действие (#487/#522): status живёт в
  * engineState по ключу движка. */
 const ENGINE_OF: Record<string, string> = {
-  update: "update", restart: "restart",
+  update: "update", restart: "restart", stop: "stop",
   recycle: "destructive", delete: "destructive", wipe: "destructive",
 };
 
@@ -196,7 +197,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   const ready = entry === "update"
     ? mode !== null && (mode !== "remove" || origin.trim() !== "")
     : entry === "model" ? model !== null
-    : entry === "restart" || isRuin(entry);
+    : entry === "restart" || entry === "stop" || isRuin(entry);
   const params: Record<string, unknown> =
     entry === "update" && mode === "keep" ? { fresh: false }
     : entry === "update" && mode === "replace" ? { fresh: true }
@@ -243,6 +244,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
     setStep(e === "update" || e === "model" ? 1 : 3);
   };  // Последствия выбранного хода -- на финальный экран
   const lines = isRuin(entry) ? PREVIEW[entry].lines
+    : entry === "stop" ? STOP_EFFECTS
     : entry === "restart" ? RESTART_EFFECTS
     : entry === "update" && mode ? MODES[mode].lines : [];
   // Экран хода (#522): стейт поднят движком по ключу progressOf
@@ -250,6 +252,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
     || (live.status !== "idle" && !TERMINAL.has(live.status));
   const opDone = !!live && TERMINAL.has(live.status);
   const wordOf = (st: EngineState | null) => !st ? "Отправляется"
+    : progressOf === "stop" && st.status === "succeeded" ? "Остановлен"
     : progressOf === "update" ? verdictWord("update", st) : opWord(st.status);
 
   // ── Экран хода: Loader/вердикт, футер по терминалу ─────────────────
@@ -314,6 +317,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
                         aria-label={blocked ?? LABELS.restart}
                         onClick={() => pick("restart")}>{LABELS.restart}</Button>
               </Tooltip>
+              <Button variant="light" onClick={() => pick("stop")}>{LABELS.stop}</Button>
               {/* разрушительные -- пункты первого экрана (#512/#473),
                   однотонные: опасность говорит текстом финального экрана */}
               {RUIN.map((a) => (

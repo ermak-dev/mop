@@ -93,6 +93,21 @@ def bootstrap_result(transport, name, marker, timeout, sleep, clock, step):
 
 
 # ─── операции ────────────────────────────────────────────────────────────
+def stop(transport, name, login=None):
+    """Остановить само задание без удаления клона и без повтора (#608)."""
+    try:
+        got = transport("job_stop", name=name, owner=login) or {}
+    except bus.Refused as e:
+        return _refused(name, str(e))
+    except Exception:
+        return outcome(UNKNOWN, name, error="job stop could not be confirmed")
+    if got.get("error"):
+        return _refused(name, got["error"])
+    if got.get("stopped") is not True:
+        return outcome(UNKNOWN, name, error="job stop could not be confirmed")
+    return outcome(REGISTERED, name, stopped=True, project=got.get("project"))
+
+
 def add(transport, origin, workspace, branch=None, ctx=None,
         sleep=time.sleep, clock=time.time, step=lambda s: None,
         place_wait=PLACE_WAIT, bootstrap_wait=BOOTSTRAP_WAIT,
