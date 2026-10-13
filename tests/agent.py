@@ -3159,6 +3159,7 @@ def check_role_node_gates_584(c):
             fresh(n)
 
     rpc = lambda g: f"mop.mop.node.hyper.rpc.{g}"                      # noqa: E731
+    role = lambda g: f"mop.mop.node.hyper.role.{g}"                    # noqa: E731
     dsp = lambda g: busnames.dispatch_subject("mop", "hyper", g[len("grant-"):])  # noqa: E731
     resolves = lambda: [r for _s, r in asks if r.get("verb") == "resolve"]  # noqa: E731
 
@@ -3175,10 +3176,26 @@ def check_role_node_gates_584(c):
         bus.arequest = arequest
         send = {"verb": "send", "name": "pu-mop-1", "message": "hi", "from_name": "anton"}
 
+        # 0. Проволочный забор (#603): обычный RPC актёра -- субъект
+        # mop.<p>.node.<узел>.role.<принципал>. Старый rpc-путь принципала
+        # отклонён ДО резолвера: на смешанной раскатке старый агент иначе
+        # исполнил бы глагол без резолвера. Не-принципал на role -- тоже
+        # отказ: канал роли не человеческий.
+        reset()
+        got = ask(rpc(W), send)
+        c.check("584 a delegated principal on the old rpc subject is fenced off",
+                bool(got and got.get("error")) and not delivered
+                and not [r for _s, r in asks if r.get("verb") == "resolve"
+                         and r.get("principal") == W], (got, asks))
+        reset()
+        got = ask("mop.mop.node.hyper.role.anton", send)
+        c.check("584 a non-principal token on the role subject is refused",
+                bool(got and got.get("error")) and not delivered, (got, delivered))
+
         # 1. Обычный send нового актёра -- сообщение соседу: доставка, без
         # аренды и без identity; резолвер спрошен; from-name -- джоб актёра.
         reset()
-        got = ask(rpc(W), send)
+        got = ask(role(W), send)
         c.check("584 grant send is authorized by the server resolver",
                 [(r.get("principal"), r.get("verb_name"), r.get("target"))
                  for r in resolves()] == [(W, "send", "pu-mop-1")], asks)
@@ -3205,7 +3222,7 @@ def check_role_node_gates_584(c):
         forged = dict(send, _caller="anton", _actor=A, _owner="anton", _dispatch=True,
                       _project="admin", owner="anton", role="master", dispatch=True,
                       soul_digest="0" * 32, grant=A, force=True)
-        got = ask(rpc(W), forged)
+        got = ask(role(W), forged)
         c.check("584 forged '_' and authority fields: still a plain send, no lease",
                 holder("pu-mop-1") is None and bool(got and got.get("msg_id")),
                 (holder("pu-mop-1"), got))
@@ -3214,7 +3231,7 @@ def check_role_node_gates_584(c):
 
         # 3. Глагол вне node_verbs -- отказ с причиной до эффекта.
         reset()
-        got = ask(rpc(W), {"verb": "wipe", "name": "pu-mop-1"})
+        got = ask(role(W), {"verb": "wipe", "name": "pu-mop-1"})
         c.check("584 a verb outside node_verbs is refused before effect",
                 not destroyed and bool(got and got.get("error"))
                 and "wipe" in got["error"], (destroyed, got))
@@ -3222,7 +3239,7 @@ def check_role_node_gates_584(c):
         # 4. Отозванная привязка (старая инкарнация) -- отказ, хотя токен
         # в субъекте правильной формы и соединение живо.
         reset()
-        got = ask(rpc(R), send)
+        got = ask(role(R), send)
         c.check("584 a revoked principal is refused before delivery",
                 not delivered and bool(got and got.get("error"))
                 and "not active" in got["error"], (delivered, got))
@@ -3230,7 +3247,7 @@ def check_role_node_gates_584(c):
         # 5. Резолвер молчит -- отказ до эффекта, не «пропустить».
         reset()
         st["mode"] = "down"
-        got = ask(rpc(W), send)
+        got = ask(role(W), send)
         c.check("584 a silent resolver denies before effect",
                 not delivered and holder("pu-mop-1") is None
                 and bool(got and got.get("error")), (delivered, got))
@@ -3304,7 +3321,7 @@ def check_role_node_gates_584(c):
         # 11. Чужой проект: принципал из other в субъекте mop -- отказ; ответ
         # о цели из чужого проекта -- отказ на узле, не только на сервере.
         reset()
-        got = ask(rpc(X), send)
+        got = ask(role(X), send)
         c.check("584 a principal of another project is refused",
                 not delivered and bool(got and got.get("error")), (delivered, got))
         reset()
@@ -3341,12 +3358,12 @@ def check_role_node_gates_584(c):
         c.check("584 the dispatch subject executes dispatch only, not wipe",
                 not destroyed and bool(got and got.get("error")), (destroyed, got))
         reset()
-        got = ask(rpc(A), dict(send, dispatch=True, mode="dispatch"))
+        got = ask(role(A), dict(send, dispatch=True, mode="dispatch"))
         c.check("584 an rpc body asking for dispatch stays a plain send",
                 holder("pu-mop-1") is None and bool(got and got.get("msg_id")),
                 (holder("pu-mop-1"), got))
         reset()
-        got = ask(rpc(A), dict(send, verb="dispatch"))
+        got = ask(role(A), dict(send, verb="dispatch"))
         c.check("584 verb dispatch over rpc is refused (the subject decides)",
                 not delivered and holder("pu-mop-1") is None
                 and bool(got and got.get("error")), (delivered, got))
@@ -3365,7 +3382,7 @@ def check_role_node_gates_584(c):
         # живая аренда другого человека закрывает wipe.
         reset()
         ask("mop.mop.node.hyper.rpc.petr", send)
-        got = ask(rpc(A), {"verb": "wipe", "name": "pu-mop-1"})
+        got = ask(role(A), {"verb": "wipe", "name": "pu-mop-1"})
         c.check("584 another human's live lease gates an actor's mutating verb",
                 not destroyed and bool(got and got.get("error")), (destroyed, got))
 
@@ -3384,7 +3401,7 @@ def check_role_node_gates_584(c):
                 and bool(got and got.get("msg_id")), (holder("pu-mop-1"), got))
         # Узловые глаголы -- никогда актёру, что бы ни ответил резолвер.
         reset()
-        got = ask(rpc(A), {"verb": "disk"})
+        got = ask(role(A), {"verb": "disk"})
         c.check("584 node-level verbs are never given to an actor",
                 bool(got and got.get("error")), got)
 
@@ -3436,12 +3453,18 @@ def check_role_node_gates_584(c):
         c.check("584 dispatch subject token must be a principal id",
                 agent.actor_of("mop.mop.node.hyper.dispatch.anton") == ("dispatch", None)
                 and agent.actor_of("mop.mop.node.hyper.rpc.anton") == ("rpc", None)
-                and agent.actor_of(rpc(W)) == ("rpc", W)
+                and agent.actor_of(role(W)) == ("role", W)
+                and agent.actor_of("mop.mop.node.hyper.role.anton") == ("role", None)
                 and agent.actor_of(dsp(A)) == ("dispatch", A))
 
     subs = asyncio.run(_subjects_584())
     c.check("584 the agent listens on its dispatch subject",
             "mop.*.node.hyper.dispatch.*" in subs, subs)
+    c.check("584 the agent listens on the role channel, disjoint from the old "
+            "rpc patterns",
+            "mop.*.node.hyper.role.*" in subs
+            and "mop.*.node.hyper.role.*" not in busnames.agent_subscriptions("hyper")["rpc"]
+            and "mop.*.node.hyper.role" not in subs, subs)
 
 
 def check_startup_soul_584(c):
@@ -3575,7 +3598,7 @@ def check_startup_soul_584(c):
             st["facts"] = {"pu-mop-1": live_fact(status=status)}
             marked_584(clones["pu-mop-1"], INC_1)
             ready_584(targets["pu-mop-1"])
-            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
             c.check(f"584 a real live session status ({status}) is ready when "
                     "the proofs match",
@@ -3601,7 +3624,7 @@ def check_startup_soul_584(c):
                 else:
                     ready_584(targets["pu-mop-1"],
                              role=ready if isinstance(ready, str) else "puppet")
-            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
             c.check(f"584 not ready: {label}",
                     soul == {"ready": False, "why": soul.get("why")}
@@ -3622,7 +3645,7 @@ def check_startup_soul_584(c):
             marked_584(clones["pu-mop-1"], INC_1)
             ready_584(targets["pu-mop-1"])
             st["facts"] = {"pu-mop-1": fact}
-            got = ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
             c.check(f"584 no soul fact without a live session ({label})",
                     soul is None and not binding_asks(), (soul, asks))
@@ -3633,12 +3656,12 @@ def check_startup_soul_584(c):
         marked_584(clones["pu-mop-1"], INC_1)
         ready_584(targets["pu-mop-1"])
         asks.clear()
-        ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the binding lookup envelope is exactly target-shaped",
                 [(s, sorted(r)) for s, r in asks
                  if r.get("verb") == "resolve" and "principal" not in r]
                 == [("mop.mop.server.rpc", ["service", "target", "verb"])], asks)
-        got = ask(rpc(W), {"verb": "state", "name": "pu-mop-1"})
+        got = ask(role(W), {"verb": "state", "name": "pu-mop-1"})
         c.check("584 state carries the soul fact too",
                 (got or {}).get("soul", {}).get("ready") is True, got)
 
@@ -3665,12 +3688,12 @@ def check_startup_soul_584(c):
         st["facts"] = {"pu-mop-1": live_fact(sid="s-1")}
         marked_584(clones["pu-mop-1"], INC_1)
         ready_584(targets["pu-mop-1"])
-        ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
-        ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 the soul fact is cached for the read within the TTL",
                 len(binding_asks()) == 1, asks)
         st["facts"] = {"pu-mop-1": live_fact(sid="s-2")}
-        ask(rpc(W), {"verb": "states", "names": ["pu-mop-1"]})
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
         c.check("584 a new session of the same name misses the cache",
                 len(binding_asks()) == 2, asks)
 
@@ -3762,7 +3785,7 @@ def check_startup_soul_584(c):
         for label, subj, body in (
                 ("human rpc", "mop.mop.node.hyper.rpc.anton",
                  {"verb": "initial_identity", "name": "pu-mop-1"}),
-                ("grant rpc", rpc(W),
+                ("grant rpc", role(W),
                  {"verb": "initial_identity", "name": "pu-mop-1"}),
                 ("dispatch subject", busnames.dispatch_subject(
                     "mop", "hyper", A[len("grant-"):]),
@@ -3778,7 +3801,7 @@ def check_startup_soul_584(c):
         # 9. Совместимость: новый принципал не трогает легаси-цель без
         # привязки -- закрыто до миграции, и это проверено, а не обещано.
         reset()
-        got = ask(rpc(W), {"verb": "send", "name": "pu-mop-4", "message": "hi"})
+        got = ask(role(W), {"verb": "send", "name": "pu-mop-4", "message": "hi"})
         c.check("584 a legacy target without a binding fails closed for a grant",
                 bool((got or {}).get("error"))
                 and "binding" in ((got or {}).get("error") or ""), got)
@@ -3786,6 +3809,8 @@ def check_startup_soul_584(c):
     subs = asyncio.run(_subjects_584())
     c.check("584 the agent listens on its startup subject",
             "mop.*.node.hyper.startup" in subs, subs)
+    c.check("584 the agent listens on the role channel",
+            "mop.*.node.hyper.role.*" in subs, subs)
 
 
 async def _subjects_584():
