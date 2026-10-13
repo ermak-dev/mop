@@ -3,10 +3,11 @@ version: 1
 runtime: {driver: any, receives_dispatch: true}
 capabilities:
   # Рабочий (#579): принимает dispatch, отчитывается, ничего не поднимает
-  # и пулом не управляет. Минимальный набор глаголов -- чтение состояния и
-  # связь.
+  # и пулом не управляет. Обнаружение адресов (#585) -- чтение СВОЕГО
+  # проекта: ping/roster/alloc/spec, без анонимного broadcast и без
+  # привилегированного locate-прокси (#580).
   node_verbs: [send, tail, state, states, ping, local]
-  cluster_verbs: []
+  cluster_verbs: [ping, roster, alloc, spec]
   dispatch: false
   spawn: []
 prompt: soul.md
