@@ -62,8 +62,10 @@ def check_dependencies_351(c):
     find = meta.get("tool", {}).get("setuptools", {}).get("packages", {}).get("find", {})
     c.expect("#351 packages: mop and below only", find.get("include"), ["mop", "mop.*"])
     data = meta.get("tool", {}).get("setuptools", {}).get("package-data", {})
-    c.check("#351 the master skill ships as package data",
-            "skills/master/*" in data.get("mop", []))
+    # #580: пакет везёт каталог ролей целиком (skills/*/*), не один файл
+    # скилла мастера: у каждой роли soul.yaml и промпт (docs/SOUL.md).
+    c.check("#351 the role catalogue ships as package data",
+            "skills/*/*" in data.get("mop", []))
 
 
 def check_console_351(c):
