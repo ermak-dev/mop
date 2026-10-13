@@ -284,6 +284,11 @@ def _row(item, disk_kb=None):
         branch=branch,
         # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
         origin=meta.origin,
+        # Тройка роли (#580) -- из той же меты, целиком или никак (JobMeta):
+        # ростер (#587) и дашборд читают роль, не перечитывая Meta сам.
+        soul=meta.soul,
+        soul_digest=meta.soul_digest,
+        soul_inc=meta.soul_inc,
         disk_kb=disk_kb,
     )
 

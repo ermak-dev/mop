@@ -76,16 +76,38 @@ class JobMeta:
     None, "?"), а перерегистрацию по ней писали четыре места -- и они
     разошлись: сборка образа теряла ветку (#265). Отсутствующий ключ здесь --
     читателя, одно на каждое. Имя проекта не хранится -- выводится из origin
-    одним правилом driver.project_of."""
+    одним правилом driver.project_of.
+
+    Тройка роли (#580) -- soul/soul_digest/soul_inc, все три или ни одной:
+    половина тройки -- не «роль без дайджеста», а сломанная запись, и
+    строится отказом. Форматы -- кодировки mop/common/soul.py, грамматика
+    одним местом. Легаси-мета без тройки читается и пишется как прежде,
+    байт в байт."""
     origin: str
     branch: str = None
     spec_version: str = None
+    soul: str = None
+    soul_digest: str = None
+    soul_inc: str = None
 
     def __post_init__(self):
         # origin -- None (джоб без Meta: законно, это «ничей») либо
         # непустая строка; пустая -- ни то ни другое (#273).
         if not (self.origin is None or (isinstance(self.origin, str) and self.origin)):
             _refuse(self, "origin", "None or a non-empty string")
+        soul = (self.soul, self.soul_digest, self.soul_inc)
+        named = [v for v in soul if v is not None]
+        if named and len(named) != len(soul):
+            _refuse(self, "soul", "the role triple comes whole (soul, "
+                                 "soul_digest, soul_inc) or not at all")
+        if named:
+            # Грамматика роли -- soul.py, проверка при сборке, а не у
+            # каждого читателя: сломанная тройка в Nomad -- папет, который
+            # не поднять и не понять.
+            from . import soul as soulmod
+            soulmod._name(self.soul, "soul")
+            soulmod._hex32(self.soul_digest, "soul_digest")
+            soulmod._uuid(self.soul_inc, "soul_inc")
 
     @property
     def project(self):
@@ -98,7 +120,12 @@ class JobMeta:
         # cred старых мет игнорируется молча: аренды больше нет (#384), и
         # прочитанная -- не отказ, а прошлое, которое перезапишет respec.
         # llm старых мет игнорируется молча: профилей больше нет (#390).
-        return cls(m.get("origin"), m.get("branch") or None, m.get(SPEC_META))
+        # soul-тройка (#580): неполная (собранная руками или битым Nomad)
+        # -- отказ, а не молчаливая половина: from_meta -- тот же договор,
+        # что и конструктор.
+        meta = cls(m.get("origin"), m.get("branch") or None, m.get(SPEC_META),
+                   m.get("soul"), m.get("soul_digest"), m.get("soul_inc"))
+        return meta
 
     @classmethod
     def from_job(cls, job):
@@ -106,12 +133,17 @@ class JobMeta:
 
     def to_meta(self):
         """Словарь для Nomad -- в порядке ключей, каким его писал job_spec:
-        origin и ветка (если есть), версия шаблона."""
+        origin и ветка (если есть), версия шаблона, тройка роли -- целиком
+        или никак (#580): легаси-провод не меняется самой возможностью."""
         out = {"origin": self.origin}
         if self.branch:
             out["branch"] = self.branch
         if self.spec_version is not None:
             out[SPEC_META] = self.spec_version
+        if self.soul:
+            out["soul"] = self.soul
+            out["soul_digest"] = self.soul_digest
+            out["soul_inc"] = self.soul_inc
         return out
 
 

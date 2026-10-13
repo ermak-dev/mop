@@ -1,0 +1,12 @@
+soul: builder
+version: 1
+runtime: {driver: any, receives_dispatch: true}
+capabilities:
+  # Сборщик (#579): рабочий, который собирает и катит в своей ветке.
+  # Управления пулом нет -- ни add, ни alloc, ни spec: глагола сборки
+  # образа у роли нет, admin-сборка молча не достаётся (docs/SOUL.md).
+  node_verbs: [send, tail, state, states, ping, local]
+  cluster_verbs: []
+  dispatch: false
+  spawn: []
+prompt: soul.md
