@@ -304,17 +304,22 @@ def _history_identity(cwd):
         with os.fdopen(fd, "rb") as f:
             raw = f.read(16 * 1024 + 1)
         if len(raw) > 16 * 1024:
-            raise ValueError("session registry record is too large")
-        d = _history_json(raw)
-        if not isinstance(d.get("cwd"), str) or not os.path.isabs(d["cwd"]):
-            raise LookupError("session registry cwd is unknown")
+            continue
+        try:
+            d = _history_json(raw)
+        except ValueError:
+            # Discovery содержит остатки и незаконченные записи других сессий.
+            # Это ещё не кандидат; fences живого endpoint ниже не ослабляются.
+            continue
+        if not isinstance(d.get("cwd"), str) or not os.path.isabs(d["cwd"]) or "\x00" in d["cwd"]:
+            continue
         if os.path.realpath(d["cwd"]) != target:
             continue
         pid, sid, path = d.get("pid"), d.get("sessionId"), d.get("messagingSocketPath")
         if type(pid) is not int or pid <= 0 or not isinstance(sid, str) or not _HISTORY_SID.fullmatch(sid):
-            raise LookupError("session registry identity is unknown")
+            continue
         if not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path:
-            raise LookupError("session registry socket is unknown")
+            continue
         peer = _history_peer(path)
         if peer is None:
             continue
@@ -409,7 +414,13 @@ def _history_page(fd, offset, size, skip):
             record = {"type": "mop_history_notice", "reason": "record_too_large",
                       "offset": offset + pos, "skipped_bytes": len(line), "complete": complete}
         else:
-            record = _history_json(line)
+            try:
+                record = _history_json(line)
+            except ValueError:
+                # Завершённая запись отображения не исполняется: сообщаем пропуск,
+                # не выдавая исходник или текст исключения. Cursor идёт дальше.
+                record = {"type": "mop_notice", "reason": "invalid_record",
+                          "offset": offset + pos, "skipped_bytes": len(line), "complete": True}
         length = len(json.dumps(record, ensure_ascii=True, allow_nan=False).encode())
         if length > HISTORY_WIRE - 4096:
             record = {"type": "mop_history_notice", "reason": "record_too_large",
@@ -443,7 +454,33 @@ def history(cwd, cursor=None):
         raise ValueError("unsafe history session or project path")
     parts = ("projects", project, sid + ".jsonl")
     base = _history_digest(json.dumps(identity, sort_keys=True).encode())
-    fd = _history_open(identity["config"], parts)
+    try:
+        fd = _history_open(identity["config"], parts)
+    except FileNotFoundError:
+        # До первого transcript каталоги projects тоже могут отсутствовать.
+        # Но недоступный/пропавший config home не является пустой историей.
+        config_fd = _history_open(identity["config"], directory=True)
+        os.close(config_fd)
+        epoch = _history_digest(json.dumps([base, "pending"]).encode())
+        empty = _history_digest(b"")
+        token = {"v": 1, "epoch": epoch, "base": base, "file": [0, 0],
+                 "offset": 0, "size": 0, "skip": False, "mtime": 0, "ctime": 0,
+                 "anchor": empty, "head_bytes": 0, "head": empty}
+        if _history_identity(cwd) != identity:
+            raise LookupError("live session changed during history read")
+        config_fd = _history_open(identity["config"], directory=True)
+        os.close(config_fd)
+        try:
+            check_fd = _history_open(identity["config"], parts)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(check_fd)
+            raise LookupError("transcript appeared during history read")
+        encoded = base64.urlsafe_b64encode(json.dumps(token, separators=(",", ":")).encode()).decode().rstrip("=")
+        return {"epoch": epoch, "session_id": sid, "cursor": encoded, "records": [],
+                "reset": previous is not None and previous != token,
+                "has_more": False, "partial": True}
     try:
         st = os.fstat(fd)
         file_id, size = [st.st_dev, st.st_ino], st.st_size

@@ -5,8 +5,9 @@ HYPOTHESIS: экран терминала не является транскри
 позволяет читать чужие файлы. История должна читать только файл живой
 идентичности и переносить объекты JSON без интерпретации состояния tools.
 SOLUTION: ограниченные страницы JSONL, курсор с идентичностью и byte offset,
-отдельные ворота проекта на узле. Входы здесь синтетические; живой контракт
-и его поля принимает #596, это не проверка работающего Claude Code.
+отдельные ворота проекта на узле. Registry/transcript здесь синтетические;
+Linux helpers дополнительно проверены настоящими своими socket/child process.
+Живой контракт Claude и его поля принимает #596, не этот файл.
 RESULT: проверки обнаружили разрыв страницы, отсутствие process-start fence,
 перезапись snapshot и эхо приватного stdout; каждое исправление проверено
 сначала красным тестом. Незаконченная строка не двигает обычный cursor,
@@ -21,6 +22,8 @@ import json
 import re
 import os
 import shlex
+import socket
+import subprocess
 import sys
 import tempfile
 
@@ -68,6 +71,51 @@ def refused(c, label, fn):
         c.fail(label)
 
 
+def check_registry_noise_does_not_hide_proven_live_candidate(c):
+    """HYPOTHESIS: чужой мусор и неполная мёртвая запись блокируют discovery.
+
+    Поля выбранного живого кандидата по-прежнему проверяются без исключений.
+    SOLUTION: пропускаем не-кандидатов до пробы endpoint; живые fences строгие.
+    RESULT: семь видов мусора больше не закрывают выбранную живую сессию.
+    STATUS: FIXED — see #597
+    """
+    with tempfile.TemporaryDirectory() as root:
+        config = os.path.join(root, "config")
+        cwd = os.path.join(root, "work")
+        os.makedirs(os.path.join(config, "sessions"))
+        os.mkdir(cwd)
+        env = {"HOME": root, "CLAUDE_CONFIG_DIR": config}
+        process = {"start": "boot:123", "proc_start": "123", "env": env,
+                   "cwd": cwd, "uid": os.getuid()}
+        record = {"pid": 456, "cwd": cwd, "sessionId": SID, "messagingSocketPath": "/selected.sock"}
+        directory = os.path.join(config, "sessions")
+        with open(os.path.join(directory, "selected.json"), "w") as f:
+            json.dump(record, f)
+        digest = hashlib.sha256(b"/selected.sock").hexdigest()
+        with open(os.path.join(directory, f"456.{digest}.key"), "w") as f:
+            json.dump({"procStart": "123"}, f)
+        def peer(path):
+            return (456, os.getuid(), [2, 3]) if path == "/selected.sock" else None
+        noise = (b"not json", b"{}", b'{"cwd":"relative"}',
+                 json.dumps({"cwd": cwd, "pid": 999, "sessionId": OTHER}).encode(),
+                 json.dumps({"cwd": cwd, "pid": 999, "sessionId": OTHER,
+                             "messagingSocketPath": "/dead.sock"}).encode(),
+                 json.dumps({"cwd": "/irrelevant", "pid": "invalid"}).encode(),
+                 b"x" * 16385)
+        with patched_env(**env), patched(session, _history_process=lambda _pid: dict(process),
+                                         _history_peer=peer):
+            for i, raw in enumerate(noise):
+                path = os.path.join(directory, "000-noise.json")
+                with open(path, "wb") as f:
+                    f.write(raw)
+                try:
+                    c.expect(f"registry noise {i} preserves selected identity",
+                             session._history_identity(cwd)["session_id"], SID)
+                except Exception as e:
+                    c.fail(f"registry noise {i} preserves selected identity", type(e).__name__)
+                os.unlink(path)
+
+
 def check_history_preserves_unknown_tools_meta_and_reconnect(c):
     with fixture() as (cwd, path, identity):
         want = [{"type": kind, "uuid": str(i), "arbitrary": {"text": "Русский", "n": None}}
@@ -113,6 +161,81 @@ def check_partial_utf8_and_final_line_are_not_consumed(c):
         got = session.history(cwd, waiting["cursor"])
         c.expect("UTF8 append is lossless", got["records"], [{"type": "user", "text": "Ж"}])
         c.check("append of partial line is not reset", not got["reset"])
+
+
+def check_proven_live_before_first_transcript_is_stable_pending(c):
+    """HYPOTHESIS: живой процесс может ещё не создать первый transcript.
+
+    Отсутствие файла — pending, не чужая история и не ошибка идентичности.
+    SOLUTION: пустой стабильный cursor с отдельной эпохой отсутствующего файла,
+    повторные проверки config home, live identity и отсутствия transcript.
+    RESULT: начальное ожидание, появление/исчезновение и гонки проверены.
+    STATUS: FIXED — see #597
+    """
+    with fixture() as (cwd, path, identity):
+        os.unlink(path)
+        first = session.history(cwd)
+        text, err, code = run_command(session.main, ["history", cwd])
+        c.expect("standalone missing transcript succeeds", code, 0)
+        c.expect("standalone missing transcript returns pending contract", json.loads(text), first)
+        c.expect("standalone pending writes no private stderr", err, "")
+        c.expect("missing transcript exact empty response", set(first),
+                 {"epoch", "session_id", "cursor", "records", "reset", "has_more", "partial"})
+        c.expect("missing transcript has no fabricated records", first["records"], [])
+        c.check("missing transcript pending not readable-more", first["partial"] and not first["has_more"] and not first["reset"])
+        c.expect("missing transcript session proven", first["session_id"], SID)
+        c.check("missing transcript response bounded", len(json.dumps(first).encode()) < 2048)
+        c.expect("missing transcript initial reads deterministic", session.history(cwd), first)
+        c.expect("missing transcript cursor and epoch stable", session.history(cwd, first["cursor"]), first)
+        put(path, [{"type": "first"}])
+        appeared = session.history(cwd, first["cursor"])
+        c.expect("first transcript returns real content", appeared["records"], [{"type": "first"}])
+        c.check("first file starts new file epoch", appeared["reset"] and appeared["epoch"] != first["epoch"])
+        os.unlink(path)
+        gone = session.history(cwd, appeared["cursor"])
+        c.check("disappearance resets to honest pending", gone["reset"] and gone["partial"] and not gone["has_more"])
+        c.expect("pending reconnect stops resetting", session.history(cwd, gone["cursor"])["reset"], False)
+        identity["start"] = "boot:new"
+        changed = session.history(cwd, gone["cursor"])
+        c.check("missing file does not suppress session epoch fence", changed["reset"] and changed["epoch"] != gone["epoch"])
+        original = session._history_open
+        def denied(root, parts=(), directory=False):
+            if directory:
+                raise PermissionError("synthetic inaccessible directory")
+            return original(root, parts, directory)
+        with patched(session, _history_open=denied):
+            refused(c, "unreadable config is not pending", lambda: session.history(cwd))
+        calls = []
+        def switch(_cwd):
+            calls.append(1)
+            return dict(identity, start="boot:race") if len(calls) > 1 else dict(identity)
+        with patched(session, _history_identity=switch):
+            refused(c, "pending rechecks live identity", lambda: session.history(cwd))
+        original_identity = session._history_identity
+        calls.clear()
+        def creates(_cwd):
+            calls.append(1)
+            if len(calls) > 1:
+                put(path, [{"type": "raced"}])
+            return original_identity(_cwd)
+        with patched(session, _history_identity=creates):
+            refused(c, "pending must not hide file appearing during read", lambda: session.history(cwd))
+    with fixture() as (cwd, path, identity):
+        os.unlink(path)
+        os.rmdir(os.path.dirname(path))
+        os.rmdir(os.path.join(identity["config"], "projects"))
+        initial = session.history(cwd)
+        c.check("missing not-yet-created project directories are pending", initial["partial"] and not initial["has_more"])
+        c.expect("missing project directories remain stable", session.history(cwd, initial["cursor"]), initial)
+        original = session._history_open
+        def denied_project(root, parts=(), directory=False):
+            if parts and parts[0] == "projects":
+                raise PermissionError("synthetic inaccessible projects directory")
+            return original(root, parts, directory)
+        with patched(session, _history_open=denied_project):
+            refused(c, "unreadable project directory is not pending", lambda: session.history(cwd))
+        os.rmdir(identity["config"])
+        refused(c, "missing config home is not pending", lambda: session.history(cwd))
 
 
 def check_stale_epoch_rotation_truncation_and_regrowth(c):
@@ -181,14 +304,61 @@ def check_limits_escaping_and_giant_record_progress(c):
         c.expect("giant does not trap following records", after, [{"type": "after"}])
 
 
-def check_hostile_cursor_and_incompatible_json_fail_closed(c):
+def check_complete_invalid_display_record_notice_and_progress(c):
+    """HYPOTHESIS: одна завершённая битая строка навсегда запирает cursor.
+
+    Мастер явно изменил только контракт отображения (#597): содержимое не
+    исполняется. Честный notice обязателен; cursor и namespace остаются строгими.
+    SOLUTION: только завершённый объект отображения превращается в notice
+    invalid_record без исходника/исключения, с точным byte offset и размером.
+    RESULT: восемь видов битых строк дают точный notice и не запирают продолжение;
+    незавершённая UTF8-строка ждёт newline без продвижения.
+    STATUS: FIXED — see #597
+    """
+    bad_records = (b"[]\n", b"null\n", b"private-not-json\n", b'{"x":NaN}\n',
+                   b'{"x":1,"x":2}\n', b'{"x":"\xff"}\n',
+                   b'{"n":1e999}\n', b'{"text":"\\ud800"}\n')
+    for i, raw in enumerate(bad_records):
+        with fixture() as (cwd, path, _identity):
+            prefix = b'{"type":"before"}\n'
+            with open(path, "wb") as f:
+                f.write(prefix + raw + b'{"type":"future-kind","keep":true}\n')
+            out = session.history(cwd)
+            c.expect(f"invalid display {i} exact content-free notice", out["records"],
+                     [{"type": "before"},
+                      {"type": "mop_notice", "reason": "invalid_record", "offset": len(prefix),
+                       "skipped_bytes": len(raw), "complete": True},
+                      {"type": "future-kind", "keep": True}])
+            token = session._history_cursor(out["cursor"])
+            c.expect("invalid display cursor consumes complete records", token["offset"], os.path.getsize(path))
+            c.check("invalid display has no pending data", not out["partial"] and not out["has_more"])
+            again = session.history(cwd, out["cursor"])
+            c.expect("invalid display reconnect never repeats notice", again["records"], [])
+            c.expect("invalid display epoch remains stable", again["epoch"], out["epoch"])
+            c.expect("invalid display replay deterministic", session.history(cwd), out)
+    with fixture() as (cwd, path, _identity):
+        with open(path, "wb") as f:
+            f.write(b"private-invalid-utf8-\xff")
+        waiting = session.history(cwd)
+        c.expect("incomplete corrupt display is not consumed", session._history_cursor(waiting["cursor"])["offset"], 0)
+        c.expect("incomplete corrupt display emits no premature notice", waiting["records"], [])
+        c.check("incomplete corrupt display remains pending", waiting["partial"] and not waiting["has_more"])
+        with open(path, "ab") as f:
+            f.write(b'\n{"type":"after"}\n')
+        got = session.history(cwd, waiting["cursor"])
+        c.expect("completed corrupt UTF8 emits exact notice then valid record", got["records"],
+                 [{"type": "mop_notice", "reason": "invalid_record", "offset": 0,
+                   "skipped_bytes": len(b"private-invalid-utf8-\xff\n"), "complete": True}, {"type": "after"}])
+        c.check("completion keeps epoch", got["epoch"] == waiting["epoch"] and not got["reset"])
+
+
+def check_hostile_cursor_still_fails_closed(c):
+    # Старый отказ для DISPLAY-строки заменён по явному решению мастера
+    # строгой проверкой точного notice и продвижения выше, не молчаливым skip.
+    # Структурные JSON cursor/registry/key по-прежнему не принимают мусор.
     with fixture() as (cwd, path, _identity):
         for cursor in ("", "../secrets", "a" * 2049, 1, {}, "W10", "e30", "!!!!"):
             refused(c, f"hostile cursor {type(cursor).__name__} refused", lambda: session.history(cwd, cursor))
-        for raw in (b"[]\n", b"null\n", b"not json\n", b'{"x":NaN}\n', b'{"x":1,"x":2}\n', b'{"x":"\xff"}\n'):
-            with open(path, "wb") as f:
-                f.write(raw)
-            refused(c, "incompatible complete JSON fails closed", lambda: session.history(cwd))
         put(path, [{"type": "valid"}])
         out = session.history(cwd)
         token = json.loads(base64.urlsafe_b64decode(out["cursor"] + "=" * (-len(out["cursor"]) % 4)))
@@ -243,6 +413,63 @@ def check_identity_and_file_are_rechecked_before_return(c):
             return rotate(_cwd) if len(calls) > 1 else old(_cwd)
         with patched(session, _history_identity=late_rotate):
             refused(c, "rotation during read must not return old data", lambda: session.history(cwd))
+
+
+def check_actual_linux_socket_peer_and_child_process_identity(c):
+    """Настоящие Linux primitives без Claude, сети, токенов и model calls.
+
+    Это проверка существующего механизма, не новый дефект для RED; совпадение
+    с procStart/config реального Claude остаётся неподтверждённым до #596.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "listener.sock")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(path)
+            listener.listen(4)
+            peer = session._history_peer(path)
+            st = os.lstat(path)
+            c.expect("actual UNIX socket SO_PEERCRED PID is this test", peer[0], os.getpid())
+            c.expect("actual UNIX socket SO_PEERCRED UID is this owner", peer[1], os.getuid())
+            c.expect("actual socket inode fence", peer[2], [st.st_dev, st.st_ino])
+            accepted, _ = listener.accept()
+            with accepted:
+                c.expect("identity probe writes no auth or messages", accepted.recv(1), b"")
+        c.expect("actual stale UNIX socket is not live", session._history_peer(path), None)
+        os.unlink(path)
+        with open(path, "w") as f:
+            f.write("synthetic regular file")
+        refused(c, "actual regular file cannot prove socket identity", lambda: session._history_peer(path))
+        c.expect("actual missing socket is not live", session._history_peer(path + ".missing"), None)
+        cwd = os.path.join(root, "child-work")
+        config = os.path.join(root, "child-config")
+        os.mkdir(cwd)
+        os.mkdir(config)
+        env = {"HOME": root, "CLAUDE_CONFIG_DIR": config,
+               "CLAUDE_CODE_PROJECT_DIR_NAME": "child-project", "MOP_TEST_IDENTITY": "owned-child"}
+        child = subprocess.Popen([sys.executable, "-I", "-c",
+                                  "import time; print('ready', flush=True); time.sleep(60)"],
+                                 cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            c.expect("own sleeping child ready", child.stdout.readline().strip(), "ready")
+            actual = session._history_process(child.pid)
+            with open(f"/proc/{child.pid}/stat") as f:
+                raw = f.read()
+            ticks = raw[raw.rfind(")") + 2:].split()[19]
+            with open("/proc/sys/kernel/random/boot_id") as f:
+                boot = f.read().strip()
+            c.expect("actual child start ticks independently read", actual["proc_start"], ticks)
+            c.expect("actual child boot plus ticks fence", actual["start"], boot + ":" + ticks)
+            c.expect("actual child cwd", actual["cwd"], os.path.realpath(cwd))
+            c.expect("actual child owner UID", actual["uid"], os.getuid())
+            for key, value in env.items():
+                c.expect(f"actual child environment {key}", actual["env"].get(key), value)
+            c.expect("actual child config source", session._history_config(actual["env"]), config)
+            c.expect("actual child supported project override", session._history_project(actual["cwd"], actual["env"]), "child-project")
+            c.expect("actual child process identity remains stable", session._history_process(child.pid), actual)
+        finally:
+            child.terminate()
+            child.communicate(timeout=5)
+        refused(c, "exited own child cannot prove process identity", lambda: session._history_process(child.pid))
 
 
 def check_config_slug_live_identity_missing_and_duplicate(c):
@@ -400,6 +627,15 @@ def check_node_history_is_master_project_read_and_cursor_only(c):
             asyncio.run(agent.handle(None, msg, public=public))
             c.check("foreign or public transcript request refused", "error" in msg.replies[-1])
         c.expect("authorization denial never reaches body", len(calls), count)
+
+
+def check_long_project_slug_remains_explicitly_unsupported_until_contract(c):
+    # Не подменяем ещё не принятый хеш Claude своим алгоритмом (#596).
+    # Это покрытие имеющегося ограничения, не утверждение живого контракта.
+    refused(c, "long slug cannot guess transcript namespace",
+            lambda: session._history_project("/" + "a" * 201, {"HOME": "/synthetic"}))
+    c.expect("supported explicit override bounds long cwd", session._history_project(
+        "/" + "a" * 201, {"CLAUDE_CONFIG_DIR": "/synthetic", "CLAUDE_CODE_PROJECT_DIR_NAME": "known-name"}), "known-name")
 
 
 def check_history_json_requires_utf8_and_finite_numbers(c):
