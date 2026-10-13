@@ -187,11 +187,13 @@ def ensure_params(name, environ):
 
 
 # ─── роль (#590) ─────────────────────────────────────────────────────────
-# Файлы роли в каталоге инкарнации (driver.soul_dir). Имена -- константы
-# узла, не поля ответа: тело запроса путей не выбирает. Метка готовности --
-# последней и отдельной записью: обёртка (#583) стартует только над ней.
-ROLE_FILES = ("manifest.json", "prompt", "bus.json")
-READY = "ready.json"
+# Раскладка в каталоге инкарнации (driver.soul_dir): бандл -- подкаталогом
+# ровно из soul.yaml и промпта, как его читает soul.load; рядом кред
+# принципала и метка готовности. Имена -- константы узла и имя промпта из
+# проверенного бандла, не поля ответа: тело запроса путей не выбирает.
+# Метка -- последней и отдельной записью: обёртка (#583) стартует только
+# над ней.
+BUS_FILE, READY = "bus.json", "ready.json"
 
 
 def expected_role(environ):
@@ -222,17 +224,19 @@ def role_files(name, expected, reply):
 
     Авторитет -- Meta джоба (expected) и неизменяемый бандл: роль,
     инкарнация и digest ответа обязаны совпасть с Meta, бандл собирается
-    soul.from_manifest и обязан хешироваться в digest Meta. Проектный кред
-    рядом с ролевым -- отказ, а не «положить оба»: легаси-кред в ролевое
-    тело не едет никак, и роль без своего принципала не стартует на чужом."""
+    soul.from_manifest и обязан хешироваться в digest Meta. Кред -- прежнее
+    поле b['bus'], но индивидуальный: его user -- принципал роли.
+    Проектный кред на его месте -- отказ: легаси-кред в ролевое тело не
+    едет никак, и роль без своего принципала не стартует на чужом. Второй
+    кред внутри роли -- дубль, тоже отказ."""
     s = reply.get("soul")
     if not isinstance(s, dict):
         raise ValueError(f"bootstrap brought no role payload for {expected.soul} "
                          f"-- the server predates role delivery or the binding is gone; "
                          f"a role never starts on project credentials")
-    if reply.get("bus"):
-        raise ValueError("bootstrap brought project credentials to a role job; "
-                         "a role takes only its principal's")
+    if "bus" in s:
+        raise ValueError("the role payload carries a second credential; "
+                         "the role's credential travels only as the reply's bus")
     for key, want in (("role", expected.soul), ("soul_inc", expected.soul_inc),
                       ("soul_digest", expected.soul_digest)):
         if s.get(key) != want:
@@ -257,19 +261,20 @@ def role_files(name, expected, reply):
     principal = s.get("principal")
     if not soul.is_grant(principal):
         raise ValueError(f"the principal {_short(principal)} is not grant-<id>")
-    creds = s.get("bus")
+    creds = reply.get("bus")
     if not isinstance(creds, dict) or creds.get("user") != principal:
-        raise ValueError(f"the credential is not {principal}'s")
+        raise ValueError(f"the bus credential is not {principal}'s")
     for key in ("url", "password"):
         if not (isinstance(creds.get(key), str) and creds[key]):
             raise ValueError(f"the credential of {principal} has no {key}")
     d = driver.soul_dir(name, expected.soul_inc)
-    # Манифест -- ровно вход digest'а (каноническим JSON): обёртка (#583)
-    # пересчитает digest из файлов и сверит с Meta сама.
-    manifest = json.dumps(s["manifest"], sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=False).encode()
-    files = [(f"{d}/manifest.json", manifest), (f"{d}/prompt", prompt),
-             (f"{d}/bus.json", json.dumps(creds).encode() + b"\n")]
+    # soul.yaml -- JSON манифеста (JSON -- это YAML): soul.load обёртки
+    # прочтёт тот же словарь и пересчитает тот же digest. ensure_ascii --
+    # чтобы YAML-загрузчику не досталось ни одного не-ASCII знака.
+    manifest = json.dumps(s["manifest"], sort_keys=True, ensure_ascii=True).encode()
+    files = [(f"{d}/{driver.SOUL_BUNDLE}/{soul.MANIFEST}", manifest),
+             (f"{d}/{driver.SOUL_BUNDLE}/{bundle.manifest.prompt}", prompt),
+             (f"{d}/{BUS_FILE}", json.dumps(creds).encode() + b"\n")]
     ready = json.dumps({"role": bundle.role, "soul_inc": expected.soul_inc,
                         "soul_digest": bundle.digest, "principal": principal},
                        sort_keys=True).encode() + b"\n"

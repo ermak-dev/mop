@@ -324,6 +324,11 @@ def project_creds(project):
     return paths.under(HOME, f"bus-{project}.json")
 
 
+# Подкаталог бандла в каталоге инкарнации (#590): ровно soul.yaml и промпт,
+# как каталог роли, -- обёртка читает его soul.load.
+SOUL_BUNDLE = "bundle"
+
+
 def soul_dir(name, inc):
     """Бандл и кред принципала роли в теле (#590): их кладёт `mop driver
     run` на подъёме, читает обёртка (#583). Свой каталог у каждой

@@ -60,13 +60,23 @@ def meta_env(role_name, digest, inc):
             "NOMAD_META_soul_inc": inc}
 
 
-def payload(role_name, digest, inc, grant, password, manifest, prompt):
-    """Ролевой ответ bootstrap'а (форма #590)."""
+OWNER = {"login": "ermak", "name": "Anton", "email": "anton@example.org"}
+
+
+def payload(role_name, digest, inc, grant, manifest, prompt):
+    """Ролевая часть ответа bootstrap'а (форма #590): без кредов -- кред
+    едет прежним полем b['bus'], индивидуальным для роли."""
     return {"role": role_name, "soul_inc": inc, "soul_digest": digest,
             "manifest": manifest, "prompt": base64.b64encode(prompt).decode(),
-            "principal": grant,
-            "bus": {"url": "nats://10.0.0.1:4222", "user": grant,
-                    "password": password}}
+            "principal": grant, "owner": dict(OWNER)}
+
+
+def creds(user, password):
+    return {"url": "nats://10.0.0.1:4222", "user": user, "password": password}
+
+
+def reply_for(soul_part, bus):
+    return {"ok": True, "played": False, "soul": soul_part, "bus": bus}
 
 
 def legacy_reply():
@@ -76,8 +86,9 @@ def legacy_reply():
 
 
 class Body:
-    """Драйвер с телом-узлом (как host): запись -- в словарь, шелл -- в
-    журнал. fail -- подстрока пути, на котором push откажет."""
+    """Драйвер с телом-узлом (как host): запись -- в словарь и на диск
+    временного дома (бандл читается soul.load, как его прочтёт обёртка),
+    шелл -- в журнал. fail -- подстрока пути, на котором push откажет."""
 
     def __init__(self, fail=None):
         self.files, self.log, self.fail = {}, [], fail
@@ -96,6 +107,9 @@ class Body:
             self.log.append(("push-failed", path))
             return {"error": f"{path}: disk full"}
         self.files[path] = data
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
         self.log.append(("push", path))
         return {"written": path}
 
@@ -187,13 +201,13 @@ def main():
     # Легаси-джоб, которому сервер прислал роль, -- рассогласование: отказ.
     body = Body()
     code, out, log = launch(body, {**legacy_reply(), "soul": payload(
-        "puppet", digest, INC, GRANT, SECRET, manifest, prompt)}, {})
+        "puppet", digest, INC, GRANT, manifest, prompt)}, {})
     c.check("#590 a legacy job refuses a role payload", refused(code), code)
     c.check("#590 a legacy job with a role payload never launches", not launched(log), brief(log))
 
     env = meta_env("puppet", digest, INC)
-    good = {"ok": True, "played": False,
-            "soul": payload("puppet", digest, INC, GRANT, SECRET, manifest, prompt)}
+    good = reply_for(payload("puppet", digest, INC, GRANT, manifest, prompt),
+                     creds(GRANT, SECRET))
 
     # Ролевой джоб, ответ легаси (только проектный кред): отказ до модели,
     # проектный кред в тело не едет.
@@ -206,27 +220,36 @@ def main():
     c.check("#590 the refusal does not print the project password",
             PROJECT_SECRET not in str(code) + out, (code, out))
 
-    # Ролевой джоб, ролевой ответ ПЛЮС проектный кред: легаси-кред в
-    # ролевое тело не едет никак -- отказ, а не «положить оба».
+    # Ролевой джоб, ролевой ответ, но кред -- проектный: легаси-кред в
+    # ролевое тело не едет никак.
     body = Body()
     code, out, log = launch(body, {**good, "bus": legacy_reply()["bus"]}, env)
-    c.check("#590 a role job refuses a reply that also carries project creds",
-            refused(code) and not launched(log) and project_path not in body.files,
+    c.check("#590 a role job refuses the project credential beside its payload",
+            refused(code) and "credential is not" in code and not launched(log)
+            and project_path not in body.files, (code, brief(log)))
+    c.check("#590 that refusal hides the project password",
+            PROJECT_SECRET not in str(code) + out, (code, out))
+    # Второй кред внутри роли -- дубль, не «запасной»: отказ.
+    body = Body()
+    code, out, log = launch(body, {**good, "soul": {**good["soul"], "bus": creds(GRANT, SECRET)}},
+                            env)
+    c.check("#590 a nested second credential in the role payload refuses",
+            refused(code) and "second credential" in code and not launched(log),
             (code, brief(log)))
 
     # Рассогласования с Meta: инкарнация, digest, роль -- в ответе и в
     # бандле. Каждое -- отказ до модели и без записи кредов.
-    other_inc = payload("puppet", digest, INC2, GRANT, SECRET, manifest, prompt)
-    tampered = payload("puppet", digest, INC, GRANT, SECRET, manifest, prompt + b"x")
-    claims_builder = payload("builder", digest, INC, GRANT, SECRET, manifest, prompt)
-    builder_bundle = payload("puppet", digest, INC, GRANT, SECRET, bmanifest, bprompt)
-    alien_user = payload("puppet", digest, INC, GRANT, SECRET, manifest, prompt)
-    alien_user["bus"] = {**alien_user["bus"], "user": "puppet-mop"}
-    not_grant = payload("puppet", digest, INC, "puppet-mop", SECRET, manifest, prompt)
-    no_password = payload("puppet", digest, INC, GRANT, SECRET, manifest, prompt)
-    del no_password["bus"]["password"]
-    bad_manifest = payload("puppet", digest, INC, GRANT, SECRET,
-                           {**manifest, "version": 2}, prompt)
+    mine = creds(GRANT, SECRET)
+    other_inc = reply_for(payload("puppet", digest, INC2, GRANT, manifest, prompt), mine)
+    tampered = reply_for(payload("puppet", digest, INC, GRANT, manifest, prompt + b"x"), mine)
+    claims_builder = reply_for(payload("builder", digest, INC, GRANT, manifest, prompt), mine)
+    builder_bundle = reply_for(payload("puppet", digest, INC, GRANT, bmanifest, bprompt), mine)
+    alien_user = reply_for(good["soul"], creds(GRANT2, SECRET))
+    not_grant = reply_for(payload("puppet", digest, INC, "puppet-mop", manifest, prompt),
+                          creds("puppet-mop", SECRET))
+    no_password = reply_for(good["soul"], {"url": "nats://10.0.0.1:4222", "user": GRANT})
+    bad_manifest = reply_for(payload("puppet", digest, INC, GRANT,
+                                     {**manifest, "version": 2}, prompt), mine)
     # Причина названа -- иначе отказ по попутной причине (битая Meta)
     # прошёл бы проверку любого рассогласования.
     for what, bad, menv, why in (
@@ -240,14 +263,14 @@ def main():
             ("a credential without a password", no_password, env, "has no password"),
             ("a manifest of an unknown schema", bad_manifest, env, "does not parse"),
             ("a job digest that is not the bundle's",
-             good["soul"], meta_env("puppet", bdigest, INC), "soul_digest")):
+             good, meta_env("puppet", bdigest, INC), "soul_digest")):
         body = Body()
-        code, out, log = launch(body, {"ok": True, "soul": bad}, menv)
+        code, out, log = launch(body, bad, menv)
         c.check(f"#590 refused before the model: {what}",
                 refused(code) and why in code and not launched(log),
                 (code, brief(log)))
         c.check(f"#590 no credential written: {what}",
-                not any(p.endswith("bus.json") for p in body.files)
+                not any("/souls/" in p for p in body.files)
                 and project_path not in body.files, sorted(body.files))
         c.check(f"#590 the refusal hides the password: {what}",
                 SECRET not in str(code) + out, (code, out))
@@ -268,18 +291,26 @@ def main():
             d is not None and d.endswith(f"/souls/{NAME}/{INC}"), d)
     if d:
         c.expect("#590 the principal's credential lands in the incarnation",
-                 creds_in(body, f"{d}/bus.json"), good["soul"]["bus"])
-        c.expect("#590 the prompt lands raw", body.files.get(f"{d}/prompt"), prompt)
-        got = json.loads(body.files.get(f"{d}/manifest.json") or "null")
-        c.expect("#590 the manifest lands as the digest's input",
-                 got and soul.digest(got, body.files.get(f"{d}/prompt", b"")), digest)
+                 creds_in(body, f"{d}/bus.json"), creds(GRANT, SECRET))
+        bundle_dir = f"{d}/bundle"
+        c.expect("#590 the bundle directory holds exactly soul.yaml and the prompt",
+                 sorted(p for p in body.files if p.startswith(bundle_dir + "/")),
+                 sorted([f"{bundle_dir}/soul.yaml", f"{bundle_dir}/{manifest['prompt']}"]))
+        c.expect("#590 the prompt lands raw",
+                 body.files.get(f"{bundle_dir}/{manifest['prompt']}"), prompt)
+        try:
+            loaded = soul.load(bundle_dir).digest
+        except (OSError, ValueError) as e:
+            loaded = f"{type(e).__name__}: {e}"
+        c.expect("#590 the delivered bundle loads to the job's digest", loaded, digest)
         ready = json.loads(body.files.get(f"{d}/ready.json") or "null")
         c.expect("#590 the ready mark names the binding without the password",
                  ready, {"role": "puppet", "soul_inc": INC, "soul_digest": digest,
                          "principal": GRANT})
         pushes = [p for kind, p in log if kind == "push"]
         order = [pushes.index(f"{d}/{f}") if f"{d}/{f}" in pushes else -1
-                 for f in ("bus.json", "prompt", "manifest.json", "ready.json")]
+                 for f in ("bus.json", f"bundle/{manifest['prompt']}", "bundle/soul.yaml",
+                           "ready.json")]
         c.check("#590 the ready mark is the last role file written",
                 min(order) >= 0 and order[-1] > max(order[:-1]), pushes)
         at = [i for i, e in enumerate(log) if e == ("push", f"{d}/ready.json")]
@@ -303,8 +334,8 @@ def main():
     # коллизии с первой.
     both = Body()
     launch(both, good, env)
-    second = {"ok": True, "soul": payload("builder", bdigest, INC2, GRANT2, SECRET2,
-                                          bmanifest, bprompt)}
+    second = reply_for(payload("builder", bdigest, INC2, GRANT2, bmanifest, bprompt),
+                       creds(GRANT2, SECRET2))
     code, out, log = launch(both, second, meta_env("builder", bdigest, INC2), name=OTHER)
     if hasattr(driver, "soul_dir"):
         c.expect("#590 the second role launches", code, 0)
@@ -316,7 +347,7 @@ def main():
                  SECRET2)
 
     # Отказ записи на любом файле роли -- модель не стартует, метки нет.
-    for f in ("bus.json", "prompt", "manifest.json", "ready.json"):
+    for f in ("bus.json", "soul.yaml", manifest["prompt"], "ready.json"):
         body = Body(fail=f"/{f}")
         code, out, log = launch(body, good, env)
         c.check(f"#590 a failed push of {f} stops before the model",
