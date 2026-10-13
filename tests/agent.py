@@ -3023,7 +3023,7 @@ def check_terminal_protocol_598(c):
                 write = dict(verb="term_write", _project="admin", name="pu-mop-1", owner="alice",
                              tid=tid, seq=1, data="Aw==")
                 got = await asyncio.wait_for(agent.v_term_write(None, write), 1)
-                c.expect("#598 interrupt uses actual C-c not Escape", got,
+                c.expect("#598 raw keyboard forwards Ctrl-C unchanged", got,
                          {"written": 1, "seq": 1, "outcome": "written"})
                 c.expect("#598 input only to PTY", calls, [("input", b"\x03")])
                 got = await agent.v_term_write(None, dict(write, owner="bob"))
@@ -3043,6 +3043,18 @@ def check_terminal_protocol_598(c):
                 c.expect("#598 admin retransmit does not reinput", msg.replies[0],
                          {"written": 1, "seq": 1, "outcome": "written"})
                 c.expect("#598 private route no second input/event", calls, [("input", b"\x03")])
+                # #613: Escape -- клавиша реального Stop CLI, не сигнал job
+                # control. Raw API не выбирает семантику остановки за UI.
+                escape = dict(write, seq=2, data="Gw==")
+                got = await agent.v_term_write(None, escape)
+                c.expect("#598 raw Escape forwarded without job stop", got,
+                         {"written": 1, "seq": 2, "outcome": "written"})
+                c.expect("#598 Escape does not close attach or synthesize signal", calls,
+                         [("input", b"\x03"), ("input", b"\x1b")])
+                c.expect("#598 Escape retry keeps receipt without retyping",
+                         await agent.v_term_write(None, escape), got)
+                c.expect("#598 Escape retry never types again", calls,
+                         [("input", b"\x03"), ("input", b"\x1b")])
             finally:
                 await registry.shutdown()
                 lock.release()
@@ -3110,6 +3122,119 @@ def check_terminal_claim_598(c):
     asyncio.run(scenario())
 
 
+def check_terminal_failed_open_598(c):
+    """BUG: definite failed attach оставляет lease и git identity на 600с.
+    HYPOTHESIS: _terminal_prepare settle делает до spawn/identity proof.
+    Реальные локальные git/bash, заглушки только профиля и attach/пробы.
+    SOLUTION: квитанция staged claim, settle после attach/proof, rollback
+    под owner-lock через существующее generation-safe восстановление.
+    RESULT: spawn/probe возвращают прежнюю пару, newer claim не тронут;
+    провал rollback (в том числе вместе с close) сохраняет причину/владельца.
+    STATUS: FIXED — see #598
+    """
+    import asyncio
+    import subprocess
+    import tempfile
+    from mop.common import lease
+    from mop.common.domain import Owner
+    from mop.node import terminal
+
+    async def scenario(case):
+        with tempfile.TemporaryDirectory(prefix="mop-test-terminal-") as d:
+            subprocess.run(["git", "init", "-q", "-b", "master", d], check=True)
+            for key, value in (("name", "Prior"), ("email", "prior@example.dev")):
+                subprocess.run(["git", "-C", d, "config", "--local", "user." + key, value], check=True)
+            path = os.path.join(d, lease.FILE)
+            calls = []
+            def ident():
+                return subprocess.run(["git", "-C", d, "config", "--local", "user.name"],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            async def facts(name):
+                owner = Owner.parse(open(path).read()) if os.path.exists(path) else None
+                if case == "commit-exit" and agent._owner_locks.get(name, asyncio.Lock()).locked():
+                    for s in registry.sessions.values():
+                        if s.process is not None:
+                            s.exited(1)
+                return dict(cur="master", **{"def": "master"}, dirty=0, ahead=0,
+                            owner=owner and owner.to_dict())
+            async def profile(*args):
+                return dict(name="Alice", email="alice@example.dev"), None
+            async def body(name, script, timeout=20):
+                c.check(f"#598 {case}: lease/identity shell holds owner lock",
+                        agent._owner_locks[name].locked())
+                calls.append("body")
+                return await bash(name, script, timeout)
+            count = 0
+            async def probe(name):
+                nonlocal count
+                count += 1
+                if case in ("probe-failed", "restore-and-close-failed") and count > 1:
+                    raise ValueError("fixture proof failure")
+                return dict(pid=1, start="9", sessionId="s", pane="%0", tty="/dev/pts/0")
+            class Process:
+                def write(self, raw):
+                    raise AssertionError("no input during preparation")
+                async def close(self):
+                    calls.append("close")
+                    if case == "restore-and-close-failed":
+                        raise ValueError("fixture attach close failure")
+            async def spawn(*args):
+                c.expect(f"#598 {case}: claim remains staged at attach", agent._lease_claims[path][1][0], "live")
+                c.expect(f"#598 {case}: git identity installed before attach", ident(), "Alice")
+                if case.startswith("race-"):
+                    async with agent._owner_locks["pu-mop-1"]:
+                        refused, undo, note = await agent._claim("pu-mop-1", {"owner": "alice", "_caller": "alice"})
+                        c.expect("#598 same-owner new claim succeeds", refused, None)
+                        subprocess.run(["git", "-C", d, "config", "--local", "user.name", "Newer Alice"], check=True)
+                        if case == "race-settled":
+                            agent._settle(undo[0], undo[3])
+                    raise ValueError("fixture attach failure")
+                if case in ("spawn-failed", "restore-failed"):
+                    raise ValueError("fixture attach failure")
+                return Process()
+            registry = terminal.Registry(probe, agent._terminal_owner, spawn)
+            patches = dict(TERMINALS=registry, clone_facts=facts, clone_dir=lambda name: d,
+                           bsh=body, owner_profile=profile, _owner_locks={}, _lease_claims={},
+                           _lease_holder={}, _lease_generations={})
+            if case in ("restore-failed", "restore-and-close-failed"):
+                patches["_restore_script"] = lambda *args: "exit 1"
+            with patched(agent, **patches):
+                try:
+                    req = dict(verb="term_open", _project="admin", name="pu-mop-1", owner="alice",
+                               mode="rw", cols=80, rows=24)
+                    got = await agent.v_term_open(None, req)
+                    if case == "success":
+                        c.check("#598 proof then commit returns handle", "tid" in got, repr(got))
+                        c.expect("#598 successful open settles only after proof", agent._lease_claims[path][1][0], "settled")
+                    else:
+                        c.check(f"#598 {case}: failed open returns reason", "error" in got, repr(got))
+                        c.expect(f"#598 {case}: no leaked terminal", registry.sessions, {})
+                        if case.startswith("race-"):
+                            c.expect(f"#598 {case}: newer same-owner git identity untouched", ident(), "Newer Alice")
+                            c.expect(f"#598 {case}: newer lease generation untouched", agent._lease_holder[path], 2)
+                        elif case in ("restore-failed", "restore-and-close-failed"):
+                            c.check("#598 rollback failure reason survives", "git identity not restored" in got.get("error", ""), repr(got))
+                            c.check("#598 failed restoration retains actual owner", os.path.exists(path))
+                            c.expect("#598 retained lease names actual owner", Owner.parse(open(path).read()).user, "alice")
+                            c.expect("#598 failed restoration retains actual git identity", ident(), "Alice")
+                            c.expect("#598 failed restoration never marked restored", agent._lease_claims[path][1][0], "live")
+                        else:
+                            c.check(f"#598 {case}: new lease removed", not os.path.exists(path))
+                            c.expect(f"#598 {case}: prior git identity restored", ident(), "Prior")
+                            email = subprocess.run(["git", "-C", d, "config", "--local", "user.email"],
+                                                   capture_output=True, text=True, check=True).stdout.strip()
+                            c.expect(f"#598 {case}: prior email restored", email, "prior@example.dev")
+                            for hook in ("pre-commit", "pre-merge-commit"):
+                                c.check(f"#598 {case}: no leaked {hook}",
+                                        not os.path.exists(os.path.join(d, ".git", "hooks", hook)))
+                            c.expect(f"#598 {case}: no leaked claim", agent._lease_claims[path], {})
+                finally:
+                    await registry.shutdown()
+    for case in ("spawn-failed", "probe-failed", "race-live", "race-settled",
+                 "restore-failed", "restore-and-close-failed", "commit-exit", "success"):
+        asyncio.run(scenario(case))
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -3124,7 +3249,7 @@ def main():
                   check_junk_without_templates_276, check_owner_hook_313,
                   check_sweep_report_358, check_sweep_bodies_363,
                   check_hung_sweep_373, check_terminal_admin_598, check_terminal_protocol_598,
-                  check_terminal_claim_598):
+                  check_terminal_claim_598, check_terminal_failed_open_598):
         try:
             check(c)
         except Exception as e:

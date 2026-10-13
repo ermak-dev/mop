@@ -1447,6 +1447,23 @@ async def _terminal_owner(name, owner, claim=False, require_owner=False):
     return clone
 
 
+class _TerminalPreparation:
+    """Квитанция provisional claim: подтвердить после attach + proof либо
+    вернуть пару на definite pre-input failure. Оба перехода под owner-lock;
+    новый send того же владельца защищён поколением, не байтами аренды."""
+    def __init__(self, name, owner, undo):
+        self.name, self.owner, self.undo = name, owner, undo
+
+    async def commit(self):
+        async with _owner_locks.setdefault(self.name, asyncio.Lock()):
+            await _terminal_owner(self.name, self.owner, require_owner=True)
+            _settle(self.undo[0], self.undo[3])
+
+    async def rollback(self):
+        async with _owner_locks.setdefault(self.name, asyncio.Lock()):
+            return await _restore_identity_and_lease(self.name, self.undo)
+
+
 async def _terminal_prepare(conn, name, owner, claim=False):
     clone = await _terminal_owner(name, owner)
     if not claim or (clone.owner and clone.owner.user == owner):
@@ -1470,7 +1487,7 @@ async def _terminal_prepare(conn, name, owner, claim=False):
             raise ValueError(failed)
         if undo:
             _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
-            _settle(undo[0], undo[3])
+            return _TerminalPreparation(name, owner, undo)
 
 
 async def _terminal_probe(name):

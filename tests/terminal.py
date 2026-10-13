@@ -4,8 +4,12 @@
 HYPOTHESIS: attach-процесс не доказывает живую Claude-сессию; повтор RPC
 может повторно ввести клавиши, а capture-pane не является потоком байтов.
 SOLUTION: приватный ограниченный реестр, строгая identity и одноразовый seq.
-RESULT: реестр и агент прошли узкие строгие проверки; локальный stdlib-PTY
-подтвердил controlling terminal без Claude/пула и без оплачиваемых вызовов.
+Коррекция: foreground -- из /proc, не ioctl чужого tty; сравнение registry
+только по identity; staged open не разрешает ввод до commit. Забытый ack
+даёт unknown, отсутствующий close -- idempotent, новый writer открывается.
+RESULT: red реальной пробы показал ENOTTY без патчей ядра; локальный
+stdlib-PTY подтвердил probe независимого non-CTTY caller и статусные гонки
+без Claude/пула и без оплачиваемых вызовов.
 STATUS: FIXED — see #598
 """
 import asyncio
@@ -161,6 +165,96 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     await call()
         self.assertFalse(self.ptys[0].closed)
 
+    async def test_lost_write_ack_after_expiry_is_unknown_never_redelivered(self):
+        # BUG: реестр забывает подтверждение после TTL, отказ не доказывает
+        # недоставку старого seq. HYPOTHESIS: unknown для отсутствующего tid.
+        tid = (await self.open())["tid"]
+        await self.r.write("pu-mop-1", "alice", tid, 1, "eA==")  # ack потерян
+        self.now = 31
+        await self.r.maintain()
+        got = await self.r.write("pu-mop-1", "alice", tid, 1, "eA==")
+        self.assertEqual(got, {"written": 0, "seq": 1, "outcome": "unknown"})
+        self.assertEqual(self.ptys[0].input, [b"x"])
+        fresh = (await self.open())["tid"]
+        with self.assertRaises(ValueError):
+            await self.r.write("pu-mop-1", "alice", fresh, 2, "eA==")
+        self.assertEqual(self.ptys[1].input, [])
+        self.assertEqual(await self.r.write("pu-mop-1", "alice", fresh, 1, "eA=="),
+                         {"written": 1, "seq": 1, "outcome": "written"})
+        self.assertEqual(self.ptys[1].input, [b"x"])
+        self.assertEqual(await self.r.write("pu-mop-1", "alice", tid, 1, "eA=="), got)
+        self.assertEqual(self.ptys[1].input, [b"x"])
+
+    async def test_old_consumed_sequence_without_receipt_is_unknown(self):
+        # Старый ack потерян, новая запись уже сменила единственную квитанцию.
+        tid = (await self.open())["tid"]
+        await self.r.write("pu-mop-1", "alice", tid, 1, "eA==")
+        await self.r.write("pu-mop-1", "alice", tid, 2, "eQ==")
+        self.assertEqual(await self.r.write("pu-mop-1", "alice", tid, 1, "eA=="),
+                         {"written": 0, "seq": 1, "outcome": "unknown"})
+        self.assertEqual(self.ptys[0].input, [b"x", b"y"])
+        self.now = 31
+        self.assertEqual(await self.r.write("pu-mop-1", "alice", tid, 2, "eQ=="),
+                         {"written": 1, "seq": 2, "outcome": "written"})
+        self.assertEqual(self.ptys[0].input, [b"x", b"y"])
+
+    async def test_partial_and_eagain_unknown_close_without_reinput(self):
+        for failure in (lambda raw: 1, lambda raw: (_ for _ in ()).throw(BlockingIOError())):
+            tid = (await self.open())["tid"]
+            self.ptys[-1].write = failure
+            got = await self.r.write("pu-mop-1", "alice", tid, 1, "eHg=")
+            self.assertEqual(got["outcome"], "unknown")
+            self.assertTrue(self.ptys[-1].closed)
+            self.assertEqual(await self.r.write("pu-mop-1", "alice", tid, 1, "eHg="), got)
+            await self.r.close("pu-mop-1", "alice", tid)
+
+    async def test_close_missing_closed_and_expired_is_idempotent(self):
+        tid = (await self.open())["tid"]
+        self.assertEqual(await self.r.close("pu-mop-1", "alice", tid), {"ok": True})
+        self.assertEqual(await self.r.close("pu-mop-1", "alice", tid), {"ok": True})
+        self.assertEqual(await self.r.close("pu-mop-1", "alice", "missing"), {"ok": True})
+        tid = (await self.open())["tid"]
+        self.now = 31
+        await self.r.maintain()
+        self.assertEqual(await self.r.close("pu-mop-1", "alice", tid), {"ok": True})
+
+    async def test_attach_exit_during_commit_compensates_before_return(self):
+        calls = []
+        class Receipt:
+            async def commit(inner):
+                calls.append("commit")
+                self.ptys[-1].on_exit(1)
+            async def rollback(inner):
+                calls.append("rollback")
+        async def prepare(*args, **kwargs):
+            return Receipt()
+        with self.assertRaisesRegex(ValueError, "attach exited"):
+            await self.r.open("pu-mop-1", "alice", "rw", 80, 24, prepare)
+        self.assertEqual(calls, ["commit", "rollback"])
+        self.assertEqual(self.r.sessions, {})
+        self.assertTrue(self.ptys[0].closed)
+        self.assertEqual(self.ptys[0].input, [])
+
+    async def test_authorization_snapshot_is_not_a_preparation_receipt(self):
+        authorize = self.r.authorize
+        async def snapshot(*args, **kwargs):
+            await authorize(*args, **kwargs)
+            return {"known": True}
+        self.r.authorize = snapshot
+        self.assertIn("tid", await self.open())
+
+    async def test_provisional_handle_cannot_type_before_commit(self):
+        async def spawn(*args):
+            tid = next(iter(self.r.sessions))
+            with self.assertRaises(ValueError):
+                await self.r.write("pu-mop-1", "alice", tid, 1, "eA==")
+            p = FakePTY()
+            self.ptys.append(p)
+            return p
+        self.r.spawn = spawn
+        await self.open()
+        self.assertEqual(self.ptys[0].input, [])
+
     async def test_writer_concurrency_caps_and_expiry(self):
         got = await asyncio.gather(self.open(), self.open(), return_exceptions=True)
         self.assertEqual(sum(isinstance(x, dict) for x in got), 1)
@@ -282,8 +376,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
             def opened(path, *a, **kw):
                 return io.StringIO(proc)
             with patch("subprocess.run", return_value=pane), patch("builtins.open", side_effect=opened), \
-                    patch("os.stat", return_value=device), patch("os.open", return_value=999), \
-                    patch("os.close"), patch("os.tcgetpgrp", return_value=123) as foreground:
+                    patch("os.stat", return_value=device):
                 got = self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
                 self.assertEqual(got, IDENT)
                 after = fields.copy()
@@ -292,13 +385,80 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                 with patch("builtins.open", side_effect=[io.StringIO(proc), io.StringIO(proc_after)]):
                     with self.assertRaises(ValueError):
                         self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
-                foreground.return_value = 124
-                with self.assertRaises(ValueError):
-                    self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
-                foreground.return_value = 123
+                with patch("builtins.open", return_value=io.StringIO(proc_after)):
+                    with self.assertRaises(ValueError):
+                        self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
                 pane.stdout = "%0\t/dev/pts/7\n%1\t/dev/pts/8\n"
                 with self.assertRaises(ValueError):
                     self.t.resolve_body_identity(str(path), "/clone", self.t.pane_argv("pu-mop-1"))
+
+    async def real_body_probe(self, changing=False, identity_change=None):
+        # BUG: O_NOCTTY + tcgetpgrp из чужой session всегда даёт ENOTTY.
+        # HYPOTHESIS: /proc уже доказывает foreground; ioctl ошибочно требует
+        # controlling tty вызывающего, а полный registry сравнивает status.
+        import json
+        import shlex
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        output = bytearray()
+        child = ("import os,json; assert os.tcgetpgrp(0)==os.getpgrp(); "
+                 "os.write(1,(json.dumps(dict(pid=os.getpid(),tty=os.ttyname(0)))+'\\n').encode()); "
+                 "os.read(0,1)")
+        process = await self.t.PTY.spawn([sys.executable, "-I", "-c", child], 80, 24,
+                                        output.extend, lambda code: None)
+        try:
+            async def ready():
+                while b"\n" not in output:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(ready(), 3)
+            info = json.loads(output)
+            with tempfile.TemporaryDirectory() as directory:
+                source = Path(directory, "session_source.py")
+                metadata = dict(pid=info["pid"], sessionId="real-session", cwd=directory,
+                                messagingSocketPath="fixture-socket")
+                source.write_text(
+                    f"record={metadata!r}\ncount=0\n"
+                    "def live_session_for_cwd(cwd):\n"
+                    " global count\n count+=1\n"
+                    f" return dict(record, **({(identity_change or {})!r} if count>1 else {{}}))\n"
+                    "def sessions():\n"
+                    " return [dict(record, **" + repr(dict(status='working', updatedAt=2, waitingFor='tool') if changing else {}) + ")]\n"
+                    "def socket_alive(path): return True\n")
+                argv = [sys.executable, "-I", "-c", f"print('%0\\t{info['tty']}')"]
+                with patch.object(self.t, "pane_argv", return_value=argv):
+                    script = self.t.probe_script(str(source), directory, "pu-mop-1")
+                caller = await asyncio.create_subprocess_exec(
+                    *shlex.split(script), stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True)
+                stdout, stderr = await asyncio.wait_for(caller.communicate(), 3)
+                return caller.returncode, stdout, stderr, info
+        finally:
+            await process.close()
+
+    async def test_real_body_probe_from_independent_noncontrolling_caller(self):
+        code, out, err, info = await self.real_body_probe()
+        self.assertEqual(code, 0, err.decode())
+        import json
+        got = json.loads(out)
+        self.assertEqual(got["pid"], info["pid"])
+        self.assertEqual(got["tty"], info["tty"])
+        self.assertEqual(got["sessionId"], "real-session")
+        self.assertEqual(got["pane"], "%0")
+        self.assertTrue(got["start"].isdigit())
+
+    async def test_real_body_probe_ignores_mutable_registry_status(self):
+        code, out, err, info = await self.real_body_probe(changing=True)
+        self.assertEqual(code, 0, err.decode())
+
+    async def test_real_body_probe_rejects_registry_identity_changes(self):
+        for change in ({"sessionId": "new"}, {"pid": 1},
+                       {"messagingSocketPath": "new-socket"}, {"cwd": "/other"}):
+            with self.subTest(change=change):
+                code, out, err, info = await self.real_body_probe(identity_change=change)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(out, b"")
 
     async def test_controlling_pty_fixture_without_claude(self):
         # Никакой модели/пула: проверяем setsid -c маленьким stdlib-процессом.
@@ -323,6 +483,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(.01)
             await asyncio.wait_for(ready(), 3)
             self.assertIn(b"\x1b[31mREADY\xff", output)
+            self.assertFalse(os.get_blocking(process.fd), "node PTY writes must never block")
             process.resize(100, 30)
             self.assertEqual(process.write(b"x"), 1)
             await asyncio.wait_for(exited.wait(), 3)

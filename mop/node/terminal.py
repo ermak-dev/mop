@@ -5,6 +5,14 @@ Claude может выйти, сменить sessionId или foreground group: 
 гарантии здесь нет. Проверяем до каждого управления и раз в 5 секунд;
 неизвестный исход записи запрещает дальнейший ввод и никогда не повторяется.
 Закрываем только attach-клиента, не tmux-сервер и не Claude.
+
+Это доверенный admin-терминал всего тела без редактирования вывода, с теми
+же правами, что CLI attach + Claude. tmux prefix/run-shell не фильтруется;
+фильтр клавиш не был бы границей безопасности. Контракт тела: пейн прямо
+исполняет Claude и заканчивается при его выходе, не возвращается в shell.
+PID/start/sessionId, socket/cwd, foreground и tty проверяются свежими
+снимками; выход attach/смена identity закрывают поток. Между последней
+пробой и вводом остаётся неатомарное окно, не гарантия syscall-level fencing.
 """
 import asyncio
 import base64
@@ -137,11 +145,21 @@ def resolve_body_identity(session_py, cwd, tmux_argv):
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
+    def identity(record):
+        # status/updatedAt/waitingFor меняются во время нормальной работы.
+        if not record:
+            return None
+        return (record.get("pid"), record.get("sessionId"),
+                record.get("messagingSocketPath"), os.path.realpath(record.get("cwd") or ""))
+
+    def candidates():
+        return [s for s in mod.sessions()
+                if os.path.realpath(s.get("cwd") or "") == os.path.realpath(cwd)
+                and mod.socket_alive(s["messagingSocketPath"])]
+
     live = mod.live_session_for_cwd(cwd)
-    matches = [s for s in mod.sessions()
-               if os.path.realpath(s.get("cwd") or "") == os.path.realpath(cwd)
-               and mod.socket_alive(s["messagingSocketPath"])]
-    if not live or len(matches) != 1 or live != matches[0]:
+    matches = candidates()
+    if not live or len(matches) != 1 or identity(live) != identity(matches[0]):
         raise ValueError("session identity ambiguous or unavailable")
     pid = live.get("pid")
     sid = live.get("sessionId")
@@ -165,19 +183,20 @@ def resolve_body_identity(session_py, cwd, tmux_argv):
     if (not stat.S_ISCHR(pane_stat.st_mode) or pane_stat.st_rdev != input_stat.st_rdev
             or dev != pane_stat.st_rdev):
         raise ValueError("Claude tty does not match the tmux pane")
-    fd = os.open(path, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
-    try:
-        if os.tcgetpgrp(fd) != int(fields[2]):
-            raise ValueError("Claude is not the terminal foreground process group")
-    finally:
-        os.close(fd)
+    # tcgetpgrp чужого O_NOCTTY fd даёт ENOTTY: foreground доказан выше
+    # полями pgrp/tpgid /proc целевого процесса, не tty вызывающего.
     # Повтор снимка отсекает исчезновение PID во время первой пробы.
     with open(f"/proc/{pid}/stat") as f:
         value = f.read()
         after = value[value.rfind(")") + 2:].split()
     current = mod.live_session_for_cwd(cwd)
+    matches = candidates()
     if (after[0] == "Z" or any(after[i] != fields[i] for i in (2, 4, 5, 19))
-            or not current or current.get("sessionId") != sid or current.get("pid") != pid):
+            or identity(current) != identity(live) or len(matches) != 1
+            or identity(matches[0]) != identity(live)
+            or not mod.socket_alive(current["messagingSocketPath"])
+            or os.stat(path).st_rdev != pane_stat.st_rdev
+            or os.stat(f"/proc/{pid}/fd/0").st_rdev != pane_stat.st_rdev):
         raise ValueError("terminal session changed during identity probe")
     return {"pid": pid, "start": fields[19], "sessionId": sid, "pane": pane, "tty": path}
 
@@ -380,17 +399,44 @@ class Registry:
             s = Session(name, owner, mode, cols, rows, None, secrets.token_urlsafe(18), self.clock())
             tid = secrets.token_urlsafe(32)
             self.sessions[tid] = s
+        receipt = None
         try:
-            # Сначала доказать сессию, потом менять аренду/identity клона.
+            # Сначала доказать сессию, потом staged claim/identity клона.
             s.identity = Identity.from_dict(await self.probe(name))
-            await (prepare or self.authorize)(name, owner, claim=(mode == "rw"))
+            if prepare is None:
+                await self.authorize(name, owner, claim=(mode == "rw"))
+            else:
+                receipt = await prepare(name, owner, claim=(mode == "rw"))
             s.process = await self.spawn(name, mode, cols, rows, s.output, s.exited)
             await self._check(s)
+            if s.closed:
+                raise ValueError("terminal attach exited before open")
+            if receipt is not None:
+                await receipt.commit()
+            if s.closed:
+                raise ValueError("terminal attach exited before open")
             s.opening = False
             s.touched = self.clock()
-        except BaseException:
-            await self._close(s)
-            self.sessions.pop(tid, None)
+        except BaseException as exc:
+            # До commit ввод запрещён: это definite pre-input failure.
+            # Ошибка закрытия attach не должна пропустить компенсацию пары.
+            failures = []
+            try:
+                await self._close(s)
+            except Exception as close_error:
+                failures.append(f"terminal attach close failed ({type(close_error).__name__})")
+            finally:
+                self.sessions.pop(tid, None)
+                if receipt is not None:
+                    try:
+                        failed = await receipt.rollback()
+                    except Exception as rollback_error:
+                        failed = f"terminal ownership rollback failed ({type(rollback_error).__name__})"
+                    if failed:
+                        failures.append(failed)
+            if failures:
+                reason = str(exc) if isinstance(exc, ValueError) else f"terminal open failed ({type(exc).__name__})"
+                raise ValueError("; ".join([reason, *failures])) from None
             raise
         if self.maintenance is None:
             self.maintenance = asyncio.create_task(self._maintain_loop())
@@ -423,17 +469,27 @@ class Registry:
                 "reset": reset, "closed": s.closed, "exit": s.exit, "epoch": s.epoch}
 
     async def write(self, name, owner, tid, seq, data):
-        s = self._get(name, owner, tid)
+        actor(name, owner)
         integer(seq, 1, 2**63 - 1, "seq")
         raw = decode_input(data)
+        if tid not in self.sessions:
+            # TTL/перезапуск/close могли забыть ack уже введённых клавиш.
+            # Отсутствие квитанции не доказывает недоставку: никогда не вводим.
+            return {"written": 0, "seq": seq, "outcome": "unknown"}
+        s = self._get(name, owner, tid)
         digest = hashlib.sha256(raw).hexdigest()
         async with s.lock:
+            if s.opening:
+                raise ValueError("terminal open not committed")
             if s.mode != "rw":
                 raise ValueError("terminal is read-only")
             if seq == s.seq:
                 if digest != s.digest:
                     raise ValueError("terminal sequence reused with different input")
                 return dict(s.receipt)
+            if seq < s.seq:
+                # Более старый ack уже вытеснен: не объявляем недоставленным.
+                return {"written": 0, "seq": seq, "outcome": "unknown"}
             if seq != s.seq + 1:
                 raise ValueError("terminal sequence must be the next number")
             await self._expired(s)
@@ -475,6 +531,9 @@ class Registry:
             await s.process.close()
 
     async def close(self, name, owner, tid):
+        actor(name, owner)
+        if tid not in self.sessions:
+            return {"ok": True}
         s = self._get(name, owner, tid)
         async with s.lock:
             await self._close(s)
