@@ -158,12 +158,13 @@ async def role_bootstrap_ask(project, name, address):
     raise RuntimeError("role bootstrap is not wired to the node channel yet")
 
 
-def bootstrap_sandbox(d, name, project, ask=None):
+def bootstrap_sandbox(d, name, project, node_qualified=False):
     """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
     дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
 
-    ask -- чем спросить сервер вместо анонимного server.rpc (ролевой джоб,
-    #603): канал узла, а не проектный вопрос человека.
+    node_qualified -- спросить именованным каналом узла (ролевой джоб,
+    #603): личный кред принципала выдаёт только хозяину узла, анонимный
+    server.rpc зовут и люди проекта. Легаси -- прежний анонимный вопрос.
 
     Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
     любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
@@ -182,11 +183,11 @@ def bootstrap_sandbox(d, name, project, ask=None):
         if r.get("error"):
             raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
-        if ask is None:
+        if node_qualified:
+            out = asyncio.run(role_bootstrap_ask(project, name, address))
+        else:
             out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
                                  project=project, name=name, address=address)
-        else:
-            out = ask()
     finally:
         # Закрыть -- и после неудачного впуска: стоп мог прийти посреди него.
         asyncio.run(d.admit(name, False))
@@ -377,11 +378,9 @@ def deliver_role(d, name, role, b, inside):
           f"{os.path.dirname(ready)}", flush=True)
 
 
-def main(argv, ask=None):
+def main(argv):
     """Поднять тело и отработать в нём внутренний врапер. Зовётся из спеки.
 
-    ask -- чем ролевой джоб спрашивает bootstrap у сервера вместо
-    анонимного server.rpc (шов #603); None -- прежний проектный вопрос.
 
     Смерть врапера обязана убивать сессию. На «живой папет = живая tmux-сессия
     с именем джоба» стоит и ростер, и сбор сирот: умри внешний врапер молча,
@@ -455,7 +454,7 @@ def main(argv, ask=None):
     # поднимается «наполовину» с окружением, которого нет.
     try:
         b = bootstrap_sandbox(d, name, driver.project_of_name(name),
-                              ask=ask if role is not None else None)
+                              node_qualified=role is not None)
     except (RuntimeError, bus.BusError) as e:
         sys.exit(refusal(name, e))
     print(f"{name}: bootstrap "

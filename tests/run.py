@@ -102,6 +102,12 @@ class Body:
     async def ensure(self, name, params):
         return {"name": name, "body": None, "created": False}
 
+    def address(self, name):
+        return "10.0.0.5"
+
+    async def admit(self, name, on):
+        return {}
+
     def run_argv(self, name):
         return []
 
@@ -140,10 +146,16 @@ def fake_identity(body):
     return identity
 
 
-def launch(body, reply, env, name=NAME, ask=None):
+def launch(body, reply, env, name=NAME):
     """main() с подменённым миром. -> (код|SystemExit-текст, stdout, лог).
     Лог -- push'и, шеллы в теле и запуск врапера в порядке исполнения."""
-    ask = ask or (lambda: reply)
+    async def role_ask(project, name, address):
+        body.log.append(("bootstrap-ask", ("role", project, name, address)))
+        return reply
+
+    def legacy_ask(*a, **k):
+        body.log.append(("bootstrap-ask", ("legacy",)))
+        return reply
     class Proc:
         def __init__(self, argv, *a, **kw):
             body.log.append(("launch", argv))
@@ -170,13 +182,14 @@ def launch(body, reply, env, name=NAME, ask=None):
     try:
         with patched_env(**{**base, **env}), \
                 patched(driver, current=lambda: body), \
-                patched(run, bootstrap_sandbox=lambda d, n, p, ask=None:
-                        ask() if ask is not None else reply), \
-                patched(run, initial_identity=fake_identity(body)), \
+                patched(run, role_bootstrap_ask=role_ask,
+                        initial_identity=fake_identity(body)), \
+                patched(run.bus, connect=lambda *a, **k: None,
+                        ask_server=legacy_ask), \
                 patched(run.subprocess, run=sh, Popen=Proc), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                code = run.main([name], ask=ask)
+                code = run.main([name])
             except SystemExit as e:
                 code = str(e.code)
     finally:
@@ -219,6 +232,8 @@ def main():
     c.check("#590 legacy: no role directory appears",
             not any("/souls/" in p for p in body.files), sorted(body.files))
     c.check("#590 legacy: the password is not printed", PROJECT_SECRET not in out, out)
+    c.expect("#590 legacy: the bootstrap ask rides the anonymous server.rpc",
+             [a for k, a in log if k == "bootstrap-ask"], [("legacy",)])
 
     # Легаси-джоб, которому сервер прислал роль, -- рассогласование: отказ.
     body = Body()
@@ -419,13 +434,19 @@ def main():
             return {}
     d2, asked = D2(), []
     ok_reply = {"ok": True, "played": False}
-    with patched(run.bus, connect=lambda *a, **k: None), \
-            patched(run.bus, ask_server=lambda *a, **k:
-                    asked.append("legacy") or dict(ok_reply)):
-        run.bootstrap_sandbox(d2, NAME, "mop",
-                              ask=lambda: asked.append("role") or dict(ok_reply))
-        c.expect("#590 a role job asks bootstrap on the node-qualified channel",
-                 asked, ["role"])
+
+    async def role_ask(project, name, address):
+        asked.append(("role", project, name, address))
+        return dict(ok_reply)
+
+    def legacy_ask(*a, **k):
+        asked.append("legacy")
+        return dict(ok_reply)
+    with patched(run.bus, connect=lambda *a, **k: None, ask_server=legacy_ask), \
+            patched(run, role_bootstrap_ask=role_ask):
+        run.bootstrap_sandbox(d2, NAME, "mop", node_qualified=True)
+        c.expect("#590 a role ask goes to the node-qualified channel by name",
+                 asked, [("role", "mop", NAME, "10.0.0.9")])
         c.expect("#590 the door still closes for a role ask", d2.doors, [True, False])
         asked.clear()
         run.bootstrap_sandbox(d2, NAME, "mop")
