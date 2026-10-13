@@ -170,11 +170,12 @@ def repair_argv(name):
     return []
 
 
-def attach_argv(name):
+def attach_argv(name, *, read_only=False):
     """Чем человек входит в сессию папета — изнутри узла.
 
-    `mop attach` доводит человека до узла своим ssh и дальше исполняет это."""
-    return Tmux(name).attach_argv()
+    `mop attach` доводит человека до узла своим ssh и дальше исполняет это.
+    read_only оставляет читателя без ввода и влияния на размер сессии."""
+    return Tmux(name).attach_argv(read_only=read_only)
 
 
 async def push(name, path, data):

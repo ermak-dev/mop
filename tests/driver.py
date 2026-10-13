@@ -117,6 +117,12 @@ CONTRACT = [
     ("argv with a required extra", plugin(argv=lambda name, extra: None), False),
     ("destroy(name, branch=None)",
      plugin(destroy=_async(lambda name, branch=None: None)), True),
+    # #614: старый плагин не должен пройти контракт и упасть на читателе.
+    ("attach_argv without read_only", plugin(attach_argv=lambda name: None), False),
+    ("attach_argv with optional read_only keyword",
+     plugin(attach_argv=lambda name, *, read_only=False: None), True),
+    ("attach_argv with required read_only breaks CLI default",
+     plugin(attach_argv=lambda name, *, read_only: None), False),
 ]
 
 # Имя папета склеивается в шелл — и у host, и у драйвера контейнеров. Проверка
@@ -139,7 +145,7 @@ HOST_ARGV = [
     ("nothing to connect with either: the wrapper runs here", "run_argv", []),
     ("repair path is the same as the main one", "repair_argv", []),
     ("a human attaches to the puppet's own tmux server", "attach_argv",
-     ["tmux", "-L", "pu-mop-1", "attach", "-t", "pu-mop-1"]),
+     ["tmux", "-u", "-L", "pu-mop-1", "attach-session", "-t", "pu-mop-1"]),
 ]
 
 
@@ -677,8 +683,67 @@ def check_sh_split_env_373(c):
     c.expect("#373 sh(split=True) on a timeout -> code None", got, ("", "", None))
 
 
+# HYPOTHESIS (#614): attach_argv знает только писателя; веб-читатель без
+# read-only,ignore-size сможет вводить клавиши и менять размер сессии.
+# Проверяем argv без запуска tmux/ssh: Unicode явный, читатель не влияет
+# на ввод и размер, оба драйвера передают режим общему сборщику.
+# SOLUTION: общий Tmux собирает -u attach-session и флаги читателя;
+# транспорты передают read_only, CALLS отвергает старые сигнатуры.
+# RESULT: строгая проверка сначала упала на 18 утверждениях, после правки зелёная.
+# STATUS: FIXED — see #614
+def check_readonly_attach_614(c):
+    from mop.driver import host, pve
+
+    name = "pu-mop-1"
+    writer = ["tmux", "-u", "-L", name, "attach-session", "-t", name]
+    reader = ["tmux", "-u", "-L", name, "attach-session",
+              "-f", "read-only,ignore-size", "-t", name]
+    prefix = ["ssh", "-t", *pve._SSH_OPTS, f"{pve.USER}@{pve.address_of(name)}"]
+    for label, attach, transport in (
+            ("Tmux", driver.Tmux(name).attach_argv, []),
+            ("host", lambda **kw: host.attach_argv(name, **kw), []),
+            ("pve", lambda **kw: pve.attach_argv(name, **kw), prefix)):
+        for mode, kwargs, expected in (
+                ("default writer", {}, writer),
+                ("explicit writer", {"read_only": False}, writer),
+                ("reader", {"read_only": True}, reader)):
+            try:
+                got = attach(**kwargs)
+            except TypeError as e:
+                c.fail(f"#614 {label}: {mode} must accept the attach contract", str(e))
+            else:
+                c.expect(f"#614 {label}: exact {mode} argv", got, transport + expected)
+
+    c.expect("#614 CALLS checks default, explicit writer and reader",
+             driver.CALLS["attach_argv"],
+             [(("n",), {}), (("n",), {"read_only": False}),
+              (("n",), {"read_only": True})])
+
+    # Подмена только сборщика: режим должен дойти до него, а не быть
+    # повторно реализован каждым транспортом.
+    for label, mod, transport in (("host", host, []), ("pve", pve, prefix)):
+        seen = []
+
+        def attach_spy(self, *, read_only=False):
+            seen.append((self.name, read_only))
+            return ["tmux-sentinel"]
+
+        with patched(driver.Tmux, attach_argv=attach_spy):
+            for read_only in (False, True):
+                try:
+                    got = mod.attach_argv(name, read_only=read_only)
+                except TypeError as e:
+                    c.fail(f"#614 {label}: forwards read_only={read_only}", str(e))
+                else:
+                    c.expect(f"#614 {label}: preserves transport and builder argv",
+                             got, transport + ["tmux-sentinel"])
+        c.expect(f"#614 {label}: forwards both modes to Tmux",
+                 seen, [(name, False), (name, True)])
+
+
 def main():
     c = Checks()
+    check_readonly_attach_614(c)
     check_sh_split_env_373(c)
     check_gave_up_wrapper_345(c)
     check_sweep_keeps_work_346(c)
