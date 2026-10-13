@@ -22,14 +22,13 @@ role_bootstrap_ask), не анонимным server.rpc.
 """
 import asyncio
 import base64
-import contextlib
 import io
 import json
 import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched, patched_env  # noqa: E402
+from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import yaml  # noqa: E402
@@ -182,7 +181,6 @@ def launch(body, reply, env, name=NAME):
             returncode, stdout, stderr = 0, "", ""
         return R()
 
-    out, err = io.StringIO(), io.StringIO()
     base = {"PU_WRAPPER": WRAPPER, "PU_ORIGIN": "git@example:mop.git",
             "PU_CLONE": f"/home/u/puppets/{name}", "NOMAD_META_soul": None,
             "NOMAD_META_soul_digest": None, "NOMAD_META_soul_inc": None}
@@ -195,16 +193,13 @@ def launch(body, reply, env, name=NAME):
                         initial_identity=fake_identity(body)), \
                 patched(run.bus, connect=lambda *a, **k: None,
                         ask_server=legacy_ask), \
-                patched(run.subprocess, run=sh, Popen=Proc), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                code = run.main([name])
-            except SystemExit as e:
-                code = str(e.code)
+                patched(run.subprocess, run=sh, Popen=Proc):
+            out, err, code = run_command(run.main, [name])
     finally:
         for s, h in saved.items():
             signal.signal(s, h)
-    return code, out.getvalue() + err.getvalue(), body.log
+    return (str(code) if isinstance(code, str) else code,
+            out + err, body.log)
 
 
 def brief(log):
