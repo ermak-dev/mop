@@ -211,7 +211,9 @@ def check_template_version(c):
 # (имя, origin, cont): проект с точкой в имени (экранирование в ограничении)
 # и разовый подъём с историей. Драйвера среди входов нет: спека от него не
 # зависит — внешний врапер один на все тела (docs/DRIVER.md). Профилей
-# больше нет (#390): окружение LLM одно.
+# больше нет (#390): окружение LLM одно. Ролевой вход (#583) -- отдельным
+# списком (ROLE_RENDER ниже): render_role зовётся с тройкой, тройка --
+# у #583-х помощников глубже по файлу.
 SPEC_INPUTS = [
     ("pu-mop-1", "git@git.example.dev:someone/mop.git", False),
     ("pu-mop-2", "git@git.example.dev:someone/mop.git", False),
@@ -271,6 +273,20 @@ def check_llm_env_449(c):
 def render(name, origin, cont):
     """Спека ровно так, как её увидит Nomad: JSON, в порядке ключей."""
     return json.dumps(spec.job_spec(name, origin, cont=cont),
+                      ensure_ascii=False, indent=1)
+
+
+# Ролевой вход слепка (#583): тройка из поставляемой роли (mop/skills) --
+# стабильный digest реального бандла, едет в спеку и в слепок байт в байт.
+ROLE_RENDER = ("pu-mop-9", "git@git.example.dev:someone/mop.git", False)
+
+
+def render_role(name, origin, cont):
+    """Ролевая спека -- так же в Nomad: с тройкой роли (#583)."""
+    manifest, prompt, digest = role_triple("puppet")
+    return json.dumps(spec.job_spec(name, origin, cont=cont,
+                                    soul=manifest["soul"],
+                                    soul_digest=digest, soul_inc=INC),
                       ensure_ascii=False, indent=1)
 
 
@@ -365,8 +381,18 @@ def check_snapshot(c):
                    not (got != want.get(key))):
             c.check(f"the snapshot spec for {key} reads as stale",
                     not (spec.spec_is_stale(json.loads(want[key])["Job"])))
+    # Ролевой случай (#583): свой ключ, тройка в Meta и PU_SOUL* в окружении
+    key = " ".join(str(x) for x in ROLE_RENDER) + " role"
+    if c.check(f"rendered role spec for {key} differs from the snapshot",
+               not (render_role(*ROLE_RENDER) != want.get(key))):
+        job = json.loads(want[key])["Job"]
+        c.check("the snapshot role spec reads as stale",
+                not (spec.spec_is_stale(job)
+                     or job["Meta"].get("soul") != "puppet"
+                     or "PU_SOUL_DIR" not in job["TaskGroups"][0]["Tasks"][0]["Env"]))
     c.check("the snapshot and SPEC_INPUTS disagree on the cases",
-            not (set(want) != {" ".join(str(x) for x in i) for i in SPEC_INPUTS}))
+            not (set(want) != {" ".join(str(x) for x in i) for i in SPEC_INPUTS}
+                 | {key}))
 
 
 # ── #155: пути узла — переменными спеки ───────────────────────────────────────
@@ -424,8 +450,16 @@ def check_wrapper_paths(c):
                 not ((env.get("PU_CARRY") or "").split(",") != body or got != body),
                 f"PU_CARRY {env.get('PU_CARRY')!r}, run.carry {got!r}, spec keys {body!r}")
         # (a) всё, что врапер читает, в спеке есть и в тело доезжает.
+        # PU_NODE -- исключение по договору (#583/#590): врапер его читает,
+        # но даёт его телу лаунчер из кредов узла, не спека -- Nomad
+        # выбирает узел после регистрации, спеке имя узла неизвестно.
+        # Ролевые ключи (#583) у легаси-входов отсутствуют по той же
+        # причине, что и в спеке: их кладёт task_env тройки ради, а врапер
+        # читает ровно на ролевой ветке -- контракт ролевого окружения
+        # проверяет check_role_startup_583.
         reads = set(re.findall(r"\$\{?(PU_[A-Z_]+)", spec.WRAPPER))
-        missing = sorted(reads - set(body))
+        missing = sorted(reads - set(body) - {"PU_NODE"}
+                         - {k for k in reads if k.startswith("PU_SOUL")})
         c.check("the wrapper reads only what the spec carries into the body", not (missing),
                 f"the wrapper reads {missing}, which the spec does not carry into the body")
     # Спека старше #155 едет старым списком: иначе папет падает на первом же
@@ -1233,9 +1267,10 @@ def plant_soul(home, name, manifest, prompt, digest,
                ready=None, files=None, creds=None):
     """Разложить каталог инкарнации как его кладёт #590: bundle/ из
     soul.yaml (JSON, как его пишет доставка) и промпта, рядом bus.json и
-    ready.json. -> путь корня. ready/files/creds -- подмены для проверок
-    расхождения; None -- честная раскладка (ready по тройке, creds --
-    принципал, files -- ровно два файла бандла)."""
+    ready.json. -> путь корня. Подмены для проверок расхождения: ready --
+    False (файла нет) или словарь (чужая расписка); files -- свой набор
+    файлов бандла; creds -- False (креда нет). None -- честная раскладка:
+    расписка по тройке, кред -- принципал, бандл -- ровно два файла."""
     root = os.path.join(home, ".config", "mop", "souls", name, INC)
     bundle = os.path.join(root, "bundle")
     os.makedirs(bundle, exist_ok=True)
@@ -1246,16 +1281,16 @@ def plant_soul(home, name, manifest, prompt, digest,
     for fn, text in planted.items():
         with open(os.path.join(bundle, fn), "w") as f:
             f.write(text)
-    if creds is not None:
+    if creds is not False:
         with open(os.path.join(root, "bus.json"), "w") as f:
-            json.dump(creds, f)
-    if ready is not None:
-        with open(os.path.join(root, "ready.json"), "w") as f:
-            json.dump(ready, f)
+            json.dump(creds or {"url": "nats://10.0.0.1:4222",
+                                "user": GRANT, "password": "p"}, f)
+    if ready is False:
+        pass
     else:
         with open(os.path.join(root, "ready.json"), "w") as f:
-            json.dump({"ready": True, "role": manifest["soul"],
-                       "soul_inc": INC, "soul_digest": digest}, f)
+            json.dump(ready or {"ready": True, "role": manifest["soul"],
+                                "soul_inc": INC, "soul_digest": digest}, f)
     return root
 
 
@@ -1300,8 +1335,13 @@ def fake_body(name, which=None, cont=False, plant=None, env_extra=None):
     manifest = prompt = digest = None
     if which is not None:
         manifest, prompt, digest = role_triple(which)
-        root = (plant(home, name, manifest, prompt, digest)
-                if plant else plant_soul(home, name, manifest, prompt, digest))
+        # plant сам знает тройку (случаи отказа закрывают над ней), поэтому
+        # договор -- (дом, имя); честная раскладка -- то же самое с тройкой
+        # из role_triple.
+        if plant:
+            plant(home, name)
+        else:
+            plant_soul(home, name, manifest, prompt, digest)
     env = dict(spec.task_env(name, ORIGIN, cont))
     clone = os.path.join(home, "puppets", name)
     os.makedirs(clone)
@@ -1392,9 +1432,9 @@ def check_role_startup_583(c):
                      {"PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC", "PU_SOUL_DIR"}),
                 role.get("PU_CARRY"))
         c.check("#583 a role adds only its four keys to the task env",
-                not (set(role) - {"PU_CARRY", "PU_WRAPPER", "PU_SOUL",
-                                  "PU_SOUL_DIGEST", "PU_SOUL_INC",
-                                  "PU_SOUL_DIR"} != set(legacy)),
+                not (set(role) - set(legacy)
+                     != {"PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC",
+                         "PU_SOUL_DIR"}),
                 sorted(set(role) ^ set(legacy)))
         c.check("#583 the role env carries no dollar and no secret",
                 not any("$" in v or "password" in v.lower()
@@ -1512,13 +1552,14 @@ def check_role_startup_583(c):
                      == b.split("--append-system-prompt-file ", 1)[1].split()[0]),
                 "the same prompt file for two roles")
 
-    # (4) промпт роли живёт и на продолжении истории
+    # (4) промпт роли живёт и на продолжении истории: маркер в клоне
+    # старый (токен сменился -- перерегистрация), --continue срабатывает
     env, home, log = fake_body("pu-mop-1", "puppet", cont=True,
                                env_extra={"PU_CONTINUE": "tok-583"})
     try:
         marker = os.path.join(env["PU_CLONE"], ".git", "mop-continue")
         with open(marker, "w") as f:
-            f.write("tok-583")
+            f.write("an older token")
         r = run_wrapper(home, env)
         argv, _ = launch_record(log)
         if c.check("#583 a resumed role session launches",
@@ -1530,7 +1571,9 @@ def check_role_startup_583(c):
     finally:
         shutil.rmtree(home)
 
-    # (5) три роли -- один старт: разница только в данных
+    # (5) три роли -- один старт: разница только в данных (пути нормализуем:
+    # у каждого прогона свой временный дом, имя файла промпта -- из
+    # манифеста своей роли: soul.md у рабочего, SKILL.md у мастера)
     starts = []
     for which in ("puppet", "builder", "master"):
         env, home, log = fake_body("pu-mop-1", which)
@@ -1538,7 +1581,11 @@ def check_role_startup_583(c):
             r = run_wrapper(home, env)
             argv, _ = launch_record(log)
             if argv is not None:
-                starts.append(re.sub(re.escape(env["PU_SOUL_DIR"]), "$SOUL", argv))
+                starts.append(re.sub(re.escape(home), "$HOME",
+                                     re.sub(re.escape(env["PU_SOUL_DIR"]),
+                                            "$SOUL", argv))
+                              .replace("/soul.md", "/PROMPT")
+                              .replace("/SKILL.md", "/PROMPT"))
         finally:
             shutil.rmtree(home)
     c.check("#583 three roles start identically, differences are data",
@@ -1567,7 +1614,10 @@ def check_role_startup_583(c):
         ("a stowaway file in the bundle", lambda h, n: plant_soul(
             h, n, m, p, d, files=extra_file)),
         ("no principal credential", lambda h, n: plant_soul(h, n, m, p, d,
-                                                            ready=False)),
+                                                            creds=False)),
+        ("the credential names no grant principal", lambda h, n: plant_soul(
+            h, n, m, p, d, creds={"url": "nats://10.0.0.1:4222",
+                                  "user": "puppet-mop", "password": "p"})),
     ]
     for what, plant in cases:
         env, home, log = fake_body("pu-mop-1", "puppet", plant=plant)
@@ -1614,10 +1664,14 @@ def check_role_startup_583(c):
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
-        # и все папеты всё равно перерегистрируются.
+        # и все папеты всё равно перерегистрируются. Ролевой случай (#583) --
+        # в том же слепке, своим ключом: спека роли отличается от легаси
+        # не только текстом врапера.
+        cases = {**{" ".join(str(x) for x in i): render(*i) for i in SPEC_INPUTS},
+                 " ".join(str(x) for x in ROLE_RENDER) + " role":
+                     render_role(*ROLE_RENDER)}
         with open(SNAPSHOT, "w") as f:
-            json.dump({" ".join(str(x) for x in i): render(*i) for i in SPEC_INPUTS},
-                      f, ensure_ascii=False, indent=1)
+            json.dump(cases, f, ensure_ascii=False, indent=1)
             f.write("\n")
         return 0
     c = Checks()

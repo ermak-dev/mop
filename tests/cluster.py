@@ -578,9 +578,11 @@ def check_update_keeps_branch_257(c):
     job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
                                       "branch": "swarm"}}
     with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
-        # cred и node -- та же сигнатура, что у настоящей job_spec (#284, #289).
+        # cred и node -- та же сигнатура, что у настоящей job_spec (#284,
+        # #289), тройка роли -- с #582/#583.
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
-            cred=None, node=None: calls.append(branch) or {"Job": {"ID": name}}
+            cred=None, node=None, soul=None, soul_digest=None, soul_inc=None: \
+            calls.append(branch) or {"Job": {"ID": name}}
         cluster.store_workspace = lambda root, name, req: None
         # register фейка кладёт пустой джоб на место прежнего: мету каждый
         # вызов берёт из своего фейка.
