@@ -101,9 +101,39 @@ NODE_CASES_321 = [
 ]
 
 
+# HYPOTHESIS: сборщик теряет ветку и считает любой старый образ достаточным.
+# SOLUTION: явная remote-ветка и SHA проходят одним источником до зеркала.
+# RESULT: default HEAD не подменяет выбранные исходники прогрева.
+# STATUS: FIXED — see #593
+def check_builder_branch_593(c):
+    from mop.server import image
+    seen = []
+    marker = {"project": "rugent", "branch": "swarm", "commit": "a" * 40}
+    def prepare(origin, **kw):
+        seen.append(("prepare", kw))
+        return marker
+    def build(origin, got, **kw):
+        seen.append(("build", got, kw.get("node")))
+        return {"rc": 0, "gone": [], "announced": []}
+    api = FakeNomad(meta={"n1": {"mop_driver": "pve", "mop_projects": "rugent"}})
+    with patched(image, prepare=prepare, build=build):
+        answer = builder.run({"origin": "git@h:g/rugent.git", "mode": "missing",
+                              "node": "n1", "branch": "swarm"}, lambda **ev: None, api=api)
+    c.expect("#593 builder passes the requested branch", seen[:1], [("prepare", {"branch": "swarm"})])
+    c.expect("#593 explicit branch replaces an old project's image",
+             seen[1:], [("build", marker, "n1")])
+    c.expect("#593 branch build does not report skipped", answer.get("skipped"), None)
+    with patched(image, prepare=lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("branch not found")),
+                 build=lambda *a, **kw: c.fail("#593 invalid branch must not clear/build")):
+        answer = builder.run({"origin": "git@h:g/rugent.git", "branch": "missing"},
+                             lambda **ev: None, api=api)
+    c.expect("#593 server returns missing-branch reason", answer.get("error"), "branch not found")
+
+
 def main():
     c = Checks()
     check_builder_api_375(c)
+    check_builder_branch_593(c)
     check_builder_node_321(c)
     # HYPOTHESIS (#123): собрать образ можно было только на контроллере, и
     # вывод был полным логом ansible. SOLUTION: сборщик на сервере шлёт шаг --

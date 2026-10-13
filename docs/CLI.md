@@ -637,7 +637,7 @@ happens on the node that owns it, in whatever that node's driver is.
 #### mop driver build
 
 ```text
-mop driver build [project|origin] [--fresh] [--force] [--node NAME]: bake the project's image
+mop driver build [project|origin] [--fresh] [--force] [--node NAME] [--branch NAME]: bake the project's image
 
 On the hypervisors, from the control machine. No argument: this working
 copy, .mop as it lies. Incremental by default: a copy of the image
@@ -646,6 +646,10 @@ puppets on container nodes are stopped, their bodies destroyed and raised
 again from the new image; a busy puppet refuses unless --force.
 --node NAME: on that node only — its puppets alone are stopped, the others'
 image and work are left as they are.
+--branch NAME: read .mop from that remote branch, not the local tree;
+pin the source mirror to the same commit for cache warm-up. It replaces
+the project's image on the selected nodes, not a separate branch image.
+Without --branch the local-tree/default-branch behavior is unchanged.
 ```
 
 #### mop driver clone-work
@@ -759,7 +763,7 @@ basename of its origin, and puppet names are built from it.
 #### mop project add
 
 ```text
-make a project ready: mop project add [--update|--rebuild] [--node NAME] [-v] [git-origin]
+make a project ready: mop project add [--update|--rebuild] [--node NAME] [--branch NAME] [-v] [git-origin]
 
 Without origin, the origin of the current working copy is used.
 
@@ -771,9 +775,15 @@ any of them. Afterwards `mop add` can place a puppet right away.
   --rebuild   build it from the base image
   --node NAME build on this node only: its puppets alone are stopped and
               raised again, the other nodes keep their image and their work
+  --branch NAME read .mop and warm-up sources from that remote branch,
+                pinned to one commit; update even an existing image
   -v          print every line of the build's output, not only on a terminal
 
-Idempotent: run it again after changing the project's .mop. Silent when all
+One image per project and node: --branch replaces it, not a new image
+name. It does not set the puppet's working or landing branch.
+Without --branch, the default remote branch is used.
+
+Idempotent without --branch: run it again after changing the project's .mop. Silent when all
 goes well; on a terminal it shows the current step under the last lines of
 the build's output, and erases both when done.
 ```

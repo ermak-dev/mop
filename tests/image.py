@@ -354,9 +354,43 @@ def check_clear_recovery_570(c):
              (r["api"].calls, r["steps"]), ([], ["stopping the project's bodies"]))
 
 
+# HYPOTHESIS: явная ветка не проходит в prepare и extra-vars зеркала.
+# SOLUTION: явная remote-ветка и SHA проходят одним источником до зеркала.
+# RESULT: default HEAD не подменяет выбранные исходники прогрева.
+# STATUS: FIXED — see #593
+def check_branch_prepare_593(c):
+    from mop.common import manifest
+    calls = []
+    got = dict(GOT, branch="swarm", commit="a" * 40)
+    def fetch(origin, branch=None):
+        calls.append((origin, branch))
+        return got
+    with patched(manifest, fetch=fetch,
+                 fetch_tree=lambda *a: (_ for _ in ()).throw(AssertionError("local tree selected"))):
+        try:
+            actual = image.prepare("git@h:g/proj.git", "/local/tree", branch="swarm")
+        except TypeError as e:
+            c.fail("#593 explicit branch bypasses the local tree", str(e))
+            return
+    c.expect("#593 prepare selects the remote branch", calls, [("git@h:g/proj.git", "swarm")])
+    c.expect("#593 prepare preserves the selected commit", actual.get("commit"), "a" * 40)
+    extra = image.extra_vars("git@h:g/proj.git", got)
+    c.expect("#593 branch travels to the mirror play", extra.get("mop_image_branch"), "swarm")
+    c.expect("#593 exact manifest commit travels to the mirror play", extra.get("mop_image_commit"), "a" * 40)
+    c.check("#593 default build does not select a mirror branch",
+            "mop_image_branch" not in image.extra_vars("git@h:g/proj.git", GOT))
+    for commit in (None, "", "bad", "-option", "a" * 40 + ";bad"):
+        try:
+            image.extra_vars("git@h:g/proj.git", dict(got, commit=commit))
+            c.fail(f"#593 branch without a verified SHA refuses: {commit!r}")
+        except RuntimeError as e:
+            c.check("#593 unsafe pin gives a commit refusal", "commit" in str(e), e)
+
+
 def main():
     c = Checks()
     check_node_check_321(c)
+    check_branch_prepare_593(c)
     check_clear_recovery_570(c)
     extra = image.extra_vars("git@h:g/proj.git", GOT)
     want = {"mop_project": "proj", "mop_origin": "git@h:g/proj.git",
