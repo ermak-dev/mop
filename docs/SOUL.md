@@ -58,26 +58,27 @@ placement по способности драйвера (mop/driver/__init__.py:5
 soul: master              # [a-z][a-z0-9-]*, уникален в каталоге
 version: 1                # версия схемы, целое
 runtime:
-  driver: isolating       # any | isolating; isolating -> только IS_CONTAINER
+  driver: isolating       # any | isolating; isolating -> только с отдельными телами
   receives_dispatch: false # цель dispatch: на эту роль диспетчерить нельзя
 capabilities:
-  node_verbs: [send, tail, state, states, ping, local, type, wipe, usage, clone]  # allowlist глаголов агента (таблица VERBS)
-  cluster_verbs: [ping, roster, pool, add, update, restart, stop, delete, alloc, stderr, spec, bootstrap_result, landing]  # обычное управление проектом; admin/secret-глаголы не входят
+  node_verbs: [send, tail, state, states, ping, local, type, wipe, usage, sizes, clone]  # allowlist глаголов агента (таблица VERBS); sizes -- колонка диска ростера, clone -- через alloc сервиса
+  cluster_verbs: [ping, roster, alloc, spec, pool, stderr, bootstrap_result, add, update, restart, stop, delete, landing]  # обычное управление проектом; admin/secret-глаголы не входят
   dispatch: true           # источник dispatch: может занимать аренду цели (#574)
   spawn: [puppet, builder] # роли, которые эта может поднимать
-prompt: soul.md            # единственный файл промпта, путь внутри каталога роли
+prompt: SKILL.md           # единственный файл промпта, путь внутри каталога роли
 ```
 
 Пример выше — поставляемый мастер-пресет: изолированное тело, диспетчерит
 на рабочих, сама не диспетчеризируема (`receives_dispatch: false`) —
 задания ей ставит человек-оператор своими инструментами (ворота аренды
-для человека прежние, LEASE.md). Наборы глаголов в примерах — рабочие
-пресеты, не максимум схемы: `alloc`/`spec`/`bootstrap_result` нужны
-существующим `node_of`/`lib.guard`/readiness, `type`/`wipe`/`usage` —
-обычное управление телами; `nodes`, `drain`, `meta`, `project_*`,
+для человека прежние, LEASE.md). Набор мастера — аудит реальных вызовов
+его инструментов, а не список «на всякий случай»: ростер зовёт `sizes` и,
+через `alloc` сервиса, `clone`; MCP-инструменты — `pool`, `stderr`,
+`states`, `type`, `wipe`. `nodes`, `drain`, `meta`, `project_*`,
 `gc_policy`, `give_up` и `secret_*` — админские и секретные глаголы,
-пресету не выдаваемые. Две другие поставляемые роли — минимальные
-пресеты, чтобы схема не оставляла простора для толкований:
+пресету не выдаваемые (грамматика их не пускает). Две другие поставляемые
+роли — минимальные пресеты, чтобы схема не оставляла простора для
+толкований:
 
 ```yaml
 soul: puppet               # рабочий: принимает dispatch, ничего не поднимает
@@ -85,15 +86,16 @@ version: 1
 runtime: {driver: any, receives_dispatch: true}
 capabilities:
   node_verbs: [send, tail, state, states, ping, local]
-  cluster_verbs: []        # маршрутизацию без broadcast даст #585
+  cluster_verbs: [ping, roster, alloc, spec]  # обнаружение адресов (#585): чтение своего проекта, без broadcast
   dispatch: false          # рабочий не диспетчерит: получает задание, отчитывается
   spawn: []
 prompt: soul.md
 ```
 
-Рабочему без анонимного broadcast нужно узнавать адресата: это инженерия
-канала #585 (читаемые `roster`/`alloc` по границам резолвера, если канал
-потребует), не расширение пресета.
+Рабочий узнаёт адресата чтением своего проекта — `ping`/`roster`/`alloc`/
+`spec` по границам резолвера (#585): без анонимной broadcast-рассылки и
+без отдельного привилегированного locate-прокси. Права остаются в рамках
+своего проекта.
 
 ```yaml
 soul: builder              # собирает в своей ветке, не управляет пулом
@@ -101,7 +103,7 @@ version: 1
 runtime: {driver: any, receives_dispatch: true}
 capabilities:
   node_verbs: [send, tail, state, states, ping, local]
-  cluster_verbs: []        # ни add, ни alloc, ни spec
+  cluster_verbs: [ping, roster, alloc, spec]  # обнаружение адресов, как у рабочего: ни add, ни update, ни stop
   dispatch: false
   spawn: []
 prompt: soul.md
@@ -136,7 +138,10 @@ sha256 по точной канонической сборке (считает �
 
 ```
 digest = sha256(
-    compact_json(manifest)   # soul.yaml, разобранный в словарь;
+    compact_json(manifest)   # soul.yaml, разобранный, проверенный и
+                             # нормализованный до полного набора ключей v1
+                             # (умолчания схемы вставлены: пустой secrets
+                             # {"files": [], "vars": []} и пр.);
                              # json.dumps(…, sort_keys=True,
                              # separators=(",", ":"), ensure_ascii=False)
                              # в UTF-8
@@ -144,8 +149,13 @@ digest = sha256(
     + prompt_bytes)          # сырые байты файла промпта (UTF-8)
 ```
 
-Никакого «нормализованного YAML» и «всех файлов каталога»: вход дайджеста —
-ровно разобранный манифест и сырой промпт. Digest пишется в Meta джоба
+Вход дайджеста — валидированное и нормализованное значение манифеста, не
+сырой словарь из yaml: написанное без блока `secrets` и с явным пустым
+блоком — один бандл («по умолчанию — пусто»), одна и та же роль не живёт
+двумя дайджестами. Нормализация — одна на всех входах бандла (`load`,
+`from_manifest`, digest при регистрации и сверке), формула — эта, и
+докстринги ей не замена. «Всех файлов каталога» в дайджесте нет: вход —
+ровно манифест и сырой промпт. Digest пишется в Meta джоба
 (`soul_digest`) при регистрации и закрепляет бандл: живая инкарнация
 продолжает работать со своим бандлом и после обновления пакета ролей —
 обновление каталога касается новых регистраций, а не работающих.
@@ -319,9 +329,10 @@ send/read/резолвер обходятся соседским `.msg`, и ве
   не стирает того, что тело уже прочитало. Граница фильтрации — доставка,
   а не память.
 - Builder — агентная роль: собирает, проверяет, катит в своей ветке.
-  Глагола сборки образа у роли нет: `cluster_verbs: []` по умолчанию, и
-  admin-сборка (mop-builder) роли не достаётся молча — ни через схему,
-  ни через «доверенное имя».
+  Глагола сборки образа у роли нет: управление пулом (`add`/`update`/
+  `stop`/пр.) в пресете отсутствует, читает только обнаружение адресов
+  (`ping`/`roster`/`alloc`/`spec`), и admin-сборка (mop-builder) роли не
+  достаётся молча — ни через схему, ни через «доверенное имя».
 - Bootstrap — серверный Ansible, то есть код на сервере, а не данные:
   `.mop/bootstrap.yaml` из рабочей копии сегодня исполняет сервер
   (deploy/bootstrap). Делегированная роль с `cluster_verbs: [add…]`
