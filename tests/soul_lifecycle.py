@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop.common import projects  # noqa: E402
 from mop.common import soul as soulmod  # noqa: E402
 from mop.common.domain import JobMeta  # noqa: E402
+from mop import driver  # noqa: E402
 from mop.server import cluster, grants, image, spec  # noqa: E402
 
 ALPHA = "git@h:g/alpha.git"
@@ -160,17 +161,52 @@ def check_spec_triple_582(c):
             return
         with_role = with_role["Job"]
         m = with_role["Meta"]
+        # PuSOUL: спека обязана нести всю тройку и в Meta, и в окружении --
+        # с одним digest, одной инкарнацией.
+        c.check("#582 Meta triple and env triple carry the same soul",
+                (m.get("soul"), m.get("soul_digest"), m.get("soul_inc"))
+                == (triple["soul"], triple["soul_digest"], triple["soul_inc"])
+                and with_role["TaskGroups"][0]["Tasks"][0]["Env"]["PU_SOUL"]
+                == triple["soul"]
+                and with_role["TaskGroups"][0]["Tasks"][0]["Env"]["PU_SOUL_DIGEST"]
+                == triple["soul_digest"]
+                and with_role["TaskGroups"][0]["Tasks"][0]["Env"]["PU_SOUL_INC"]
+                == triple["soul_inc"],
+                with_role["TaskGroups"][0]["Tasks"][0]["Env"].get("PU_SOUL_DIGEST"))
         c.check("#582 the triple rides Meta whole (soul, soul_digest, soul_inc)",
                 (m.get("soul"), m.get("soul_digest"), m.get("soul_inc"))
                 == ("puppet", PUPPET_DIGEST, triple["soul_inc"]), m)
         c.check("#582 a legacy spec carries no soul keys at all",
                 not [k for k in legacy["Meta"] if k.startswith("soul")],
                 legacy["Meta"])
-        c.check("#582 the role does not touch the task env or the template version",
-                with_role["TaskGroups"][0]["Tasks"][0]["Env"]
-                == legacy["TaskGroups"][0]["Tasks"][0]["Env"]
+        # Транспорт тела (#582, для #590/#583): тройка едет окружением
+        # PU_SOUL*, несекретно, и БОЛЬШЕ НИЧЕГО в окружении не меняется --
+        # версия шаблона та же (масс-перерегистрация не нужна), легаси-
+        # ключи те же байт в байт. Легаси-спека несёт PU_SOUL пустыми:
+        # врапер одного поля на оба пути.
+        role_env = with_role["TaskGroups"][0]["Tasks"][0]["Env"]
+        legacy_env = legacy["TaskGroups"][0]["Tasks"][0]["Env"]
+        transport = {k: v for k, v in role_env.items()
+                     if k.startswith("PU_SOUL")}
+        c.check("#582 the role adds exactly the PU_SOUL transport keys, "
+                "the rest of the env and the template version unchanged",
+                transport == {"PU_SOUL": "puppet",
+                              "PU_SOUL_DIGEST": PUPPET_DIGEST,
+                              "PU_SOUL_INC": triple["soul_inc"],
+                              "PU_SOUL_DIR": driver.soul_dir(
+                                  "pu-alpha-1", triple["soul_inc"])}
+                and {k: v for k, v in role_env.items()
+                     if not k.startswith("PU_SOUL")}
+                == {k: v for k, v in legacy_env.items()
+                    if not k.startswith("PU_SOUL")}
+                and "PU_SOUL" in legacy_env
+                and legacy_env["PU_SOUL"] == ""
+                and "PU_SOUL_DIR" in legacy_env
+                and legacy_env["PU_SOUL_DIR"] == ""
                 and with_role["Meta"][spec.SPEC_META]
-                == legacy["Meta"][spec.SPEC_META])
+                == legacy["Meta"][spec.SPEC_META],
+                {k: v for k, v in role_env.items()
+                 if legacy_env.get(k) != v})
         # Любой драйвер (puppet): дополнительного ограничения нет -- роль не
         # должна выдавать имя за привилегию размещения (#579).
         cons = [x["LTarget"] for x in with_role["Constraints"]]

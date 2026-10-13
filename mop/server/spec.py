@@ -444,9 +444,11 @@ def gateway_env():
     return env
 
 
-def task_env(name, origin, cont=False, mem=0):
+def task_env(name, origin, cont=False, mem=0, soul=None, soul_digest=None,
+             soul_inc=None):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
-    шаблона. mem -- потолок памяти папета, МБ (spec.memory)."""
+    шаблона. mem -- потолок памяти папета, МБ (spec.memory). Тройка роли
+    (#582) -- несекретный транспорт для тела: пустые значения без роли."""
     env_llm = "".join(f"{k}={v}\n" for k, v in gateway_env().items())
     project = driver.project_of(origin)
     env = {
@@ -477,6 +479,17 @@ def task_env(name, origin, cont=False, mem=0):
         # (MemoryMaxMB), в pve-теле -- `pct --memory`, который ставит ensure
         # драйвера из этой переменной на каждом подъёме.
         "PU_MEM_MB": str(mem),
+        # Тройка роли транспорта (#582, для #590/#583): несекретные имя,
+        # digest и инкарнация из Meta джоба. Meta в теле приезжает не у
+        # всякого драйвера и не с гарантированной формой ключей, поэтому
+        # врапер читает их из окружения, собранного сервером. Каталог
+        # бандла -- по имени и инкарнации (driver.soul_dir): PU_NODE
+        # добавит #590 из кредов узла ПОСЛЕ размещения, сервер имени узла
+        # не знает.
+        "PU_SOUL": soul or "",
+        "PU_SOUL_DIGEST": soul_digest or "",
+        "PU_SOUL_INC": soul_inc or "",
+        "PU_SOUL_DIR": driver.soul_dir(name, soul_inc) if soul else "",
     }
     # Что `mop driver run` переливает в тело: всё окружение спеки, кроме
     # самого врапера. Списком здесь, а не копией там (#155).
@@ -511,7 +524,8 @@ def job_spec(name, origin, cont=False, branch=None, node=None,
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
     except ValueError as e:
         raise RuntimeError(f"{name}: {e} ({project.name})")
-    env = task_env(name, origin, cont, ceiling)
+    env = task_env(name, origin, cont, ceiling, soul=soul,
+                   soul_digest=soul_digest, soul_inc=soul_inc)
     meta = dataclasses.replace(meta, spec_version=template_version(env)).to_meta()
     role_bundle = pinned_bundle(soul, soul_digest)
     return {"Job": {
