@@ -1,0 +1,15 @@
+soul: master
+version: 1
+runtime:
+  driver: isolating
+  receives_dispatch: false
+capabilities:
+  # Глаголы узла -- таблица агента, глаголы кластера -- таблица сервиса
+  # (docs/SOUL.md #579): allowlist роли, не привилегия имени. Админских
+  # глаголов (узловые disk/junk/sweep, админские кластера, секреты) здесь
+  # нет и быть не может: грамматика их не пускает.
+  node_verbs: [send, tail, state, states, ping, local, type, wipe, usage]
+  cluster_verbs: [roster, add, alloc, spec, bootstrap_result, update, restart, stop, delete, landing]
+  dispatch: true
+  spawn: [puppet, builder]
+prompt: SKILL.md
