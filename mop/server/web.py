@@ -271,6 +271,10 @@ def unified_roster(rows, answers):
                     "name": r.name, "node": shown["node"],
                     "alloc_status": r.alloc_status, "state": shown["state"],
                     "kind": classify(r), "branch": shown["branch"],
+                    # detail -- прежняя короткая причина вердикта (#452):
+                    # PoolTable рисует её как есть, UI строку состояния не
+                    # разбирает. Nullable, как в самой строке.
+                    "detail": r.detail,
                     "llm": shown["llm"], "origin": r.origin,
                     "disk_kb": r.disk_kb,
                     "role": r.soul, "role_source": "meta",

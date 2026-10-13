@@ -2864,6 +2864,10 @@ def check_unified_roster_587(c):
     # (10) Managed-строка адресуема: адрес доставки -- имя джоба.
     c.expect("#587 a managed row is addressable by its job name",
              m1["addresses"], ["pu-mop-1"])
+    # (11) Прежнее поле detail (#452) едет дальше: короткая причина
+    #      вердикта, nullable; UI не разбирает строку состояния.
+    c.check("#587 managed rows keep the verdict detail",
+            all("detail" in r for r in got if r["source"] == "managed"), got)
 
     # (8) Битая половина тройки в мете -- громкий отказ с причиной, не
     #     молчаливая потеря строки: сценарии #421/#423 ниже остаются на месте.
