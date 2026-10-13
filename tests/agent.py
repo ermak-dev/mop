@@ -3547,9 +3547,11 @@ def check_startup_soul_584(c):
             soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
             c.check(f"584 no soul fact without a fresh live session ({label})",
                     soul is None and not binding_asks(), (soul, asks))
-        got = ask(rpc(W), {"verb": "state", "name": "pu-mop-1"})
-        c.check("584 state carries the soul fact too",
-                (got or {}).get("soul", {}).get("ready") is True, got)
+            reset()
+            st["facts"] = {"pu-mop-1": live}
+            got = ask(rpc(W), {"verb": "state", "name": "pu-mop-1"})
+            c.check("584 state carries the soul fact too",
+                    (got or {}).get("soul", {}).get("ready") is True, got)
 
         # 3. Битая привязка -- не готовность, а причина; молчание -- тоже.
         for mode, word in (("down", "resolver"), (None, "binding"),
@@ -3558,7 +3560,10 @@ def check_startup_soul_584(c):
             st["mode"] = mode
             st["facts"] = {"pu-mop-3" if mode is None else "pu-mop-1": live}
             name = "pu-mop-3" if mode is None else "pu-mop-1"
-            got = ask(rpc(W), {"verb": "states", "names": [name]})
+            # Человеческий субъект: путь актёра при молчании резолвера
+            # закрыт сам по себе, а soul-факт проверяем на читающем глаголе
+            # человека -- он не зависит от прав актёра.
+            got = ask("mop.mop.node.hyper.rpc.anton", {"verb": "states", "names": [name]})
             soul = (got or {}).get("puppets", {}).get(name, {}).get("soul")
             c.check(f"584 a malformed or missing binding is not ready ({mode})",
                     soul == {"ready": False, "why": soul.get("why")}
@@ -3584,12 +3589,13 @@ def check_startup_soul_584(c):
                 and ident("pu-mop-1") == profiles["anton"], (got, holder("pu-mop-1")))
         c.check("584 startup returns the role triple for the wrapper",
                 (got or {}).get("soul", {}).get("soul_digest") == "a" * 32, got)
-        asks.clear()
+        before = ident("pu-mop-1")
         got = ask("mop.mop.node.hyper.startup",
                   {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
                   startup=True)
-        c.check("584 startup resume of the same owner touches nothing",
-                (got or {}).get("resumed") is True and not asks, (got, asks))
+        c.check("584 startup resume of the same owner writes nothing",
+                (got or {}).get("resumed") is True and ident("pu-mop-1") == before
+                and holder("pu-mop-1") == "anton", (got, ident("pu-mop-1")))
 
         # 6. Власть -- не тело: хозяин из привязки, инкарнация сверяется.
         reset()

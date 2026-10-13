@@ -86,6 +86,8 @@ KEYS_ALLOWED = ("Escape",)
 IDLE_WAIT = 600          # потолок ожидания простоя для notify
 IDENTITY_WAIT = 5        # сколько send ждёт профиль владельца у сервера (#167)
 RESOLVE_WAIT = 5         # сколько глагол актёра ждёт резолвер сервера (#584)
+SOUL_FACT_TTL = 10       # кэш soul-факта ростера: только читающие глаголы (#584)
+STARTUP = "initial_identity"   # единственный глагол канала подъёма (#584/#590)
 
 
 def node_name():
@@ -348,11 +350,15 @@ async def v_ping(_conn, _req):
     return {"node": node_name()}
 
 
-async def v_state(_conn, req):
-    return await facts(req["name"])
+async def v_state(conn, req):
+    out = await facts(req["name"])
+    soul_fact = await _soul_fact(conn, req["_project"], req["name"], out)
+    if soul_fact is not None:
+        out["soul"] = soul_fact
+    return out
 
 
-async def v_states(_conn, req):
+async def v_states(conn, req):
     """Пачкой: у узла обычно несколько папетов, и спрашивают о них всегда
     вместе. Одна поездка вместо N.
 
@@ -361,7 +367,10 @@ async def v_states(_conn, req):
     которой не должна пропасть картина по своим."""
     names = [n for n in (req.get("names") or []) if await _mine(req, n)]
     got = await asyncio.gather(*(facts(n) for n in names))
-    return {"puppets": dict(zip(names, got))}
+    souls = await asyncio.gather(*(_soul_fact(conn, req["_project"], n, f)
+                                   for n, f in zip(names, got)))
+    return {"puppets": {n: dict(f, soul=s) if s is not None else f
+                        for n, f, s in zip(names, got, souls)}}
 
 
 async def v_sizes(_conn, req):
@@ -1770,12 +1779,16 @@ def actor_of(subject):
     """Субъект -> (канал, принципал | None). rpc.<grant-id> -- актёр
     обычного глагола, dispatch.<id> -- диспетчер; токен dispatch без
     правильного id -- канал dispatch без актёра (отказ в handle). Логин
-    человека принципалом не бывает: префикс grant- зарезервирован."""
-    parts = (subject or "").split(".")
-    if len(parts) == 6 and parts[0] == busnames.ROOT and parts[2] == "node" \
-            and parts[4] == busnames.DISPATCH_CHANNEL:
-        user = busnames.GRANT_PREFIX + parts[5]
+    человека принципалом не бывает: префикс grant- зарезервирован.
+    Канал подъёма -- не субъект актёра: глагол один, и его держит
+    узловой кред тела, а не принципал (#590)."""
+    tokens = (subject or "").split(".")
+    channel = tokens[4] if tokens[2:3] == ["node"] and len(tokens) >= 5 else None
+    if channel == busnames.DISPATCH_CHANNEL:
+        user = busnames.GRANT_PREFIX + (tokens[5] if len(tokens) > 5 else "")
         return DISPATCH, (user if soul.is_grant(user) else None)
+    if channel == "startup":
+        return "startup", None
     login = busnames.caller(subject)
     return "rpc", (login if soul.is_grant(login) else None)
 
@@ -1844,6 +1857,97 @@ async def resolve_actor(conn, project, principal, verb, target=None):
     return (None, why) if why else (got, None)
 
 
+async def target_binding(conn, project, name):
+    """Привязка цели из реестра сервера. -> (цель | None, причина | None).
+
+    Свежий вопрос без принципала (target-вид резолвера): тот же сервис,
+    тот же узловой кред. Проверяем и форму тройки: битый digest или
+    инкарнация -- не готовность, а причина; «примерно та» привязка прав
+    не даёт. Кэш -- только у читающего глагола (_soul_fact), мутации
+    зовут этот свежий вопрос."""
+    fields = {"service": "node", "target": name}
+    try:
+        msg = await bus.arequest(conn, busnames.server(project),
+                                 bus.envelope("resolve", **fields), RESOLVE_WAIT)
+        got = json.loads(msg.data.decode())
+    except Exception as e:
+        return None, f"the resolver did not answer ({type(e).__name__})"
+    if not isinstance(got, dict) or got.get("found") is not True:
+        return None, f"puppet {name} has no binding"
+    if got.get("job") != name:
+        return None, f"the resolver answered about {got.get('job')}, not {name}"
+    if got.get("project") != project:
+        return None, foreign(name, project)
+    if not (isinstance(got.get("owner"), str) and got["owner"]):
+        return None, f"puppet {name} has no human owner"
+    if not (isinstance(got.get("role"), str) and soul.NAME.match(got["role"])):
+        return None, f"puppet {name} has a malformed role {got.get('role')!r}"
+    if not (isinstance(got.get("soul_digest"), str)
+            and soul.HEX32.match(got["soul_digest"])):
+        return None, f"puppet {name} has a malformed soul digest"
+    import uuid as _uuid
+    inc = got.get("soul_inc")
+    try:
+        canonical = str(_uuid.UUID(inc)) == inc if isinstance(inc, str) else False
+    except ValueError:
+        canonical = False
+    if not canonical:
+        return None, f"puppet {name} has a malformed soul incarnation"
+    return got, None
+
+
+# Кэш soul-факта ростера (#584): (проект, имя) -> (годен до, факт). Только
+# читающие глаголы и только на TTL: мутации резолвер спрашивают свежо.
+_soul_cache = {}
+
+
+def _session_live(fact):
+    """Свежая живая сессия в фактах ростера: строка «<status> <alive>
+    <listen>» с живым сокетом; мёртвая и отсутствующая -- не живая."""
+    tokens = (fact.get("session") or "").split()
+    return bool(tokens) and tokens[0] != "none" and (len(tokens) < 2 or tokens[1] == "1")
+
+
+async def _soul_fact(conn, project, name, fact):
+    """Тройка роли для ростера -- только после проверенной привязки и
+    живой сессии. -> факт либо None (нет сессии -- нет и факта).
+
+    Отказ привязки -- не отказ глагола: состояние папета -- факт узла,
+    тройка роли -- знание сервера; незнание уезжает битым фактом с
+    причиной, а ростер остаётся цел."""
+    if not fact.get("present") or not _session_live(fact):
+        return None
+    hit = _soul_cache.get((project, name))
+    if hit and hit[0] > time.time():
+        return hit[1]
+    got, why = await target_binding(conn, project, name)
+    soul_fact = ({"ready": True, "role": got["role"], "soul_inc": got["soul_inc"],
+                  "soul_digest": got["soul_digest"]} if got is not None
+                 else {"ready": False, "why": why})
+    _soul_cache[(project, name)] = (time.time() + SOUL_FACT_TTL, soul_fact)
+    return soul_fact
+
+
+async def v_startup(conn, req):
+    """Глагол канала подъёма: первая аренда и identity до первого хода
+    модели (#590 зовёт обёрткой; субъект -- узловой кред тела). Хозяин и
+    тройка -- из привязки сервера, тело называет лишь джоб и инкарнацию:
+    расхождение (переиспользованное имя, старая инкарнация) -- отказ."""
+    name = req.get("name")
+    if not driver.valid_name(name):
+        return {"error": driver.bad_name(name)}
+    got, why = await target_binding(conn, req["_project"], name)
+    if got is None:
+        return {"error": why}
+    if req.get("soul_inc") and req["soul_inc"] != got["soul_inc"]:
+        return {"error": f"{name}: job name is reused, this body is a new "
+                         f"incarnation {got['soul_inc']}"}
+    out = await initial_identity(conn, name, got["owner"])
+    out["soul"] = {"ready": True, "role": got["role"], "soul_inc": got["soul_inc"],
+                   "soul_digest": got["soul_digest"]}
+    return out
+
+
 async def _admit_actor(conn, req, actor, channel):
     """Права актёра на запрос. -> отказ | None; пустил -- в req каркасные
     поля актёра. Глагол, который проверили, и есть тот, что исполнят:
@@ -1877,7 +1981,7 @@ async def _admit_actor(conn, req, actor, channel):
 
 
 # ─── петля ───────────────────────────────────────────────────────────────
-async def handle(conn, msg, public):
+async def handle(conn, msg, public, startup=False):
     """Разбор и три проверки: глагол существует, субъект его допускает, папет
     принадлежит спрашивающему проекту.
 
@@ -1904,14 +2008,21 @@ async def handle(conn, msg, public):
         req.pop("owner", None)
 
     verb = req.get("verb")
-    if actor:
+    if startup:
+        # Канал подъёма (#584): узловой кред тела, глагол один, и никакой
+        # другой субъект его не отдаёт.
+        why = (None if verb == STARTUP
+               else f"the startup channel carries {STARTUP} only, not {verb}")
+    elif verb == STARTUP:
+        why = f"verb {STARTUP} is available to the wrapper's startup channel only"
+    elif actor:
         why = await _admit_actor(conn, req, actor, channel)
         verb = req.get("verb")
     elif channel == DISPATCH:
         why = f"subject {DISPATCH} needs a delegated principal token"
     else:
         why = refusal(verb, public, req["_project"])
-    if why is None and not actor and VERBS[verb].named \
+    if why is None and not actor and not startup and VERBS[verb].named \
             and not await _mine(req, req.get("name") or ""):
         # Главная проверка проектирования. Прав NATS тут мало: мастер проекта A
         # законно пишет в свой субъект, но может назвать папета из B.
@@ -1920,7 +2031,8 @@ async def handle(conn, msg, public):
         out = {"error": why}
     else:
         try:
-            out = await VERBS[verb].fn(conn, req)
+            out = await (v_startup(conn, req) if startup
+                         else VERBS[verb].fn(conn, req))
         except Exception as e:
             out = {"error": f"{verb}: {e}"}
     try:
@@ -1945,12 +2057,17 @@ async def attach(conn, node):
     async def on_msg(msg):
         asyncio.create_task(handle(conn, msg, public=True))
 
+    async def on_startup(msg):
+        asyncio.create_task(handle(conn, msg, public=False, startup=True))
+
     subs = busnames.agent_subscriptions(node)
     # dispatch (#584): свой субъект с id актёра, права узла его покрывают
     # (natsconf.node_permissions: node.<узел>.>).
-    subs["rpc"] = subs["rpc"] + [busnames.dispatch_subject(busnames.ANY, node, busnames.ANY)]
-    for subj in subs["rpc"]:
+    subs["rpc"] = subs["rpc"] + [busnames.dispatch_subject(busnames.ANY, node, busnames.ANY),
+                                 busnames.node(busnames.ANY, node, "startup")]
+    for subj in subs["rpc"][:-1]:
         await conn.subscribe(subj, cb=on_rpc)
+    await conn.subscribe(subs["rpc"][-1], cb=on_startup)
     for subj in subs["msg"]:
         await conn.subscribe(subj, cb=on_msg)
     await _event(conn, "up", text=f"agent on {node}")
