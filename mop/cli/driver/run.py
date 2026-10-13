@@ -161,7 +161,8 @@ def bootstrap_sandbox(d, name, project):
             raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
         out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT, project=project,
-                             name=name, address=address)
+                             name=name, address=address, alloc=os.environ.get("NOMAD_ALLOC_ID"),
+                             started_at=time.time())
     finally:
         # Закрыть -- и после неудачного впуска: стоп мог прийти посреди него.
         asyncio.run(d.admit(name, False))

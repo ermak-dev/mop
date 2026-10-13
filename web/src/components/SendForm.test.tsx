@@ -86,7 +86,7 @@ test("#469 double submit is one POST", async () => {
   const fetchMock = route(() => slow, async () => opJson("running"));
   vi.stubGlobal("fetch", fetchMock);
   open();
-  fireEvent.change(screen.getByLabelText("Сообщение"), { target: { value: "раз" } });
+  fireEvent.change(await screen.findByLabelText("Сообщение"), { target: { value: "раз" } });
   const button = screen.getByRole("button", { name: "Отправить" });
   fireEvent.click(button);
   fireEvent.click(button);
@@ -124,11 +124,11 @@ test("#469 a guest sees no send form or icon", () => {
   expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
-test("#469 an empty message posts nothing", () => {
+test("#469 an empty message posts nothing", async () => {
   const fetchMock = route(async () => ok202("op-1"), async () => opJson("succeeded"));
   vi.stubGlobal("fetch", fetchMock);
   open();
-  fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Отправить" }));
   expect(posts(fetchMock)).toHaveLength(0);
 });
 
