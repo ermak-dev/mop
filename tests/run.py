@@ -135,20 +135,29 @@ class Body:
 
 def fake_identity(body):
     """Шов initial_identity: что сделает живой агент (#584), по режиму
-    тела -- успех, отказ с причиной, транспортный отказ."""
+    тела -- успех с распиской, отказ с причиной, транспортный отказ,
+    расписка без identity_ready, расписка с чужой тройкой."""
     async def identity(name, inc, login, profile):
         body.log.append(("identity", (name, inc, login, profile)))
         if body.identity == "raise":
             raise RuntimeError("the agent did not answer")
         if body.identity == "error":
             return {"error": "the clone belongs to another owner"}
-        return {"ok": True}
+        if body.identity == "no-receipt":
+            return {"ok": True}
+        role_name, digest, _ = body.triple
+        if body.identity == "wrong-triple":
+            role_name = "builder"
+        return {"identity_ready": True, "role": role_name,
+                "soul_inc": inc, "soul_digest": digest}
     return identity
 
 
 def launch(body, reply, env, name=NAME):
     """main() с подменённым миром. -> (код|SystemExit-текст, stdout, лог).
     Лог -- push'и, шеллы в теле и запуск врапера в порядке исполнения."""
+    body.triple = (env.get("NOMAD_META_soul"), env.get("NOMAD_META_soul_digest"),
+                   env.get("NOMAD_META_soul_inc"))
     async def role_ask(project, name, address):
         body.log.append(("bootstrap-ask", ("role", project, name, address)))
         return reply
@@ -341,9 +350,9 @@ def main():
             loaded = f"{type(e).__name__}: {e}"
         c.expect("#590 the delivered bundle loads to the job's digest", loaded, digest)
         ready = json.loads(body.files.get(f"{d}/ready.json") or "null")
-        c.expect("#590 the ready mark names the binding without the password",
-                 ready, {"role": "puppet", "soul_inc": INC, "soul_digest": digest,
-                         "principal": GRANT})
+        c.expect("#590 the ready mark is the node facts shape, no principal",
+                 ready, {"ready": True, "role": "puppet", "soul_inc": INC,
+                         "soul_digest": digest})
         pushes = [p for kind, p in log if kind == "push"]
         order = [pushes.index(f"{d}/{f}") if f"{d}/{f}" in pushes else -1
                  for f in ("bus.json", f"bundle/{manifest['prompt']}", "bundle/soul.yaml",
@@ -388,6 +397,17 @@ def main():
                 not any(p.endswith("ready.json") for p in body.files), sorted(body.files))
         c.check(f"#590 a refused identity ({mode}) hides the password",
                 SECRET not in str(code) + out, (code, out))
+
+    # Расписка identity -- доказательство, а не «ok»: без identity_ready
+    # или с чужой тройкой старт роли отказывает, метки нет.
+    for mode, why in (("no-receipt", "identity_ready"),
+                      ("wrong-triple", "is not the job's")):
+        body = Body(identity=mode)
+        code, out, log = launch(body, good, env)
+        c.check(f"#590 a bad identity receipt ({mode}) stops before the model",
+                refused(code) and why in code and not launched(log), (code, brief(log)))
+        c.check(f"#590 a bad identity receipt ({mode}) leaves no ready mark",
+                not any(p.endswith("ready.json") for p in body.files), sorted(body.files))
 
     # Хозяин-человек обязателен: без логина и без профиля -- отказ до модели.
     for what, bad_soul in (

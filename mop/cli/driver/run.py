@@ -299,8 +299,9 @@ def role_files(name, expected, reply):
     files = [(f"{d}/{driver.SOUL_BUNDLE}/{soul.MANIFEST}", manifest),
              (f"{d}/{driver.SOUL_BUNDLE}/{bundle.manifest.prompt}", prompt),
              (f"{d}/{BUS_FILE}", json.dumps(creds).encode() + b"\n")]
-    ready = json.dumps({"role": bundle.role, "soul_inc": expected.soul_inc,
-                        "soul_digest": bundle.digest, "principal": principal},
+    ready = json.dumps({"ready": True, "role": bundle.role,
+                        "soul_inc": expected.soul_inc,
+                        "soul_digest": bundle.digest},
                        sort_keys=True).encode() + b"\n"
     return files, (f"{d}/{READY}", ready)
 
@@ -366,8 +367,22 @@ def deliver_role(d, name, role, b, inside):
     except (RuntimeError, bus.BusError) as e:
         sys.exit(f"role delivery of {name} refused: the owner identity did "
                  f"not settle: {e}")
-    if not (isinstance(r, dict) and r.get("ok")):
-        why = r.get("error") if isinstance(r, dict) else _short(r)
+    # Расписка -- доказательство глагола, а не «ok»: identity_ready и вся
+    # тройка роли в ней обязаны совпасть с Meta джоба (#603). Расписка без
+    # тройки -- не расписка этой роли.
+    why = r.get("error") if isinstance(r, dict) else _short(r)
+    if why is None and isinstance(r, dict):
+        why = "no identity_ready in the receipt"
+        if r.get("identity_ready"):
+            for key, want in (("role", role.soul), ("soul_inc", role.soul_inc),
+                              ("soul_digest", role.soul_digest)):
+                if r.get(key) != want:
+                    why = (f"the receipt's {key} {_short(r.get(key))} is not "
+                           f"the job's {want!r}")
+                    break
+            else:
+                why = None
+    if why is not None:
         sys.exit(f"role delivery of {name} refused: the owner identity did "
                  f"not settle: {why}")
     w = asyncio.run(d.push(name, ready, mark))
