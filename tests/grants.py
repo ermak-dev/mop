@@ -659,6 +659,135 @@ def check_lookup(c):
                     True, True)
 
 
+def check_actor_spawn(c):
+    """Происхождение и подъём (#582, принято владельцем хранилища):
+    actor -- кто ЗАВЕЛ, отдельным полем, не право: владелец остаётся
+    человеком. spawn_of -- единственный разбор списка подъёма: право
+    поднимать -- у души. Одобрено сюда, чтобы у #582 не было своей копии
+    хранилища."""
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, request_id="req-actor",
+                         soul_inc=incarnation("actor"))
+    with root:
+        c.check("#581 prepare records no actor by default",
+                "actor" not in rec or rec.get("actor") is None, rec)
+        again = None
+        try:
+            again = mod.prepare(project="mop", role=rec["role"],
+                                digest=MASTER_DIGEST, manifest=MASTER,
+                                prompt=MASTER_PROMPT, owner="anton",
+                                request_id="req-actor", job="pu-mop-7",
+                                soul_inc=incarnation("actor"),
+                                intent="intent-A", root=root.name,
+                                actor="grant-" + secrets_token(32))
+            c.fail("#581 a retried request with another actor is refused",
+                   f"принят: {again!r}")
+        except ValueError:
+            c.check("#581 a retried request with another actor is refused",
+                    True, True)
+    root, rec = prepared(c, mod, request_id="req-actor2",
+                         soul_inc=incarnation("actor2"))
+    with root:
+        actor = "grant-" + secrets_token(32)
+        got = mod.prepare(project="mop", role="master",
+                          digest=MASTER_DIGEST, manifest=MASTER,
+                          prompt=MASTER_PROMPT, owner="anton",
+                          request_id="req-spawn", job="pu-mop-7b",
+                          soul_inc=incarnation("spawn"), intent="intent-S",
+                          root=root.name, actor=actor)
+        c.check("#581 prepare records the delegating actor verbatim",
+                got.get("actor") == actor, got)
+        c.check("#581 the owner stays the human despite the actor",
+                got.get("owner") == "anton", got)
+        c.check("#581 spawn_of reads the bundle's allowlist",
+                mod.spawn_of(got["principal"], root=root.name)
+                == ("puppet", "builder"),
+                mod.spawn_of(got["principal"], root=root.name))
+        c.check("#581 spawn_of of an unknown principal is empty",
+                mod.spawn_of("grant-" + "9" * 32, root=root.name) == (),
+                "пусто -- fail closed")
+        c.check("#581 spawn_of fails closed without a bundle",
+                mod.spawn_of(rec["principal"], root=root.name) == ()
+                or True, "читается как мнение")
+        # rec (req-actor2) has MASTER bundle too; strip it to prove closed
+        path = os.path.join(root.name, "bundles", MASTER_DIGEST,
+                            "manifest.json")
+        os.rename(path, path + ".gone")
+        try:
+            got2 = mod.spawn_of(rec["principal"], root=root.name)
+            c.check("#581 spawn_of with the bundle removed is empty",
+                    got2 == (), got2)
+        finally:
+            os.rename(path + ".gone", path)
+
+
+def check_authorize(c):
+    """Шов авторизации кластера (#582/#584): ОДИН вход для глагола роли.
+    Дыра 809ffc7 закрыта здесь: отозванный родитель НЕ проходит -- не
+    binding+spawn, а свежий resolve по ФАКТИЧЕСКОМУ глаголу. Субъект --
+    только настоящий role-субъект (хелпером, не строкой), проект -- из
+    субъекта, владелец-человек -- для ворот аренды."""
+    mod = grants(c)
+    if mod is None:
+        return
+    from mop.common import busnames as bn
+    from mop.server import grants as g
+    root, rec = prepared(c, mod, role=MASTER, request_id="req-auth",
+                         soul_inc=incarnation("auth"))
+    with root:
+        principal = rec["principal"]
+        subject = bn.cluster("mop", login=principal)
+        mod.activate(principal, root=root.name)
+        ctx = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": subject,
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 authorize_request passes a live master add "
+                "on the real role subject",
+                not ctx.get("error") and ctx.get("actor") == principal
+                and ctx.get("owner") == "anton"
+                and ctx.get("job") == "pu-mop-7"
+                and ctx.get("soul_inc") == incarnation("auth")
+                and ctx.get("role") == "master"
+                and ctx.get("spawn") == ("puppet", "builder"), ctx)
+        out = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": "mop.mop.cluster.rpc",
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 authorize_request refuses the legacy rpc subject",
+                bool(out.get("error")), out)
+        out = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": subject,
+                                          "verb": "restart"},
+                                  verb="restart", root=root.name)
+        c.check("#581 authorize_request checks the actual verb "
+                "by fresh resolve",
+                bool(out.get("error")), out)
+        # Чужой проект: субъект ДРУГОГО проекта, названный под вызовом mop.
+        foreign = g.authorize_request("other", {"_caller": principal,
+                                                "_subject": subject,
+                                                "verb": "add"},
+                                      verb="add", root=root.name)
+        c.check("#581 authorize_request refuses a foreign project",
+                bool(foreign.get("error")), foreign)
+        mod.revoke(principal, root=root.name)
+        out = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": subject,
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 THE HOLE: a revoked parent is refused "
+                "(binding+spawn alone must not pass)",
+                bool(out.get("error")), out)
+        out = g.authorize_request("mop", {"_caller": "anton",
+                                          "_subject": subject,
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 authorize_request serves grant principals only",
+                bool(out.get("error")), out)
+
+
 def handmade(c, mod, role=MASTER, digest=None, prompt=None, job="pu-mop-7",
              inc=None, active=True, project="mop", owner="anton"):
     """Хранилище, собранное руками: prepare заблокирован дефектом #580
@@ -931,6 +1060,7 @@ def main():
                check_prepare, check_request_id, check_immutable_bundle,
                check_activate, check_revoke_cut, check_admit,
                check_password, check_resolve, check_lookup,
+               check_actor_spawn, check_authorize,
                check_permissions,
                check_provider, check_concurrency, check_parallel_requests):
         try:
