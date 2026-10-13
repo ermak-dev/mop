@@ -343,6 +343,25 @@ def check_add_soul_582(c):
                 and rec.get("owner") == "anton", rec)
 
 
+@contextlib.contextmanager
+def extra_project(origin):
+    """Ещё один проект в снимке реестра ДЕЙСТВУЮЩЕЙ soul_env: beta,
+    зарегистрированная на сервере, -- чтобы отказ по чужому origin был
+    отказом по ГРАНИЦЕ, а не по «нет такого проекта»."""
+    path = os.path.join(projects.SNAPSHOT_DIR, "projects.json")
+    with open(path) as f:
+        doc = json.load(f)
+    doc["projects"].append({"origin": origin})
+    with open(path, "w") as f:
+        json.dump(doc, f)
+    try:
+        yield
+    finally:
+        doc["projects"].pop()
+        with open(path, "w") as f:
+            json.dump(doc, f)
+
+
 def soul_parent(api, g, request_id="parent-1", workspace=PLAY_A):
     """Живой родитель-мастер со согласованной политикой: add ЧЕЛОВЕКОМ --
     аутентифицированное создание роли сохраняет путь согласования
@@ -663,6 +682,18 @@ def check_add_delegated_582(c):
         c.check("#582 a spawn role outside the parent's allowlist is refused",
                 "error" in denied and "spawn" in (denied.get("error") or "")
                 and len(api.jobs) == 1, denied)
+        # Чужой origin: граница проекта -- для всех актёров, делегированный
+        # путь не открывает гранту проект-соседа. Beta ЗАРЕГИСТРИРОВАНА:
+        # отказ по границе, а не «нет такого проекта».
+        with extra_project("git@h:g/beta.git"):
+            foreign = answer(api, "alpha", {"verb": "add",
+                                            "origin": "git@h:g/beta.git",
+                                            "soul": "puppet", "request_id": "sp-2",
+                                            "_caller": principal, "_subject":
+                                            f"mop.alpha.cluster.role.{principal}"})
+        c.check("#582 a delegated add cannot cross the project boundary",
+                "error" in foreign and "beta" in (foreign.get("error") or "")
+                and len(api.jobs) == 1, foreign)
 
     # Человек сохраняет сегодняшний путь: легаси-add со своим текстом
     # (источник согласования -- сам человек, канал легаси-rpc).

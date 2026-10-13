@@ -470,6 +470,11 @@ def _delegated(project, req, caller):
     if parent_rec.get("project") != project:
         return {"error": f"{caller}: the binding lives in project "
                          f"{parent_rec.get('project')}, not {project}"}
+    # Граница проекта -- для всех актёров (#567): легаси-путь держит её
+    # refusal(add), делегированная ветка идёт мимо -- тот же вопрос здесь.
+    why = _foreign_origin(project, req.get("origin"))
+    if why:
+        return {"error": f"{caller}: {why}"}
     allowed = grants.spawn_of(caller, root=SOUL_ROOT)
     if req.get("soul") not in allowed:
         return {"error": f"{caller}: the role {req.get('soul')} is not in "
