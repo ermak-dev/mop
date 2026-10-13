@@ -14,6 +14,11 @@ bus.principal/caller_token/node_name, ops.add(soul=, request_id=) без
 повторов, receives_dispatch в строке ростера с серверного MopSoul и корни
 каталога ролей MOP_SOUL_DIRS (os.pathsep, доверенные внешние раньше
 пакетных). Легаси-провода байт в байт прежние.
+Раунд ревью c9262ac: пользователь приватного префикса -- ОДИН токен
+(login_token), node-a не читает ответы node-a.b; identity-хелперы читают
+креды открытого соединения (NODE_FILE лаунчера), не перечитывают
+config(); общие маски node_role/cluster_role и глобальная private_publish
+отдельно от private_scope.
 STATUS: FIXED — see #603
 """
 import asyncio
@@ -82,6 +87,12 @@ class Recorder:
 
 def creds(user):
     return lambda: {"user": user, "url": "nats://x", "password": "p"}
+
+
+def global_set_conn(conn):
+    """Поставить bus._conn так, как это делает настоящий connect(): без
+    подмены модульного атрибута хелперы не видят соединения."""
+    bus._conn = conn
 
 
 def check_fence_603(c):
@@ -311,7 +322,9 @@ def check_reply_fence_603(c):
     valid_private_reply не пускает маски, пустые сегменты и
     whitespace/контрольные хвосты, caller квалифицированного server.rpc
     читает узел декодированием, серверный caller кодируется/читается
-    кругом. Свои значения (имена без точек) -- прежние байт в байт."""
+    кругом. Свои значения (имена без точек) -- прежние байт в байт.
+    RESULT: все проверки ниже зелёные; transport 154/154, strict 77/77.
+    STATUS: FIXED — see #603"""
     dotted = busnames.node_user("a.b")          # node-a.b: два токена, если в лоб
     confused = busnames.node_user("a")          # node-a: его префикс -- ВИД префикса node-a.b
     plain = NODE_USER                            # node-hyper: без точек
@@ -376,8 +389,10 @@ def check_identity_603(c):
     открытое из NODE_FILE, несёт узлового пользователя, и хелперы читают
     его оттуда; file= у config() по-прежнему решает сам, FILE/NODE_FILE --
     прежние значения, легаси-дефолты и поведение человека не меняются.
-    RESULT: см. ниже; текущее поведение -- без чего отказ.
-    STATUS: RED"""
+    RESULT: connect ставит выбранные креды на соединение (conn.creds),
+    хелперы читают их, без соединения -- прежний config(); подмены #590
+    (bus.FILE) не осталось.
+    STATUS: FIXED — see #603"""
     with tempfile.TemporaryDirectory() as d:
         node_file = os.path.join(d, "bus.json")
         with open(node_file, "w") as f:
@@ -395,9 +410,14 @@ def check_identity_603(c):
         calls = []
         # config() в каталоге сервера молчит (нет ни файла, ни каталога) --
         # как на реальном узле, где лаунчер ходит только NODE_FILE'ом.
+        def node_connect(file=None):
+            calls.append(file)
+            global_set_conn(Conn())
+            return bus._conn
+
         with patched(bus, config=lambda *a, **k: (_ for _ in ()).throw(
                 bus.BusError("no bus credentials"))), \
-                patched(bus, _conn=None, connect=recording_conn):
+                patched(bus, _conn=None, connect=node_connect):
             bus.connect(bus.NODE_FILE)
             c.expect("connect passes the file through", calls[-1], bus.NODE_FILE)
             c.expect("node_name reads the CONNECTED credential, not config()",
@@ -411,9 +431,13 @@ def check_identity_603(c):
         class GrantConn(Conn):
             creds = {"url": "nats://x", "user": GRANT, "password": "p"}
 
+        def grant_connect(file=None):
+            global_set_conn(GrantConn())
+            return bus._conn
+
         with patched(bus, config=lambda *a, **k: (_ for _ in ()).throw(
                 bus.BusError("no bus credentials"))), \
-                patched(bus, _conn=None, connect=lambda file=None: GrantConn()):
+                patched(bus, _conn=None, connect=grant_connect):
             bus.connect(grant_file)
             c.expect("principal reads the connected grant credential",
                      bus.principal(), GRANT)
@@ -437,10 +461,11 @@ def check_masks_603(c):
     до пула (отказ прав в error_cb читается как «агент молчит»). И публикация
     приватных ответов -- глобальная маска сервера (_MOP_REPLY.> тем, кто
     отвечает узлу/принципалу), а не «свой private_scope(user)».
-    SOLUTION: общие node_role/cluster_role (principal=ANY -- маска, полный
-    принципал -- точный субъект) и private_publish (глобальная маска
+    SOLUTION: общие node_role/cluster_role (без principal -- маска `>`,
+    полный принципал -- точный субъект) и private_publish (глобальная маска
     публикации в чужие приватные ответы), отдельная от private_scope.
-    Рантайм-маршрутизация переиспользует их же функции. STATUS: RED"""
+    Рантайм-маршрутизация переиспользует их же: node()/cluster() зовут
+    node_role/cluster_role. STATUS: FIXED — see #603"""
     c.expect("the node role mask",
              busnames.node_role("mop", "hyper"),
              f"mop.mop.node.hyper.role.>")
