@@ -410,11 +410,15 @@ def _now():
 def permissions(principal, rec=None, root=None):
     """Права соединения принципала: субъекты busnames, свой токен.
 
-    Публикация -- rpc-субъект с именем принципала (глаголы из node_verbs
-    решает resolve, не ACL), dispatch-субъект при dispatch: true, кластерная
-    публикация только при непустом cluster_verbs (финальное #579);
-    подписка -- только _INBOX (ответы). Легаси-набор puppet-<проект> (ан
-    .msg, broadcast, events) принципалу не достаётся вовсе (#579)."""
+    Проволочное ограждение #603: НИ ОДНОГО легаси-rpc-субъекта человека --
+    ни node rpc, ни cluster rpc, ни с логином, ни без. Старый агент или
+    контроллер на смешанном роллауте исполнял бы глагол роли БЕЗ
+    резолвера; role-субъекты (node.<n>.role.<grant>, cluster.role.<grant>)
+    высаживает #603, до них принципал публикацией в чужие каналы не
+    говорит вовсе. Dispatch -- отдельный канал, без изменений. Подписка --
+    только _INBOX (ответы); после #603 -- собственный приватный префикс.
+    Легаси-набор puppet-<проект> (ан .msg, broadcast, events) принципалу
+    не достаётся вовсе (#579)."""
     rec = rec or binding(principal, root=root)
     if rec is None:
         return {"publish": [], "subscribe": []}
@@ -422,12 +426,11 @@ def permissions(principal, rec=None, root=None):
     manifest = got.get("manifest") or {}
     project = rec.get("project")
     gid = soul.grant_id(principal) or principal
-    publish = [busnames.node(project, "*", "rpc", login=principal),
-               busnames.INBOX]
+    publish = [busnames.INBOX]
     if _flag(manifest, "dispatch"):
         publish.append(busnames.dispatch_subject(project, "*", gid))
-    if _role_verbs(manifest, "cluster"):
-        publish.append(busnames.cluster(project, login=principal))
+    # Кластерные глаголы роли едут субъектом cluster.role.<grant> (#603),
+    # не легаси cluster.rpc: helper высаживает #603, до него -- не выдан.
     return {"publish": publish, "subscribe": [busnames.INBOX]}
 
 
