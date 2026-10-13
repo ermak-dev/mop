@@ -450,39 +450,23 @@ def owner_identity(req):
 
 
 def resolve_soul(project, req):
-    """Глагол resolve (#579/#581): вердикт ИСТОЧНИКУ -- может ли принципал
-    глагол службы.
+    """Глагол resolve (#579/#581): единый wire-вердикт ИСТОЧНИКА и, при
+    названной цели, вложенный блок target -- один атомарный снимок реестра.
 
     Здесь, а не в cluster.rpc (#579): спросить может только узел, кластеру
     -- та же библиотека in-process. Проект -- из субъекта, не из тела:
     субъект проверен правами NATS. Проектный человек тоже публикует в
     легаси server.rpc (#603), поэтому анонимный вызов -- отказ без фактов:
     вердикт о принципале едет только узловому вызывающему, которого назвал
-    субъект (server.rpc.<узел>, #603), не тело. Отказ -- тоже ответ:
-    fail closed."""
+    субъект (_caller каркаса, не тело). Отказ -- тоже ответ: fail closed."""
     from . import grants
     if not _node_caller(req):
         return {"allow": False,
                 "reason": "resolve serves node callers only: the anonymous "
                           "legacy server.rpc carries no grant facts (#603)"}
-    return grants.resolve(req.get("principal"), req.get("service") or "node",
-                          req.get("action") or "")
-
-
-def resolve_soul_target(project, req):
-    """Глагол resolve_target (#579/#581): вердикт ЦЕЛИ -- роль и
-    receives_dispatch адресата из реестра.
-
-    Тем же правилом узлового вызывающего (#603): цель из тела, проект из
-    субъекта; анонимному легаси-субъекту -- отказ без фактов. Не найдено --
-    тоже ответ."""
-    from . import grants
-    if not _node_caller(req):
-        return {"found": False,
-                "reason": "resolve_target serves node callers only: the "
-                          "anonymous legacy server.rpc carries no grant "
-                          "facts (#603)"}
-    return grants.resolve_target(project, req.get("target"))
+    return grants.resolve(req.get("principal"),
+                          req.get("service") or "node",
+                          req.get("verb_name") or "", target=req.get("target"))
 
 
 def _node_caller(req):
@@ -558,12 +542,10 @@ def answer(project, req, _send=None):
             return owner_identity(req)
         if verb == "resolve":
             return resolve_soul(project, req)
-        if verb == "resolve_target":
-            return resolve_soul_target(project, req)
         # `put` снят (#133): workspace кладут глаголы жизненного цикла
         # папета у сервиса кластера, а в этот субъект пишут и узлы.
         return {"error": f"no such verb {verb}; available: ping, bootstrap, "
-                         f"identity, resolve, resolve_target"}
+                         f"identity, resolve"}
     except Exception as e:
         return {"error": f"{verb}: {e}"}
 

@@ -179,7 +179,7 @@ def check_resolve_endpoint_today(c):
     from mop.server import bootstrap
 
     anon = bootstrap.answer("mop", {"verb": "resolve", "principal": "grant-x",
-                                    "service": "node", "action": "state"})
+                                    "service": "node", "verb_name": "state"})
     c.check("#581 the bootstrap service answers a resolve request "
             "with a verdict, not a missing verb",
             not (anon.get("error") or "").startswith("no such verb"),
@@ -189,7 +189,7 @@ def check_resolve_endpoint_today(c):
             anon.get("allow") is False and "grant-" not in json.dumps(anon)
             and not (anon.get("role") or anon.get("owner")), anon)
     out = bootstrap.answer("mop", {"verb": "resolve", "principal": "grant-x",
-                                   "service": "node", "action": "state",
+                                   "service": "node", "verb_name": "state",
                                    "_caller": "node-pve1"})
     c.check("#581 a node caller gets the fail-closed verdict "
             "for an unknown principal",
@@ -197,11 +197,9 @@ def check_resolve_endpoint_today(c):
             (out.get("reason") or ""), out)
     out = bootstrap.answer("mop", {"verb": "resolve_target",
                                    "target": "pu-mop-7"})
-    err = out.get("error") or ""
-    c.check("#581 the bootstrap service answers resolve_target "
-            "from the registry, anonymously fail-closed",
-            not err.startswith("no such verb") and out.get("found") is False,
-            f"сегодня: {err!r}")
+    c.check("#581 resolve_target is internal: the wire carries one "
+            "resolve verb only",
+            (out.get("error") or "").startswith("no such verb"), out)
 
 
 # ─── хранилищная половина: mop/server/grants.py ──────────────────────────
@@ -455,13 +453,19 @@ def check_resolve(c):
         mod.activate(rec["principal"], root=root.name)
         got = mod.resolve(rec["principal"], "node", "state", root=root.name)
         c.check("#581 resolve allows a verb of the role's node list "
-                "with the source binding facts",
+                "with the full source echo",
                 got.get("allow") is True and got.get("role") == "puppet"
                 and got.get("soul_digest") == PUPPET_DIGEST
                 and got.get("owner") == "anton"
                 and got.get("project") == "mop"
-                and got.get("dispatch") is False
-                and got.get("receives_dispatch") is True, got)
+                and got.get("principal") == rec["principal"]
+                and got.get("job") == "pu-mop-9"
+                and got.get("soul_inc") == incarnation("nine")
+                and got.get("source_dispatch") is False
+                and got.get("capabilities", {}).get("node_verbs")
+                == PUPPET["capabilities"]["node_verbs"]
+                and got.get("capabilities", {}).get("cluster_verbs") == [],
+                got)
         got = mod.resolve(rec["principal"], "node", "restart", root=root.name)
         c.check("#581 resolve denies a verb outside the list, naming it",
                 got.get("allow") is False and "restart" in (got.get("reason")
@@ -469,9 +473,25 @@ def check_resolve(c):
         got = mod.resolve(rec["principal"], "cluster", "roster", root=root.name)
         c.check("#581 resolve checks cluster verbs against the cluster list",
                 got.get("allow") is False, got)
+        nested = mod.resolve(rec["principal"], "node", "send",
+                              target="pu-mop-9", root=root.name)
+        c.check("#581 a named target rides the same resolve as a nested "
+                "block, one atomic snapshot",
+                nested.get("target", {}).get("found") is True
+                and nested.get("target", {}).get("job") == "pu-mop-9"
+                and nested.get("target", {}).get("project") == "mop"
+                and nested.get("target", {}).get("role") == "puppet"
+                and nested.get("target", {}).get("soul_inc")
+                == incarnation("nine")
+                and nested.get("target", {}).get("receives_dispatch")
+                is True, nested)
+        missed = mod.resolve(rec["principal"], "node", "send",
+                              target="pu-mop-1", root=root.name)
+        c.check("#581 an unbound target fails closed inside the block",
+                missed.get("target", {}).get("found") is False, missed)
         target = mod.resolve_target("mop", "pu-mop-9", root=root.name)
-        c.check("#581 resolve_target answers the target's eligibility "
-                "from the registry",
+        c.check("#581 resolve_target stays an internal helper "
+                "of the same registry",
                 target.get("receives_dispatch") is True
                 and target.get("role") == "puppet"
                 and target.get("job") == "pu-mop-9", target)
@@ -485,6 +505,70 @@ def check_resolve(c):
         got = mod.resolve("grant-" + "0" * 32, "node", "state", root=root.name)
         c.check("#581 resolve fails closed on an unknown principal",
                 got.get("allow") is False and (got.get("reason") or ""), got)
+
+
+def handmade(c, mod, role=MASTER, digest=None, prompt=None, job="pu-mop-7",
+             inc=None, active=True, project="mop", owner="anton"):
+    """Хранилище, собранное руками: prepare заблокирован дефектом #580
+    (32/64 hex), а чтение -- нет. Фикстура пишет реестр и бандл напрямую,
+    чтобы рендер прав и ограждение каналов проверялись сегодня."""
+    import tempfile
+    digest = digest or MASTER_DIGEST
+    prompt = prompt or MASTER_PROMPT
+    inc = inc or incarnation("hand")
+    root = tempfile.TemporaryDirectory()
+    bdir = os.path.join(root.name, "bundles", digest)
+    os.makedirs(bdir)
+    with open(os.path.join(bdir, "manifest.json"), "w") as f:
+        json.dump(role, f)
+    with open(os.path.join(bdir, role.get("prompt") or "soul.md"), "wb") as f:
+        f.write(prompt)
+    rec = {"principal": "", "owner": owner, "project": project, "job": job,
+           "soul_inc": inc, "soul_digest": digest, "role": role["soul"],
+           "active": active}
+    principal = "grant-" + secrets_token(32)
+    rec["principal"] = principal
+    with open(os.path.join(root.name, "registry.json"), "w") as f:
+        json.dump({principal: rec}, f)
+    return root, rec
+
+
+def secrets_token(n):
+    import secrets
+    return "0" * 0 + secrets.token_hex(n // 2)
+
+
+def check_channel_fence(c):
+    """Проволочное ограждение #603: принципал роли НЕ говорит по легаси
+    rpc человека -- ни node rpc, ни cluster rpc, ни с логином, ни без.
+    Иначе старый агент/контроллер на смешанном роллауте исполнял бы
+    БЕЗ резолвера. Отдельные role-субъекты -- когда высадит #603."""
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = handmade(c, mod)
+    with root:
+        got = mod.permissions(rec["principal"],
+                              mod.binding(rec["principal"], root=root.name),
+                              root=root.name)
+        publish = got.get("publish") or []
+        c.check("#581 the grant ACL carries no legacy human rpc subjects",
+                busnames.node("mop", "*", "rpc", login=rec["principal"])
+                not in publish
+                and busnames.cluster("mop", login=rec["principal"])
+                not in publish, publish)
+        c.check("#581 dispatch survives the fence unchanged",
+                busnames.dispatch_subject(
+                    "mop", "*", soul.grant_id(rec["principal"])) in publish,
+                publish)
+    # Сервисный борт: глагол кластера от принципала роли по легаси-субъекту
+    # -- отказ ещё ДО таблиц глаголов: старый контроллер без резолвера.
+    from mop.server import cluster
+    out = cluster.answer("mop", {"verb": "roster", "_caller": rec["principal"]})
+    c.check("#581 the cluster service refuses a grant actor "
+            "on the legacy human subject",
+            isinstance(out.get("error"), str)
+            and "grant" in out["error"].lower(), out)
 
 
 def check_permissions(c):
@@ -502,10 +586,10 @@ def check_permissions(c):
         dispatch = busnames.dispatch_subject(
             "mop", "*", soul.grant_id(rec["principal"]))
         cluster = busnames.cluster("mop", login=rec["principal"])
-        c.check("#581 the connection ACL is own-token busnames subjects "
-                "and replies only",
+        c.check("#581 the connection ACL is dispatch and replies only "
+                "until the role channel lands (#603)",
                 sorted(got.get("publish") or []) == sorted(
-                    [rpc, dispatch, cluster, busnames.INBOX])
+                    [dispatch, busnames.INBOX])
                 and (got.get("subscribe") or []) == [busnames.INBOX], got)
         legacy = {busnames.cluster("mop"), busnames.node("mop", "*", "rpc"),
                   busnames.node("mop", "*", "msg")}
@@ -514,6 +598,14 @@ def check_permissions(c):
                 or "server" in s]
         c.check("#581 no legacy anonymous subject reaches the grant ACL",
                 not leak, leak)
+        # Проволочное ограждение #603: принципал роли НЕ говорит по легаси
+        # rpc человека -- ни с логином, ни без. Иначе старый агент/контроллер
+        # на смешанном роллауте исполнял бы БЕЗ резолвера.
+        c.check("#581 the grant ACL carries no legacy human rpc subjects",
+                busnames.node("mop", "*", "rpc", login=rec["principal"])
+                not in (got.get("publish") or [])
+                and busnames.cluster("mop", login=rec["principal"])
+                not in (got.get("publish") or []), got)
     root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
                          prompt=b"# puppet prompt\n", request_id="r2",
                          job="pu-mop-8", soul_inc=incarnation("eight"), intent="intent-P")
@@ -660,7 +752,7 @@ def check_parallel_requests(c):
 def main():
     c = Checks()
     for fn in (check_namespace_today, check_callout_routing_today,
-               check_resolve_endpoint_today,
+               check_resolve_endpoint_today, check_channel_fence,
                check_prepare, check_request_id, check_immutable_bundle,
                check_activate, check_revoke_cut, check_admit,
                check_password, check_resolve, check_permissions,
