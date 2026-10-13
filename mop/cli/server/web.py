@@ -719,7 +719,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/projects":
             return ADMINAPI.projects(self, _registry_projects)
         if path.startswith("/api/admin/ops/"):
-            return self._json(200, ADMINAPI.result(path.rsplit("/", 1)[-1], self.who))
+            try:
+                result = ADMINAPI.result(path.rsplit("/", 1)[-1], self.who)
+            except adminapi.Refused as e:
+                return self._json(e.code, {"error": e.error})
+            return self._json(200, result)
         if path == "/llm/management.html":
             return self.llm_shim()
         if path.startswith("/llm/raw/"):

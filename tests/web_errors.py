@@ -47,7 +47,12 @@ def main():
         body = json.dumps(got)
         c.check("#495 private details never ride the result", all(secret not in body for secret in
                 ("private-key", "private-user", "/root", "secret.env", "raw payload", "params")), got)
-        c.expect("#495 role gate still hides the result", api.result(rec["id"], ("bob", "user")), {"status": "403"})
+        try:
+            api.result(rec["id"], ("bob", "user"))
+            c.check("#495 role gate still hides the result", False)
+        except adminapi.Refused as refused:
+            c.expect("#495 role gate still hides the result", (refused.code, refused.error),
+                     (403, "admin only"))
     api = adminapi.Api(adminapi.Operations(), origin="https://pool.example",
                        executor=lambda *a: {"outcome": "registered"})
     rec = api.submit("send", "pu-mop-1", {"message": "hello"}, who)

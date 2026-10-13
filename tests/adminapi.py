@@ -463,8 +463,12 @@ def main():
     c.check("#461 own result is readable", got.get("id") == first["id"], got)
     c.check("#461 a result of an unknown id reads unknown with the journal pointer",
             api.result("no-such-id", ADMIN).get("status") == "unknown", None)
-    c.check("#461 a result is admin-only",
-            api.result(first["id"], USER).get("status") in ("401", "403", "refused"))
+    try:
+        api.result(first["id"], USER)
+        c.check("#461 a result is admin-only", False)
+    except adminapi.Refused as refused:
+        c.expect("#461 a result is admin-only", (refused.code, refused.error),
+                 (403, "admin only"))
     c.check("#461 the result carries no message payload",
             "message" not in json.dumps(got), got)
     c.check("#461 results never ride the public snapshot",
