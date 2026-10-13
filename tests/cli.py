@@ -1531,6 +1531,78 @@ def check_role_declarations_585(c):
             continue
         c.fail(f"#585 declared must refuse: {bad}")
 
+    # HYPOTHESIS (#585, остаток): seventeen commandlets carry an MCP
+    # declaration, but none names its verbs -- so a role sees no commandlet
+    # tool at all, and the fail-closed catalogue is empty for every grant.
+    # SOLUTION: annotate each declaration with the verbs the commandlet
+    # really calls (the audit below follows the actual calls, not guessed
+    # names); a commandlet whose true verbs are admin ones the role grammar
+    # excludes (nodes/drain/up/project_add/project_limit) or that needs a
+    # human login (models, diagnose, server diagnose) stays silent -- it is
+    # human-only, and the grammar keeps it out on purpose.
+    # Глаголы -- по живым вызовам каждого командлета, не по имени команды:
+    # wipe зовёт cluster alloc (узел остановленного) и node wipe; recycle
+    # добавляет spec/delete/update/bootstrap_result; stat -- cluster pool и
+    # node usage; landing -- только landing.
+    ANNOTATED = {
+        "wipe": (["wipe"], ["alloc"]),
+        "restart": ([], ["alloc", "restart"]),
+        "delete": (["wipe"], ["alloc", "delete"]),
+        "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
+                              "bootstrap_result"]),
+        "update": ([], ["spec", "update", "bootstrap_result"]),
+        "add": ([], ["add", "alloc", "bootstrap_result"]),
+        "landing": ([], ["landing"]),
+        "stat": (["usage"], ["pool"]),
+        "profile": ([], []),
+        # admin verbs outside the role grammar: silent for grants on purpose
+        "node": None, "node_drain": None, "node_up": None,
+        "project_add": None, "project_limit": None,
+        "models": None, "diagnose": None, "server_diagnose": None,
+    }
+    from mop.common import soul
+    tools = {n: cli.declared(path) for n, _, path
+             in cli.tool_commands(cli.scan(), cli.verbs())}
+    declared_names = {n: d for n, d in tools.items() if d is not None}
+    c.expect("#585 every declared commandlet is audited",
+             sorted(declared_names), sorted(ANNOTATED))
+    for name, audited in sorted(ANNOTATED.items()):
+        decl = declared_names.get(name)
+        if audited is None:
+            c.check(f"#585 {name} stays silent: its verbs are outside the role grammar "
+                    f"or need a human login",
+                    not any(k in (decl or {}) for k in
+                            ("node_verbs", "cluster_verbs", "dispatch")))
+            continue
+        node_verbs, cluster_verbs = audited
+        c.expect(f"#585 {name} names the verbs it really calls",
+                 (decl.get("node_verbs"), decl.get("cluster_verbs")),
+                 (node_verbs, cluster_verbs))
+        for verb in node_verbs:
+            c.check(f"#585 {name}: {verb} is in the role grammar",
+                    verb in soul.NODE_VERBS)
+        for verb in cluster_verbs:
+            c.check(f"#585 {name}: {verb} is in the role grammar",
+                    verb in soul.CLUSTER_VERBS)
+    # Аннотация -- не декорация: с ней рабочий пресет видит командлеты в
+    # своих правах, а не пустой каталог.
+    from mop.client import channel
+    grant_caps = soul.from_manifest({
+        "soul": "puppet", "version": 1,
+        "runtime": {"driver": "any", "receives_dispatch": True},
+        "capabilities": {"node_verbs": ["send", "tail", "state", "states",
+                                        "ping", "local", "usage"],
+                         "cluster_verbs": ["alloc", "spec", "roster"],
+                         "dispatch": False, "spawn": []},
+        "prompt": "soul.md"}, b"p").manifest.capabilities
+    seen = channel.tools_for(channel.GRANT, grant_caps,
+                             {n: d for n, d in declared_names.items()})
+    c.check("#585 a grant's catalogue is not empty once declarations name verbs",
+            {"profile", "stat"} <= seen, seen)
+    c.check("#585 a role with no matching verbs gains nothing",
+            "wipe" not in seen and "add" not in seen, seen)
+    # STATUS: FIXED — see #585
+
 
 def check_mcp_declarations(c):
     """#160: инструменты управления MCP -- объявления в самих командлетах.

@@ -4,7 +4,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402
-from _lib import Checks, patched, run_command  # noqa: E402
+from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import cli  # noqa: E402
@@ -38,8 +38,44 @@ def main():
             text, _, _ = run_command(profile.main, [])
     c.expect("#442 no branch is not origin HEAD", text.strip(),
              "profile master of project cloudpub; integration branch not set")
-    # RESULT: красный на отсутствующем командлете, зелёный после реализации.
-    # STATUS: FIXED — see #442
+
+    # HYPOTHESIS (#585): роль-принципал (grant-<id>) разбирается той же
+    # проверкой «не puppet-<проект>», что и человек, и mop profile
+    # называет её «master of project» -- а её права из бандла, и хозяин у
+    # неё другой. Мастер-роль диспетчерит, рабочая -- принимает: слово
+    # «master» здесь ложь дважды.
+    # SOLUTION: профиль по виду говорящего (channel.actor): грант --
+    # «role <имя роли бандла>», имя -- из MOP_SOUL_DIR, без бандла -- «role
+    # unknown (no bundle)»: заявлять роль, которой тело не подтвердило,
+    # нельзя. Человек и узел -- прежние строки байт в байт.
+    from mop.client import channel
+    GRANT = "grant-" + "a" * 32
+    import tempfile
+    import json as _json
+    d = tempfile.mkdtemp(prefix="mop-test-profile-585-")
+    bundle = os.path.join(d, "worker")
+    os.makedirs(bundle)
+    with open(os.path.join(bundle, "soul.yaml"), "w") as f:
+        f.write("soul: worker\nversion: 1\n"
+                "runtime: {driver: any, receives_dispatch: true}\n"
+                "capabilities: {node_verbs: [send, tail], cluster_verbs: [], "
+                "dispatch: false, spawn: []}\n"
+                "secrets: {files: [], vars: []}\n"
+                "prompt: soul.md\n")
+    with open(os.path.join(bundle, "soul.md"), "w") as f:
+        f.write("prompt\n")
+    c.expect("#585 grant is its own actor", channel.actor(GRANT), channel.GRANT)
+    with patched(bus, config=lambda: {"user": GRANT}, PROJECT="cloudpub"):
+        with patched_env(MOP_SOUL_DIR=bundle):
+            text, _, code = run_command(profile.main, [])
+    c.expect("#585 a grant is profiled as its bundle's role", text.strip(),
+             "profile role worker; integration branch not set")
+    with patched(bus, config=lambda: {"user": GRANT}, PROJECT="cloudpub"):
+        text, _, _ = run_command(profile.main, [])
+    c.expect("#585 a grant without a bundle is not a master either", text.strip(),
+             "profile role unknown (no bundle); integration branch not set")
+    # RESULT: красный на «master of project» для гранта, зелёный после.
+    # STATUS: FIXED — see #585 (после #442)
     return c.report("profile")
 
 
