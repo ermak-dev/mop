@@ -2704,6 +2704,39 @@ def readers_stub():
                    node_of=lambda name, running=True: "mate")
 
 
+# HYPOTHESIS: GET результата кодирует admin-гейт как status="403"
+# внутри HTTP 200, и клиент принимает отказ доступа за исход операции.
+# SOLUTION: отказ -- типизированный Refused, HTTP-handler сохраняет его
+# код и безопасную причину, а не упаковывает отказ как статус операции.
+# RESULT: 401/403/503 проверены на настоящем GET-handler.
+# STATUS: FIXED — see #610
+def check_operation_result_http_gate_610(c):
+    from mop.cli.server import web as webcli
+    from mop.server import adminapi
+
+    def unavailable():
+        raise RuntimeError("PRIVATE-TOKEN /private/provider.env")
+
+    cases = (((None, None), None, 401, "login required"),
+             (("viewer", "user"), None, 403, "admin only"),
+             (("admin", "admin"), unavailable, 503, "login provider unavailable"))
+    for who, provider, expected, reason in cases:
+        api = adminapi.Api(adminapi.Operations(), origin="https://pool.example", provider=provider)
+        with patched(webcli, ADMINAPI=api), patched(webcli.Handler, _who=lambda self, p=who: p):
+            headers, body = _fake_handler(webcli, "GET", "/api/admin/ops/private-operation-id")
+        c.expect(f"#610 HTTP result gate {expected}", headers[0][1], expected)
+        c.expect(f"#610 result gate {expected} gives only its public reason",
+                 json.loads(body), {"error": reason})
+        c.check(f"#610 result gate {expected} leaks no operation or provider details",
+                all(secret not in body.decode() for secret in
+                    ("private-operation-id", "PRIVATE-TOKEN", "provider.env", '"target"')), body)
+    api = adminapi.Api(adminapi.Operations(), origin="https://pool.example")
+    with patched(webcli, ADMINAPI=api), patched(webcli.Handler, _who=lambda self: ("admin", "admin")):
+        headers, body = _fake_handler(webcli, "GET", "/api/admin/ops/unknown-id")
+    c.expect("#610 admin can still read an unknown result", headers[0][1], 200)
+    c.expect("#610 unknown is an operation status, not an auth failure", json.loads(body)["status"], "unknown")
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -2714,7 +2747,7 @@ def main():
                check_load_378, check_master_sessions_421, check_who_answer_421,
                check_session_store_415, check_login_api_415,
                check_session_survives_restart_485,
-               check_admin_routes_486,
+               check_admin_routes_486, check_operation_result_http_gate_610,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
                check_no_replay_519,

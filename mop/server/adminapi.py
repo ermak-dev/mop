@@ -504,7 +504,7 @@ class Api:
         эффекте -- /api/journal и аудит пула, не память адаптера."""
         why = self._admin(who, asked=True)
         if why:
-            return {"status": str(why[0])}
+            raise Refused(why[0], why[1])
         with self._lock:
             stored = self._records.get(op_id)
             got = dict(stored) if stored is not None else None
