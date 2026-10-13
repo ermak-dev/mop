@@ -198,6 +198,59 @@ def check_resolve_endpoint_today(c):
     c.check("#581 resolve_target is internal: the wire carries one "
             "resolve verb only",
             (out.get("error") or "").startswith("no such verb"), out)
+    # Режим только-цели (#584): узлу нужно прочитать привязку ДО того,
+    # как процесс роли сможет действовать. Без принципала -- это ПОИСК
+    # ЦЕЛИ, не делегированное действие: отсутствие принципала не
+    # превращается молча в анонимное привилегированное действие --
+    # явный data-only режим, и тоже только узловому вызывающему.
+    anon = bootstrap.answer("mop", {"verb": "resolve", "target": "pu-mop-9"})
+    c.check("#581 a principal-less resolve is node-gated too",
+            anon.get("allow") is False
+            and "node callers" in (anon.get("reason") or ""), anon)
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                         prompt=b"# puppet prompt\n", job="pu-mop-9",
+                         soul_inc=incarnation("nine"), request_id="req-t9")
+    with root:
+        mod.activate(rec["principal"], root=root.name)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 a principal-less node resolve returns the exact "
+                "binding state, no action verdict, no password",
+                out.get("found") is True and out.get("job") == "pu-mop-9"
+                and out.get("project") == "mop"
+                and out.get("owner") == "anton"
+                and out.get("role") == "puppet"
+                and out.get("soul_inc") == incarnation("nine")
+                and out.get("soul_digest") == PUPPET_DIGEST
+                and out.get("active") is True
+                and out.get("receives_dispatch") is True
+                and out.get("allow") is None
+                and "password" not in json.dumps(out), out)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "soul_inc": incarnation("nine"),
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 soul_inc narrows the target lookup (#590)",
+                out.get("found") is True
+                and out.get("soul_inc") == incarnation("nine"), out)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "soul_inc": incarnation("nope"),
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 an unknown incarnation misses the target",
+                out.get("found") is False, out)
+        mod.revoke(rec["principal"], root=root.name)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 a revoked target carries its revoked_at, "
+                "the node judges",
+                out.get("found") is True and out.get("active") is False
+                and out.get("revoked_at"), out)
 
 
 # ─── хранилищная половина: mop/server/grants.py ──────────────────────────
@@ -651,15 +704,28 @@ def check_channel_fence(c):
                               mod.binding(rec["principal"], root=root.name),
                               root=root.name)
         publish = got.get("publish") or []
-        c.check("#581 the grant ACL carries no legacy human rpc subjects",
-                busnames.node("mop", "*", "rpc", login=rec["principal"])
-                not in publish
-                and busnames.cluster("mop", login=rec["principal"])
-                not in publish, publish)
-        c.check("#581 dispatch survives the fence unchanged",
-                busnames.dispatch_subject(
-                    "mop", "*", soul.grant_id(rec["principal"])) in publish,
+        c.check("#581 the grant ACL carries no legacy human rpc subjects "
+                "and no bare legacy cluster subject",
+                not [s for s in publish if ".rpc." in s]
+                and busnames.cluster("mop") not in publish, publish)
+        c.check("#581 dispatch rides the full principal (#603)",
+                busnames.dispatch_subject("mop", "*", rec["principal"])
+                in publish, publish)
+        c.check("#581 the master role speaks on its node role subjects "
+                "by the full principal (#603)",
+                busnames.node("mop", "*", busnames.ROLE_CHANNEL,
+                              login=rec["principal"]) in publish
+                and busnames.cluster("mop",
+                                     login=rec["principal"]) in publish,
                 publish)
+        c.check("#581 the grant subscribes only its own private replies "
+                "(#603): no legacy _INBOX",
+                (got.get("subscribe") or [])
+                == [busnames.private_scope(rec["principal"])],
+                got)
+        c.check("#581 the grant publishes its own reply subjects (#603)",
+                f"{busnames.private_prefix(rec['principal'])}.*"
+                in publish, publish)
     # Сервисный борт: глагол кластера от принципала роли по легаси-субъекту
     # -- отказ ещё ДО таблиц глаголов: старый контроллер без резолвера.
     from mop.server import cluster
@@ -682,14 +748,16 @@ def check_permissions(c):
                               mod.binding(rec["principal"], root=root.name),
                               root=root.name)
         rpc = busnames.node("mop", "*", "rpc", login=rec["principal"])
-        dispatch = busnames.dispatch_subject(
-            "mop", "*", soul.grant_id(rec["principal"]))
+        dispatch = busnames.dispatch_subject("mop", "*", rec["principal"])
         cluster = busnames.cluster("mop", login=rec["principal"])
-        c.check("#581 the connection ACL is dispatch and replies only "
-                "until the role channel lands (#603)",
+        c.check("#581 the connection ACL is role subjects, dispatch "
+                "and own private replies (#603)",
                 sorted(got.get("publish") or []) == sorted(
-                    [dispatch, busnames.INBOX])
-                and (got.get("subscribe") or []) == [busnames.INBOX], got)
+                    [dispatch, busnames.node("mop", "*", busnames.ROLE_CHANNEL,
+                                             login=rec["principal"]),
+                     cluster, busnames.private_prefix(rec["principal"]) + ".*"])
+                and (got.get("subscribe") or [])
+                == [busnames.private_scope(rec["principal"])], got)
         legacy = {busnames.cluster("mop"), busnames.node("mop", "*", "rpc"),
                   busnames.node("mop", "*", "msg")}
         leak = [s for s in (got.get("publish") or []) + (got.get("subscribe")
@@ -699,12 +767,12 @@ def check_permissions(c):
                 not leak, leak)
         # Проволочное ограждение #603: принципал роли НЕ говорит по легаси
         # rpc человека -- ни с логином, ни без. Иначе старый агент/контроллер
-        # на смешанном роллауте исполнял бы БЕЗ резолвера.
+        # на смешанном роллауте исполнял бы БЕЗ резолвера. Для гранта
+        # cluster(p, login=grant) -- это и ЕСТЬ role-субъект (#603),
+        # легаси-утечка structural: любой .rpc. токен.
         c.check("#581 the grant ACL carries no legacy human rpc subjects",
-                busnames.node("mop", "*", "rpc", login=rec["principal"])
-                not in (got.get("publish") or [])
-                and busnames.cluster("mop", login=rec["principal"])
-                not in (got.get("publish") or []), got)
+                not [s for s in (got.get("publish") or [])
+                     if ".rpc." in s or s == busnames.cluster("mop")], got)
     root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
                          prompt=b"# puppet prompt\n", request_id="r2",
                          job="pu-mop-8", soul_inc=incarnation("eight"), intent="intent-P")
@@ -714,11 +782,19 @@ def check_permissions(c):
                               root=root.name)
         c.check("#581 a role without dispatch or cluster verbs gets "
                 "neither subject",
-                busnames.dispatch_subject(
-                    "mop", "*", soul.grant_id(rec["principal"]))
+                busnames.dispatch_subject("mop", "*", rec["principal"])
                 not in (got.get("publish") or [])
                 and busnames.cluster("mop", login=rec["principal"])
                 not in (got.get("publish") or []), got)
+        c.check("#581 a role with node verbs speaks its node role "
+                "subject and private replies only",
+                busnames.node("mop", "*", busnames.ROLE_CHANNEL,
+                              login=rec["principal"])
+                in (got.get("publish") or [])
+                and not [s for s in (got.get("publish") or [])
+                         if ".rpc." in s]
+                and (got.get("subscribe") or [])
+                == [busnames.private_scope(rec["principal"])], got)
 
 
 def check_provider(c):

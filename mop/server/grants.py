@@ -418,6 +418,38 @@ def resolve_target(project, target, root=None):
     return _target_block(_read(_root_dir(root)), project, target, root)
 
 
+def describe_target(project, target, soul_inc=None, root=None):
+    """Полное состояние привязки цели для узла (#584): data-only.
+
+    Режим только-цели resolve: узел читает привязку ДО того, как процесс
+    роли сможет действовать. Отбор свой, не by_job: без инкарнации живая
+    привязка предпочтительна (переиспользованное имя держит новый грант),
+    но единственная неживая видима С её состоянием -- узлу различить
+    «никогда не была привязана» (легаси-путь) и «привязана, но отозвана»
+    (снести) важнее, чем не видеть ничего; неоднозначность неживых --
+    тот же громкий отказ. Пароля здесь нет и не бывает: это чтение,
+    не выдача кредов."""
+    reg = _read(_root_dir(root))
+    rec = _select_job(reg, project, target, soul_inc)
+    if rec is None and soul_inc is None:
+        rest = [r for r in reg.values()
+                if r.get("project") == project and r.get("job") == target]
+        if len(rest) > 1:
+            raise ValueError(f"grants: {project}/{target} has ambiguous "
+                             f"bindings: {', '.join(sorted(
+                                 r.get('principal', '?') for r in rest))}")
+        rec = dict(rest[0]) if rest else None
+    if rec is None:
+        return {"found": False}
+    return {"found": True, "job": rec.get("job"),
+            "project": rec.get("project"), "role": rec.get("role"),
+            "soul_inc": rec.get("soul_inc"), "owner": rec.get("owner"),
+            "soul_digest": rec.get("soul_digest"),
+            "active": bool(rec.get("active")),
+            "revoked_at": rec.get("revoked_at"),
+            "receives_dispatch": _target_flag(_root_dir(root), rec)}
+
+
 def _target_flag(root, rec):
     got = bundle(rec.get("soul_digest"), root=root)
     if got is None:
@@ -451,25 +483,29 @@ def permissions(principal, rec=None, root=None):
     Проволочное ограждение #603: НИ ОДНОГО легаси-rpc-субъекта человека --
     ни node rpc, ни cluster rpc, ни с логином, ни без. Старый агент или
     контроллер на смешанном роллауте исполнял бы глагол роли БЕЗ
-    резолвера; role-субъекты (node.<n>.role.<grant>, cluster.role.<grant>)
-    высаживает #603, до них принципал публикацией в чужие каналы не
-    говорит вовсе. Dispatch -- отдельный канал, без изменений. Подписка --
-    только _INBOX (ответы); после #603 -- собственный приватный префикс.
-    Легаси-набор puppet-<проект> (ан .msg, broadcast, events) принципалу
-    не достаётся вовсе (#579)."""
+    резолвера; роль говорит субъектами канала role (node.<n>.role.<grant>,
+    cluster.role.<grant>) и dispatch -- полным принципалом (#603: голый
+    hex на проводе не появляется). Подписка -- ТОЛЬКО свой приватный
+    префикс ответов (_MOP_REPLY.<grant>.>): публичный _INBOX человеку
+    читаем, и ответ узла несёт служебные данные; свой ответ принципал
+    публикует тем же префиксом. Легаси-набор puppet-<проект> (ан .msg,
+    broadcast, events) принципалу не достаётся вовсе (#579)."""
     rec = rec or binding(principal, root=root)
     if rec is None:
         return {"publish": [], "subscribe": []}
     got = bundle(rec.get("soul_digest"), root=root) or {}
     manifest = got.get("manifest") or {}
     project = rec.get("project")
-    gid = soul.grant_id(principal) or principal
-    publish = [busnames.INBOX]
+    publish = [busnames.private_prefix(principal) + ".*"]
     if _flag(manifest, "dispatch"):
-        publish.append(busnames.dispatch_subject(project, "*", gid))
-    # Кластерные глаголы роли едут субъектом cluster.role.<grant> (#603),
-    # не легаси cluster.rpc: helper высаживает #603, до него -- не выдан.
-    return {"publish": publish, "subscribe": [busnames.INBOX]}
+        publish.append(busnames.dispatch_subject(project, "*", principal))
+    if _role_verbs(manifest, "node"):
+        publish.append(busnames.node(project, "*", busnames.ROLE_CHANNEL,
+                                     login=principal))
+    if _role_verbs(manifest, "cluster"):
+        publish.append(busnames.cluster(project, login=principal))
+    return {"publish": publish,
+            "subscribe": [busnames.private_scope(principal)]}
 
 
 class Provider:

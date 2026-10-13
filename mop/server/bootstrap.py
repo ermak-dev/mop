@@ -449,24 +449,38 @@ def owner_identity(req):
     return identity.profile(identity.server_provider(), login)
 
 
-def resolve_soul(project, req):
-    """Глагол resolve (#579/#581): единый wire-вердикт ИСТОЧНИКА и, при
-    названной цели, вложенный блок target -- один атомарный снимок реестра.
+def resolve_soul(project, req, root=None):
+    """Глагол resolve (#579/#581/#584): единый wire-вердикт. Два режима:
+
+    -- с принципалом -- делегированное действие {principal, service,
+       verb_name, target?}: вердикт ИСТОЧНИКА и, при названной цели,
+       вложенный блок target, один атомарный снимок реестра;
+    -- без принципала -- режим только-цели (#584): узел читает
+       состояние привязки ДО того, как процесс роли сможет действовать.
+       Это data-only: found/job/project/owner/role/soul_inc/soul_digest/
+       active/revoked_at/receives_dispatch, пароля нет. Отсутствие
+       принципала НЕ становится молча анонимным привилегированным
+       действием -- только этот явный режим и только узлу.
 
     Здесь, а не в cluster.rpc (#579): спросить может только узел, кластеру
     -- та же библиотека in-process. Проект -- из субъекта, не из тела:
     субъект проверен правами NATS. Проектный человек тоже публикует в
     легаси server.rpc (#603), поэтому анонимный вызов -- отказ без фактов:
     вердикт о принципале едет только узловому вызывающему, которого назвал
-    субъект (_caller каркаса, не тело). Отказ -- тоже ответ: fail closed."""
+    субъект (_caller каркаса, не тело). root -- шов проверок: реальный
+    вызов читает хранилище сервера. Отказ -- тоже ответ: fail closed."""
     from . import grants
     if not _node_caller(req):
         return {"allow": False,
                 "reason": "resolve serves node callers only: the anonymous "
                           "legacy server.rpc carries no grant facts (#603)"}
+    if not req.get("principal"):
+        return grants.describe_target(project, req.get("target") or "",
+                                      soul_inc=req.get("soul_inc"), root=root)
     return grants.resolve(req.get("principal"),
                           req.get("service") or "node",
-                          req.get("verb_name") or "", target=req.get("target"))
+                          req.get("verb_name") or "", target=req.get("target"),
+                          root=root)
 
 
 def _node_caller(req):
