@@ -218,7 +218,8 @@ def check_resolve_endpoint_today(c):
         mod.activate(rec["principal"], root=root.name)
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 a principal-less node resolve returns the exact "
                 "binding state, no action verdict, no password",
                 out.get("found") is True and out.get("job") == "pu-mop-9"
@@ -234,20 +235,23 @@ def check_resolve_endpoint_today(c):
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "soul_inc": incarnation("nine"),
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 soul_inc narrows the target lookup (#590)",
                 out.get("found") is True
                 and out.get("soul_inc") == incarnation("nine"), out)
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "soul_inc": incarnation("nope"),
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 an unknown incarnation misses the target",
                 out.get("found") is False, out)
         mod.revoke(rec["principal"], root=root.name)
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 a revoked target carries its revoked_at, "
                 "the node judges",
                 out.get("found") is True and out.get("active") is False
@@ -835,16 +839,19 @@ def check_issue(c):
         password = f.read().strip()
     node = "node-pve1"
     reply_ok = f"{busnames.private_prefix(node)}.abc123"
-    jobs_ok = lambda name: JobMeta(None, None, None, "puppet",
-                                   PUPPET_DIGEST, incarnation("nine"))
+    # Meta по имени: ролевая тройка -- только у связанного имени; чужое
+    # имя (легаси-путь ниже) -- меты без тройки, как живой легаси-джоб.
+    # Origin -- проекта маршрута: сервер пишет его при регистрации (#581).
+    jobs_ok = lambda name: (
+        JobMeta("git@gitlab:mop/mop.git", None, None, "puppet",
+                PUPPET_DIGEST, incarnation("nine"))
+        if name == "pu-mop-9" else JobMeta(None, None))
     assigned_ok = lambda name: "pve1"
     played = []
-    ok_play = dict(lambda req, project: played.append(req) or {
-        "ok": True, "played": True, "rc": 0, "seconds": 1.0, "tail": ""})[0] \
-        if False else (lambda req, project: (played.append(req),
-                                             {"ok": True, "played": True,
-                                              "rc": 0, "seconds": 1.0,
-                                              "tail": ""})[1])
+    ok_play = (lambda req, project, **kw: (played.append(req),
+                                            {"ok": True, "played": True,
+                                             "rc": 0, "seconds": 1.0,
+                                             "tail": ""})[1])
     owner_probe = lambda login: {"login": login, "name": "Anton",
                                  "email": "anton@ermak.dev"}
     with root:
@@ -923,9 +930,10 @@ def check_issue(c):
         # 5a. Проваленный прогон НЕ выдаёт кредов (#590): прежде ролевая
         #     надстройка ехала в ответ при любом исходе прогона -- узел
         #     с упавшим ansible получал пароль принципала и душу.
-        fail_play = lambda rq, p: {"ok": False, "played": True, "rc": 2,
-                                   "task": "install", "message": "boom",
-                                   "tail": "TASK [install] *** boom"}
+        fail_play = lambda rq, p, **kw: {"ok": False, "played": True,
+                                         "rc": 2, "task": "install",
+                                         "message": "boom",
+                                         "tail": "TASK [install] *** boom"}
         with patched(bootstrap, ROOT=root.name, play=fail_play,
                      _job_meta=jobs_ok, _assigned_node=assigned_ok,
                      _soul_root=lambda: root.name,
@@ -1261,6 +1269,511 @@ def check_parallel_requests(c):
                 f"{len(principals)} принципалов на 8 гонок: {results!r}")
 
 
+# ─── строгая выдача: фактическая Meta, живость ПОСЛЕ прогона (#581) ──────
+def check_strict_meta_581(c):
+    """HYPOTHESIS (#581, ревью выдачи): роль опознаётся одним реестром
+    (binding_named), инкарнация уходит в by_job какой дала Meta (None --
+    любой живой), _job_meta глотает ЛЮБОЙ отказ Nomad в пустую мету, а
+    живость проверяется только ДО прогона. Прогон идёт минуты: отзыв по
+    дороге или молчащая пустая Meta выдают пароль принципала узлу, чей
+    джоб уже не тот (или вовсе не роль).
+    SOLUTION: (1) классификация и ворота читают ФАКТИЧЕКУЮ Meta джоба:
+    тройка роли в Meta -- ролевой джоб, и привязка обязана найтись по
+    (project, job, soul, digest, inc) ЦЕЛИКОМ; пустая Meta у имени с
+    привязкой -- отказ, не легаси-путь. (2) _job_meta не глотает отказ
+    Nomad: причина едет наружу, ворота отказывают (fail closed). (3)
+    роль играет с закреплённым бандлом play(bundle=...) (#592): allowlist
+    из доверенного хранения. (4) после прогона -- повторная проверка
+    живости: отзыв, приехавший за минуты ansible, не выдаёт кредов.
+    (5) владелец в ответе -- ровно {login, name, email}.
+    RESULT: пустая/битая Meta, чужая тройка, отсутствующий бандл, отзыв
+    во время прогона и битый реестр после него -- отказы с причиной, без
+    bus/soul в ответе; счастливый путь несёт бандл в прогон. 
+    STATUS: RED — see #581"""
+    import base64
+    from mop.server import bootstrap
+    from _lib import patched
+
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                         prompt=b"# puppet prompt\n", job="pu-mop-9",
+                         soul_inc=incarnation("nine"), request_id="req-s9")
+    principal = rec["principal"]
+    node = "node-pve1"
+    reply_ok = f"{busnames.private_prefix(node)}.abc123"
+    req = {"verb": "bootstrap", "name": "pu-mop-9", "address": "10.0.0.1",
+           "_caller": node, "_reply": reply_ok}
+    # Тройка фактической Meta: та, что в реестре. Origin -- проекта
+    # маршрута: сервер пишет его при регистрации, без него тройка --
+    # сломанная запись (#581).
+    origin = "git@gitlab:mop/mop.git"
+    meta_ok = JobMeta(origin, None, None, "puppet", PUPPET_DIGEST,
+                      incarnation("nine"))
+    plays = []
+
+    def ok_play(rq, project, **kw):
+        plays.append(kw)
+        return {"ok": True, "played": True, "rc": 0, "seconds": 1.0,
+                "tail": ""}
+
+    owner_probe = lambda login: {"login": login, "name": "Anton",
+                                 "email": "anton@ermak.dev"}
+    with root:
+        mod.activate(principal, root=root.name)
+        base_patch = dict(ROOT=root.name, play=ok_play,
+                          _assigned_node=lambda name: "pve1",
+                          _soul_root=lambda: root.name,
+                          _owner_profile=owner_probe)
+        # 1. Счастливый путь: прогон получает закреплённый бандл (#592).
+        with patched(bootstrap, _job_meta=lambda name: meta_ok, **base_patch):
+            out = bootstrap.answer("mop", dict(req))
+        c.check("#581 the happy path feeds the pinned trusted bundle "
+                "into the role play",
+                out.get("ok") is True and plays
+                and plays[-1].get("bundle") is not None
+                and plays[-1]["bundle"].digest == PUPPET_DIGEST
+                and plays[-1]["bundle"].manifest.secrets is not None, out)
+        c.check("#581 the happy path still issues the #590 payload",
+                (out.get("bus") or {}).get("user") == principal
+                and (out.get("soul") or {}).get("role") == "puppet", out)
+        # 2. Пустая Meta (Nomad молчит) у имени с привязкой -- отказ,
+        #    не легаси-путь с проектным кредом и не any-live выбор.
+        with patched(bootstrap, _job_meta=lambda name: JobMeta(None, None),
+                     **base_patch):
+            empty = bootstrap.answer("mop", dict(req))
+        c.check("#581 empty job Meta at a bound name is a refusal, "
+                "not a legacy fallback",
+                bool(empty.get("error")) and "bus" not in empty
+                and "soul" not in empty and "puppet-mop" not in
+                json.dumps(empty), empty)
+        # 3. Отказ Nomad в _job_meta не глотается: причина едет наружу.
+        def broken_meta(name):
+            raise ConnectionError("Nomad unreachable")
+        with patched(bootstrap, _job_meta=broken_meta, **base_patch):
+            loud = bootstrap.answer("mop", dict(req))
+        c.check("#581 a Nomad failure in job Meta is loud, not an "
+                "empty-Meta fallback",
+                bool(loud.get("error")) and "Nomad unreachable" in
+                loud.get("error") and "bus" not in loud
+                and "soul" not in loud, loud)
+        # 4. Битая тройка в Meta (половина тройки) -- отказ сборки Meta,
+        #    не половина роли: тот же договор, что у конструктора.
+        def half_meta(name):
+            return JobMeta(None, None, None, "puppet", PUPPET_DIGEST, None)
+        with patched(bootstrap, _job_meta=half_meta, **base_patch):
+            half = bootstrap.answer("mop", dict(req))
+        c.check("#581 a half role triple in Meta is refused",
+                bool(half.get("error")) and "bus" not in half, half)
+        # 5. Чужая тройка (роль/дайджест другой) -- привязка не та:
+        #    совпадение (project, job, inc) без роли и дайджеста --
+        #    чужая душа.
+        other = JobMeta(origin, None, None, "master", MASTER_DIGEST,
+                        incarnation("nine"))
+        with patched(bootstrap, _job_meta=lambda name: other, **base_patch):
+            alien = bootstrap.answer("mop", dict(req))
+        c.check("#581 a Meta triple of another role or digest does not "
+                "match the binding",
+                bool(alien.get("error")) and "bus" not in alien, alien)
+        # 5a. HYPOTHESIS (#581, ревью проектов): ворота сверяли тройку,
+        # но не ФАКТИЧЕСКИЙ проект Meta: та же тройка на чужом origin
+        # проходит именем -- project_of(origin) иного проекта не равен
+        # проекту маршрута, а привязка выбиралась по имени джоба.
+        # SOLUTION: проект тройки обязан быть проектом маршрута И
+        # проектом привязки; тройка без origin -- сломанная запись
+        # новой роли, не «как раньше».
+        foreign = JobMeta("git@gitlab:other/other.git", None, None,
+                          "puppet", PUPPET_DIGEST, incarnation("nine"))
+        with patched(bootstrap, _job_meta=lambda name: foreign, **base_patch):
+            away = bootstrap.answer("mop", dict(req))
+        c.check("#581 a role triple on a foreign origin is refused",
+                bool(away.get("error")) and "bus" not in away
+                and "soul" not in away, away)
+        naked = JobMeta(None, None, None, "puppet", PUPPET_DIGEST,
+                        incarnation("nine"))
+        with patched(bootstrap, _job_meta=lambda name: naked, **base_patch):
+            originless = bootstrap.answer("mop", dict(req))
+        c.check("#581 a role triple without an origin is refused",
+                bool(originless.get("error")) and "bus" not in originless
+                and "soul" not in originless, originless)
+        # 6. Владелец в ответе -- ровно {login, name, email}: никакие
+        #    лишние поля провайдера не едут в тело.
+        with patched(bootstrap, _job_meta=lambda name: meta_ok, **base_patch):
+            out = bootstrap.answer("mop", dict(req))
+        who = (out.get("soul") or {}).get("owner") or {}
+        c.check("#581 the owner profile in the reply is exactly "
+                "{login, name, email}",
+                sorted(who) == ["email", "login", "name"], who)
+        # 7. Отзыв ПОСЛЕ прогона: креды не выдаются, отказ без секрета.
+        def revoke_during_play(rq, project, **kw):
+            mod.revoke(principal, root=root.name)
+            return {"ok": True, "played": True, "rc": 0, "seconds": 1.0,
+                    "tail": ""}
+
+        with patched(bootstrap, _job_meta=lambda name: meta_ok,
+                     play=revoke_during_play, ROOT=root.name,
+                     _assigned_node=lambda name: "pve1",
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            late = bootstrap.answer("mop", dict(req))
+        c.check("#581 a revocation landing during the play issues no "
+                "credentials",
+                "bus" not in late and "soul" not in late
+                and bool(late.get("error")), late)
+        # 8. Бандл исчез из хранения -- отказ, не пустая душа с паролем.
+        #    Прежняя привязка отозвана шагом 7: заводится новая с другой
+        #    инкарнацией (то же имя джоба держит новый грант, #579).
+        root2, rec2 = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                               prompt=b"# puppet prompt\n", job="pu-mop-9",
+                               soul_inc=incarnation("nine2"),
+                               request_id="req-s9b")
+        with root2:
+            mod.activate(rec2["principal"], root=root2.name)
+            os.replace(os.path.join(root2.name, "registry.json"),
+                       os.path.join(root.name, "registry.json"))
+            import shutil as _sh
+            _sh.rmtree(os.path.join(root2.name, "bundles"),
+                       ignore_errors=True)
+            meta2 = JobMeta(origin, None, None, "puppet", PUPPET_DIGEST,
+                            incarnation("nine2"))
+            with patched(bootstrap, _job_meta=lambda name: meta2,
+                         play=ok_play, ROOT=root.name,
+                         _assigned_node=lambda name: "pve1",
+                         _soul_root=lambda: root.name,
+                         _owner_profile=owner_probe):
+                nobundle = bootstrap.answer("mop", dict(req))
+            c.check("#581 a missing stored bundle refuses issuance instead "
+                    "of an empty soul",
+                    bool(nobundle.get("error")) and "bus" not in nobundle
+                    and "soul" not in nobundle, nobundle)
+def check_target_node_581(c):
+    """HYPOTHESIS (#581): resolve без принципала (режим только-цели #584)
+    отдаёт узлу состояние ЛЮБОЙ цели проекта: узел читает привязку до
+    входа принципала, но авторитет старта -- назначение Nomad, и чужая
+    цель не должна раскрывать своё состояние соседнему узлу.
+    SOLUTION: фактическая сверка назначения: цель найдена и активна --
+    сервер смотрит узел последней аллокации джоба и отдаёт состояние
+    только узлу-хозяину; чужому узлу -- found: False без состояния.
+    RESULT: свой узел читает как прежде; чужой не получает ни роли,
+    ни инкарнации, ни владельца.
+    STATUS: RED — see #581"""
+    from mop.server import bootstrap
+    from _lib import patched
+
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                         prompt=b"# puppet prompt\n", job="pu-mop-9",
+                         soul_inc=incarnation("nine"), request_id="req-n9")
+    with root:
+        mod.activate(rec["principal"], root=root.name)
+        own = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
+        c.check("#581 the owning node still reads its target state",
+                own.get("found") is True and own.get("role") == "puppet", own)
+        alien = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                               "_caller": "node-pve2"},
+                                       root=root.name,
+                                       assigned=lambda name: "pve1")
+        c.check("#581 a target on another node answers found: False to "
+                "the alien node, no state",
+                alien.get("found") is False and "role" not in alien
+                and "soul_inc" not in alien and "owner" not in alien, alien)
+        # HYPOTHESIS (#581, ревью назначения): старая калитка пускала
+        # состояние дальше, когда сверка назначения НЕ ОТВЕТИЛА -- where
+        # None обходил сравнение: «не знаем, чей джоб -- значит читай».
+        # Nomad, промолчавший про аллокацию, раскрывал чужую привязку.
+        # SOLUTION: fail closed -- назначение обязано быть известным и
+        # ровно узлу вызывающего; неизвестно или сбой -- «не найдено»,
+        # сбой -- с причиной. Гейт накрывает ВСЕ найденные состояния:
+        # отозванная/неактивная цель соседнему узлу тоже не течёт.
+        blind = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                               "_caller": "node-pve1"},
+                                       root=root.name,
+                                       assigned=lambda name: None)
+        c.check("#581 an unknown assignment hides the target even from "
+                "its likely owner",
+                blind.get("found") is False and "role" not in blind, blind)
+
+        def broken(name):
+            raise ConnectionError("Nomad unreachable")
+
+        err = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name, assigned=broken)
+        c.check("#581 a failing assignment lookup fails closed "
+                "with its reason",
+                err.get("found") is False
+                and "Nomad unreachable" in (err.get("reason") or "")
+                and "role" not in err and "owner" not in err, err)
+        # HYPOTHESIS (#581, отчёт против источника): сам помощник
+        # _assigned_node ГЛОТАЛ любой сбой Nomad в None -- продакшнный
+        # сбой сверки читался бы общим «узла нет», а не своей причиной;
+        # проверка выше инъектирует сбой в СЕAM, сам помощник не трогая.
+        # SOLUTION: помощник не глотает: сбой едет в resolve_soul, где
+        # калитка возвращает found:False с причиной. Отсутствие
+        # (нет аллокации/узла) остаётся None -- молчание Nomad это
+        # законный ответ, не сбой.
+        from mop.server import nomad
+
+        with patched(nomad, latest_alloc=broken):
+            real = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                                  "_caller": "node-pve1"},
+                                          root=root.name)
+        c.check("#581 the real assignment helper surfaces the Nomad "
+                "failure through the gate",
+                real.get("found") is False
+                and "Nomad unreachable" in (real.get("reason") or "")
+                and "role" not in real and "owner" not in real, real)
+        with patched(nomad, latest_alloc=lambda name: None):
+            absent = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                                    "_caller": "node-pve1"},
+                                            root=root.name)
+        c.check("#581 a genuine missing allocation stays a silent "
+                "not-found with its reason",
+                absent.get("found") is False
+                and "no node" in (absent.get("reason") or ""), absent)
+        mod.revoke(rec["principal"], root=root.name)
+        alien2 = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                                "_caller": "node-pve2"},
+                                        root=root.name,
+                                        assigned=lambda name: "pve1")
+        c.check("#581 a revoked target leaks no state to an alien node",
+                alien2.get("found") is False and "role" not in alien2
+                and "soul_inc" not in alien2 and "owner" not in alien2
+                and "revoked_at" not in alien2, alien2)
+        own2 = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                              "_caller": "node-pve1"},
+                                      root=root.name,
+                                      assigned=lambda name: "pve1")
+        c.check("#581 the owning node still reads the revoked target state",
+                own2.get("found") is True and own2.get("active") is False
+                and own2.get("revoked_at"), own2)
+
+
+def check_bundle_integrity_581(c):
+    """HYPOTHESIS (#581, ревью авторитета): resolve/_target_flag/spawn_of/
+    permissions читают бандл сырым bundle() -- словарь manifest.json без
+    сверки digest и схемы: подмени manifest.json на диске (или промпт) под
+    СТАРЫМ digest'ом в реестре -- и вердикты глаголов, список подъёма и
+    ACL рендерятся из изменённых байтов, которых регистрация не
+    закрепляла. Проверка бандла была только на старте (load_bundle в
+    bootstrap), авторитет -- без неё.
+    SOLUTION: один валидированный путь для каждого читателя авторитета:
+    load_bundle (soul.from_manifest + сверка digest), отказ -- ValueError
+    с причиной; изменённые байты под закреплённым digest'ом режут
+    авторитет (вердикт allow:False, spawn (), ACL без субъектов роли),
+    а не расширяют его. Промпт тоже входит в digest: изменённый промпт
+    -- тот же отказ.
+    RESULT: подмена manifest.json (лишние глаголы, чужой spawn) и промпта
+    оставляет resolve отказом с причиной, spawn_of пустым, permissions
+    без ролевых субъектов; восстановленный бандл возвращает всё.
+    STATUS: RED — see #581"""
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=MASTER, request_id="req-int",
+                         soul_inc=incarnation("int"))
+    principal = rec["principal"]
+    manifest_path = os.path.join(root.name, "bundles", MASTER_DIGEST,
+                                 "manifest.json")
+    prompt_path = os.path.join(root.name, "bundles", MASTER_DIGEST, "soul.md")
+    # Расширяем роли подсунутые байты: глагол вне закреплённого списка
+    # и spawn чужой души -- то, что регистрация не подписывала.
+    altered = json.loads(json.dumps(MASTER))
+    altered["capabilities"]["cluster_verbs"] = ["roster", "add", "stop"]
+    altered["capabilities"]["spawn"] = ["puppet", "builder", "master"]
+    with root:
+        mod.activate(principal, root=root.name)
+        # Сначала -- честный вердикт: бандл на месте.
+        honest = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 authority reads the pinned bundle before tampering",
+                honest.get("allow") is True and honest.get("role") == "master",
+                honest)
+        with open(manifest_path, "w") as f:
+            json.dump(altered, f)
+        # 1. resolve: подменённый манифест не расширяет глаголы.
+        got = mod.resolve(principal, "cluster", "stop", root=root.name)
+        c.check("#581 an altered manifest does not widen resolve verbs",
+                got.get("allow") is False and "digest" in
+                (got.get("reason") or "").lower(), got)
+        # Закреплённый глагол тоже умирает: авторитет не собирается из
+        # байтов, которые не сверены, -- даже «старых» вердиктов нет.
+        got = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 an altered manifest refuses even pinned verbs",
+                got.get("allow") is False and "digest" in
+                (got.get("reason") or "").lower(), got)
+        # 2. spawn_of: чужой spawn не появляется.
+        c.check("#581 an altered manifest does not widen spawn",
+                mod.spawn_of(principal, root=root.name) == (),
+                mod.spawn_of(principal, root=root.name))
+        # 3. permissions: субъекты роли не рендерятся из изменённых байтов.
+        perms = mod.permissions(principal, rec, root=root.name)
+        c.check("#581 an altered manifest renders no role subjects",
+                (perms.get("publish") or [])
+                == [busnames.private_prefix(principal) + ".*"], perms)
+        # 4. Промпт входит в digest: изменённый промпт -- тот же отказ.
+        with open(manifest_path, "w") as f:
+            json.dump(MASTER, f)
+        with open(prompt_path, "wb") as f:
+            f.write(b"# tampered prompt\n")
+        got = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 an altered prompt refuses the same as the manifest",
+                got.get("allow") is False and "digest" in
+                (got.get("reason") or "").lower(), got)
+        c.check("#581 an altered prompt empties spawn",
+                mod.spawn_of(principal, root=root.name) == (),
+                mod.spawn_of(principal, root=root.name))
+        # 5. Восстановленный бандл возвращает авторитет.
+        with open(prompt_path, "wb") as f:
+            f.write(MASTER_PROMPT)
+        got = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 a restored bundle restores the authority verdict",
+                got.get("allow") is True, got)
+
+
+def check_registry_liveness_581(c):
+    """HYPOTHESIS (#581): _Writer.__enter__ берёт flock и зовёт _read;
+    битый реестр роняет _read -- __exit__ не вызван, fd держит LOCK_EX и
+    утёк: следующий писатель в ДРУГОМ процессе (callout, сервис) висит
+    навсегда. __exit__ пишет и может упасть до unlock/close тем же
+    образом. _read, кроме того, считает пустой файл пустым реестром --
+    вопреки собственному договору «отсутствие -- единственный пустой»:
+    тихо стёртый реестр рождается заново, и отозванные привязки
+    воскресают.
+    SOLUTION: захват и чтение -- try/finally: любая ошибка на входе
+    отпускает блокировку и закрывает fd; выход пишет под тем же
+    предохранителем (release и после сбоя записи). Пустой (существует,
+    но 0 байт/пробелы) файл -- громкий отказ порчи, как у битого JSON.
+    RESULT: после отказа на входе ВРЕМЕННЫЙ fd того же замка берётся
+    без блокировки (flock не утёк), после сбоя записи -- так же; пустой
+    файл -- отказ, не новый реестр; реальный следующий prepare жив
+    (join с таймаутом -- проверка не висит).
+    STATUS: RED — see #581"""
+    import fcntl
+    import threading
+
+    mod = grants(c)
+    if mod is None:
+        return
+    reg = lambda root: os.path.join(root, "registry.json")
+    lock = lambda root: os.path.join(root, "registry.lock")
+
+    def lockable(root):
+        """Берётся ли замок реестра новым fd без блокировки: да -- прошлый
+        писатель отпустил, нет -- flock утёк, и чужой процесс висел бы."""
+        fd = open(lock(root), "a+")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            fd.close()
+
+    # 1. Битый JSON: громкий отказ, и замок НЕ утёк.
+    root = tempfile.TemporaryDirectory()
+    with root:
+        with open(reg(root.name), "w") as f:
+            f.write("{corrupted")
+        refused = None
+        try:
+            mod.prepare("mop", "master", MASTER_DIGEST, MASTER,
+                        MASTER_PROMPT, "anton", "req-x", "pu-mop-x",
+                        incarnation("x"), "intent-x", root=root.name)
+        except ValueError as e:
+            refused = str(e)
+        c.check("#581 a corrupted registry must refuse loudly",
+                refused is not None and "corrupted" in refused, refused)
+        c.check("#581 a refused enter must not leak the registry lock "
+                "(the next process would hang)",
+                lockable(root.name), None)
+        # Ремонт и следующий писатель: гонка идёт в НОВОМ процессе, где
+        # висячий fd жив (в этом процессе писатели делят fd и не виснут) --
+        # здесь только живость самого prepare (join с таймаутом).
+        with open(reg(root.name), "w") as f:
+            f.write("{}")
+        done = []
+
+        def next_writer():
+            try:
+                done.append(mod.prepare(
+                    "mop", "master", MASTER_DIGEST, MASTER, MASTER_PROMPT,
+                    "anton", "req-y", "pu-mop-y", incarnation("y"),
+                    "intent-y", root=root.name).get("principal"))
+            except Exception as e:              # отказ -- не зависание
+                done.append(f"{type(e).__name__}: {e}")
+
+        t = threading.Thread(target=next_writer)
+        t.start()
+        t.join(timeout=30)
+        c.check("#581 a writer after a repaired registry must not hang",
+                not t.is_alive() and done and
+                str(done[0]).startswith("grant-"),
+                done or "writer did not finish in 30s")
+    # 2. Пустой файл -- порча, не «новый реестр»: воскресить отозванные
+    #    молча -- хуже, чем отказаться громко.
+    root = tempfile.TemporaryDirectory()
+    with root:
+        open(reg(root.name), "w").close()
+        refused = None
+        try:
+            mod.prepare("mop", "master", MASTER_DIGEST, MASTER,
+                        MASTER_PROMPT, "anton", "req-e", "pu-mop-e",
+                        incarnation("e"), "intent-e", root=root.name)
+        except ValueError as e:
+            refused = str(e)
+        c.check("#581 an empty registry file must be refused as corruption",
+                refused is not None and "corrupted" in refused, refused)
+        c.check("#581 the refused empty read must not leak the lock either",
+                lockable(root.name), None)
+    # 3. Сбой записи в __exit__ не запирает следующего писателя.
+    root = tempfile.TemporaryDirectory()
+    with root:
+        mod.prepare("mop", "master", MASTER_DIGEST, MASTER, MASTER_PROMPT,
+                    "anton", "req-w", "pu-mop-w", incarnation("w"),
+                    "intent-w", root=root.name)
+
+        def flaky_write(path, text):
+            raise OSError("disk full")
+
+        with patched(mod, _write=flaky_write):
+            failed = None
+            try:
+                mod.prepare("mop", "master", MASTER_DIGEST, MASTER,
+                            MASTER_PROMPT, "anton", "req-z", "pu-mop-z",
+                            incarnation("z"), "intent-z", root=root.name)
+            except OSError as e:
+                failed = str(e)
+        c.check("#581 a failing registry write must refuse",
+                failed is not None, failed)
+        c.check("#581 a failed exit write must not leak the lock",
+                lockable(root.name), None)
+        done2 = []
+
+        def writer2():
+            try:
+                done2.append(mod.prepare(
+                    "mop", "master", MASTER_DIGEST, MASTER, MASTER_PROMPT,
+                    "anton", "req-v", "pu-mop-v", incarnation("v"),
+                    "intent-v", root=root.name).get("principal"))
+            except Exception as e:              # отказ -- не зависание
+                done2.append(f"{type(e).__name__}: {e}")
+
+        t2 = threading.Thread(target=writer2)
+        t2.start()
+        t2.join(timeout=30)
+        c.check("#581 a writer after a failed write must not hang",
+                not t2.is_alive() and done2
+                and str(done2[0]).startswith("grant-"),
+                done2 or "writer did not finish in 30s")
+
+
 def main():
     c = Checks()
     for fn in (check_namespace_today, check_callout_routing_today,
@@ -1270,7 +1783,9 @@ def main():
                check_password, check_resolve, check_lookup,
                check_actor_spawn, check_authorize, check_issue,
                check_permissions,
-               check_provider, check_concurrency, check_parallel_requests):
+               check_provider, check_concurrency, check_parallel_requests,
+               check_strict_meta_581, check_target_node_581,
+               check_bundle_integrity_581, check_registry_liveness_581):
         try:
             fn(c)
         except Exception as e:

@@ -76,14 +76,29 @@ class _Writer:
     def __enter__(self):
         fsutil.make_private_dir(self.root)
         self.fd = _locked(self.root)
-        self.reg = _read(self.root)
+        try:
+            self.reg = _read(self.root)
+        except BaseException:
+            # Битый реестр роняет чтение ПОСЛЕ захвата flock (#581):
+            # без отпуска fd держал бы LOCK_EX навсегда, и следующий
+            # писатель в другом процессе (callout, сервис) висел бы.
+            self._release()
+            raise
         return self
 
-    def __exit__(self, *exc):
-        if exc[0] is None:
-            _write(self.root, self.reg)
+    def _release(self):
+        """Отпустить замок и закрыть fd -- на любом выходе."""
         fcntl.flock(self.fd, fcntl.LOCK_UN)
         self.fd.close()
+
+    def __exit__(self, *exc):
+        try:
+            if exc[0] is None:
+                _write(self.root, self.reg)
+        finally:
+            # Сбой записи -- не повод держать замок (#581): следующий
+            # писатель читает и видит причину, а не молчание.
+            self._release()
         return False
 
 
@@ -103,7 +118,11 @@ def _read(root):
     except FileNotFoundError:
         return {}
     if not raw.strip():
-        return {}
+        # Пустой ФАЙЛ -- порча, а не «нет реестра» (#581): отсутствие --
+        # единственный пустой. Тихо стёртый реестр родился бы заново,
+        # и отозванные привязки воскресли бы.
+        raise ValueError(f"grants: registry {path} is corrupted: "
+                         f"empty file")
     try:
         reg = json.loads(raw)
     except ValueError as e:
@@ -371,16 +390,54 @@ def password_of(principal, root=None):
 
 
 def bundle(digest, root=None):
-    """Закреплённый бандл по дайджесту, либо None."""
+    """Закреплённый бандл по дайджесту, либо None. Внутренний IO (#581):
+    путь для авторитета -- load_bundle/_validated_bundle, не этот словарь.
+    Имя файла промпта -- общая проверка ДО открытия (#581): путь может
+    прийти только из хранимого manifest.json, и побег за пределы каталога
+    бандла -- отказ, а не чтение чужого файла."""
     path = _bundle_dir(_root_dir(root), digest)
     try:
         with open(os.path.join(path, "manifest.json")) as f:
             manifest = json.load(f)
+        # from_manifest канонизует тем же parse: имя промпта валидно
+        # прежде, чем по нему открывается файл.
+        soul.from_manifest(manifest, b"")
         with open(os.path.join(path, soul_bundle_name(manifest)), "rb") as f:
             prompt = f.read()
     except (OSError, ValueError):
         return None
     return {"manifest": manifest, "prompt": prompt}
+
+
+def load_bundle(digest, root=None):
+    """Бандл хранилища как soul.Bundle (#592/#581), либо None.
+
+    Прогон роли кормит allowlist секретов из ДОВЕРЕННОГО закреплённого
+    бандла (play(bundle=...)), а словарь bundle() -- сырые manifest.json
+    и промпт без схемы. Сборка и сверка -- общий конструктор from_manifest
+    (#580): digest собранных байт обязан совпасть с запрошенным, иначе
+    хранилище держит не то, что закрепила регистрация. None -- бандла нет
+    или он не собирается: отказ, не пустая душа."""
+    got = bundle(digest, root=root)
+    if got is None:
+        return None
+    try:
+        made = soul.from_manifest(got["manifest"], got["prompt"])
+    except ValueError:
+        return None
+    return made if made.digest == digest else None
+
+
+def _validated_bundle(digest, root=None):
+    """Валидированный бандл для ЧИТАТЕЛЕЙ АВТОРИТЕТА (#581), либо None.
+
+    Тот же путь, что load_bundle: from_manifest проверяет схему и
+    переваривает digest, сверки -- одной формулой, без второй копии
+    хеша. resolve/_target_flag/spawn_of/permissions не читают сырой
+    словарь: байты, не сходящиеся с digest'ом реестра, -- отказ
+    авторитета (allow False, пустой spawn, пустой ACL), а не источник
+    прав. bundle() -- внутренний IO, авторитет его в руки не берёт."""
+    return load_bundle(digest, root=root)
 
 
 def resolve(principal, service, verb, target=None, root=None):
@@ -404,12 +461,13 @@ def resolve(principal, service, verb, target=None, root=None):
     if not rec.get("active"):
         return {"allow": False,
                 "reason": f"grants: {principal} is not an active binding"}
-    got = bundle(rec.get("soul_digest"), root=root)
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
     if got is None:
         return {"allow": False,
-                "reason": f"grants: bundle {rec.get('soul_digest')} "
-                          f"is not in the store"}
-    parsed = soul.parse(json.dumps(got["manifest"]))
+                "reason": f"grants: the pinned bundle {rec.get('soul_digest')}"
+                          f" does not verify against its digest -- the store "
+                          f"holds bytes the registration never pinned"}
+    parsed = got.manifest
     verbs = tuple(getattr(parsed.capabilities,
                           "node_verbs" if service == "node"
                           else "cluster_verbs"))
@@ -491,34 +549,27 @@ def describe_target(project, target, soul_inc=None, root=None):
 
 
 def _target_flag(root, rec):
-    got = bundle(rec.get("soul_digest"), root=root)
+    """Флаг цели из ВАЛИДИРОВАННОГО бандла (#581): сырой словарь без
+    сверки digest рендерил бы факт из байтов, которые регистрация не
+    закрепляла. Бандл не собирается -- False: цель не принимает
+    диспетчеризацию, fail closed."""
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
     if got is None:
         return False
-    return _runtime(got["manifest"], "receives_dispatch")
-
-
-def _role_verbs(manifest, service):
-    parsed = soul.parse(json.dumps(manifest))
-    return tuple(getattr(parsed.capabilities,
-                         "node_verbs" if service == "node"
-                         else "cluster_verbs"))
-
-
-def _flag(manifest, name):
-    return bool((manifest.get("capabilities") or {}).get(name))
+    return got.manifest.runtime.receives_dispatch
 
 
 def spawn_of(principal, root=None):
     """Разрешённые роли цели принципала (#582): список spawn его бандла.
-    Пусто -- принципал никого не поднимает; нет бандла -- тоже пусто:
-    fail closed. Право поднимать -- у души, не у провода: делегированный
-    add сверяет роль цели по ЭТОМУ списку, не по грамматике субъекта."""
+    Пусто -- принципал никого не поднимает; нет бандла или байты не
+    сходятся с digest'ом -- тоже пусто: fail closed. Право поднимать --
+    у души, не у провода: делегированный add сверяет роль цели по
+    ЭТОМУ списку, не по грамматике субъекта."""
     rec = binding(principal, root=root)
     if rec is None:
         return ()
-    got = bundle(rec.get("soul_digest"), root=root) or {}
-    return tuple((got.get("manifest") or {}).get("capabilities", {})
-                 .get("spawn") or ())
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
+    return tuple(got.manifest.capabilities.spawn) if got else ()
 
 
 def authorize_request(project, req, verb, root=None):
@@ -562,10 +613,6 @@ def authorize_request(project, req, verb, root=None):
             "spawn": spawn_of(who, root=root)}
 
 
-def _runtime(manifest, name):
-    return bool((manifest.get("runtime") or {}).get(name))
-
-
 def _now():
     import time
     return time.time()
@@ -587,16 +634,19 @@ def permissions(principal, rec=None, root=None):
     rec = rec or binding(principal, root=root)
     if rec is None:
         return {"publish": [], "subscribe": []}
-    got = bundle(rec.get("soul_digest"), root=root) or {}
-    manifest = got.get("manifest") or {}
+    # Один валидированный путь (#581): ACL рендерится из сверенного
+    # бандла; байты, не сходящиеся с digest'ом, субъектов роли не
+    # дают -- пустой ACL вместо расширенного.
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
+    caps = got.manifest.capabilities if got else None
     project = rec.get("project")
     publish = [busnames.private_prefix(principal) + ".*"]
-    if _flag(manifest, "dispatch"):
+    if caps and caps.dispatch:
         publish.append(busnames.dispatch_subject(project, "*", principal))
-    if _role_verbs(manifest, "node"):
+    if caps and caps.node_verbs:
         publish.append(busnames.node(project, "*", busnames.ROLE_CHANNEL,
                                      login=principal))
-    if _role_verbs(manifest, "cluster"):
+    if caps and caps.cluster_verbs:
         publish.append(busnames.cluster(project, login=principal))
     return {"publish": publish,
             "subscribe": [busnames.private_scope(principal)]}
