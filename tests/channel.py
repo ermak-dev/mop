@@ -531,10 +531,12 @@ def check_role_api_585(c):
     c.expect("#585 legacy puppet: the channel only",
              channel.tools_for(channel.LEGACY, None, decls), {"agents", "send", "tail"})
     decls["profile"] = {"cluster_verbs": []}
-    c.expect("#585 puppet role as preset today: no discovery without roster",
+    # Пресет-«рабочий без alloc»: send/tail не видны -- их нечем
+    # маршрутизировать (node_of идёт alloc); профиль остаётся.
+    c.expect("#585 puppet role with no cluster verbs routes nothing",
              channel.tools_for(channel.GRANT, caps_of("puppet"), decls),
-             {"send", "tail", "profile"})
-    c.expect("#585 puppet role with declared roster/alloc: discovery",
+             {"profile"})
+    c.expect("#585 puppet role with declared roster/alloc: discovery and channel",
              channel.tools_for(channel.GRANT, caps_of("puppet", cluster_verbs=["roster", "alloc"]),
                                decls),
              {"agents", "send", "tail", "profile"})

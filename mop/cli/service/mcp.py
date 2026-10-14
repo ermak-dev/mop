@@ -321,9 +321,11 @@ def _masters():
 @role_tool(description=(
     "Message a puppet, a project master or a local session. Use the address "
     "from agents or a received message. Returns a delivery verdict; "
-    "notify_when_idle arranges a later notice. Messaging a puppet claims "
-    "ownership; force=true overrides another master's ownership only if "
-    "that master agrees or is gone."))
+    "notify_when_idle arranges a later notice. For a human master, messaging "
+    "a puppet claims ownership; force=true overrides another master's "
+    "ownership only if that master agrees or is gone. A role's send is a "
+    "plain message: it takes no lease and claims nothing — hand tasks over "
+    "with dispatch."))
 def send(to: str, message: str, priority: str = "next",
          notify_when_idle: bool = False, wait_seconds: int = 0,
          force: bool = False) -> str:
