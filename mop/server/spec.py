@@ -18,9 +18,9 @@ import os
 import re
 import time
 
-from ..common import config, domain, llm, paths, state
+from ..common import config, domain, llm, paths, soul, state
 from .. import driver
-from . import nomad
+from . import grants, nomad
 from ..common.domain import JobMeta, Project
 
 # Значения этой установки — .env поверх дефолтов; см. mop/common/config.py.
@@ -444,9 +444,11 @@ def gateway_env():
     return env
 
 
-def task_env(name, origin, cont=False, mem=0):
+def task_env(name, origin, cont=False, mem=0, soul=None, soul_digest=None,
+             soul_inc=None):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
-    шаблона. mem -- потолок памяти папета, МБ (spec.memory)."""
+    шаблона. mem -- потолок памяти папета, МБ (spec.memory). Тройка роли
+    (#582) -- несекретный транспорт для тела: пустые значения без роли."""
     env_llm = "".join(f"{k}={v}\n" for k, v in gateway_env().items())
     project = driver.project_of(origin)
     env = {
@@ -477,6 +479,17 @@ def task_env(name, origin, cont=False, mem=0):
         # (MemoryMaxMB), в pve-теле -- `pct --memory`, который ставит ensure
         # драйвера из этой переменной на каждом подъёме.
         "PU_MEM_MB": str(mem),
+        # Тройка роли транспорта (#582, для #590/#583): несекретные имя,
+        # digest и инкарнация из Meta джоба. Meta в теле приезжает не у
+        # всякого драйвера и не с гарантированной формой ключей, поэтому
+        # врапер читает их из окружения, собранного сервером. Каталог
+        # бандла -- по имени и инкарнации (driver.soul_dir): PU_NODE
+        # добавит #590 из кредов узла ПОСЛЕ размещения, сервер имени узла
+        # не знает.
+        "PU_SOUL": soul or "",
+        "PU_SOUL_DIGEST": soul_digest or "",
+        "PU_SOUL_INC": soul_inc or "",
+        "PU_SOUL_DIR": driver.soul_dir(name, soul_inc) if soul else "",
     }
     # Что `mop driver run` переливает в тело: всё окружение спеки, кроме
     # самого врапера. Списком здесь, а не копией там (#155).
@@ -489,22 +502,32 @@ def task_env(name, origin, cont=False, mem=0):
     return env
 
 
-def job_spec(name, origin, cont=False, branch=None, node=None):
+def job_spec(name, origin, cont=False, branch=None, node=None,
+             soul=None, soul_digest=None, soul_inc=None):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
     историю каталога (`claude --continue`). node — узел, к которому спека
     привязана (#289): перерегистрация стоящего папета, см. node_constraint.
 
+    Тройка роли (#582, #580) — целиком или никак: JobMeta проверяет её
+    грамматику, здесь она едет Meta как есть, а бандл закреплён в хранилище
+    сервера — isolating-роль добавляет ограничение размещения по
+    способности драйвера (isolate_constraint), роли «any» размещение не
+    меняют: имя роли -- не привилегия (#579).
+
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
     (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    meta = JobMeta(origin, branch)
+    meta = JobMeta(origin, branch, soul=soul, soul_digest=soul_digest,
+                   soul_inc=soul_inc)
     project = Project.of(origin, asks=read_asks())
     try:
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
     except ValueError as e:
         raise RuntimeError(f"{name}: {e} ({project.name})")
-    env = task_env(name, origin, cont, ceiling)
+    env = task_env(name, origin, cont, ceiling, soul=soul,
+                   soul_digest=soul_digest, soul_inc=soul_inc)
     meta = dataclasses.replace(meta, spec_version=template_version(env)).to_meta()
+    role_bundle = pinned_bundle(soul, soul_digest)
     return {"Job": {
         "ID": name,
         "Name": name,
@@ -512,7 +535,9 @@ def job_spec(name, origin, cont=False, branch=None, node=None):
         "Type": "service",
         "Meta": meta,
         "Constraints": [project_constraint(project.name), memory_constraint(ceiling)]
-                       + ([node_constraint(node)] if node else []),
+                       + ([node_constraint(node)] if node else [])
+                       + ([isolate_constraint()] if role_bundle is not None
+                          and role_bundle.manifest.runtime.driver == "isolating" else []),
         "TaskGroups": [{
             "Name": GROUP,
             "Count": 1,
@@ -546,11 +571,58 @@ def respec(name, meta, cont=False, node=None):
     (#265). Её берут глагол update сервиса кластера (перерегистрация,
     рецикл, лечение doctor'а) и сборка образа, поднимающая снятых папетов.
     Пока дорог было несколько, одна из них теряла ветку мастера (#256):
-    после сборки образа папет поднимался на origin/HEAD.
+    после сборки образа папет поднимался на origin/HEAD. Тройка роли --
+    та же мета (#582): respec переживает её, как ветку, имя и digest
+    не пересобирает -- у живой инкарнации свой бандл (#579).
 
     node — узел стоящего папета (#289): update держит его на месте. Сборка
     образа узла не называет: тела снесены, держать некого."""
-    return job_spec(name, meta.origin, cont=cont, branch=meta.branch, node=node)
+    return job_spec(name, meta.origin, cont=cont, branch=meta.branch, node=node,
+                    soul=meta.soul, soul_digest=meta.soul_digest,
+                    soul_inc=meta.soul_inc)
+
+
+# ── роль: бандл и размещение (#582) ──────────────────────────────────────
+# Хранилище бандлов сервера (#581): корень по образцу grants._root_dir
+# (рядом с каталогом кредов папетов), но своим проводом -- спека не тянет
+# bootstrap на импорте. Кто и когда пишет бандл -- регистрация в кластере.
+SOUL_STORE = os.path.join(os.path.dirname(paths.local("puppets")), grants.STORE)
+
+
+def pinned_bundle(role, digest, store=None):
+    """Закреплённый бандл роли по дайджесту (#579): тройка в Meta без
+    бандла в хранилище -- громкий отказ, а не тихий папет без души: спека
+    размещает роль и закрепляет промпт, «примерной» души не бывает.
+    -> Bundle | None (легаси-джоб: тройки нет)."""
+    if role is None and digest is None:
+        return None
+    got = grants.bundle(digest, root=store or SOUL_STORE)
+    if got is None:
+        raise RuntimeError(
+            f"soul {role}: bundle {digest} is not in the server store; "
+            "the role must be registered before the job")
+    bundle = soul.from_manifest(got["manifest"], got["prompt"])
+    if bundle.manifest.soul != role:
+        raise RuntimeError(
+            f"soul {role}: bundle {digest} pins another role "
+            f"'{bundle.manifest.soul}'")
+    return bundle
+
+
+def isolate_constraint():
+    """Ограничение размещения изолирующей роли (#579, #582): тело обязано
+    быть отдельным объектом, и это спрашивается у драйвера узла
+    способностью (is_container в контракте), а не именем роли. Кандидаты
+    отдаёт реестр драйверов (container_drivers): имя роли в спеке ничего
+    не значит, а пустой список означает «в пуле нет изоляции вообще» --
+    и это отказ job_spec'а до Nomad, а не тихо непланируемый джоб."""
+    capable = driver.container_drivers()
+    if not capable:
+        raise RuntimeError(
+            "an isolating role demands a driver with separate bodies, "
+            f"the pool has none: {', '.join(driver.drivers()) or '?'}")
+    return {"LTarget": "${meta.mop_driver}", "Operand": "regexp",
+            "RTarget": "^(%s)$" % "|".join(capable)}
 
 
 def node_constraint(node):

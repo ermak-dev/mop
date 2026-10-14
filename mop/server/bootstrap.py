@@ -89,16 +89,28 @@ def _sent_path(root, name):
     return os.path.join(root, f"{name}-sent.json")
 
 
+def _approval_path(root, name):
+    return os.path.join(root, f"{name}-approved.json")
+
+
 def _result_path(root, name):
     return os.path.join(root, f"{name}-result.json")
 
 
-def _read_json(path):
+def _read_json(path, why=None):
+    """JSON по пути либо None, если файла нет. Битый/нечитаемый -- не
+    «пусто», а громкий отказ (#582): проглоченная причина метки
+    согласования читалась бы как «политика не согласована» -- и молча
+    меняла решение о наследовании."""
     try:
         with open(path) as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except OSError as e:
+        raise OSError(f"{why or path}: unreadable: {e}") from e
+    except ValueError as e:
+        raise ValueError(f"{why or path}: corrupted JSON: {e}") from e
 
 
 def read_sent(root, name):
@@ -136,6 +148,114 @@ GIVE_UP_AFTER = 3
 GIVE_UP_GRACE = 5
 # ansible-playbook: 2 -- упала задача на хосте (3 -- хост недоступен).
 TASK_FAILED_RC = 2
+
+
+def note_approval(root, name):
+    """Метка согласования политики папета-роли (#582): человек ЗАЯВИЛ
+    политику полем workspace -- текст любой, включая пустой («пусто
+    согласовано» -- законная политика, mop сам без .mop/bootstrap.yaml).
+    Метка держит хеш снапшота на момент согласования: копия ребёнку
+    сверяется с ней -- файлы, сменившиеся мимо человеческого пути,
+    согласованием не считаются. Кладётся только человеческим
+    add/update роли; грант метку не пишет."""
+    fsutil.make_private_dir(root)
+    fsutil.write_private(_approval_path(root, name), json.dumps(
+        {"at": int(time.time()), "key": _snapshot_key(root, name)}))
+    return True
+
+
+def _snapshot_files(root, name):
+    """(путь, байты) снапшота ОДНИМ чтением либо ValueError/OSError
+    (#582, блокатор ревью): дальше эти же байты и хешируются, и пишутся
+    -- хеш одного чтения, копия другого, разрешали подтасовку файлами,
+    сменившимися между двумя ходами. Отсутствующий файл -- законное
+    «пусто» (согласованный пустой снапшот); нечитаемый -- отказ."""
+    out = []
+    for path in files_of(root, name):
+        if path is None:
+            out.append((None, b""))
+            continue
+        try:
+            with open(path, "rb") as f:
+                out.append((path, f.read()))
+        except OSError as e:
+            raise OSError(f"{os.path.basename(path)}: unreadable: {e}") from e
+    return out
+
+
+def _snapshot_key(root, name):
+    """Хеш хранимого снапшота политики: те же байты, что workspace_key,
+    без метки регистрации -- согласование о файлах, не о прогонах."""
+    h = hashlib.sha256()
+    for _path, data in _snapshot_files(root, name):
+        h.update(data)
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def approval_of(root, name):
+    """Согласована ли политика папета-роли (#582): метка либо None."""
+    return _read_json(_approval_path(root, name))
+
+
+def drop_approval(root, name):
+    """Снять метку согласования (#582): папета нет -- политики нет."""
+    try:
+        os.unlink(_approval_path(root, name))
+    except FileNotFoundError:
+        pass
+
+
+def copy_approval(root, parent, child):
+    """Наследование согласованной политики (#582): снапшот родителя под
+    именем ребёнка, одним ходом и до Nomad -- ретрай того же request_id
+    не может молча получить политику новее той, что закреплена резервом.
+    Без метки согласования -- отказ: унаследовать несогласованное значило
+    бы обойти границу, которую держит человек. Снапшот, не сходящийся с
+    меткой (файлы сменились мимо человеческого пути), -- тот же отказ:
+    согласование -- факт человека о конкретных байтах. -> отказ | None.
+
+    Одно чтение -- одна запись (#582, блокатор ревью): байты читаются
+    один раз, хеш сверяется с НИМИ, и пишутся именно они -- атомарно и
+    приватно (fsutil.write_private): никакого re-read/copy между хешем
+    и записью, файлы, сменившиеся в этом зазоре, до ребёнка не доезжают."""
+    try:
+        mark = approval_of(root, parent)
+    except (OSError, ValueError) as e:
+        return (f"{parent}: the approval marker is unreadable: {e} (#582)")
+    if mark is None:
+        return (f"{parent}: no approved bootstrap to inherit: its human "
+                f"owner has not registered a policy (#582)")
+    try:
+        snapshot = _snapshot_files(root, parent)
+    except OSError as e:
+        return f"{parent}: the approved bootstrap is unreadable: {e} (#582)"
+    h = hashlib.sha256()
+    for _path, data in snapshot:
+        h.update(data)
+        h.update(b"\0")
+    if h.hexdigest() != mark.get("key"):
+        return (f"{parent}: the approved bootstrap changed outside the "
+                f"human path: the stored snapshot does not match its "
+                f"approval (#582)")
+    fsutil.make_private_dir(root)
+    for what, (path, data) in zip(("tasks", "vars"), snapshot):
+        dst = os.path.join(root, f"{child}-{what}.yml")
+        if path is None:
+            # Файла родителя нет -- и у ребёнка его быть не должно:
+            # пустая согласованная политика наследуется как пустота, а
+            # не как пустой файл (его уже считал бы проигрыватель).
+            try:
+                os.unlink(dst)
+            except FileNotFoundError:
+                pass
+            continue
+        fsutil.write_private(dst, data)
+    fsutil.write_private(
+        _approval_path(root, child),
+        json.dumps({"at": mark.get("at"), "key": mark.get("key"),
+                    "inherited_from": parent}))
+    return None
 
 
 def workspace_key(root, name):
