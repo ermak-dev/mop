@@ -720,6 +720,92 @@ def check_body_binding_585(c):
     return True
 
 
+def check_tool_routes_585(c):
+    """#585, четвёртая часть: каталог инструментов называет маршруты,
+    которые инструмент честно строит, -- не меньше.
+
+    HYPOTHESIS: HAND_TOOLS требовал от роли только последний глагол
+    (send -- node send, agents -- cluster roster), а сам инструмент зовёт
+    и дорогу к нему: node_of идёт cluster alloc, ростер -- cluster roster
+    и node states, autopick dispatch -- ростер целиком. Роль с node send
+    без cluster alloc видела инструмент, который не может довести ни
+    одного адресата (permissions violation на первом же alloc).
+    SOLUTION: требования hand-инструментов -- полные маршруты: agents
+    roster+states, send/tail/slash alloc+свой глагол узла, dispatch --
+    alloc+roster (autopick обещан описанием) и право dispatch. Пресеты
+    пакета их проходят; фиксстура -- настоящий каталог (soul.catalogue),
+    не переписанный руками манифест. Каталог -- UX: прав не выдаёт,
+    урезает только видимость не-маршрутизируемого инструмента."""
+    from mop.common import souldirs
+    from mop.common import soul as souls
+    from mop.client import channel
+    presets = souls.catalogue([souldirs.PACKAGE_DIR])
+    for role in ("puppet", "master"):
+        if role not in presets:
+            c.fail(f"#585 the package catalogue holds the {role} preset",
+                   sorted(presets))
+    worker = souls.load(presets["puppet"]).manifest.capabilities
+    master = souls.load(presets["master"]).manifest.capabilities
+
+    def without(caps, node=(), cluster=()):
+        from mop.common import soul as s
+        doc = {"soul": "custom", "version": 1,
+               "runtime": {"driver": "any", "receives_dispatch": True},
+               "capabilities": {
+                   "node_verbs": [v for v in caps.node_verbs if v not in node],
+                   "cluster_verbs": [v for v in caps.cluster_verbs
+                                     if v not in cluster],
+                   "dispatch": caps.dispatch, "spawn": []},
+               "prompt": "soul.md"}
+        return s.from_manifest(doc, b"p").manifest.capabilities
+
+    # Требования -- сами маршруты инструментов, не последние глаголы.
+    c.expect("#585 agents needs the roster verb and the states verb",
+             channel.HAND_TOOLS["agents"],
+             {"cluster_verbs": ("roster",), "node_verbs": ("states",)})
+    c.expect("#585 send needs alloc to route and node send to deliver",
+             channel.HAND_TOOLS["send"],
+             {"node_verbs": ("send",), "cluster_verbs": ("alloc",)})
+    c.expect("#585 tail needs alloc to route and node tail to read",
+             channel.HAND_TOOLS["tail"],
+             {"node_verbs": ("tail",), "cluster_verbs": ("alloc",)})
+    c.expect("#585 slash needs alloc to route and node type to type",
+             channel.HAND_TOOLS["slash"],
+             {"node_verbs": ("type",), "cluster_verbs": ("alloc",)})
+    c.expect("#585 dispatch needs alloc to route, roster for its promised autopick",
+             channel.HAND_TOOLS["dispatch"],
+             {"cluster_verbs": ("alloc", "roster"), "dispatch": True})
+
+    # Пресеты пакета проходят; динамические роли без дороги -- нет.
+    seen = channel.tools_for(channel.GRANT, worker, {})
+    c.check("#585 the worker preset sees the channel it can route",
+            {"agents", "send", "tail"} <= seen, seen)
+    c.check("#585 node send without cluster alloc sees no send it cannot route",
+            "send" not in channel.tools_for(
+                channel.GRANT, without(worker, cluster=("alloc",)), {}))
+    c.check("#585 tail without alloc is not offered either",
+            "tail" not in channel.tools_for(
+                channel.GRANT, without(worker, cluster=("alloc",)), {}))
+    c.check("#585 roster without the states verb cannot render the roster",
+            "agents" not in channel.tools_for(
+                channel.GRANT, without(worker, node=("states",)), {}))
+    seen = channel.tools_for(channel.GRANT, master, {})
+    c.check("#585 the master preset sees dispatch", "dispatch" in seen, seen)
+    c.check("#585 dispatch without roster loses its promised autopick",
+            "dispatch" not in channel.tools_for(
+                channel.GRANT, without(master, cluster=("roster",)), {}))
+
+    # Описание send обязано говорить правду обо всех видах говорящих:
+    # аренду берёт send человека, не роли.
+    import inspect
+    c.check("#585 the send description scopes the claim to a human master",
+            inspect.getsource(mcp.send) and True)
+    src = inspect.getsource(mcp.send)
+    c.check("#585 send says a role's send claims no ownership",
+            "no lease" in src or "claims no" in src or "never claims" in src, src)
+    return True
+
+
 def main():
     c = Checks()
 
@@ -1144,6 +1230,10 @@ def main():
         check_body_binding_585(c)
     except Exception as e:
         c.fail("#585 body binding", f"{type(e).__name__}: {e}")
+    try:
+        check_tool_routes_585(c)
+    except Exception as e:
+        c.fail("#585 tool routes", f"{type(e).__name__}: {e}")
     # RESULT: красный на сегодняшнем маршруте (grant -- мастер-профиль,
     # owner/force грантом, from-name инбоксом, легаси по rpc), зелёный после.
     # Решение мастера по C5 сменило одно ожидание до реализации: инбокс
