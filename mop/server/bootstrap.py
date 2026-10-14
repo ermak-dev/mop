@@ -384,12 +384,15 @@ def _soul_root():
 
 
 def _job_meta(name):
-    """Meta джоба Nomad: шов проверок."""
+    """Мета джоба (#256/#265) как JobMeta: шов проверок. Читают её только
+    через JobMeta -- сырые .get по ключам расходились умолчаниями; нет
+    джоба или Nomad молчит -- пустая мета, как у cluster._meta."""
+    from ..common.domain import JobMeta
     from . import nomad
     try:
-        return (nomad.get_job(name) or {}).get("Meta") or {}
+        return JobMeta.from_job(nomad.get_job(name))
     except Exception:
-        return {}
+        return JobMeta(None, None)
 
 
 def _assigned_node(name):
@@ -445,8 +448,8 @@ def role_gates(name, caller, reply, project, root=None, jobs=None,
     if not busnames.valid_private_reply(reply or "", caller):
         return {"error": f"role credentials ride the caller's own private "
                          f"reply subject, not {reply!r} (#603)"}
-    meta = (jobs or _job_meta)(name) or {}
-    rec = grants.by_job(project, name, soul_inc=meta.get("soul_inc"),
+    meta = (jobs or _job_meta)(name)
+    rec = grants.by_job(project, name, soul_inc=meta.soul_inc,
                         root=root)
     if rec is None or rec.get("revoked_at") or not rec.get("active"):
         return {"error": f"no live binding for {name} in project {project}"}

@@ -41,6 +41,7 @@ from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import busnames, creds, soul  # noqa: E402
+from mop.common.domain import JobMeta  # noqa: E402
 
 PRINCIPAL = re.compile(r"^grant-[0-9a-f]{32}$")
 
@@ -807,7 +808,8 @@ def check_issue(c):
         password = f.read().strip()
     node = "node-pve1"
     reply_ok = f"{busnames.private_prefix(node)}.abc123"
-    jobs_ok = lambda name: {"soul_inc": incarnation("nine")}
+    jobs_ok = lambda name: JobMeta(None, None, None, "puppet",
+                                   PUPPET_DIGEST, incarnation("nine"))
     assigned_ok = lambda name: "pve1"
     played = []
     ok_play = dict(lambda req, project: played.append(req) or {

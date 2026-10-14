@@ -151,15 +151,27 @@ def config(file=None):
     return server_config(settings.get("MOP_SERVER_LAN"))
 
 
+def _user_of(creds):
+    """Чьими кредами ходит процесс: user или ''. Чистая."""
+    try:
+        return (creds() if callable(creds) else creds or {}).get("user") or ""
+    except Exception:
+        return ""
+
+
 def login():
     """Логин человека, под которым этот процесс на шине, или None.
 
     Им мастер называет себя владельцем задания (#161). Папет, узел, сервисы
-    сервера и принципалы ролей -- не люди: их `send` аренду не берёт."""
-    try:
-        user = config().get("user") or ""
-    except Exception:
-        return None
+    сервера и принципалы ролей -- не люди: их `send` аренду не берёт.
+
+    Креды -- те, которыми соединение ОТКРЫТО (#603): лаунчер Nomad ходит
+    через bus.connect(NODE_FILE), и перечитывание config() на узле без
+    профиля сервера молча давало бы None или чужие креды. Без соединения --
+    прежний config(): фронтенды без шины читают каталог сервера."""
+    user = _user_of(getattr(_conn, "creds", None) if _conn is not None else None)
+    if not user:
+        user = _user_of(config)
     if not user or busnames.is_machine(user):
         return None
     return user
@@ -170,12 +182,11 @@ def principal():
 
     Единственный «кто я» для транспорта роли (#603): полный grant-<id>, не
     голый id -- на проводе всё, что адресует принципала, появляется целиком.
-    Человек, узел, сервис и легаси-папет принципала не имеют."""
-    user = None
-    try:
-        user = config().get("user") or ""
-    except Exception:
-        return None
+    Человек, узел, сервис и легаси-папет принципала не имеют. Креды -- как
+    у login(): открытые, иначе config()."""
+    user = _user_of(getattr(_conn, "creds", None) if _conn is not None else None)
+    if not user:
+        user = _user_of(config)
     return user if busnames.is_grant(user) else None
 
 
@@ -192,11 +203,11 @@ def node_name():
 
     Квалифицированный server.rpc (#603) -- узловая штука: его строит только
     процесс с узловым кредом (mop driver run), человек и принципал остаются
-    на анонимном легаси-субъекте."""
-    try:
-        user = config().get("user") or ""
-    except Exception:
-        return None
+    на анонимном легаси-субъекте. Креды -- как у login(): открытые
+    соединением (лаунчер ходит NODE_FILE'ом), иначе config()."""
+    user = _user_of(getattr(_conn, "creds", None) if _conn is not None else None)
+    if not user:
+        user = _user_of(config)
     if user.startswith(busnames.NODE_PREFIX):
         return user[len(busnames.NODE_PREFIX):]
     return None
@@ -389,9 +400,13 @@ async def _open(**opts):
     return nc
 
 
-async def _aconnect(file=None):
+async def _aconnect(creds):
+    """Соединение процесса по ВЫБРАННОМУ снимку кредов -- config() здесь не
+    читается вовсе (#603, ревью 01a4a58): второе чтение развязывалось с
+    первым (файл перезаписали между чтениями), и рукопожатие шло одним
+    пользователем, а conn.creds и identity-хелперы называли другого."""
     return await _open(
-        **auth(config(file)), name="mop", error_cb=_on_error,
+        **auth(creds), name="mop", error_cb=_on_error,
         # Молча копить неотправленное в ожидании сервера — худший вид отказа:
         # вызывающий получит успех, которого не было.
         allow_reconnect=True, max_reconnect_attempts=-1,
@@ -441,19 +456,23 @@ def connect(file=None):
 
     file — чьи креды: узел из процесса задачи Nomad (`mop driver run`)
     представляется своим узловым файлом, а не каталогом сервера, которого
-    на узле нет."""
+    на узле нет. Выбранные креды остаются на соединении (conn.creds):
+    identity-хелперы (#603) читают, кем процесс ПРЕДСТАВИЛСЯ, а не
+    перечитывают config() -- на узле нет профиля сервера, и молчаливый
+    None или чужие креды ломали бы маршрутизацию субъекта."""
     global _conn
     with _lock:
         if _conn is not None and not _conn.is_closed:
             return _conn
+        selected = config(file)
         def creds_or_nothing():
-            try:
-                return config(file)
-            except Exception:
-                return {}
+            return selected
         since = _clock()
         with _connect_failure(creds_or_nothing, lambda e: _error_since(since) or str(e)):
-            _conn = _call(_aconnect(file), 10)
+            # Один снимок кредов -- и рукопожатию, и identity: второе чтение
+            # config() развязало бы их (см. _aconnect).
+            _conn = _call(_aconnect(selected), 10)
+            _conn.creds = selected
         return _conn
 
 
