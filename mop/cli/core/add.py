@@ -13,7 +13,7 @@ from mop.common import bus, context, ops, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "args": [
+MCP = {"annotations": "destructive", "node_verbs": [], "cluster_verbs": ['add', 'alloc', 'bootstrap_result'], "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
     ]}
 

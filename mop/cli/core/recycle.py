@@ -14,7 +14,7 @@ from mop.common import context, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "args": [
+MCP = {"annotations": "destructive", "node_verbs": ['wipe'], "cluster_verbs": ['spec', 'alloc', 'delete', 'update', 'bootstrap_result'], "args": [
     {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
     {"name": "force", "type": "boolean", "flag": "--force",
      "help": "act on a puppet another master leads; the answer names whom"}]}

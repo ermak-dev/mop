@@ -131,5 +131,5 @@ test("#422 back from the journal returns to the main page", async () => {
   // главная: таблицы пула снова на экране (снимок пуст -- заметка вместо
   // таблиц, но страница журнала ушла)
   expect(screen.queryByTestId("journal-page")).toBeNull();
-  expect(screen.getByText("папетов нет")).toBeInTheDocument();
+  expect(screen.getByText("No sessions")).toBeInTheDocument();
 });

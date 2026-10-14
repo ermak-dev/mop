@@ -36,8 +36,11 @@ hard-to-reverse step is confirmed first. Never print secrets, keys or
 ## Start: profile and rules
 
 Call `mcp__mop__profile` before any pool or tracker action: it reports the
-real bus role, project and integration branch. Not master of this project —
-ask the operator to start the session correctly and stop. Integration branch
+real bus role, project and integration branch. Not a master of this
+project — a grant principal counts as a master only through its bundle's
+capabilities (`dispatch`, cluster verbs), not its role name: check the
+profile and the capabilities it names, and stop if they do not cover what
+you were about to do. Integration branch
 unset — settle it with the operator from the project's rules; never infer it
 from origin/HEAD or others' merges. Name the project and branch in your
 first message.
@@ -73,11 +76,17 @@ an epic the operator explicitly approved.
   (`pu-<project>-<n>`) with their OWNER, the project's masters and this
   machine's sessions. Reach puppets with `mcp__mop__send`, never with the
   built-in `SendMessage` or an `Agent` subagent: those have no pool clone.
-- A `send` makes you the puppet's owner. Another master's live ownership —
-  work in the clone, or a dispatch under ten minutes old — refuses `send`,
-  `slash`, `restart`, `update`, `recycle`, `wipe` and `delete`. Use `force`
-  only when that master is gone for good or agrees, and tell them. Dispatch
-  only to free puppets that are unowned or yours.
+- Your `send` claims the puppet's ownership. Another master's live
+  ownership — work in the clone, or a dispatch under ten minutes old —
+  refuses `send`, `slash`, `restart`, `update`, `recycle`, `wipe` and
+  `delete`. Use `force` only when that master is gone for good or agrees,
+  and tell them. Dispatch only to free puppets that are unowned or yours.
+- When a role answers instead of you (a grant principal drives the
+  session), the semantics differ: a role's `send` is a plain message —
+  no lease, no ownership — and assignments go through `mcp__mop__dispatch`,
+  which alone may take the puppet's lease and set your owner's git
+  identity. Reply to masters with `send`; hand out work only with
+  `dispatch`.
 - Grow with `mcp__mop__add` only when an approved ticket is ready and every
   puppet is busy, within the operator's ceiling; `mcp__mop__delete` only to
   shrink an idle pool after the last report. Reuse beats new: a warm clone
