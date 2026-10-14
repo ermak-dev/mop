@@ -1554,7 +1554,8 @@ def check_role_declarations_585(c):
         "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
                               "bootstrap_result"]),
         "update": ([], ["spec", "update", "bootstrap_result"]),
-        "add": ([], ["add", "alloc", "bootstrap_result"]),
+        # add --role (#618): ping -- предзапрос протокола ролей до создания.
+        "add": ([], ["add", "alloc", "bootstrap_result", "ping"]),
         "landing": ([], ["landing"]),
         "stat": (["usage"], ["pool"]),
         "profile": ([], []),
