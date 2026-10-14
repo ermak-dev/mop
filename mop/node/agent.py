@@ -51,7 +51,8 @@ import time
 
 from ..common import bus, busnames, config, fsutil, lease, paths, service
 from .. import driver, usage
-from ..common.domain import CloneFacts, Owner, Verb
+from ..common.domain import CloneFacts, Owner, Verb, holds_work
+from . import terminal
 from ..driver import Tmux, clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -301,7 +302,7 @@ def _last_json(out):
     return None
 
 
-async def session_json(name, script, timeout=20):
+async def session_json(name, script, timeout=20, private=False):
     """Ответ session.py, который печатает JSON (send, wait-idle).
 
     Тишина тела (код None) и ответ без итоговой JSON-строки (разрыв
@@ -311,7 +312,11 @@ async def session_json(name, script, timeout=20):
     известно, доехало ли» -- второе не откатывает ни аренду, ни identity:
     сообщение могло дойти, и откат испортил бы чужой ход. Подтверждённый
     отказ -- только структурированный ответ session.py, угадывание по
-    строкам мусора -- не способ."""
+    строкам мусора -- не способ.
+
+    private (#597) запрещает эхо неразобранного stdout: оборванный JSON истории
+    может содержать реплики. Структурированный отказ reader сохраняет причину.
+    """
     out, code = await bsh(name, script, timeout)
     if code is None:
         return {"error": f"{name}: the body did not answer in {timeout}s",
@@ -319,6 +324,9 @@ async def session_json(name, script, timeout=20):
     got = _last_json(out)
     if got is not None:
         return got
+    if private:
+        return {"error": f"{name}: history reader exit {code} — no parsable answer",
+                "timeout": True}
     return {"error": (out.strip() or f"session.py exit {code}")
             + " — no parsable answer, delivery unknown",
             "timeout": True}
@@ -476,15 +484,21 @@ def _settle(path, generation):
         _prune_claims(claims, _lease_holder.get(path))
 
 
-async def _claim(name, req):
+async def _claim(name, req, guard=None):
     """Аренда задания перед доставкой. -> (отказ|None, откат|None, заметка|None).
 
     Откат -- прежняя запись: не доехало сообщение -- возвращаем её, иначе
-    неудачный `send` держал бы папета окно диспатча впустую."""
+    неудачный `send` держал бы папета окно диспатча впустую.
+    guard проверяет именно снимок захвата для терминала (#598); обычный send
+    оставляет guard пустым и идёт прежним путём."""
     me = lease.caller(req)[0]
     if not me:
         return None, None, None
     clone = CloneFacts.from_dict(await clone_facts(name))
+    if guard:
+        refused = guard(clone, me, time.time())
+        if refused:
+            return refused, None, None
     owner = clone and clone.owner
     act, note = lease.verdict(owner, me, clone, time.time(), bool(req.get("force")))
     if act == "refuse":
@@ -1302,6 +1316,45 @@ async def _event(conn, kind, name=None, **fields):
         pass
 
 
+async def v_history(_conn, req):
+    """Мастерское чтение транскрипта внутри тела, без захвата владельца.
+
+    Проект уже проверен handle по named. Запрос задаёт только cursor; cwd,
+    config home, transcript path и live identity выбирает standalone reader.
+    Не публикуем records в события, аудит или лог.
+    """
+    allowed = {"verb", "name", "cursor", "_project", "_caller"}
+    if set(req) - allowed:
+        return {"error": "history request accepts only name and cursor"}
+    cursor = req.get("cursor")
+    if cursor is not None and (not isinstance(cursor, str) or not 0 < len(cursor) <= 2048
+                               or not re.fullmatch(r"[A-Za-z0-9_-]+", cursor)):
+        return {"error": "invalid history cursor"}
+    args = [clone_dir(req["name"])]
+    if cursor is not None:
+        args += ["--cursor", cursor]
+    out = await session_json(req["name"], _session_cmd("history", *args), private=True)
+    if (isinstance(out, dict) and set(out) <= {"error", "timeout"}
+            and isinstance(out.get("error"), str)
+            and ("timeout" not in out or type(out["timeout"]) is bool)):
+        return out
+    keys = {"epoch", "session_id", "cursor", "records", "reset", "has_more", "partial"}
+    if (not isinstance(out, dict) or set(out) != keys
+            or any(not isinstance(out[k], str) or not 0 < len(out[k]) <= limit
+                   for k, limit in (("epoch", 128), ("session_id", 128), ("cursor", 2048)))
+            or any(type(out[k]) is not bool for k in ("reset", "has_more", "partial"))
+            or not isinstance(out["records"], list)
+            or any(not isinstance(record, dict) for record in out["records"])):
+        return {"error": "incompatible history response from body"}
+    try:
+        size = len(json.dumps(out, ensure_ascii=True, allow_nan=False).encode())
+    except (ValueError, UnicodeError, RecursionError):
+        return {"error": "incompatible history response from body"}
+    if size >= 300_000:
+        return {"error": "history response from body exceeds byte limit"}
+    return out
+
+
 async def v_tail(_conn, req):
     return {"lines": await pane_lines(req["name"])}
 
@@ -1418,6 +1471,152 @@ async def v_wipe(conn, req):
     return await _gated(name, req, act)
 
 
+def terminal_access(clone, owner, now):
+    """Admin даёт транспорт, но не право на чужую работу (#598)."""
+    if clone is None or not clone.known:
+        return "terminal refused: clone state is unknown"
+    if holds_work(clone) and (clone.owner is None or clone.owner.user != owner):
+        return "terminal refused: work belongs to another owner or nobody"
+    refused, _ = lease.gate("terminal", clone, owner, now)
+    return refused
+
+
+async def _terminal_owner(name, owner, claim=False, require_owner=False):
+    clone = CloneFacts.from_dict(await clone_facts(name))
+    refused = terminal_access(clone, owner, time.time())
+    if refused:
+        raise ValueError(refused)
+    if require_owner and (clone.owner is None or clone.owner.user != owner):
+        raise ValueError("terminal writer ownership changed; reopen required")
+    # Без owner-lock: interrupt не ждёт долгой доставки normal send.
+    # Это снимок, не атомарная аренда вместе с записью в удалённый PTY.
+    return clone
+
+
+class _TerminalPreparation:
+    """Квитанция provisional claim: подтвердить после attach + proof либо
+    вернуть пару на definite pre-input failure. Оба перехода под owner-lock;
+    новый send того же владельца защищён поколением, не байтами аренды."""
+    def __init__(self, name, owner, undo):
+        self.name, self.owner, self.undo = name, owner, undo
+
+    async def commit(self):
+        async with _owner_locks.setdefault(self.name, asyncio.Lock()):
+            await _terminal_owner(self.name, self.owner, require_owner=True)
+            _settle(self.undo[0], self.undo[3])
+
+    async def rollback(self):
+        async with _owner_locks.setdefault(self.name, asyncio.Lock()):
+            return await _restore_identity_and_lease(self.name, self.undo)
+
+
+async def _terminal_prepare(conn, name, owner, claim=False):
+    clone = await _terminal_owner(name, owner)
+    if not claim or (clone.owner and clone.owner.user == owner):
+        return
+    # Новый держатель чистого клона: тот же порядок claim -> identity,
+    # что у send. Админский actor здесь явный, не loginless мастер.
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        clone = await _terminal_owner(name, owner)
+        if clone.owner and clone.owner.user == owner:
+            return
+        req = {"owner": owner, "_caller": owner}
+        refused, undo, _ = await _claim(name, req, guard=terminal_access)
+        if refused:
+            raise ValueError(refused)
+        _, failed, snap, safe = await _install_identity(conn, name, owner, undo)
+        if failed:
+            if safe:
+                undone = await _unclaim(name, undo)
+                if undone:
+                    failed += "; " + undone
+            raise ValueError(failed)
+        if undo:
+            _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
+            return _TerminalPreparation(name, owner, undo)
+
+
+async def _terminal_probe(name):
+    script = terminal.probe_script(DRIVER.SESSION_PY, clone_dir(name), name)
+    out, code = await bsh(name, script, timeout=5)
+    if code != 0:
+        # Не отдаём traceback тела: там могут быть пути и чужие данные.
+        raise ValueError("terminal session identity unavailable")
+    return terminal.Identity.from_dict(_last_json(out)).__dict__
+
+
+async def _terminal_spawn(name, mode, cols, rows, on_data, on_exit):
+    terminal.actor(name, "attach")
+    # read_only keyword добавляет #614. Нет его -- отказ, не rw fallback.
+    argv = DRIVER.attach_argv(name, read_only=(mode == "ro"))
+    return await terminal.PTY.spawn(argv, cols, rows, on_data, on_exit)
+
+
+async def _terminal_interrupt_delay(name):
+    """Timing -- только metadata actual tmux server в теле, не identity."""
+    script = terminal.interrupt_script(name)
+    try:
+        out, code = await bsh(name, script, timeout=5)
+        value = out.strip()
+        if (code != 0 or not value or len(value) > 5
+                or any(c not in '0123456789' for c in value)):
+            return None
+        delay = int(value)
+        return delay if 100 <= delay <= 10100 else None
+    except Exception:
+        return None  # Ни fallback, ни сырой stdout/traceback в ответе open.
+
+
+TERMINALS = terminal.Registry(_terminal_probe, _terminal_owner, _terminal_spawn,
+                             interrupt_delay=_terminal_interrupt_delay)
+
+
+async def _terminal_rpc(conn, req, verb):
+    # Повтор ворот для прямых внутренних вызовов, до схемы/проб/attach.
+    if req.get("_project") != busnames.ADMIN:
+        return {"error": "terminal requires the private admin node subject"}
+    try:
+        terminal.validate(verb, req)
+        name, owner = req["name"], req["owner"]
+        if verb == "term_open":
+            async def prepare(name, owner, claim=False):
+                return await _terminal_prepare(conn, name, owner, claim)
+            return await TERMINALS.open(name, owner, req["mode"], req["cols"], req["rows"], prepare)
+        tid = req["tid"]
+        if verb == "term_read":
+            return await TERMINALS.read(name, owner, tid, req["cursor"], req["wait"])
+        if verb == "term_write":
+            return await TERMINALS.write(name, owner, tid, req["seq"], req["data"])
+        if verb == "term_resize":
+            return await TERMINALS.resize(name, owner, tid, req["cols"], req["rows"])
+        return await TERMINALS.close(name, owner, tid)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        # Ни bytes, ни tid, ни traceback в общий журнал/ответ.
+        return {"error": f"terminal operation failed ({type(exc).__name__})"}
+
+
+async def v_term_open(conn, req):
+    return await _terminal_rpc(conn, req, "term_open")
+
+
+async def v_term_read(conn, req):
+    return await _terminal_rpc(conn, req, "term_read")
+
+
+async def v_term_write(conn, req):
+    return await _terminal_rpc(conn, req, "term_write")
+
+
+async def v_term_resize(conn, req):
+    return await _terminal_rpc(conn, req, "term_resize")
+
+
+async def v_term_close(conn, req):
+    return await _terminal_rpc(conn, req, "term_close")
+
+
 async def v_type(conn, req):
     """Напечатать слэш-команду в пейн и вернуть экран после неё.
 
@@ -1438,6 +1637,8 @@ async def v_type(conn, req):
 
 async def _type(conn, name, command):
     """Ввод в пейн, когда ворота уже пустили."""
+    if TERMINALS.writer_open(name):
+        return {"error": "terminal writer is open; close it before type"}
     if command in KEYS_ALLOWED:
         # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
         # диалог, а Enter после него отправил бы пустой ход.
@@ -1674,7 +1875,13 @@ VERBS = {
     "usage":  Verb(v_usage,  MASTER, False),
     "junk":   Verb(v_junk,   NODE,   False),
     "clone":  Verb(v_clone,  MASTER, True),
+    "history": Verb(v_history, MASTER, True),
     "sweep":  Verb(v_sweep,  NODE,   False),
+    "term_open":   Verb(v_term_open,   NODE, True),
+    "term_read":   Verb(v_term_read,   NODE, True),
+    "term_write":  Verb(v_term_write,  NODE, True),
+    "term_resize": Verb(v_term_resize, NODE, True),
+    "term_close":  Verb(v_term_close,  NODE, True),
 }
 # Прежние наборы -- выводом из таблицы, для тех, кто их читает.
 PUBLIC_VERBS = tuple(v for v, d in VERBS.items() if d.scope == PUBLIC)

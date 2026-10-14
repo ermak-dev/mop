@@ -1,7 +1,9 @@
-"""tail of a puppet's screen: mop tail <name> [-n N] [-f]
+"""tail of a puppet's screen: mop tail <name> [-n N] [-f] [--startup]
 
-  -n N   how many lines (default 10)
-  -f     keep following until Ctrl-C
+  -n N       how many lines (default 10)
+  -f         keep following until Ctrl-C
+  --startup  operator-only initialization log before the session; wrapper stages
+             and bootstrap tasks, not project command output
 """
 import time
 
@@ -50,8 +52,22 @@ def parse(argv):
 
 
 def main(argv):
-    name, lines, follow = parse(argv)
+    startup = "--startup" in argv
+    name, lines, follow = parse([arg for arg in argv if arg != "--startup"])
     lib.guard(name)
+    if startup:
+        previous = []
+        while True:
+            got = puppets.startup_lines(name, lines)
+            current = got.get("lines") or []
+            if not current and got.get("note"):
+                current = [got["note"]]
+            for line in appended_since(previous, current):
+                print(line, flush=True)
+            if not follow:
+                return
+            previous = current
+            time.sleep(2)
     try:
         node = puppets.node_of(name)
         buf = puppets.pane_lines(node, name)

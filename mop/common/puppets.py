@@ -836,6 +836,11 @@ def switch_model(node, name, model, force=False):
         raise RuntimeError("model switch dialog did not close")
 
 
+def startup_lines(name, lines=500):
+    """Ограниченный ход инициализации, только оператору; библиотека молчит."""
+    return _cluster("startup", project=bus.ADMIN, name=name, lines=lines)
+
+
 def alloc_stderr(name, lines):
     """Хвост stderr задачи аллокации папета глаголом `stderr` (#333):
     [строки], пусто -- аллокации нет или stderr пуст."""
