@@ -1451,6 +1451,47 @@ def _answer(project, req):
         ctx = grants.authorize_request(project, req, verb, root=SOUL_ROOT)
         if "error" in ctx:
             return ctx
+        # Маршрут по глаголу, не «всё в add» (#582, блокатор ревью):
+        # add -- делегированное заводение; ДРУГИЕ глаголы души -- те же
+        # ворота и обработчики, что у человека (refusal/имя/аренда):
+        # пресет рабочего (ping/roster/alloc/spec) и мастера (restart,
+        # update, ...) ими и живёт. Актёр -- принципал (шов его назвал),
+        # аренда видит человека-хозяина: изменяющий глагол роли бьёт по
+        # чужой работе -- её держит хозяйнин воротами аренды, как у людей.
+        if verb != "add":
+            # Грант не грузит текст политики (#582): workspace --
+            # человеческий путь согласования, ребёнок наследует снапшот
+            # родителя, живой -- держит свой.
+            if "workspace" in req or "bootstrap_sent" in req:
+                return {"error": f"{ctx['actor']}: a grant request carries "
+                                 f"no client workspace text: the policy is "
+                                 f"approved by its human owner (#582)"}
+            req = {**req, "_owner": ctx["owner"], "_actor": ctx["actor"]}
+            name = req.get("name")
+            vrow = _row(verb)
+            origin, exists = (None, False)
+            if vrow and vrow.named and name:
+                origin, exists = _owner(name)
+            new_origin = None
+            if verb == "update" and req.get("origin") \
+                    and req.get("origin") != origin:
+                new_origin = req.get("origin")
+            why = refusal(project, verb,
+                          origin=(origin if exists else req.get("origin")),
+                          name=name, job_exists=exists,
+                          new_origin=new_origin)
+            if why:
+                return {"error": why}
+            if vrow.acting and name and not exists:
+                return {"error": f"no job {name} in the cluster"}
+            try:
+                return vrow.fn(project, req)
+            except KeyError as e:
+                return {"error": f"{verb}: missing field {e}"}
+            except ValueError as e:
+                return {"error": f"{verb}: {e}"}
+            except Exception as e:
+                return {"error": f"{verb}: {nomad.describe_error(e)}"}
         try:
             return _delegated(project, req, ctx)
         except ValueError as e:

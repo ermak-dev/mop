@@ -862,6 +862,118 @@ def check_seam_adoption_582(c):
                 bad_subject)
 
 
+def check_role_channel_verbs_582(c):
+    """Блокатор ревью 9747ed7: глаголы роли НЕ исчерпываются add. Шов
+    authorize_request пускает по cluster_verbs души (пресет puppet:
+    ping/roster/alloc/spec; мастер: ещё pool/stderr/update/...), но
+    _answer вёл ЛЮБОЙ глагол роли в _delegated, а тот отказывал всему,
+    кроме add: рабочие глаголы пресетов по каналу роли не работали вовсе.
+    Маршрут: add -- делегированное заводение; ДРУГИЕ разрешённые глаголы
+    -- обычные ворота (refusal/имя/аренда) и существующие обработчики,
+    актёр -- принципал, аренда видит человека-хозяина; запрет -- швом
+    (не в cluster_verbs) или воротами (чужая цель), легаси-rpc человека
+    не меняется вовсе."""
+    from mop.common import busnames as bn
+
+    def worker_and_target(api, g):
+        """Живой рабочий (puppet) и его джоб в Nomad: цели глаголов."""
+        got = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                    "soul": "puppet", "request_id": "w-1",
+                                    "_caller": "anton"})
+        assert got.get("ok"), got
+        worker = grants.by_job("alpha", got["name"], root=g)["principal"]
+        return worker, got["name"]
+
+    def on_role(api, project, worker, fields):
+        return answer(api, project, {**fields, "_caller": worker,
+                                     "_subject": bn.cluster(project,
+                                                            login=worker)})
+
+    # Позитив: рабочие глаголы пресета puppet по каналу роли.
+    api = FakeNomad(jobs={"pu-alpha-9": soul_job("pu-alpha-9")})
+    with soul_env(api) as g:
+        worker, target = worker_and_target(api, g)
+        api.jobs[target] = soul_job(target)
+        got = on_role(api, "alpha", worker,
+                      {"verb": "ping", "origin": ALPHA})
+        c.check("#582 a worker's ping answers on the role channel",
+                got.get("ok"), got)
+        roster = on_role(api, "alpha", worker, {"verb": "roster"})
+        c.check("#582 a worker's roster sees the project's puppets",
+                roster.get("ok")
+                and target in {r.get("job", {}).get("ID")
+                               for r in roster.get("items", [])}, roster)
+        alloc = on_role(api, "alpha", worker,
+                        {"verb": "alloc", "name": target})
+        c.check("#582 a worker's alloc reaches the named puppet",
+                alloc.get("ok") or "no job" in (alloc.get("error") or ""),
+                alloc)
+        spec = on_role(api, "alpha", worker,
+                       {"verb": "spec", "name": target})
+        c.check("#582 a worker's spec reads the job meta",
+                spec.get("ok") and (spec.get("meta") or {}).get("soul")
+                == "puppet", spec)
+
+    # Позитив: мастер управляет -- restart разрешён душой мастера,
+    # аренда видит человека-хозяина, не принципала.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        rec = grants.by_job("alpha", parent, root=g)
+        target = soul_job("pu-alpha-9", digest=rec["soul_digest"])
+        target["Meta"]["soul"] = rec["role"]
+        target["Meta"]["soul_inc"] = rec["soul_inc"]
+        api.jobs["pu-alpha-9"] = target
+        api.allocs["pu-alpha-9"] = {"ID": "a1", "NodeName": "hyper",
+                                    "JobID": "pu-alpha-9",
+                                    "ClientStatus": "running",
+                                    "TaskStates": {}}
+        with patched(cluster, _clone_of=lambda name: None):
+            got = on_role(api, "alpha", principal,
+                          {"verb": "restart", "name": "pu-alpha-9",
+                           "force": True})
+        c.check("#582 a master's restart works on the role channel",
+                got.get("ok"), got)
+        # update от гранта: без client workspace -- текст политики
+        # загружает только человек, грант его не приносит.
+        with patched(cluster, _clone_of=lambda name: None):
+            upd = on_role(api, "alpha", principal,
+                          {"verb": "update", "name": "pu-alpha-9",
+                           "origin": ALPHA, "force": True})
+        c.check("#582 a grant update carries no client workspace",
+                upd.get("error") is None
+                and bootstrap.files_of(bootstrap.ROOT, "pu-alpha-9")
+                == (None, None), (upd, bootstrap.files_of(
+                    bootstrap.ROOT, "pu-alpha-9")))
+        with patched(cluster, _clone_of=lambda name: None):
+            poison = on_role(api, "alpha", principal,
+                             {"verb": "update", "name": "pu-alpha-9",
+                              "origin": ALPHA, "workspace": "- name: evil\n",
+                              "force": True})
+        c.check("#582 a grant update cannot upload workspace text",
+                "error" in poison
+                and bootstrap.files_of(bootstrap.ROOT, "pu-alpha-9")
+                == (None, None), poison)
+
+    # Негатив: глагол вне cluster_verbs души -- отказ шва; чужой проект
+    # на субъектах роли не читается; отозванный источник -- отказ.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        worker, target = worker_and_target(api, g)
+        no_verb = on_role(api, "alpha", worker, {"verb": "pool"})
+        c.check("#582 a verb outside the soul is refused by the seam",
+                "error" in no_verb
+                and "may not" in (no_verb.get("error") or ""), no_verb)
+        foreign = on_role(api, "beta", worker, {"verb": "ping"})
+        c.check("#582 a foreign project subject is refused",
+                "error" in foreign, foreign)
+        grants.revoke(worker, root=g)
+        revoked = on_role(api, "alpha", worker, {"verb": "ping"})
+        c.check("#582 a revoked source is refused with its reason",
+                "error" in revoked and "revok" in revoked.get("error", ""),
+                revoked)
+
+
 def check_bootstrap_snapshot_coherence_582(c):
     """Блокатор 6: согласованный снапшот -- одни байты на чтение, хеш и
     запись. Хеш сверяется с прочитанными байтами, копируются они же;
@@ -1176,6 +1288,7 @@ def main():
                check_add_legacy_untouched_582, check_add_delegated_582,
                check_add_delegated_gates_582,
                check_seam_adoption_582,
+               check_role_channel_verbs_582,
                check_bootstrap_snapshot_coherence_582,
                check_add_workspace_boundary_582,
                check_add_quota_counts_roles_582,
