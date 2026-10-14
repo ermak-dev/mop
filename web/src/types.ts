@@ -11,7 +11,7 @@ export type Kind = (typeof KINDS)[number];
 // Виды вердикта (#452) -- тем же списком, что state.KINDS на сервере:
 // слово статуса и его иконка выводятся из него. null -- переходный снимок
 // (сервер до #452 или спросить некого: state-строка прочерк).
-export const VERDICTS = ["silent", "hung", "starting", "dialog", "login", "quota", "error",
+export const VERDICTS = ["silent", "hung", "starting", "queued", "dialog", "login", "quota", "error",
   "waiting", "busy", "other", "free", "idle", "unknown", "failing"] as const;
 export type VerdictKind = (typeof VERDICTS)[number] | null;
 

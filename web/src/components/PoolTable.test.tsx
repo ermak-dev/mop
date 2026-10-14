@@ -119,6 +119,26 @@ test("#452 a transition snapshot without the new fields still renders", () => {
   expect(screen.getByText("нет данных")).toBeInTheDocument();
 });
 
+// HYPOTHESIS: неизвестный queued рисуется как «нет данных» без объяснения.
+// SOLUTION: единый verdict-словарь даёт ожидание, detail приходит от сервера.
+// RESULT: проверка была красной на прежнем словаре, после правки зелёная.
+// STATUS: FIXED — see #619
+test("#619 a pending puppet shows placement wait and its server reason", () => {
+  const queued: Project[] = [{
+    name: "mop",
+    counts: { puppets: 1, free: 0, busy: 0, sick: 0, silent: 0, down: 1 },
+    puppets: [{ name: "pu-mop-9", node: "-", alloc_status: "pending",
+      state: "queued: no free slots in the pool", kind: "queued", bucket: "down",
+      detail: "no free slots in the pool", branch: null,
+      owner: "-", llm: "-", origin: "git@h:g/mop.git", disk_kb: null }],
+  }];
+  renderUi(<PoolTable projects={queued} />);
+  expect(screen.getByText("ожидает размещения")).toBeInTheDocument();
+  expect(screen.getByText("no free slots in the pool")).toBeInTheDocument();
+  expect(screen.queryByText("нет данных")).not.toBeInTheDocument();
+  expect(screen.queryByText("поднимается")).not.toBeInTheDocument();
+});
+
 // ── #509: карточки-вердикты ушли из таблицы ────────────────────────────
 // Терминал операции возвращается человеку балуном кадра
 // (useOperationBalloons, проверен своим файлом), строка цели чиста:

@@ -254,6 +254,15 @@ def _initializing(item):
             or item.get("kind") == "hung" and item.get("detail") == "no tmux session")
 
 
+def _placement_state(item):
+    job = item["job"]
+    if item.get("alloc") or item.get("error") or item.get("gave_up") \
+            or job.get("Stop") is True or not state.queued(job):
+        return None
+    issue = _placement_issue(job, None, item.get("unserved", False), item.get("ceiling"))
+    return State("queued", issue["diagnosis"].removeprefix("queued — "))
+
+
 def _row(item, disk_kb=None):
     job, alloc = item["job"], Alloc.from_dict(item["alloc"])
     meta = JobMeta.from_job(job)
@@ -274,6 +283,10 @@ def _row(item, disk_kb=None):
     if item.get("gave_up") and not item["error"]:
         status, state, kind = "failed", str(State("failing", item["gave_up"])), "failing"
         detail, branch = item["gave_up"], None
+    placement = _placement_state(item)
+    if placement and kind != "failing":
+        status, state, kind = "pending", str(placement), placement.kind
+        detail, branch = placement.detail, None
     return PuppetRow(
         name=job["ID"],
         node=alloc.node if alloc else None,
