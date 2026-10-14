@@ -1,5 +1,4 @@
 .hybrid-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
-.hybrid-screen { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .hybrid-controls, .hybrid-history-toolbar, .hybrid-composer { flex-shrink: 0; background: var(--mantine-color-gray-0); border-bottom: 1px solid var(--mantine-color-default-border); }
 .hybrid-panes { flex: 1; min-height: 0; min-width: 0; }
 .hybrid-chat-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
@@ -14,6 +13,7 @@
 .hybrid-composer-extra { margin-top: 8px; font-size: var(--mantine-font-size-sm); }
 .hybrid-composer-extra summary { cursor: pointer; padding: 4px 0; }
 .hybrid-terminal-pane { flex: 1; min-width: 0; min-height: 0; flex-direction: column; padding: 16px; }
+.hybrid-live-terminal, .hybrid-snapshot { flex: 1; min-height: 0; min-width: 0; flex-direction: column; }
 .hybrid-terminal { flex: 1; min-height: 160px; width: 100%; overflow: hidden; background: #1a1b1e; padding: 8px; }
 .hybrid-terminal .xterm { height: 100%; }
 .hybrid-panes-split > .hybrid-chat-pane { flex: 1.1; }

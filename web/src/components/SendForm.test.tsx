@@ -35,7 +35,7 @@ const open = () => {
     : fetchTail(url, init));
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "Экран" }));
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
   return view;
 };
 const typeAndSend = async () => {
