@@ -394,12 +394,22 @@ def check_no_human_over_nats_219(c):
             if f.endswith(".py"):
                 path = os.path.join(base, f)
                 sources[os.path.relpath(path, root)] = open(path).read()
-    # nats:// строится одним bus_config -- только папету (и машинам -- файлом).
+    # nats:// строится одним bus_config -- только папету, принципалу роли
+    # (#581: телу роли на узле нужен тот же путь без TLS, что и папету,
+    # его индивидуальный кред едет ответом bootstrap) и машинам -- файлом.
+    # Человеку -- по-прежнему wss (#97): его пароль по LAN открытым
+    # текстом не ходит, и расширение договора на принципала этого не
+    # меняет. Захват -- ровно вызов (скобки вглубь одного уровня): охват
+    # «до конца строки» склеивал вызов со следующим кодом, и слово из
+    # чужой строки проходило проверку пусто.
+    call_re = re.compile(r"creds\.bus_config\((?:[^()]|\([^()]*\))*\)")
     for path, text in sources.items():
-        for m in re.finditer(r"creds\.bus_config\((.*?)\)\s*$", text, re.S | re.M):
-            call = m.group(1)
-            c.check(f"{path}: bus_config (plain nats://) only for a puppet",
-                    "puppet_user" in call, call.strip()[:120])
+        for m in call_re.finditer(text):
+            call = m.group(0)
+            c.check(f"{path}: bus_config (plain nats://) only for a puppet "
+                    f"or a grant principal (#581)",
+                    "puppet_user(" in call or "user=principal" in call,
+                    call[:120])
         for m in re.finditer(r"can_login\(([^)]*)", text):
             call = m.group(1)
             c.check(f"{path}: can_login (plain nats://) only for a puppet or the service",
