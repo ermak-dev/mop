@@ -49,7 +49,7 @@ import shlex
 import socket
 import time
 
-from ..common import bus, busnames, config, fsutil, lease, paths, service
+from ..common import bus, busnames, config, fsutil, lease, paths, service, soul
 from .. import driver, usage
 from ..common.domain import CloneFacts, Owner, Verb
 from ..driver import Tmux, clone_dir, target_dir, why
@@ -85,6 +85,11 @@ KEYS_ALLOWED = ("Escape",)
 
 IDLE_WAIT = 600          # потолок ожидания простоя для notify
 IDENTITY_WAIT = 5        # сколько send ждёт профиль владельца у сервера (#167)
+RESOLVE_WAIT = 5         # сколько глагол актёра ждёт резолвер сервера (#584)
+SOUL_FACT_TTL = 10       # кэш soul-факта ростера: только читающие глаголы (#584)
+STARTUP = "initial_identity"   # единственный глагол канала подъёма (#584/#590)
+MARK = "mop-soul-inc"          # маркер identity инкарнации (агент, .git/)
+READY = "ready.json"          # доказательство готовности 590/583 (souls/)
 
 
 def node_name():
@@ -347,11 +352,15 @@ async def v_ping(_conn, _req):
     return {"node": node_name()}
 
 
-async def v_state(_conn, req):
-    return await facts(req["name"])
+async def v_state(conn, req):
+    out = await facts(req["name"])
+    soul_fact = await _soul_fact(conn, req["_project"], req["name"], out)
+    if soul_fact is not None:
+        out["soul"] = soul_fact
+    return out
 
 
-async def v_states(_conn, req):
+async def v_states(conn, req):
     """Пачкой: у узла обычно несколько папетов, и спрашивают о них всегда
     вместе. Одна поездка вместо N.
 
@@ -360,7 +369,10 @@ async def v_states(_conn, req):
     которой не должна пропасть картина по своим."""
     names = [n for n in (req.get("names") or []) if await _mine(req, n)]
     got = await asyncio.gather(*(facts(n) for n in names))
-    return {"puppets": dict(zip(names, got))}
+    souls = await asyncio.gather(*(_soul_fact(conn, req["_project"], n, f)
+                                   for n, f in zip(names, got)))
+    return {"puppets": {n: dict(f, soul=s) if s is not None else f
+                        for n, f, s in zip(names, got, souls)}}
 
 
 async def v_sizes(_conn, req):
@@ -1158,6 +1170,74 @@ async def _install_identity(conn, name, login, undo):
             f"commit with git -c", None, snap, True)
 
 
+async def _prepare(conn, name, req):
+    """Захват аренды и identity владельца ДО доставки (#574). -> (отказ |
+    None, откат | None, заметка | None). Зовут под замком папета.
+
+    Захват -> identity -> передача: под одним замком, окно -- вопрос
+    профилю (IDENTITY_WAIT) и шелл установки. Ошибка подготовки -- отказ ДО
+    доставки: задание не уходит под неверной identity; компенсация
+    подтвердилась -- откат захвата едет с той же причиной (#181), не
+    подтвердилась -- аренда остаётся за пославшим, «восстановлено» не
+    говорится (review-2, п.2)."""
+    me, verified = lease.caller(req)
+    refused, undo, note = await _claim(name, req)
+    if refused:
+        return refused, None, None
+    if undo and verified:
+        inote, failed, snap, safe = await _install_identity(conn, name, me, undo)
+        if failed:
+            if safe:
+                undone = await _unclaim(name, undo)
+                if undone:
+                    failed = f"{failed}; owner not restored: {undone}"
+            return f"{name}: {failed}", None, None
+        note = "; ".join(filter(None, (note, inote)))
+        # Снимок в реестр: прежняя пара и свои хуки тем же шеллом
+        # установки, до записи новой.
+        _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
+    return None, undo, note
+
+
+async def initial_identity(conn, name, owner, inc):
+    """Первая аренда и identity хозяина в теле роли ДО первого хода модели
+    (docs/SOUL.md, шов для #590). -> {resumed | owner_note} либо {error}.
+    Успех ставит маркер инкарнации.
+
+    Та же транзакция, что у dispatch (#574): замок папета, захват, снимок,
+    установка, откат при провале. owner -- хозяин-человек из резолвера,
+    не из тела. Резюм доказывает маркер ЭТОЙ инкарнации, не аренда:
+    клон могли снести и поднять заново тем же хозяином, и свежее тело без
+    маркера обязано пройти полный путь, а не «аренда та же -- значит
+    готово». Маркер жив -- возобновление: ни аренду, ни git не трогаем, их
+    мог законно переставить поздний dispatch. Маркера нет, а аренда
+    чужая -- отказ: работа в клоне не наша."""
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        marker, mwhy = await _read_marker(name)
+        if marker is None:
+            if mwhy and "absent" not in mwhy:
+                return {"error": mwhy}
+            clone = CloneFacts.from_dict(await clone_facts(name))
+            held = clone and clone.owner and clone.owner.user
+            if held:
+                return {"error": f"{name}: lease is held by {held}, not {owner}"}
+            refused, undo, note = await _prepare(conn, name, {"_caller": owner})
+            if refused:
+                return {"error": refused}
+            if undo:
+                _settle(undo[0], undo[3])
+        else:
+            if marker["inc"] != inc:
+                return {"error": f"{name}: the body carries incarnation "
+                                 f"{marker['inc']}, this registration is {inc}"}
+            note = None
+        failed = await _write_marker(name, inc)
+        if failed:
+            return {"error": failed}
+    return {"resumed": True} if note is None and marker else \
+        ({"owner_note": note} if note else {})
+
+
 async def v_send(conn, req):
     """Сообщение в сессию папета. -> {msg_id} либо {error}.
 
@@ -1178,32 +1258,18 @@ async def v_send(conn, req):
     самим замком, и откат чужой записи поверх невозможен конструктивно."""
     name = req["name"]
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
-    me, verified = lease.caller(req)
+    # Актёр роли (#584): обычный send -- сообщение соседу, без аренды и без
+    # identity; аренду берёт только dispatch, решённый субъектом и
+    # резолвером в handle (_dispatch), а не телом. Аренда и identity
+    # dispatch -- хозяина-человека из резолвера (_caller), как у человека.
+    actor = req.get("_actor")
+    leased = not actor or req.get("_dispatch") is True
     out = {}
     async with _owner_locks.setdefault(name, asyncio.Lock()):
-        refused, undo, note = await _claim(name, req)
+        refused, undo, note = await _prepare(conn, name, req) if leased \
+            else (None, None, None)
         if refused:
             return {"error": refused}
-        # Захват -> identity -> передача: под одним замком, окно -- вопрос
-        # профилю (IDENTITY_WAIT), шелл установки и короткая передача
-        # --wait 0, не 600 секунд простоя. Ошибка подготовки -- отказ ДО
-        # доставки: задание не уходит под неверной identity; компенсация
-        # подтвердилась -- откат захвата едет с той же причиной (#181),
-        # не подтвердилась -- аренда остаётся за пославшим, «восстановлено»
-        # не говорится (review-2, п.2).
-        if undo and verified:
-            inote, failed, snap, safe = await _install_identity(conn, name, me, undo)
-            if failed:
-                if safe:
-                    undone = await _unclaim(name, undo)
-                    if undone:
-                        failed = f"{failed}; owner not restored: {undone}"
-                return {"error": f"{name}: {failed}"}
-            else:
-                note = "; ".join(filter(None, (note, inote)))
-                # Снимок в реестр: прежняя пара и свои хуки тем же шеллом
-                # установки, до записи новой.
-                _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
         # Цель — клон, а не сокет: session.py резолвит сессию сам, внутри
         # тела, где только и лежат её файлы. Снаружи сокет контейнерного
         # папета не виден. Передача -- под тем же замком: bounded (--wait 0,
@@ -1245,7 +1311,10 @@ async def v_send(conn, req):
             out["idle_error"] = r["error"]
         else:
             out["idle"] = r.get("state")
-    await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}")
+    # Аудит -- фактический актёр и его хозяин из резолвера, не поле тела.
+    await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}",
+                 **({"actor": actor, "owner": req.get("_caller"),
+                     "dispatch": req.get("_dispatch") is True} if actor else {}))
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
         # проектом, иначе два терминала в одном проекте получали бы вести друг
@@ -1708,8 +1777,410 @@ async def _mine(req, name):
     return req.get("_project") == bus.ADMIN or await puppet_project(name) == req.get("_project")
 
 
+# ─── делегированный актёр (#584) ─────────────────────────────────────────
+# Роль входит своим принципалом grant-<id> (docs/SOUL.md): rpc.<grant-id>
+# для глаголов node_verbs и dispatch.<id> -- для диспетчера. ACL шины
+# пускает в субъект только этот принципал, но его права на глагол, на цель
+# и сама живость привязки -- у сервера: узел спрашивает резолвер
+# bootstrap-сервиса (server.rpc, узловой кред) перед любым эффектом, каждый
+# раз, без кэша. Молчание, отказ, ответ не о том -- отказ: отозванная
+# привязка не действует и при живом соединении.
+DISPATCH = "dispatch"     # глагол в теле dispatch-субъекта и в резолвере
+# Канал обычного RPC актёра -- busnames.ROLE_CHANNEL (#603): локальная
+# копия убрана, расхождение ловил бы только живой забор.
+# Поля тела, которыми легаси-путь называет власть: у актёра власть -- его
+# субъект и резолвер, тело их не пишет.
+ACTOR_STRIPPED = ("owner", "holder", "force")
+
+
+def actor_of(subject):
+    """Субъект -> (канал, принципал | None). role.<grant-id> -- актёр
+    обычного глагола (#603), dispatch.<id> -- диспетчер; токен канала без
+    правильного принципала -- канал без актёра (отказ в handle). Логин
+    человека принципалом не бывает: префикс grant- зарезервирован, и
+    принципал на старом rpc-пути -- не человек и не актёр: проволочный
+    забор, чтобы старый агент смешанной раскатки не исполнил глагол без
+    резолвера. Канал подъёма -- не субъект актёра: глагол один, и его
+    держит узловой кред тела, а не принципал (#590)."""
+    tokens = (subject or "").split(".")
+    channel = tokens[4] if tokens[2:3] == ["node"] and len(tokens) >= 5 else None
+    if channel == busnames.DISPATCH_CHANNEL:
+        # Полный принципал grant-<id> (#603): голый hex на проводе не
+        # появляется, и токен субъекта -- уже готовое имя.
+        user = tokens[5] if len(tokens) > 5 else ""
+        return DISPATCH, (user if soul.is_grant(user) else None)
+    if channel == busnames.ROLE_CHANNEL:
+        user = tokens[5] if len(tokens) > 5 else ""
+        return busnames.ROLE_CHANNEL, (user if soul.is_grant(user) else None)
+    if channel == "startup":
+        return "startup", None
+    # Принципал на человеческом rpc-пути: субъект роли есть, этот -- не
+    # его. #603 закрыл caller() для гранта на rpc, и узел читает забор по
+    # последнему токену субъекта тем же правилом, что и шина: принципал
+    # там -- не человек и не актёр, до резолвера отказ (смешанная раскатка
+    # не исполняет глагол без резолвера).
+    tail = tokens[5] if len(tokens) > 5 else ""
+    if soul.is_grant(tail):
+        return "fenced", tail
+    return "rpc", None
+
+
+def source_dispatch(got):
+    """Право источника на dispatch из ответа резолвера: source_dispatch
+    либо capabilities.dispatch; иного вида нет -- None, то есть отказ."""
+    if "source_dispatch" in got:
+        return got["source_dispatch"]
+    caps = got.get("capabilities")
+    return caps.get("dispatch") if isinstance(caps, dict) else None
+
+
+def actor_verdict(got, principal, project, verb, target=None):
+    """Ответ резолвера -> причина отказа | None. Чистая: решает узел, а не
+    вера в то, что сервер ответил о том, о чём спросили.
+
+    Пускает только явное allow о том же принципале в том же проекте, с
+    хозяином-человеком; названная цель -- найдена, та же, в том же
+    проекте и ЖИВА (без revoked_at, с явным active, #581); dispatch --
+    источник с dispatch и цель с receives_dispatch (право цели --
+    отдельная проверка от свободы клона, её решает аренда)."""
+    if not isinstance(got, dict):
+        return f"the resolver answered {type(got).__name__}, not a verdict"
+    if got.get("allow") is not True:
+        return f"refused by the server: {got.get('reason') or got.get('error') or 'not allowed'}"
+    if got.get("principal") != principal:
+        return f"the resolver answered about {got.get('principal')}, not {principal}"
+    if got.get("project") != project:
+        return f"principal {principal} is not in project {project}"
+    for key, what in (("owner", "human owner"), ("job", "job")):
+        if not (isinstance(got.get(key), str) and got[key]):
+            return f"principal {principal} has no {what}"
+    if target is not None:
+        t = got.get("target")
+        if not (isinstance(t, dict) and t.get("found") is True):
+            return f"puppet {target} has no binding"
+        if t.get("revoked_at"):
+            return f"binding of {target} is revoked"
+        if t.get("active") is not True:
+            return f"binding of {target} is not active"
+        if t.get("job") != target:
+            return f"the resolver answered about {t.get('job')}, not {target}"
+        if t.get("project") != project:
+            return foreign(target, project)
+    if verb == DISPATCH:
+        if source_dispatch(got) is not True:
+            return f"role {got.get('role')} does not dispatch"
+        if target is None or got["target"].get("receives_dispatch") is not True:
+            return f"puppet {target} does not receive dispatch"
+    return None
+
+
+def resolver_subject(conn, project):
+    """Субъект вопроса к резолверу сервера -- узловой квалифицированный
+    (#581): анонимный server.rpc сервисный маршрут не пускает. Узел --
+    из кредов ОТКРЫТОГО соединения (conn.creds, #603): тот же снимок, что
+    рукопожатию; дефолтный config() на узле пуст или чужой. -> субъект
+    | None (кред не узловой -- спрашивать нечем)."""
+    creds = getattr(conn, "creds", None)
+    user = creds().get("user") if callable(creds) else \
+        (creds or {}).get("user") if isinstance(creds, dict) else None
+    if isinstance(user, str) and user.startswith(busnames.NODE_PREFIX):
+        return busnames.server(project, caller=busnames.node_user(
+            user[len(busnames.NODE_PREFIX):]))
+    return None
+
+
+async def resolve_actor(conn, project, principal, verb, target=None):
+    """Принципал, глагол, цель -> (ответ резолвера | None, отказ | None).
+
+    Свежий запрос к bootstrap-сервису проекта узловым кредом: ни Nomad,
+    ни каталога ролей узел не держит. Проект -- субъектом запроса, не
+    полем тела: сервер берёт его оттуда. Принципал -- полным именем
+    grant-<id> на обоих каналах. Общий шов для подъёма роли (#590)."""
+    fields = {"principal": principal, "service": "node", "verb_name": verb}
+    if target is not None:
+        fields["target"] = target
+    subj = resolver_subject(conn, project)
+    if subj is None:
+        return None, "no node credentials to ask the resolver"
+    try:
+        msg = await bus.arequest(conn, subj,
+                                 bus.envelope("resolve", **fields), RESOLVE_WAIT)
+        got = json.loads(msg.data.decode())
+    except Exception as e:
+        return None, f"the resolver did not answer ({type(e).__name__})"
+    why = actor_verdict(got, principal, project, verb, target)
+    return (None, why) if why else (got, None)
+
+
+async def target_binding(conn, project, name, soul_inc=None):
+    """Привязка цели из реестра сервера. -> (цель | None, причина | None).
+
+    Свежий вопрос без принципала (target-вид резолвера): тот же сервис,
+    тот же узловой кред. Инкарнация в вопросе -- контракт by_job #581:
+    точная запись приходит С состоянием (неактивная, отозванная), и
+    отвергает её вызывающий; без инкарнации describe_target возвращает
+    единственную неживую запись ТОЖЕ с состоянием -- «отозвана» и «не
+    привязана» обязан различать сам узел. Живость -- для любого режима
+    вопроса: явное active и без revoked_at, умолчание не согласие.
+    Проверяем и форму тройки: битый digest или инкарнация -- не
+    готовность, а причина; «примерно та» привязка прав не даёт. Кэш --
+    только у читающего глагола (_soul_fact), мутации зовут свежо."""
+    fields = {"service": "node", "target": name}
+    if soul_inc is not None:
+        fields["soul_inc"] = soul_inc
+    subj = resolver_subject(conn, project)
+    if subj is None:
+        return None, "no node credentials to ask the resolver"
+    try:
+        msg = await bus.arequest(conn, subj,
+                                 bus.envelope("resolve", **fields), RESOLVE_WAIT)
+        got = json.loads(msg.data.decode())
+    except Exception as e:
+        return None, f"the resolver did not answer ({type(e).__name__})"
+    # Живость записи -- для любого режима вопроса (#581: describe_target
+    # без инкарнации тоже возвращает единственную неживую запись с её
+    # состоянием): явное active и без revoked_at, умолчание не согласие.
+    # Отказ сервера (found: False) со своей причиной остаётся его words.
+    if not isinstance(got, dict) or got.get("found") is not True:
+        why = got.get("reason") if isinstance(got, dict) else None
+        if soul_inc is not None and isinstance(got, dict) \
+                and (got.get("revoked_at") or got.get("active") is False):
+            return None, (f"binding of {name} {soul_inc} is revoked"
+                          if got.get("revoked_at") else
+                          f"binding of {name} {soul_inc} is not active")
+        if why:
+            return None, f"{name}: {why}"
+        return None, f"puppet {name} has no binding"
+    if got.get("revoked_at"):
+        return None, f"binding of {name} {got.get('soul_inc')} is revoked"
+    if got.get("active") is not True:
+        return None, f"binding of {name} {got.get('soul_inc')} is not active"
+    if got.get("job") != name:
+        return None, f"the resolver answered about {got.get('job')}, not {name}"
+    if got.get("project") != project:
+        return None, foreign(name, project)
+    if not (isinstance(got.get("owner"), str) and got["owner"]):
+        return None, f"puppet {name} has no human owner"
+    if not (isinstance(got.get("role"), str) and soul.NAME.match(got["role"])):
+        return None, f"puppet {name} has a malformed role {got.get('role')!r}"
+    if not (isinstance(got.get("soul_digest"), str)
+            and soul.HEX64.match(got["soul_digest"])):
+        return None, f"puppet {name} has a malformed soul digest"
+    # Грамматика инкарнации -- общий помощник soul (#580), не своя
+    # проверка на месте: каноническая строка UUID, что и в реестре.
+    try:
+        soul._uuid(got.get("soul_inc"), "soul_inc", "binding")
+    except ValueError:
+        return None, f"puppet {name} has a malformed soul incarnation"
+    return got, None
+
+
+# Кэш soul-факта ростера (#584): (проект, имя, инкарнация, sessionId) ->
+# (годен до, факт). Ключ -- проверенная инкарнация и идентификатор живой
+# сессии из структурной записи state: переиспользованное имя и новая
+# сессия не наследуют готовность прежней. Только читающие глаголы и
+# только на TTL: мутации резолвер спрашивают свежо.
+_soul_cache = {}
+
+
+async def _read_marker(name):
+    """Маркер identity инкарнации. -> (словарь | None, причина | None).
+
+    Маркер пишет агент канала подъёма под замком папета, в .git/ -- рядом
+    с файлом аренды: клон остаётся чистым для git. Маркер доказывает
+    только то, что агент сам поставил identity этой инкарнации, и ничью
+    готовность сам по себе не доказывает (готовность -- ready-файл 590).
+    Битый и нечитаемый маркер -- причина, не готовность."""
+    out, code = await bsh(
+        name, f'cat {shlex.quote(os.path.join(clone_dir(name), ".git", MARK))} 2>/dev/null')
+    if not (out or "").strip():
+        # Нет файла (rc 1) и пустой вывод -- маркера нет; таймаут и мусор
+        # вместо кода -- нечитаемо: «нет» и «не знаю» -- разные ответы.
+        if code in (1, 0, None):
+            return None, f"{name}: the identity marker is absent"
+        return None, f"{name}: the identity marker is unreadable"
+    try:
+        got = json.loads(out.strip().splitlines()[-1])
+    except ValueError:
+        return None, f"{name}: the identity marker is malformed"
+    if not (isinstance(got, dict) and isinstance(got.get("inc"), str) and got["inc"]):
+        return None, f"{name}: the identity marker carries no incarnation"
+    return got, None
+
+
+async def _write_marker(name, inc):
+    """Маркер identity этой инкарнации: {"inc": ...} в .git/, как файл
+    аренды. Пишет агент под замком папета."""
+    path = os.path.join(clone_dir(name), ".git", MARK)
+    body = json.dumps({"inc": inc})
+    out, code = await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}")
+    return None if code == 0 else f"{name}: the identity marker is not recorded: {why(out, code)}"
+
+
+
+
+def soul_dir(name, inc):
+    """Каталог инкарнации роли в теле -- опубликованный helper #603
+    (driver.soul_dir): формула та же, что была здесь локальной копией;
+    узел читает каталог, который пишет лаунчер #590."""
+    return driver.soul_dir(name, inc)
+
+
+async def _read_ready(name, inc):
+    """Доказательство готовности 590/583 -> (словарь | None, причина |
+    None). Обёртка пишет его последним и отдельным файлом в каталог
+    инкарнации (souls/<name>/<inc>/) после проверки бандла, до старта
+    модели; узел читает и сверяет, но не создаёт: готовность -- факт
+    обёртки, узел её лишь предъявляет. Битое -- не готовность."""
+    path = os.path.join(soul_dir(name, inc), READY)
+    try:
+        got = json.loads(open(path).read() or "null")
+    except (OSError, ValueError):
+        return None, f"{name}: the ready proof is unreadable or absent"
+    if not isinstance(got, dict):
+        return None, f"{name}: the ready proof is malformed"
+    return got, None
+
+
+def _session_live(fact):
+    """Живая сессия и её идентификатор -> (жива, id | None).
+
+    Только структурная запись state (#222/#468): alive === True,
+    listen === True и непустой sessionId -- его session.py даёт лишь
+    слушающей живой сессии. Строка «<status> <alive> <listen>» статусы
+    не перечисляет (idle/busy/waiting/shell -- всё живые), записи нет --
+    fail closed: неугаданное состояние не готовность, и никакой роли не
+    позволено «примерно живой» быть."""
+    st = fact.get("state")
+    if not isinstance(st, dict):
+        return False, None
+    sid = st.get("sessionId")
+    if st.get("alive") is not True or st.get("listen") is not True \
+            or not (isinstance(sid, str) and sid):
+        return False, None
+    return True, sid
+
+
+async def _soul_fact(conn, project, name, fact):
+    """Тройка роли для ростера. -> факт либо None (нет живой сессии -- нет
+    и факта). Готовность -- рантайм-доказательство, а не факт регистрации:
+    проверенная привязка И живая сессия И маркер этой инкарнации, что
+    агент поставил под замком. Чего-то нет -- не готовность, а причина.
+
+    Отказ привязки -- не отказ глагола: состояние папета -- факт узла,
+    тройка роли -- знание сервера; незнание уезжает битым фактом с
+    причиной, а ростер остаётся цел."""
+    live, sid = _session_live(fact)
+    if not fact.get("present") or not live:
+        return None
+    key = (project, name, sid)
+    hit = _soul_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    got, why = await target_binding(conn, project, name)
+    if got is None:
+        soul_fact = {"ready": False, "why": why}
+    else:
+        marker, mwhy = await _read_marker(name)
+        ready, rwhy = (await _read_ready(name, got["soul_inc"])) if marker is not None \
+            and marker["inc"] == got["soul_inc"] else (None, None)
+        if marker is None:
+            soul_fact = {"ready": False, "why": mwhy}
+        elif marker["inc"] != got["soul_inc"]:
+            soul_fact = {"ready": False,
+                         "why": f"{name}: the identity marker names incarnation "
+                                f"{marker['inc']}, the binding names {got['soul_inc']}"}
+        elif ready is None:
+            soul_fact = {"ready": False, "why": rwhy}
+        elif ready.get("role") != got["role"] or ready.get("soul_inc") != got["soul_inc"] \
+                or ready.get("soul_digest") != got["soul_digest"]:
+            soul_fact = {"ready": False,
+                         "why": f"{name}: the ready proof names another soul "
+                                f"({ready.get('role')}, {ready.get('soul_inc')}, "
+                                f"{ready.get('soul_digest')})"}
+        else:
+            soul_fact = {"ready": True, "role": got["role"],
+                         "soul_inc": got["soul_inc"], "soul_digest": got["soul_digest"]}
+    _soul_cache[(project, name, sid)] = (time.time() + SOUL_FACT_TTL, soul_fact)
+    return soul_fact
+
+
+async def v_startup(conn, req):
+    """Глагол канала подъёма: первая аренда и identity до первого хода
+    модели (#590 зовёт обёрткой; субъект -- узловой кред тела). Хозяин и
+    тройка -- из привязки сервера, тело называет джоб и точную инкарнацию:
+    расхождение (переиспользованное имя, старая инкарнация) -- отказ.
+    Цель -- джоб этого узла: канал подъёма не обслуживает соседей.
+    Тройка -- только успешному ответу: ошибка не ходит с готовностью."""
+    name = req.get("name")
+    if not driver.valid_name(name):
+        return {"error": driver.bad_name(name)}
+    if not await local_puppet(name):
+        return {"error": f"{name}: not a job of this node"}
+    got, why = await target_binding(conn, req["_project"], name,
+                                    soul_inc=req.get("soul_inc"))
+    if got is None:
+        return {"error": why}
+    if req.get("soul_inc") != got["soul_inc"]:
+        return {"error": f"{name}: this body is incarnation {got['soul_inc']}, "
+                         f"the request names {req.get('soul_inc')!r}"}
+    out = await initial_identity(conn, name, got["owner"], got["soul_inc"])
+    if not out.get("error"):
+        # Расписка identity -- ВЕРХНЕГО УРОВНЯ (#590): identity_ready +
+        # тройка роли, не вложенный soul.ready (тот публикует отдельный
+        # факт узла после живого доказательства, _soul_fact). Лаунчер
+        # сверяет её с Meta до метки готовности.
+        out.update(identity_ready=True, role=got["role"],
+                   soul_inc=got["soul_inc"], soul_digest=got["soul_digest"])
+    return out
+
+
+async def local_puppet(name):
+    """Джоб этого узла? Канал подъёма -- факт того же узла, и соседние
+    тела не его дело. Но свежая роль ещё НЕ в списках драйвера/tmux:
+    подъём происходит до первого процесса в теле, и по сокетам свежий
+    старт выглядел бы чужим. Членство -- по клональному факту: клон
+    поднял лаунчер ДО identity (#247); нет клона -- нет и джоба."""
+    clone = await clone_facts(name)
+    if clone and clone.get("origin"):
+        return True
+    return name in [n for n in await DRIVER.bodies() if n == name]
+
+
+async def _admit_actor(conn, req, actor, channel):
+    """Права актёра на запрос. -> отказ | None; пустил -- в req каркасные
+    поля актёра. Глагол, который проверили, и есть тот, что исполнят:
+    dispatch-субъект исполняет только dispatch (как send с арендой),
+    rpc-субъект -- только свой глагол, «dispatch» телом -- не глагол."""
+    verb = req.get("verb")
+    if channel == DISPATCH:
+        if verb != DISPATCH:
+            return f"subject {DISPATCH} carries verb {DISPATCH} only, not {verb}"
+        req["verb"] = verb = "send"
+    why = refusal(verb, False, req["_project"])
+    if why:
+        return why
+    named = VERBS[verb].named
+    if named and not await _mine(req, req.get("name") or ""):
+        return foreign(req.get("name"), req["_project"])
+    got, why = await resolve_actor(conn, req["_project"], actor,
+                                   DISPATCH if channel == DISPATCH else verb,
+                                   req.get("name") if named else None)
+    if why:
+        return why
+    for key in ACTOR_STRIPPED:
+        req.pop(key, None)
+    # Власть -- хозяин-человек из резолвера (_caller): аренда, ворота (#40)
+    # и git-подпись те же, что у него самого; два мастера одного человека --
+    # один человек, как по прежней политике. Актёр -- отдельно, для аудита.
+    # from-name -- джоб актёра: стабильный адрес папета для отчётов.
+    req.update(_caller=got["owner"], _actor=actor, _job=got["job"],
+               _dispatch=channel == DISPATCH, from_name=got["job"])
+    return None
+
+
 # ─── петля ───────────────────────────────────────────────────────────────
-async def handle(conn, msg, public):
+async def handle(conn, msg, public, startup=False):
     """Разбор и три проверки: глагол существует, субъект его допускает, папет
     принадлежит спрашивающему проекту.
 
@@ -1725,20 +2196,37 @@ async def handle(conn, msg, public):
         # без ответа -- проситель ждал таймаут.
         return await msg.respond(
             json.dumps({"error": "request is not a JSON object"}).encode())
+    # Кто просит (#207) -- из субъекта, поверх тела: каркасные ключи ('_')
+    # тело не пишет, все до одного (service.trusted, #580). Публичный
+    # канал -- папетов: владельца он не несёт, и названный в теле не в счёт.
+    channel, actor = (None, None) if public else actor_of(msg.subject)
+    req = service.trusted(req, None if public else busnames.caller(msg.subject))
     # Одно правило на всех (#173): mop.<проект>.node.<узел>.<канал>.
     req["_project"] = service.project_from_subject(msg.subject)
-    # Кто просит (#207) -- из субъекта, поверх тела. Публичный канал --
-    # папетов: владельца он не несёт, и названный в теле не в счёт.
-    req.pop("_caller", None)
-    caller = None if public else busnames.caller(msg.subject)
-    if caller:
-        req["_caller"] = caller
     if public:
         req.pop("owner", None)
 
     verb = req.get("verb")
-    why = refusal(verb, public, req["_project"])
-    if why is None and VERBS[verb].named and not await _mine(req, req.get("name") or ""):
+    if startup:
+        # Канал подъёма (#584): узловой кред тела, глагол один, и никакой
+        # другой субъект его не отдаёт.
+        why = (None if verb == STARTUP
+               else f"the startup channel carries {STARTUP} only, not {verb}")
+    elif verb == STARTUP:
+        why = f"verb {STARTUP} is available to the wrapper's startup channel only"
+    elif channel == "fenced":
+        why = f"delegated principals use the {busnames.ROLE_CHANNEL} subject, not the human rpc path"
+    elif actor:
+        why = await _admit_actor(conn, req, actor, channel)
+        verb = req.get("verb")
+    elif channel in (busnames.ROLE_CHANNEL, DISPATCH):
+        # Канал есть, актёра нет: токен не принципал (или его нет вовсе) --
+        # отказ до таблицы и до легаси-человека, не проваливаясь в него.
+        why = f"the {channel} subject needs a delegated principal token"
+    else:
+        why = refusal(verb, public, req["_project"])
+    if why is None and not actor and not startup and VERBS[verb].named \
+            and not await _mine(req, req.get("name") or ""):
         # Главная проверка проектирования. Прав NATS тут мало: мастер проекта A
         # законно пишет в свой субъект, но может назвать папета из B.
         why = foreign(req.get("name"), req["_project"])
@@ -1746,7 +2234,8 @@ async def handle(conn, msg, public):
         out = {"error": why}
     else:
         try:
-            out = await VERBS[verb].fn(conn, req)
+            out = await (v_startup(conn, req) if startup
+                         else VERBS[verb].fn(conn, req))
         except Exception as e:
             out = {"error": f"{verb}: {e}"}
     try:
@@ -1771,9 +2260,23 @@ async def attach(conn, node):
     async def on_msg(msg):
         asyncio.create_task(handle(conn, msg, public=True))
 
+    async def on_startup(msg):
+        asyncio.create_task(handle(conn, msg, public=False, startup=True))
+
     subs = busnames.agent_subscriptions(node)
-    for subj in subs["rpc"]:
+    # dispatch (#584): свой субъект с принципалом актёра, права узла его
+    # покрывают (natsconf.node_permissions: node.<узел>.>). Маска роли --
+    # опубликованный помощник #603 (node_role, «role.>»); маски dispatch у
+    # #603 нет -- точечные субъекты строит dispatch_subject (полный
+    # принципал), а маску подписки собираем из его же констант.
+    dispatch_mask = (f"{busnames.ROOT}.{busnames.ANY}.node.{node}."
+                     f"{busnames.DISPATCH_CHANNEL}.{busnames.ANY}")
+    subs["rpc"] = subs["rpc"] + [dispatch_mask,
+                                 busnames.node_role(busnames.ANY, node),
+                                 busnames.node(busnames.ANY, node, "startup")]
+    for subj in subs["rpc"][:-1]:
         await conn.subscribe(subj, cb=on_rpc)
+    await conn.subscribe(subs["rpc"][-1], cb=on_startup)
     for subj in subs["msg"]:
         await conn.subscribe(subj, cb=on_msg)
     await _event(conn, "up", text=f"agent on {node}")

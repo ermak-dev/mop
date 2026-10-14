@@ -110,17 +110,30 @@ def add(transport, origin, workspace, branch=None, ctx=None, soul=None,
     без единого нового ключа на проводе, байт в байт прежний. Повторов
     здесь нет и не будет: судьбу неотвеченной регистрации решает вызывающий
     (#586), тем же request_id -- сервер сводит повторы к одному джобу
-    (#582), но это политика вызывающего, не операции."""
+    (#582), но это политика вызывающего, не операции.
+
+    workspace=None (#617) -- политика НЕ заявлена: оба поля (workspace,
+    bootstrap_sent) на провод не идут вовсе. Роль-актёр (#582) текст
+    политики грузить не вправе -- сервер такой глагол отказывает, и
+    «шлём пусто на всякий случай» ломало заявленное управление ролью;
+    ребёнок роли наследует одобренный снапшот родителя, а пустой текст
+    был бы заявлением «согласовано пусто» от того, кто согласовать
+    не может. Кортеж (текст, происхождение) -- прежний провод байт в
+    байт, легаси-вызовы не меняются."""
     progress = []
     note = progress.append
     note("registering")
-    text, sent = workspace
+    if workspace is None:
+        policy = {}
+    else:
+        text, sent = workspace
+        policy = {"workspace": text, "bootstrap_sent": sent}
     role = {} if soul is None and request_id is None else \
         {k: v for k, v in (("soul", soul), ("request_id", request_id))
          if v is not None}
     try:
-        got = transport("add", origin=origin, timeout=30, workspace=text,
-                        bootstrap_sent=sent, branch=branch, **role)
+        got = transport("add", origin=origin, timeout=30, branch=branch,
+                        **policy, **role)
     except bus.Refused as e:
         return _refused(None, str(e), progress)
     name = got.get("name")
@@ -189,14 +202,26 @@ def _bootstrap_error(record):
 def update(transport, name, origin=None, fresh=False, workspace=None,
            branch=None, force=False, login=None, ctx=None, spec=None,
            sleep=time.sleep, clock=time.time, step=lambda s: None,
-           bootstrap_wait=BOOTSTRAP_WAIT):
+           bootstrap_wait=BOOTSTRAP_WAIT, preserve_workspace=False):
     """Перевести папета: смена origin, fresh/resume, перерегистрация.
 
     origin=None -- прежний репозиторий. fresh при смене origin вынужден:
     разговор прежнего проекта в чужом репозитории -- чужой контекст.
     no-op (спека не изменилась) -- accepted, не registered: эффект
     «принято», нового прогона не будет. spec -- уже прочитанная спека
-    (перила мастер-шелла отдали): не спрашивать вторично."""
+    (перила мастер-шелла отдали): не спрашивать вторично.
+
+    workspace/preserve_workspace (#617): по умолчанию -- прежний провод,
+    пустой текст (воркер веба стирает политику сознательно, байт в байт).
+    preserve_workspace=True -- оба поля политики отпущены: папет-роль
+    (#582) текст грузить не вправе, сервер такой глагол отказывает, а
+    живой держит свой одобренный снапшот. Одновременно и то и другое --
+    конфликт высказываний: отказ ДО любых эффектов, молча выбрать одно
+    из двух операция не вправе."""
+    if preserve_workspace and workspace is not None:
+        return _refused(name, "update: preserve_workspace sends no policy "
+                              "text — name the workspace or preserve it, "
+                              "not both (#617)")
     spec = spec if spec is not None else transport("spec", name=name)
     if spec.get("error"):
         return _refused(name, spec["error"])
@@ -206,12 +231,15 @@ def update(transport, name, origin=None, fresh=False, workspace=None,
         return _refused(name, "no origin in the spec — not a pool puppet")
     new_origin = origin or old
     cont = not fresh and new_origin == old
-    text, sent = workspace or ("", None)
+    if preserve_workspace:
+        policy = {}
+    else:
+        text, sent = workspace or ("", None)
+        policy = {"workspace": text, "bootstrap_sent": sent}
     try:
         got = transport("update", name=name, origin=new_origin,
                         cont=cont, new_origin=new_origin if new_origin != old else None,
-                        workspace=text, bootstrap_sent=sent,
-                        owner=login, force=force, branch=branch)
+                        owner=login, force=force, branch=branch, **policy)
     except bus.Refused as e:
         return _refused(name, str(e))
     if got.get("error"):

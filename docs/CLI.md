@@ -171,6 +171,8 @@ mop profile: show the pool role, project and integration branch
 
 The role comes from bus credentials, not the presence of MCP tools. An unset
 integration branch is reported as unset; it is not inferred from origin/HEAD.
+A role principal is profiled by its bundle's role name — a grant is a puppet,
+not a master of anything.
 ```
 
 #### mop recycle

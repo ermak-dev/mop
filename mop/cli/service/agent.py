@@ -18,6 +18,11 @@ async def serve(nats, agent, bus):
     conn = await nats.connect(
         **bus.auth(c), name=f"mop-agent/{node}",
         allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
+    # Креды-снимок -- на соединение (#603): его читает резолвер-путь узла
+    # (resolver_subject, #581), и соединение, открытое здесь, а не
+    # bus.connect(), иначе осталось бы без узлового имени. Снимок -- тот
+    # же c, что ушёл в auth: рукопожатие и identity видят одни креды.
+    conn.creds = c
     subjects = await agent.attach(conn, node)
     print(f"mop-agent: node {node}, subscribed to {', '.join(subjects)}", flush=True)
     await asyncio.Event().wait()

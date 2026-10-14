@@ -341,7 +341,11 @@ def check_clear_recovery_570(c):
               [("n1", "announced, serves p"), ("n2", "announced, serves p")], 1))
     c.expect("#570 a successful build: gone carries the meta",
              r["result"]["gone"][0],
-             {"name": "pu-p-1", "origin": "git@h:g/p.git", "branch": "feat/a", "node": "n1"})
+             {"name": "pu-p-1", "origin": "git@h:g/p.git", "branch": "feat/a",
+              "node": "n1",
+              # Тройка роли -- поля журнала с #582: легаси-снятый несёт их
+              # пустыми, сборка роли проверяется tests/soul_lifecycle.py.
+              "soul": None, "soul_digest": None, "soul_inc": None})
 
     # Занятый папет: отказ до первого останова, никого не подняли.
     busy = rows_570(("pu-p-1", "n1"), ("pu-p-2", "n2"))

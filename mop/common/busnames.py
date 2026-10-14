@@ -336,8 +336,18 @@ def agent_subscriptions(name):
 def service_subscriptions():
     """На что подписаны сервисы сервера под `service`: bootstrap, кластер,
     сборщик, журнал дашборда."""
-    return [server(ANY), cluster(ANY), cluster(ANY, login=ANY), join_config(ANY),
-            build(), events(ANY)]
+    return [*server_family(), cluster(ANY), cluster(ANY, login=ANY),
+            join_config(ANY), build(), events(ANY)]
+
+
+def server_family():
+    """Семейство субъектов bootstrap-сервиса (#603/#581): анонимный легаси
+    mop.*.server.rpc плюс хвост квалифицированных узловых токенов. `>` в NATS
+    -- один и больше токенов, и хвост БЕЗ голого субъекта не накрывает
+    легаси-путь: обе записи. Одно определение для подписки serve() и ACL
+    (#144: расхождение подписки и прав молчит до пула); server() кодирует
+    токен, маску строим здесь."""
+    return [server(ANY), f"{server(ANY)}.>"]
 
 
 # ─── пользователи ────────────────────────────────────────────────────────

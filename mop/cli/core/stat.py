@@ -96,7 +96,7 @@ def by_users(per_user):
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "readonly", "args": [
+MCP = {"annotations": "readonly", "node_verbs": ["usage"], "cluster_verbs": ["pool"], "args": [
     {"name": "days", "type": "integer", "flag": "--days", "help": "window in days, 14 by default"},
     {"name": "puppets", "type": "boolean", "flag": "--puppets", "help": "per puppet instead of per day"},
     {"name": "users", "type": "boolean", "flag": "--users", "help": "per user (who started the turns) instead of per day"}]}

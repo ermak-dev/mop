@@ -32,7 +32,7 @@ import asyncio
 import os
 import re
 
-from ..common import busnames, config, fsutil
+from ..common import busnames, config, fsutil, soul
 from . import identity, natsconf, nkjwt, operators
 
 SUBJECT = "$SYS.REQ.USER.AUTH"
@@ -109,11 +109,22 @@ def _side(allow, deny=()):
     return out
 
 
-def rights(login, ctype, password, humans, puppets):
+def rights(login, ctype, password, humans, puppets, souls=None):
     """Кто входит -> (имя, права JWT {pub, sub}), либо identity.Refused.
-    Чистая функция, кроме провайдеров."""
+    Чистая функция, кроме провайдеров. souls -- провайдер принципалов душ
+    (grants.Provider): без него grant-логин отказан, а не «провалился»
+    в ветку человека (#581)."""
     if not login:
         raise identity.Refused("no login given")
+    from . import grants
+    if soul.is_grant(login):
+        if souls is None:
+            raise identity.Refused(f"{login}: grant principals are not served "
+                                   f"by this callout")
+        rec = souls.authenticate(login, password)
+        perms = souls.permissions(login)
+        return login, {"pub": _side(perms["publish"]),
+                       "sub": _side(perms["subscribe"])}
     if busnames.is_puppet(login):
         perms = natsconf.puppet_permissions(puppets.authenticate(login, password))
         return login, {"pub": _side(perms["publish"]), "sub": _side(perms["subscribe"])}
@@ -134,8 +145,12 @@ def rights(login, ctype, password, humans, puppets):
                        "sub": _side(p["allow"], p["deny"])}
 
 
-def respond(req, humans, puppets, keys_, now=None):
-    """Тело запроса сервера -> JWT ответа (строка). Отказ -- nats.error."""
+def respond(req, humans, puppets, keys_, now=None, souls=None):
+    """Тело запроса сервера -> JWT ответа (строка). Отказ -- nats.error.
+
+    souls -- провайдер принципалов ролей (grants.Provider, #581): без
+    него вход принципала -- отказ с причиной, а не тихое проваливание в
+    ветку человека. Пароль в журнал не идёт."""
     n = req.get("nats") or {}
     opts = n.get("connect_opts") or {}
     base = {"sub": n.get("user_nkey", ""), "aud": (n.get("server_id") or {}).get("id", ""),
@@ -144,7 +159,7 @@ def respond(req, humans, puppets, keys_, now=None):
         if n.get("type") != "authorization_request":
             raise identity.Refused(f"not an authorization request: {n.get('type')!r}")
         name, perms = rights(opts.get("user") or "", (n.get("client_info") or {}).get("type"),
-                             opts.get("pass") or "", humans, puppets)
+                             opts.get("pass") or "", humans, puppets, souls=souls)
     except identity.Refused as e:
         base["nats"]["error"] = str(e)
         return nkjwt.encode(base, keys_.issuer_seed, now)
@@ -154,7 +169,7 @@ def respond(req, humans, puppets, keys_, now=None):
     return nkjwt.encode(base, keys_.issuer_seed, now)
 
 
-def handle(data, server_xkey, keys_, humans, puppets):
+def handle(data, server_xkey, keys_, humans, puppets, souls=None):
     """Запечатанный запрос сервера -> (запечатанный ответ, строка журнала).
 
     Подпись запроса проверяется: ящик открывается только нашим ключом, но
@@ -164,7 +179,7 @@ def handle(data, server_xkey, keys_, humans, puppets):
     n = req.get("nats") or {}
     if req.get("iss") != (n.get("server_id") or {}).get("id"):
         raise ValueError("the request is not signed by the server it names")
-    token = respond(req, humans, puppets, keys_)
+    token = respond(req, humans, puppets, keys_, souls=souls)
     error = (nkjwt.decode(token).get("nats") or {}).get("error")
     line = (f"{(n.get('connect_opts') or {}).get('user') or '-'} via "
             f"{(n.get('client_info') or {}).get('type') or '-'}: "
@@ -177,7 +192,7 @@ def answer(data, server_xkey, keys_, humans, puppets):
     return handle(data, server_xkey, keys_, humans, puppets)[0]
 
 
-async def serve(url, password, keys_, humans, puppets, log):
+async def serve(url, password, keys_, humans, puppets, log, souls=None):
     """Подписчик: отвечает на запросы авторизации, пока жив процесс.
 
     Под своим пользователем callout (его право -- ровно этот субъект и
@@ -195,7 +210,7 @@ async def serve(url, password, keys_, humans, puppets, log):
             # scrypt -- десятки миллисекунд: в исполнителе, чтобы петля
             # отвечала остальным входящим.
             out, line = await loop.run_in_executor(None, handle, msg.data, server_xkey,
-                                                   keys_, humans, puppets)
+                                                   keys_, humans, puppets, souls)
         except Exception as e:
             # Без ответа сервер откажет входящему сам, по таймауту.
             log(f"callout: unreadable request: {type(e).__name__}: {e}")
@@ -211,9 +226,10 @@ async def serve(url, password, keys_, humans, puppets, log):
 
 async def run(log):
     """Сервис целиком, из настроек сервера."""
-    from . import bootstrap   # PUPPET_CREDS: пароли папетов пишет natsconf
+    from . import bootstrap, grants   # PUPPET_CREDS: пароли папетов; души -- #581
     password = natsconf.read_base().get(USER)
     if not password:
         raise RuntimeError(f"{natsconf.BASE} has no {USER} password -- run mop server deploy")
     await serve(f"nats://127.0.0.1:{config.get('MOP_NATS_PORT')}", password, keys(),
-                identity.server_provider(), PuppetProvider(bootstrap.PUPPET_CREDS), log)
+                identity.server_provider(), PuppetProvider(bootstrap.PUPPET_CREDS), log,
+                souls=grants.Provider())

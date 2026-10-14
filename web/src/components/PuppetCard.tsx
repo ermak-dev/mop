@@ -124,14 +124,16 @@ function PuppetOutput({ session, target }: {
   </>;
 }
 
-export function PuppetCard({ session, target, onClose }: {
+export function PuppetCard({ session, target, role, onClose }: {
   session: Session;
   target: string | null;
+  role?: string | null;
   onClose: () => void;
 }) {
   if (!target || session.role !== "admin") return null;
   return <Modal opened onClose={onClose} size="min(1000px, calc(100vw - 32px))" yOffset={16}
-    title={<Text fw={600}>экран {target}</Text>}
+    title={<Group gap="sm"><Text fw={600}>экран {target}</Text>
+      {role && <Text size="sm" c="dimmed">Role: {role}</Text>}</Group>}
     data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ "aria-label": LABELS.close }}
     styles={{
       content: { height: "calc(100dvh - 32px)", maxHeight: "calc(100dvh - 32px)",
