@@ -134,6 +134,9 @@ def own_bundle(environ=None):
     except LookupError as e:
         return None, f"{e} -- no bundle is verified without the job name"
     inc = os.path.basename(root)
+    if not soul.is_incarnation(inc):
+        return None, (f"{path}: the incarnation directory {inc!r} is no "
+                      f"canonical uuid -- not this body's own layout")
     if os.path.realpath(root) != os.path.realpath(driver.soul_dir(name, inc)):
         return None, (f"{path}: a self-declared bundle outside the body's "
                       f"own incarnation layout opens nothing")
@@ -143,6 +146,9 @@ def own_bundle(environ=None):
             receipt = json.load(f)
     except (OSError, ValueError) as e:
         return None, f"{root}/{driver.READY}: the ready receipt does not read: {e}"
+    if not isinstance(receipt, dict):
+        return None, (f"{root}/{driver.READY}: the ready receipt is "
+                      f"{type(receipt).__name__}, not a mapping")
     for key, want in (("ready", True), ("role", bundle.role),
                       ("soul_inc", inc), ("soul_digest", bundle.digest)):
         if receipt.get(key) != want:
