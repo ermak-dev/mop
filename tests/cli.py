@@ -915,7 +915,10 @@ CONCISE_431 = {
         ("gone", "the token is kept by the cluster service"),
     ),
     "mop.cli.core.master": (
-        ("syntax", "mop master [git-origin] [claude options]"),
+        # #586: голый `mop master` -- лаунчер мастер-роли, прежний
+        # локальный запуск -- явный --local с прежним пасстру.
+        ("syntax", "mop master [git-origin]"),
+        ("syntax", "mop master --local [git-origin] [claude options]"),
         ("keeps", "resumes the master's last session"),
         ("keeps", "a master sees and reaches only its own project's puppets"),
         ("gone", "one master: a master sees"),

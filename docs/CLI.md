@@ -27,8 +27,10 @@ Use mop models to see model IDs offered by the selected proxy.
 ```text
 open a terminal on a puppet: mop attach <name>
 
-Goes over ssh, not the bus: a live terminal is not something a bus verb
-hands over.
+Reconnects to a running puppet and creates nothing: a new one is
+`mop add` or `mop <role>`. Detaching (or a dropped connection) leaves the
+puppet running. Goes over ssh, not the bus: a live terminal is not
+something a bus verb hands over.
 ```
 
 #### mop code
@@ -122,29 +124,34 @@ the dispatch decision rests on this.
 #### mop master
 
 ```text
-launch claude as a project's master: mop master [git-origin] [claude options]
+launch the master role as a new pooled puppet: mop master [git-origin]
 
-Without an argument, the origin of the current working copy is used. A
-master sees and reaches only its own project's puppets; anyone else's don't
-exist for it.
+The same launcher as `mop <role>` for the role master, and the command
+says so: a new puppet of the project is registered with the role, waits
+for its bootstrap and the role's session, and the terminal attaches to it
+over ssh. Detaching leaves the puppet running; reconnect with
+`mop attach <name>`, which never creates one. Only origin belongs to a
+role launch: the role owns its prompt, settings and permissions, and any
+flag is refused before anything is allocated. A failure after
+registration names the created puppet and does not create another.
 
-Only origin belongs to this command; everything else goes to claude as-is
-(`mop master --continue` resumes the master's last session). A flag that
-takes a VALUE goes after `--` (`mop master -- --model opus`): otherwise the
-value is indistinguishable from origin. Several masters of one project are
-fine: inboxes are addressed per master.
+Any other role of the catalogue launches the same way: `mop <role>`. A
+role whose name is a mop command or a reserved bus name is refused before
+anything is allocated.
 
-No ansible on this machine: bus and proxy credentials arrive with
-`mop login --server ADDRESS LOGIN`, started automatically if either record
-is missing; without a terminal or an unambiguous server it refuses before
-launching claude.
-
-The master runs in the same permission class as its pool: it can push,
-manage the project's puppets and talk to the tracker without asking on
-every step. The Nomad token stays on the server. The session uses the
-selected server's LLM proxy; its URL and key come from the server
-profile, connection.json written by mop login (the legacy
-operator/client pair is still read for compatibility).
+The legacy local session stays an explicit choice:
+mop master --local [git-origin] [claude options]
+launches claude on this machine as before. Only origin belongs to it;
+everything else goes to claude as-is (`mop master --local --continue`
+resumes the master's last session), and a flag that takes a VALUE goes
+after `--` (`mop master --local -- --model opus`). As before, a master
+sees and reaches only its own project's puppets. Bus and proxy
+credentials arrive with `mop login --server ADDRESS LOGIN`, started
+automatically if either record is missing; without a terminal or an
+unambiguous server it refuses before launching claude. The Nomad token
+stays on the server; the session uses the selected server's LLM proxy
+from connection.json written by mop login (the legacy operator/client
+pair is still read for compatibility).
 ```
 
 #### mop models
