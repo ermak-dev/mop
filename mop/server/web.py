@@ -937,3 +937,36 @@ def puppet_tail(name, pane, node_of):
         return [_redact_text(l) for l in lines], False
     return [_redact_text(l) for l in lines[-TAIL_LINES:]], True
 
+
+def puppet_output(row, pane, node_of, startup):
+    """Экран предпочтителен; до его появления подтверждённый старт показывает
+    приватный ход инициализации. Отказ сервиса не превращается в пустой лог."""
+    lines, note = puppet_tail(row.name, pane, node_of)
+    if lines is not None:
+        return {"source": "screen", "lines": lines, "truncated": note}, None
+    if row.kind not in ("starting", "failing") and row.alloc_status != "pending":
+        return None, note
+    try:
+        got = startup(row.name)
+        raw = got["lines"]
+        status = got.get("note")
+        if status is not None and not isinstance(status, str):
+            raise ValueError("invalid initialization status")
+        if not isinstance(raw, list) or not all(isinstance(line, str) for line in raw):
+            raise ValueError("invalid initialization log")
+        shown, size = [], 0
+        for line in reversed(raw[-TAIL_LINES:]):
+            clean = _redact_text(line)[:1024]
+            size += len(clean.encode("utf-8")) + 1
+            if size > 65536:
+                break
+            shown.append(clean)
+        shown.reverse()
+        return {"source": "initialization", "lines": shown,
+                "truncated": got.get("truncated") is True or len(shown) < len(raw),
+                "note": _redact_text(status)}, None
+    except bus.Refused as e:
+        return None, str(e)
+    except Exception:
+        return None, "initialization log unavailable"
+
