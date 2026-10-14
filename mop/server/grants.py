@@ -332,7 +332,12 @@ def admit(principal, root=None):
     rec = binding(principal, root=root)
     if rec is None:
         return False, f"grants: unknown principal {principal}"
-    if rec.get("revoked_at") or not rec.get("active"):
+    if rec.get("revoked_at"):
+        # Отзыв и неподтверждённость -- разные причины (#579): pu4's
+        # cluster._answer читает «is revoked» явно; один текст на обе
+        # ветки прятал отзыв от диагностики и от ретрая callout.
+        return False, f"grants: {principal} is revoked"
+    if not rec.get("active"):
         return False, f"grants: {principal} is not an active binding"
     if not rec.get("job") or not rec.get("soul_inc"):
         return False, f"grants: {principal} is not bound to an incarnation"
@@ -393,7 +398,10 @@ def resolve(principal, service, verb, target=None, root=None):
     if rec is None:
         return {"allow": False,
                 "reason": f"grants: unknown principal {principal}"}
-    if rec.get("revoked_at") or not rec.get("active"):
+    if rec.get("revoked_at"):
+        return {"allow": False,
+                "reason": f"grants: {principal} is revoked"}
+    if not rec.get("active"):
         return {"allow": False,
                 "reason": f"grants: {principal} is not an active binding"}
     got = bundle(rec.get("soul_digest"), root=root)

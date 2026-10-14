@@ -73,6 +73,11 @@ def _user(name, password, perms, extra=""):
 
 # Сервисы сервера (#104): машина, а не человек. Права пока как у admin.
 SERVICE_PERMISSIONS = [busnames.everything(), busnames.join_config(busnames.ANY),
+                       # Приватные ответы машинам (#603): публикация В них
+                       # -- глобальной маской (вне mop.> и _INBOX.>), без
+                       # строки сервис не отвечает машинам вовсе. Это НЕ
+                       # подписка: чужие приватные скоупы сервис не читает.
+                       busnames.private_publish(),
                        busnames.INBOX]
 # ...кроме субъектов с логином человека (#207): машина его не называет, а
 # сервис с mop.> иначе опубликовал бы запрос от чьего угодно имени.
@@ -136,6 +141,11 @@ def node_permissions(node):
                         busnames.node(any_, node, "msg"), busnames.server(any_),
                         busnames.server(any_, caller=busnames.node_user(node)),
                         busnames.startup_subject(any_, node),
+                        # Ответы машинам (#603): агент узла -- тоже
+                        # доверенный отвечающий (resolve/startup просят
+                        # принципалы и сервисы); глобальная маска, своя
+                        # подписка -- только свой скоуп ниже.
+                        busnames.private_publish(),
                         busnames.INBOX],
             "subscribe": [busnames.node(any_, node, ">"), busnames.broadcast(any_),
                           busnames.private_scope(busnames.node_user(node)),
@@ -145,6 +155,13 @@ def node_permissions(node):
 # Пользователь callout (#206): отвечает на запросы авторизации и больше ничего
 # -- ответ сервер ждёт на $SYS._INBOX (стенд #206).
 CALLOUT_PERMISSIONS = {"publish": ["$SYS._INBOX.>"], "subscribe": ["$SYS.REQ.USER.AUTH"]}
+
+
+# Подписка сервиса (#603): БЕЗ private_publish() -- та строка даёт
+# публикацию в приватные ответы, а подписка на _MOP_REPLY.> читала бы
+# чужие ответы; сервис слушает свои subjects и _INBOX, как прежде.
+SERVICE_SUBSCRIBE = [busnames.everything(), busnames.join_config(busnames.ANY),
+                     busnames.INBOX]
 
 
 def _machines(base):
@@ -160,7 +177,7 @@ def _machines(base):
                 CALLOUT_PERMISSIONS["publish"], sub_allow=CALLOUT_PERMISSIONS["subscribe"]))),
             (busnames.SERVICE, _user(busnames.SERVICE, base[busnames.SERVICE],
                                      _perms(SERVICE_PERMISSIONS, SERVICE_PUBLISH_DENY,
-                                            sub_allow=SERVICE_PERMISSIONS)))]
+                                            sub_allow=SERVICE_SUBSCRIBE)))]
 
 
 def _nodes(base):

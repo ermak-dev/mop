@@ -688,6 +688,11 @@ def answer(project, req, _send=None):
                 # Кред роли едет тем же ответом, что и легаси-кред папета:
                 # разговора два не нужно. Индивидуальный принципал вместо
                 # проектного -- ролевая надстройка (#590), отказ -- отказ.
+                # Только при успешном прогоне (#590): упавший ansible --
+                # узел без рабочего workspace, и пароль принципала с душой
+                # ему не выдаются; причина провала сохраняется как есть.
+                if not out.get("ok"):
+                    return out
                 role = role_reply(bound, project, root=soul_root)
                 if role.get("error"):
                     return role
@@ -739,10 +744,15 @@ def banner(subject, root, puppets):
 async def serve(log):
     """Подписчик сервера. Креды — машинного пользователя service (#104), не
     оператора: сервер слушает все проекты, и своего файла кредов у него нет —
-    тот же каталог, что у дашборда (mop/common/creds.py)."""
-    subj = bus.server_subject(busnames.ANY)
+    тот же каталог, что у дашборда (mop/common/creds.py).
+
+    Семейство субъектов (#581/#603): анонимный легаси mop.*.server.rpc и
+    квалифицированный хвост mop.*.server.rpc.node-<узел>, на котором узловой
+    резолвер (#584) просит от своего имени. Одно определение с ACL
+    (busnames.server_family): подписка мимо него ждала бы таймаут молчания."""
+    subj = busnames.server_family()
     await service.serve("mop-bootstrap", subj, answer, log, journal,
-                        lambda: banner(subj, ROOT, _puppets_here()))
+                        lambda: banner(", ".join(subj), ROOT, _puppets_here()))
 
 
 # ─── мастер ──────────────────────────────────────────────────────────────

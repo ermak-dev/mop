@@ -43,21 +43,21 @@ USERS_CONF = """users = [
   {
     user: "service", password: "svc-pass"
     permissions: {
-      publish:   { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*", "mopjoin.*.rpc", "mop.*.node.*.role", "mop.*.node.*.role.>", "mop.*.node.*.dispatch", "mop.*.node.*.dispatch.>", "mop.*.cluster.role", "mop.*.cluster.role.>", "mop.*.node.*.startup", "mop.*.server.rpc.>"] }
+      publish:   { allow: ["mop.>", "mopjoin.*.rpc", "_MOP_REPLY.>", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*", "mopjoin.*.rpc", "mop.*.node.*.role", "mop.*.node.*.role.>", "mop.*.node.*.dispatch", "mop.*.node.*.dispatch.>", "mop.*.cluster.role", "mop.*.cluster.role.>", "mop.*.node.*.startup", "mop.*.server.rpc.>"] }
       subscribe: { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"] }
     }
   }
   {
     user: "node-hyper", password: "hy-pass"
     permissions: {
-      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.hyper.msg", "mop.*.server.rpc", "mop.*.server.rpc.node-hyper", "mop.*.node.hyper.startup", "_INBOX.>"] }
+      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.hyper.msg", "mop.*.server.rpc", "mop.*.server.rpc.node-hyper", "mop.*.node.hyper.startup", "_MOP_REPLY.>", "_INBOX.>"] }
       subscribe: { allow: ["mop.*.node.hyper.>", "mop.*.all.msg", "_MOP_REPLY.node-hyper.>", "_INBOX.>"] }
     }
   }
   {
     user: "node-mini", password: "mi-pass"
     permissions: {
-      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.mini.msg", "mop.*.server.rpc", "mop.*.server.rpc.node-mini", "mop.*.node.mini.startup", "_INBOX.>"] }
+      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.mini.msg", "mop.*.server.rpc", "mop.*.server.rpc.node-mini", "mop.*.node.mini.startup", "_MOP_REPLY.>", "_INBOX.>"] }
       subscribe: { allow: ["mop.*.node.mini.>", "mop.*.all.msg", "_MOP_REPLY.node-mini.>", "_INBOX.>"] }
     }
   }
@@ -333,6 +333,21 @@ def check_machine_role_routes_581(c):
     c.expect(*pub("node-hyper", busnames.node("mop", "hyper", busnames.ROLE_CHANNEL,
                                               login=other), False))
     c.expect(*pub("node-hyper", busnames.dispatch_subject("mop", "hyper", grant), False))
+    # Приватные ответы (#603): публикация В НИХ -- доверенным отвечающим
+    # (сервис, узел) глобальной маской private_publish(): _MOP_REPLY вне
+    # mop.> и _INBOX.>, без строки ответы машинам не работают вовсе.
+    # Подписка -- только СВОЯ (scope узла), и только у машин: человек
+    # приватного скоупа не имеет.
+    for user in ("service", "node-hyper"):
+        c.expect(*pub(user, busnames.private_prefix(grant) + ".nuid1", True))
+        c.expect(*pub(user, busnames.private_prefix(
+            busnames.node_user("n1")) + ".nuid2", True))
+    c.expect(*sub("service", busnames.private_scope(grant), False))
+    c.expect(*sub("service", busnames.private_scope(
+        busnames.node_user("n1")), False))
+    for user in ("alice", "puppet-mop"):
+        c.expect(*pub(user, busnames.private_prefix(grant) + ".nuid1", False))
+        c.expect(*sub(user, busnames.private_scope(grant), False))
 
 
 def check_inbox_login_213(c):
