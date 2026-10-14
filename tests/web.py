@@ -111,17 +111,26 @@ def check_bucket_452(c):
     rows = [row("pu-mop-1", MOP, State("hung", "not responding")),
             row("pu-mop-2", MOP, State("busy", branch="feat/452")),
             row("pu-mop-3", MOP, FREE)]
+    rows += web.puppets.rows_from([{
+        "job": {"ID": "pu-mop-9", "Status": "pending", "Meta": {"origin": MOP},
+                "JobSummary": {"Summary": {"puppets": {"Queued": 1}}}},
+        "alloc": None, "error": None, "state": None, "kind": None,
+        "detail": None, "branch": None, "owner": None, "llm": None,
+    }])
     snap = web.projects(rows)
     puppets_ = snap[0]["puppets"]
     # Вид вердикта на месте, корзина -- рядом отдельным ключом: страница
     # получает и то, и другое, ничего не разбирая сама.
     c.expect("#452 kind keeps the verdict kind", [p.get("kind") for p in puppets_],
-             ["hung", "busy", "free"])
+             ["hung", "busy", "free", "queued"])
     c.expect("#452 bucket carries the classify", [p.get("bucket") for p in puppets_],
-             ["sick", "busy", "free"])
+             ["sick", "busy", "free", "down"])
+    c.expect("#619 the public queue row keeps its diagnosis and unplaced bucket",
+             (puppets_[3]["detail"], puppets_[3]["alloc_status"], puppets_[3]["bucket"]),
+             ("no free slots in the pool", "pending", "down"))
     # Счётчики -- по корзинам, как и раньше (#210).
     c.expect("#452 counts stay by bucket", snap[0]["counts"],
-             {"puppets": 3, "free": 1, "busy": 1, "sick": 1, "silent": 0, "down": 0})
+             {"puppets": 4, "free": 1, "busy": 1, "sick": 1, "silent": 0, "down": 1})
     # Старый снимок без bucket читается: поля нет -- страница рисует по kind.
     c.check("#452 bucket is a render-time key, not a row field",
             not any("bucket" in r.to_dict() for r in rows), [r.to_dict() for r in rows])

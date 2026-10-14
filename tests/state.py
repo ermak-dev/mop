@@ -853,7 +853,15 @@ def check_verdict_fields_452(c):
         c.expect("#510 starting: the row", (r.state, r.kind, r.detail),
                  ("starting", "starting", None))
 
-    # Все 13 видов из KINDS доезжают хотя бы одним случаем.
+    r = judged(State("unknown", "no clone data"), alloc=None,
+               job={"ID": "pu-x-1", "Status": "pending", "Meta": {},
+                    "JobSummary": {"Summary": {"puppets": {"Queued": 1}}}})
+    seen.add(r.kind)
+    c.expect("#619 queued: the row carries the placement diagnosis",
+             (r.state, r.kind, r.detail, r.branch),
+             ("queued: no free slots in the pool", "queued", "no free slots in the pool", None))
+
+    # Каждый вид из KINDS доезжает хотя бы одним случаем.
     c.check("#452 every verdict kind reaches the row", seen == set(KINDS),
             sorted(set(KINDS) - seen))
 
@@ -1000,6 +1008,65 @@ def check_restart_failure_606(c):
              [(None, "FAILED: no MOP_PROXY_KEY in secrets.env (4 restarts, retrying initialization)")])
 
 
+# HYPOTHESIS: placement-диагноз есть у doctor, но строка без аллокации
+# не переносит его в kind/state/detail и остаётся прочерком.
+# SOLUTION: проекция очереди переиспользует _placement_issue и даёт явный
+# queued; ошибки чтения, stopped и состоявшаяся аллокация имеют приоритет.
+# RESULT: восемь проверок строки/провода были красными, после исправления
+# зелёные; сохранены причины image/memory/resources и запрет автолечения.
+# STATUS: FIXED — see #619
+def check_queued_placement_619(c):
+    origin = "git@example.test:group/mop.git"
+    job = {"ID": "pu-mop-9", "Status": "pending", "Meta": {"origin": origin},
+           "JobSummary": {"Summary": {"puppets": {"Queued": 1}}}}
+
+    def item(**over):
+        given = {"job": job, "alloc": None, "error": None, "state": None,
+                 "kind": None, "detail": None, "branch": None, "owner": None,
+                 "llm": None, "task": None, "reason": None}
+        given.update(over)
+        return given
+
+    for label, unserved, ceiling in (("resources", False, None),
+                                     ("image", True, None),
+                                     ("memory ceiling", "memory", 12288)):
+        given = item(unserved=unserved, ceiling=ceiling)
+        row = puppets.rows_from([given])[0]
+        diagnosis = puppets._placement_issue(job, None, unserved, ceiling)["diagnosis"]
+        detail = diagnosis.removeprefix("queued — ")
+        c.expect(f"#619 {label}: the row carries the existing placement reason",
+                 (row.alloc_status, row.kind, row.detail, row.state),
+                 ("pending", "queued", detail, f"queued: {detail}"))
+        wire = row.to_dict()
+        c.expect(f"#619 {label}: reason survives CLI/MCP/dashboard wire",
+                 (wire["kind"], wire["detail"], wire["state"]),
+                 ("queued", detail, f"queued: {detail}"))
+        with patched(puppets, roster=lambda **kw: [given]):
+            issues = puppets.diagnose()
+        c.expect(f"#619 {label}: diagnostic stays the same without auto-treatment",
+                 [(i["action"], i["diagnosis"]) for i in issues], [(None, diagnosis)])
+    r = puppets._row(item(job={**job, "Status": "running"}))
+    c.expect("#619 queued summary takes precedence over a job's running label without an allocation",
+             (r.alloc_status, r.kind), ("pending", "queued"))
+    r = puppets._row(item(error="Nomad read failed"))
+    c.expect("#619 read failure is not hidden by a queue diagnosis",
+             (r.alloc_status, r.kind), ("Nomad read failed", None))
+    for label, changed in (("stopped", {"Stop": True, "Status": "dead"}),
+                           ("summary unknown", {"JobSummary": {}}),
+                           ("not queued", {"JobSummary": {"Summary": {"puppets": {"Queued": 0}}}})):
+        r = puppets._row(item(job={**job, **changed}))
+        c.check(f"#619 {label} is not invented placement wait", r.kind != "queued", r)
+    r = puppets._row(item(gave_up="bootstrap failed"))
+    c.expect("#619 confirmed bootstrap failure keeps precedence", r.kind, "failing")
+    given = item(alloc={"NodeName": "node1", "ClientStatus": "running"})
+    puppets._judge(given, State("free", branch="master"))
+    r = puppets._row(given)
+    c.expect("#619 placement into a live session clears the old queue reason",
+             (r.kind, r.detail, r.state), ("free", None, "free (master)"))
+    c.expect("#619 queued has no automatic treatment", action_for("queued"), None)
+    c.expect("#619 queued is not dispatchable work", is_free("queued"), False)
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -1021,6 +1088,7 @@ def main():
     check_alloc_377(c)
     check_starting_510(c)
     check_restart_failure_606(c)
+    check_queued_placement_619(c)
     check_english_562(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)

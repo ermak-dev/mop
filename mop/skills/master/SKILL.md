@@ -114,6 +114,7 @@ an epic the operator explicitly approved.
 | `busy`, `busy: <branch>` | Working: wait for the report. |
 | `idle: <branch> (uncommitted: N, unpushed: M)` | Quiet session, unsaved work in the clone: recover it with the puppet, never overwrite. |
 | `starting` | A fresh attempt under five minutes old: wait, do not treat. |
+| `queued: <reason>` | No allocation yet: placement waits for resources, a project image or an admissible memory request. Read the reason; do not restart. A free clone still holds its allocation's resources, so stopping other puppets is the operator's decision. |
 | `needs action`, `needs action: <what>` | A dialog blocks it: read `mcp__mop__tail`, dismiss with `mcp__mop__slash(command="Escape")`; never pick an answer you did not see. |
 | `waiting for input` | Maybe between turns: inspect, do not treat. |
 | `login expired`, `login expired: <branch>` | The model API refused the key: the operator fixes the proxy key, then nudge with a message. No restart; the hourly doctor nudges too. |

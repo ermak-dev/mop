@@ -24,7 +24,8 @@ export const KIND_COLOR: Record<Kind, string> = {
 // оператор читал в state-строке, одним словом. Список -- те же VERDICTS,
 // что на сервере; незнакомого вида страница не рисует.
 export const VERDICT_WORD: Record<Exclude<VerdictKind, null>, string> = {
-  silent: "агент молчит", hung: "завис", starting: "поднимается", dialog: "ждёт действия",
+  silent: "агент молчит", hung: "завис", starting: "поднимается", queued: "ожидает размещения",
+  dialog: "ждёт действия",
   login: "логин", quota: "нет квоты", error: "ошибка", waiting: "ждёт ввода",
   busy: "занят", other: "иначе", free: "свободен", idle: "работа в клоне",
   unknown: "неизвестно", failing: "падает",
