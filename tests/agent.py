@@ -3195,7 +3195,10 @@ def check_role_node_gates_584(c):
 
     rpc = lambda g: f"mop.mop.node.hyper.rpc.{g}"                      # noqa: E731
     role = lambda g: f"mop.mop.node.hyper.role.{g}"                    # noqa: E731
-    dsp = lambda g: busnames.dispatch_subject("mop", "hyper", g[len("grant-"):])  # noqa: E731
+    # Диспетчерский субъект -- полный принципал grant-<id> (#603): голый
+    # hex на проводе не появляется, и busnames.dispatch_subject
+    # ровно это и требует.
+    dsp = lambda g: busnames.dispatch_subject("mop", "hyper", g)  # noqa: E731
     resolves = lambda: [r for _s, r in asks if r.get("verb") == "resolve"]  # noqa: E731
 
     with restored(agent, "bsh", "clone_facts", "clone_dir", "session_json",
@@ -3497,8 +3500,9 @@ def check_role_node_gates_584(c):
             "mop.*.node.hyper.dispatch.*" in subs, subs)
     c.check("584 the agent listens on the role channel, disjoint from the old "
             "rpc patterns",
-            "mop.*.node.hyper.role.*" in subs
-            and "mop.*.node.hyper.role.*" not in busnames.agent_subscriptions("hyper")["rpc"]
+            busnames.node_role(busnames.ANY, "hyper") in subs
+            and busnames.node_role(busnames.ANY, "hyper")
+            not in busnames.agent_subscriptions("hyper")["rpc"]
             and "mop.*.node.hyper.role" not in subs, subs)
 
 
@@ -3871,7 +3875,7 @@ def check_startup_soul_584(c):
                 ("grant rpc", role(W),
                  {"verb": "initial_identity", "name": "pu-mop-1"}),
                 ("dispatch subject", busnames.dispatch_subject(
-                    "mop", "hyper", A[len("grant-"):]),
+                    "mop", "hyper", A),
                  {"verb": "initial_identity", "name": "pu-mop-1"}),
                 ("public msg", "mop.mop.node.hyper.msg",
                  {"verb": "initial_identity", "name": "pu-mop-1"})):
@@ -3893,7 +3897,7 @@ def check_startup_soul_584(c):
     c.check("584 the agent listens on its startup subject",
             "mop.*.node.hyper.startup" in subs, subs)
     c.check("584 the agent listens on the role channel",
-            "mop.*.node.hyper.role.*" in subs, subs)
+            busnames.node_role(busnames.ANY, "hyper") in subs, subs)
 
 
 async def _subjects_584():

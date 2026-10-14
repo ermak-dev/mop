@@ -1786,7 +1786,8 @@ async def _mine(req, name):
 # раз, без кэша. Молчание, отказ, ответ не о том -- отказ: отозванная
 # привязка не действует и при живом соединении.
 DISPATCH = "dispatch"     # глагол в теле dispatch-субъекта и в резолвере
-ROLE_CHANNEL = "role"     # канал обычного RPC актёра (#603): node.<узел>.role.<принципал>
+# Канал обычного RPC актёра -- busnames.ROLE_CHANNEL (#603): локальная
+# копия убрана, расхождение ловил бы только живой забор.
 # Поля тела, которыми легаси-путь называет власть: у актёра власть -- его
 # субъект и резолвер, тело их не пишет.
 ACTOR_STRIPPED = ("owner", "holder", "force")
@@ -1804,19 +1805,23 @@ def actor_of(subject):
     tokens = (subject or "").split(".")
     channel = tokens[4] if tokens[2:3] == ["node"] and len(tokens) >= 5 else None
     if channel == busnames.DISPATCH_CHANNEL:
-        user = busnames.GRANT_PREFIX + (tokens[5] if len(tokens) > 5 else "")
-        return DISPATCH, (user if soul.is_grant(user) else None)
-    if channel == ROLE_CHANNEL:
+        # Полный принципал grant-<id> (#603): голый hex на проводе не
+        # появляется, и токен субъекта -- уже готовое имя.
         user = tokens[5] if len(tokens) > 5 else ""
-        return ROLE_CHANNEL, (user if soul.is_grant(user) else None)
+        return DISPATCH, (user if soul.is_grant(user) else None)
+    if channel == busnames.ROLE_CHANNEL:
+        user = tokens[5] if len(tokens) > 5 else ""
+        return busnames.ROLE_CHANNEL, (user if soul.is_grant(user) else None)
     if channel == "startup":
         return "startup", None
-    login = busnames.caller(subject)
-    if soul.is_grant(login or ""):
-        # Принципал на человеческом rpc-пути: субъект роли есть, этот --
-        # не его. Отдельный маркер канала, не None: handle откажет до
-        # резолвера, не проваливаясь в легаси-человека.
-        return "fenced", login
+    # Принципал на человеческом rpc-пути: субъект роли есть, этот -- не
+    # его. #603 закрыл caller() для гранта на rpc, и узел читает забор по
+    # последнему токену субъекта тем же правилом, что и шина: принципал
+    # там -- не человек и не актёр, до резолвера отказ (смешанная раскатка
+    # не исполняет глагол без резолвера).
+    tail = tokens[5] if len(tokens) > 5 else ""
+    if soul.is_grant(tail):
+        return "fenced", tail
     return "rpc", None
 
 
@@ -1981,12 +1986,13 @@ async def _write_marker(name, inc):
     return None if code == 0 else f"{name}: the identity marker is not recorded: {why(out, code)}"
 
 
+
+
 def soul_dir(name, inc):
-    """Каталог инкарнации роли в теле (#590 пишет, #603 опубликует
-    помощника в common): свой каталог у каждой инкарнации каждого имени --
-    старая инкарнация не читается новой. Формула -- та же, что у
-    driver.soul_dir 590."""
-    return paths.under(driver.HOME, "souls", name, inc)
+    """Каталог инкарнации роли в теле -- опубликованный helper #603
+    (driver.soul_dir): формула та же, что была здесь локальной копией;
+    узел читает каталог, который пишет лаунчер #590."""
+    return driver.soul_dir(name, inc)
 
 
 async def _read_ready(name, inc):
@@ -2168,11 +2174,11 @@ async def handle(conn, msg, public, startup=False):
     elif verb == STARTUP:
         why = f"verb {STARTUP} is available to the wrapper's startup channel only"
     elif channel == "fenced":
-        why = f"delegated principals use the {ROLE_CHANNEL} subject, not the human rpc path"
+        why = f"delegated principals use the {busnames.ROLE_CHANNEL} subject, not the human rpc path"
     elif actor:
         why = await _admit_actor(conn, req, actor, channel)
         verb = req.get("verb")
-    elif channel in (ROLE_CHANNEL, DISPATCH):
+    elif channel in (busnames.ROLE_CHANNEL, DISPATCH):
         # Канал есть, актёра нет: токен не принципал (или его нет вовсе) --
         # отказ до таблицы и до легаси-человека, не проваливаясь в него.
         why = f"the {channel} subject needs a delegated principal token"
@@ -2217,11 +2223,15 @@ async def attach(conn, node):
         asyncio.create_task(handle(conn, msg, public=False, startup=True))
 
     subs = busnames.agent_subscriptions(node)
-    # dispatch (#584): свой субъект с id актёра, права узла его покрывают
-    # (natsconf.node_permissions: node.<узел>.>).
-    role_subj = f"{busnames.ROOT}.{busnames.ANY}.node.{node}.{ROLE_CHANNEL}.{busnames.ANY}"
-    subs["rpc"] = subs["rpc"] + [busnames.dispatch_subject(busnames.ANY, node, busnames.ANY),
-                                 role_subj,
+    # dispatch (#584): свой субъект с принципалом актёра, права узла его
+    # покрывают (natsconf.node_permissions: node.<узел>.>). Маска роли --
+    # опубликованный помощник #603 (node_role, «role.>»); маски dispatch у
+    # #603 нет -- точечные субъекты строит dispatch_subject (полный
+    # принципал), а маску подписки собираем из его же констант.
+    dispatch_mask = (f"{busnames.ROOT}.{busnames.ANY}.node.{node}."
+                     f"{busnames.DISPATCH_CHANNEL}.{busnames.ANY}")
+    subs["rpc"] = subs["rpc"] + [dispatch_mask,
+                                 busnames.node_role(busnames.ANY, node),
                                  busnames.node(busnames.ANY, node, "startup")]
     for subj in subs["rpc"][:-1]:
         await conn.subscribe(subj, cb=on_rpc)
