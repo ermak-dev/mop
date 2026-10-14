@@ -4,7 +4,7 @@
 // ввод скрыт до него, безопасная причина отказа остаётся конкретной.
 // RESULT: ожидание, переход, неизвестный источник и первый сбой были RED.
 // STATUS: FIXED — see #612
-import { act, screen } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { PuppetCard } from "./PuppetCard";
 import { renderUi } from "../test-utils";
@@ -14,7 +14,15 @@ const response = (source: string, lines: string[], note: string | null = null) =
   ok: true, status: 200, json: async () => ({ source, lines, note, truncated: false }),
 }) as Response;
 const tick = async (ms = 0) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
-const open = () => renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
+const open = () => {
+  const fetchTail = vi.mocked(fetch);
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
+    : fetchTail(url, init));
+  const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  return view;
+};
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });

@@ -643,15 +643,16 @@ def target_project(origin, job_project=None):
 
 
 def safety(name, project, owner=None, facts=None, busy=False,
-           disruptive=False, now=None):
+           disruptive=False, now=None, continuation=False):
     """Безопасно ли действие воркера над папетом. -> (можно, причина).
 
     Один инвариант (#460):
       - факты клона известны: ошибка агента, тишина (None) и битый ответ --
         отказ («не знаю» не значит «пусто», AGENT SILENT -- папет может
         работать);
-      - работы в клоне нет -- включая ничейную: веб-клик не диспатч, окно
-        lease.WINDOW ему не положено (это дорога CLI-мастера);
+      - работы в клоне нет -- включая ничейную; continuation допускает
+        только недеструктивное продолжение своей известной работы;
+        окно lease.WINDOW веб-клику не положено (это дорога CLI-мастера);
       - чужой живой аренды нет; своя -- проходит;
       - disruptive (рестарт, stop, wipe) при живой занятой сессии цели --
         отказ даже со своей арендой: сессию ведёт человек.
@@ -666,7 +667,9 @@ def safety(name, project, owner=None, facts=None, busy=False,
         return False, (f"{name}: cannot tell if it holds work — "
                        f"{(facts or {}).get('error') or 'no facts from the node'}")
     clone = CloneFacts.from_dict(facts["clone"])
-    if holds_work(clone):
+    continuing = (continuation and not disruptive and clone.known
+                  and owner and clone.owner and clone.owner.user == owner)
+    if holds_work(clone) and not continuing:
         whose = clone.owner.user if clone.owner else "nobody"
         return False, (f"{name}: work in the clone (led by {whose}) — "
                        f"the web does not take work over")

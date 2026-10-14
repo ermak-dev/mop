@@ -31,7 +31,8 @@ Nomad решает, где стоит папет, шина — как с ним 
     push(name, path, data) положить файл внутрь (mop driver run)
     push_many(name, files) [(путь, байты)] разом -- глагол write (mop login)
     projects_dir(name)     где транскрипты — mop stat, usage
-    attach_argv(name)      чем входит человек
+    attach_argv(name, read_only=False)
+                           чем входит человек; читатель не вводит и не меняет размер
     repair_argv(name)      аварийный путь, когда основной молчит
     admit(name, let_in)    впустить ключ сервера в тело на время bootstrap'а
                            (#62), let_in=False — выпустить; у host пусто: ключ
@@ -103,7 +104,8 @@ CALLS = {
     "push": [(("n", "/path", b""), {})],
     "push_many": [(("n", []), {})],
     "projects_dir": [(("n",), {})],
-    "attach_argv": [(("n",), {})],
+    "attach_argv": [(("n",), {}), (("n",), {"read_only": False}),
+                    (("n",), {"read_only": True})],
     "repair_argv": [(("n",), {})],
     "admit": [(("n", True), {})],
     "address": [(("n",), {})],
@@ -366,10 +368,14 @@ class Tmux:
     def kill(self):
         return f"{self.base} kill-session -t {self.name}"
 
-    def attach_argv(self):
-        """Чем человек входит в сессию -- argv, не строка: его исполняют
-        без шелла (`mop attach`)."""
-        return ["tmux", "-L", self.name, "attach", "-t", self.name]
+    def attach_argv(self, read_only=False):
+        """Вход в сессию -- argv, не строка: его исполняют без шелла.
+
+        Читатель не вводит клавиши и не участвует в выборе размера сессии;
+        Unicode включён явно и для читателя, и для обычного `mop attach`."""
+        flags = ["-f", "read-only,ignore-size"] if read_only else []
+        return ["tmux", "-u", "-L", self.name, "attach-session",
+                *flags, "-t", self.name]
 
     def buffer(self):
         """Весь буфер, с историей."""

@@ -29,8 +29,13 @@ const route = (post: () => Promise<Response>, get: () => Promise<Response>) =>
     init?.method === "POST" ? post() : String(url).endsWith("/tail")
       ? ({ ok: true, json: async () => ({ lines: ["screen"] }) }) as Response : get());
 const open = () => {
+  const fetchTail = vi.mocked(fetch);
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
+    : fetchTail(url, init));
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "Экран" }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
   return view;
 };
 const typeAndSend = async () => {

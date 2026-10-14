@@ -174,3 +174,18 @@ test("#588 the common managed screen identifies its role", async () => {
   await waitFor(() => expect(screen.getByTestId("puppet-card")).toBeInTheDocument());
   expect(within(screen.getByTestId("puppet-card")).getByText("Role: master")).toBeInTheDocument();
 });
+
+// HYPOTHESIS: #578 доносит роль через клик по имени, но не через иконку экрана.
+// SOLUTION: оба пути передают метку роли одной карточке с чатом.
+// RESULT: RED без роли, GREEN через иконку и клик по имени.
+// STATUS: FIXED — see #594
+test("#594 the row screen action keeps the role in the chat header", async () => {
+  auth.current = { login: "viewer", role: "admin" };
+  await mount();
+  await screen.findByText("viewer");
+  const actions = screen.getByRole("group", { name: "действия pu-sample-2" });
+  fireEvent.click(within(actions).getByRole("button", { name: "Экран" }));
+  const card = await screen.findByTestId("puppet-card");
+  expect(within(card).getByText("Role: master")).toBeInTheDocument();
+  expect(within(card).getByRole("tab", { name: "Чат" })).toHaveAttribute("aria-selected", "true");
+});

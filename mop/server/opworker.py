@@ -304,7 +304,8 @@ def _wrap_send(target, login, message, context=None):
             return bus.request(node, verb, project=project, **fields)
 
         facts = node_call(node, "state", name=target)
-        safe, why = ops.safety(target, project, owner=login, facts=facts)
+        safe, why = ops.safety(target, project, owner=login, facts=facts,
+                               continuation=True)
         if not safe:
             return ops.outcome(ops.REFUSED, target, error=why,
                                project=project)

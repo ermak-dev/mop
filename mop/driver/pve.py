@@ -350,12 +350,12 @@ def repair_argv(name):
     return [*SUDO, "exec", str(vmid_of(name))]
 
 
-def attach_argv(name):
+def attach_argv(name, *, read_only=False):
     """Чем человек входит в сессию. `mop attach` доводит его ssh до узла, а
     дальше это — второй ssh, уже внутрь тела: на гипервизоре tmux-сервера
-    папета нет вовсе."""
+    папета нет вовсе. read_only не даёт читателю вводить и менять размер."""
     return ["ssh", "-t", *_SSH_OPTS, f"{USER}@{address_of(name)}",
-            *Tmux(name).attach_argv()]
+            *Tmux(name).attach_argv(read_only=read_only)]
 
 
 def projects_dir(name):

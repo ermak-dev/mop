@@ -1,0 +1,9 @@
+{
+  "history": {"epoch":"h1-digest","session_id":"conversation-1","cursor":"history-cursor-1","records":[],"reset":false,"has_more":false,"partial":false},
+  "open": {"tid":"binding-1","epoch":"t-random-1","cursor":0,"mode":"rw","cols":80,"rows":24,"interrupt_delay_ms":350},
+  "read": {"data":"","cursor":0,"reset":false,"closed":false,"exit":null,"epoch":"t-random-1"},
+  "close_gone": {"status":404,"body":{"error":"attach not found"}},
+  "close_detached": {"status":200,"body":{"ok":false,"error":"already closed"}},
+  "input_escape": {"seq":1,"data":"Gw=="},
+  "input_escape_reply": {"seq":1,"written":1,"outcome":"written"}
+}

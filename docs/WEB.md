@@ -108,6 +108,39 @@ CSS.
 коммите; `web/node_modules` в пакет не едет (список исключений один,
 `deploy/group_vars/all.yml`).
 
+## Приватный чат и терминал
+
+Гибрид #594 описан в [CHAT](CHAT.md). Он не использует public `/events` для
+содержимого разговора и не ставит keyboard/Stop в очередь административных
+операций. Тот же foreground Claude виден через JSONL history и настоящий
+`driver.attach_argv` под PTY; браузер использует xterm.js, не ANSI-stripped
+capture-pane. Прежний tail/инициализация остаётся отдельным представлением.
+
+Все маршруты ниже admin-only, `no-store`, с проверкой реальной цели ростера;
+запись требует Origin и ограниченный JSON. Роль повторно проверяется после
+long-poll. Handle закреплён за target, login и принятой browser cookie.
+
+| Маршрут | Контракт |
+|---|---|
+| `GET /api/puppet/<name>/history?cursor=` | records/epoch/session_id/cursor/reset/has_more/partial, без клиентского file path |
+| `POST /api/puppet/<name>/term` | mode ro/rw и cols/rows; явный writer, не более одного на цель |
+| `GET /api/puppet/<name>/term/<tid>/read?cursor=&wait=` | base64 PTY bytes, bounded wait до 15 секунд, closed/reset/epoch |
+| `POST /api/puppet/<name>/term/<tid>/input` | seq и base64 data до 4 KiB; unknown не повторяется |
+| `POST /api/puppet/<name>/term/<tid>/resize` | writer cols/rows; влияет на настоящий tmux |
+| `POST /api/puppet/<name>/term/<tid>/close` | detach клиента, не остановка папета |
+
+Raw terminal — доверенная capability исполнения кода в теле, включая
+CLI `!` и tmux commands; он не обещает redaction секретов. Reader не вводит
+и не участвует в выборе рабочего размера. Logout/revocation закрывают
+собственные handles. Ничего из input/history/tid не добавляется в public
+snapshot, SSE или operation verdict; audit take/release не содержит bytes.
+
+`/clear` меняет conversation identity, даже когда PID/socket сохранены.
+Исторический epoch и terminal epoch принадлежат разным пространствам: их
+нельзя сравнивать друг с другом. Старое управление не переносится на новый
+разговор автоматически. Принятие PTY bytes не является доказательством,
+что Claude выполнил команду или остановил конкретный инструмент.
+
 ## Операции: исполнитель и адаптер
 
 Клик по дашборду — не RPC и не subprocess командлета: POST
@@ -127,7 +160,11 @@ CSS.
 Перед каждым эффектом воркер спрашивает один инвариант `ops.safety`
 (#460): факты клона известны («не знаю» — отказ, AGENT SILENT — папет может
 работать), работы в клоне нет, чужой живой аренды нет, disruptive поверх
-живой сессии — отказ. `force` у веба нет: чужую работу клик не берёт.
+живой сессии — отказ. Исключение — `send` для продолжения собственной
+работы (#595): dirty/ahead допускаются только при известных фактах и
+совпадении владельца клона с логином HTTP-принципала. Остальные действия,
+чужая и ничейная работа исключения не получают. `force` у веба нет:
+чужую работу клик не берёт.
 Аудит (`ops.record`): принципал HTTP и сервис-отправитель — отдельные
 поля; payload (текст сообщения, bootstrap) в вердикте, GET, SSE-кадре и
 аудит-записи не живёт.

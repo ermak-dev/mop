@@ -79,7 +79,7 @@ function Row({ p, role, onOpen, session }: {
       <Table.Td>{p.llm}</Table.Td>
       <Table.Td ta={align(COLS.disk)}>{gb(p.disk_kb)}</Table.Td>
       {session?.role === "admin" && <Table.Td ta="right" style={{ width: "1%", whiteSpace: "nowrap" }}>
-        <PuppetActions key={`${session.login}\0${p.name}`} row={p} session={session} />
+        <PuppetActions key={`${session.login}\0${p.name}`} row={p} role={role} session={session} />
       </Table.Td>}
     </Table.Tr>
   );

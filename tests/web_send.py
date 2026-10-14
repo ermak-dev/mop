@@ -15,7 +15,7 @@ import tempfile
 import hermetic  # noqa: F401
 from _lib import Checks, patched
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from mop.common import bus, puppets
+from mop.common import bus, ops, puppets
 from mop.server import opworker
 
 
@@ -98,6 +98,56 @@ def main():
         c.expect(f"#493 receipt {reply!r} maps to {status}", got.get("status"), status)
         c.expect("#493 uncertain delivery is never replayed",
                  sum(v == "send" for _, v, _ in calls), 1)
+    # HYPOTHESIS: общие административные ворота запрещают владельцу
+    # продолжать работу через send, хотя узловая аренда его пропускает.
+    # SOLUTION: send явно разрешает продолжение своей известной работы;
+    # общие ворота для остальных мутаций остаются закрыты.
+    # RESULT: RED -- 7 отказов вместо доставки; GREEN -- матрица владельцев.
+    # STATUS: FIXED — see #595
+    mine = {"user": "alice", "at": 1}
+    foreign = {"user": "bob", "at": 1}
+    for work in ({"dirty": 1}, {"ahead": 1}, {"dirty": 2, "ahead": 3}):
+        owned = {"present": True, "session": "busy 1 1",
+                 "clone": dict(clean["clone"], owner=mine, **work)}
+        got, calls = run(facts=owned)
+        c.check(f"#595 owned follow-up with {work} reaches delivery once",
+                got.get("status") == "succeeded"
+                and [v for _, v, _ in calls] == ["state", "send"], (got, calls))
+        sent = [fields for _, verb, fields in calls if verb == "send"]
+        c.check(f"#595 owned follow-up with {work} keeps principal and no force",
+                len(sent) == 1 and sent[0].get("owner") == "alice"
+                and sent[0].get("force") is False
+                and sent[0].get("project") == "actual", calls)
+        for disruptive in (False, True):
+            safe, why = ops.safety(target, "actual", owner="alice",
+                                   facts=owned, disruptive=disruptive)
+            c.check(f"#595 administrative safety still refuses {work}, disruptive={disruptive}",
+                    not safe and bool(why), (safe, why))
+        for owner in (None, foreign):
+            rejected = dict(owned, clone=dict(owned["clone"], owner=owner))
+            got, calls = run(facts=rejected)
+            c.check(f"#595 work {work} owned by {owner} cannot be taken over",
+                    got.get("status") == "refused"
+                    and not any(v == "send" for _, v, _ in calls), (got, calls))
+
+    unknown = {"clone": dict(clean["clone"], owner=mine, dirty=None, ahead=None)}
+    for facts in (None, {}, {"error": "silent"}, unknown):
+        got, calls = run(facts=facts)
+        c.check(f"#595 owned continuation does not bypass unknown facts {facts}",
+                got.get("status") == "refused"
+                and not any(v == "send" for _, v, _ in calls), (got, calls))
+
+    owned = {"clone": dict(clean["clone"], owner=mine, dirty=1)}
+    for extra in ({"owner": "alice"}, {"project": "actual"},
+                  {"continuation": True}, {"force": True}):
+        got, calls = run(facts={"clone": dict(owned["clone"], owner=foreign)},
+                         params={"message": "hello", **extra})
+        c.check(f"#595 payload {extra} cannot grant follow-up authority",
+                got.get("status") == "refused" and not calls, (got, calls))
+    got, calls = run(facts=owned, reply=bus.BusError("timed out after delivery"))
+    c.check("#595 an uncertain owned follow-up is not replayed",
+            got.get("status") == "unknown"
+            and sum(v == "send" for _, v, _ in calls) == 1, (got, calls))
     return c.report("web_send")
 
 

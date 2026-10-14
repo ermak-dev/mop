@@ -26,7 +26,7 @@ import { DestructiveBox } from "./DestructiveBox";
 import { ControlWindow, type ControlEntry, type Signal, type EngineState } from "./ControlWindow";
 import { LABELS } from "./labels";
 
-export function PuppetActions({ row, session }: { row: Puppet; session: Session }) {
+export function PuppetActions({ row, role, session }: { row: Puppet; role: string | null; session: Session }) {
   // экран или ничего (#507): второй источник -- stderr -- ушёл с кнопкой «лог»
   const [viewer, setViewer] = useState<"tail" | null>(null);
   // окно правки (#516/#522): визард операций цели
@@ -55,7 +55,7 @@ export function PuppetActions({ row, session }: { row: Puppet; session: Session 
     <IconButton label={LABELS.screen} variant="subtle" size="lg" onClick={() => setViewer("tail")}>
       <IconTerminal2 size={18} />
     </IconButton>
-    {viewer && <PuppetCard session={session} target={row.name} onClose={() => setViewer(null)} />}
+    {viewer && <PuppetCard session={session} target={row.name} role={role} onClose={() => setViewer(null)} />}
     <IconButton label={LABELS.edit} variant="subtle" size="lg"
                 onClick={() => { setReopen(null); setWin(true); }}>
       <IconSettings size={18} />

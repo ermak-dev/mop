@@ -26,8 +26,15 @@ const row: Puppet = {
 const snapshot = emptySnapshot({ projects: [{ name: "mop", puppets: [row],
   counts: { puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0 } }] });
 const response = (body: unknown) => ({ ok: true, json: async () => body }) as Response;
-const card = () => renderUi(<PuppetCard session={session}
-  target={row.name} onClose={() => {}} />);
+const card = () => {
+  const fetchTail = vi.mocked(fetch);
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => String(url).includes('/history')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
+    : fetchTail(url, init)));
+  const view = renderUi(<PuppetCard session={session} target={row.name} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  return view;
+};
 
 const originalScrollTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop");
 // второй afterEach -- тому же «каждому разу»: scrollTop-дескриптор (#487)

@@ -39,7 +39,8 @@ def old_decision(verb, public, project, name, mine):
     """Отказ, как его давал handle до #150, либо None -- глагол исполняется.
     Правила прежние; таблица -- с добавленными после (ADDED, ниже): они
     мастерские и именующие."""
-    verbs, named = OLD_VERBS + ADDED + ADDED_NODE, OLD_NAMED + ADDED
+    verbs = OLD_VERBS + ADDED + ADDED_NODE
+    named = OLD_NAMED + ADDED + TERMINAL_NODE
     if verb not in verbs:
         return f"no such verb {verb}; available: {', '.join(sorted(verbs))}"
     if public and verb not in OLD_PUBLIC:
@@ -61,11 +62,13 @@ def new_decision(verb, public, project, name, mine):
 
 # После #150 -- глаголы, добавленные с тех пор, в конце таблицы: clone --
 # факты клона для ворот сервиса кластера (#40), мастерский и именующий.
-ADDED = ("clone",)
+# history (#597) — мастерское именующее чтение, не публичный tail.
+ADDED = ("clone", "history")
 # Узловые глаголы, добавленные после (#358): sweep -- подметание диска узла по
 # просьбе doctor. Место на диске -- факт про хост со всеми его жильцами, и
 # глагол, как disk, только оператору.
-ADDED_NODE = ("sweep",)
+TERMINAL_NODE = ("term_open", "term_read", "term_write", "term_resize", "term_close")
+ADDED_NODE = ("sweep",) + TERMINAL_NODE
 
 
 def check_sets(c):
@@ -74,7 +77,7 @@ def check_sets(c):
     for got, want, what in ((tuple(agent.VERBS), OLD_VERBS + ADDED + ADDED_NODE, "VERBS"),
                             (agent.PUBLIC_VERBS, OLD_PUBLIC, "PUBLIC_VERBS"),
                             (agent.ADMIN_VERBS, OLD_ADMIN + ADDED_NODE, "ADMIN_VERBS"),
-                            (agent.NAMED_VERBS, OLD_NAMED + ADDED, "NAMED_VERBS")):
+                            (agent.NAMED_VERBS, OLD_NAMED + ADDED + TERMINAL_NODE, "NAMED_VERBS")):
         c.expect(what, tuple(got), want)
 
 
@@ -4109,6 +4112,340 @@ def check_serve_creds_584(c):
             and seen["creds_at_attach"].get("user") == "node-hyper", seen)
 
 
+def check_terminal_admin_598(c):
+    """HYPOTHESIS: сырой терминал нельзя открыть субъектом проекта, даже
+    прежним loginless. SOLUTION: только приватные именующие NODE-глаголы.
+    RESULT: приватный admin-маршрут и исключение type проверены.
+    STATUS: FIXED — see #598"""
+    import asyncio
+    verbs = ("term_open", "term_read", "term_write", "term_resize", "term_close")
+    for verb in verbs:
+        c.check(f"#598 {verb} private admin allowed", agent.refusal(verb, False, "admin") is None)
+        c.check(f"#598 {verb} project denied", agent.refusal(verb, False, "mop") is not None)
+        c.check(f"#598 {verb} public denied", agent.refusal(verb, True, "admin") is not None)
+        spec = agent.VERBS.get(verb)
+        c.check(f"#598 {verb} named node", spec is not None and spec.named and spec.scope == agent.NODE)
+
+    class Registry:
+        def writer_open(self, name):
+            return True
+
+    async def bsh(*a, **kw):
+        raise AssertionError("human input must not be cleared")
+
+    if hasattr(agent, "TERMINALS"):
+        with patched(agent, TERMINALS=Registry(), bsh=bsh):
+            got = asyncio.run(agent._type(None, "pu-mop-1", "/clear"))
+            c.check("#598 type refuses active writer", "error" in got)
+    else:
+        c.fail("#598 type writer exclusion missing", "no terminal registry")
+
+    from mop.common.domain import CloneFacts, Owner
+    from mop.common import lease
+    now = 10000
+    for dirty, ahead, who, at, expected in (
+            (1, 0, "alice", now, True), (0, 1, "alice", now, True),
+            (1, 0, "bob", 0, False), (1, 0, None, 0, False),
+            (None, None, "alice", now, False), (0, 0, None, 0, True),
+            (0, 0, "bob", now, False), (0, 0, "bob", 0, True)):
+        clone = CloneFacts("master", "master", dirty=dirty, ahead=ahead,
+                           owner=Owner(who, at) if who else None)
+        if hasattr(agent, "terminal_access"):
+            got = agent.terminal_access(clone, "alice", now)
+            c.expect(f"#598 work gate {dirty}/{ahead}/{who}/{at}", got is None, expected)
+        else:
+            c.fail("#598 strict clone terminal gate missing", "no terminal_access")
+
+
+def check_terminal_protocol_598(c):
+    """HYPOTHESIS: admin-маршрут может утечь в общий event, а Stop -- ждать
+    owner-lock send. SOLUTION: отдельный PTY-реестр и приватный путь RPC.
+    STATUS: FIXED — see #598"""
+    import asyncio
+    from mop.node import terminal
+
+    async def scenario():
+        calls = []
+        class Process:
+            def write(self, raw):
+                calls.append(("input", raw))
+                return len(raw)
+            async def close(self):
+                calls.append(("close",))
+            def resize(self, cols, rows):
+                calls.append(("resize", cols, rows))
+
+        async def probe(name):
+            return dict(pid=1, start="9", sessionId="s", pane="%0", tty="/dev/pts/0")
+        async def spawn(*args):
+            return Process()
+        async def clone(name):
+            return dict(cur="master", **{"def": "master"}, dirty=1, ahead=0,
+                        owner={"user": "alice", "at": 0})
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("raw terminal must not emit events or call normal send")
+        async def no_claim(*args, **kwargs):
+            raise AssertionError("owned interrupt must not await send's owner lock")
+
+        registry = terminal.Registry(probe, agent._terminal_owner, spawn)
+        lock = asyncio.Lock()
+        await lock.acquire()
+        req = dict(verb="term_open", _project="admin", name="pu-mop-1", owner="alice",
+                   mode="rw", cols=80, rows=24)
+        with patched(agent, TERMINALS=registry, clone_facts=clone, _event=forbidden,
+                     v_send=forbidden, _claim=no_claim, _owner_locks={"pu-mop-1": lock}):
+            try:
+                opened = await asyncio.wait_for(agent.v_term_open(None, req), 1)
+                c.check("#598 own writer opens independently of normal send", "tid" in opened)
+                if "tid" not in opened:
+                    return
+                tid = opened["tid"]
+                write = dict(verb="term_write", _project="admin", name="pu-mop-1", owner="alice",
+                             tid=tid, seq=1, data="Aw==")
+                got = await asyncio.wait_for(agent.v_term_write(None, write), 1)
+                c.expect("#598 raw keyboard forwards Ctrl-C unchanged", got,
+                         {"written": 1, "seq": 1, "outcome": "written"})
+                c.expect("#598 input only to PTY", calls, [("input", b"\x03")])
+                got = await agent.v_term_write(None, dict(write, owner="bob"))
+                c.check("#598 mismatched actor denied", "error" in got)
+                got = await agent.v_term_write(None, dict(write, name="pu-mop-2"))
+                c.check("#598 mismatched target denied", "error" in got)
+                got = await agent.v_term_write(None, dict(write, unexpected="secret"))
+                c.check("#598 unknown field denied", "error" in got)
+                for subject, public in (("mop.mop.node.h.rpc", False),
+                                        ("mop.mop.node.h.rpc.alice", False),
+                                        ("mop.admin.node.h.msg", True)):
+                    msg = Msg(subject=subject, body=write)
+                    await agent.handle(None, msg, public)
+                    c.check(f"#598 no raw terminal via {subject}", "error" in msg.replies[0])
+                msg = Msg(subject="mop.admin.node.h.rpc", body=write)
+                await agent.handle(None, msg, False)
+                c.expect("#598 admin retransmit does not reinput", msg.replies[0],
+                         {"written": 1, "seq": 1, "outcome": "written"})
+                c.expect("#598 private route no second input/event", calls, [("input", b"\x03")])
+                # #613: Escape -- клавиша реального Stop CLI, не сигнал job
+                # control. Raw API не выбирает семантику остановки за UI.
+                escape = dict(write, seq=2, data="Gw==")
+                got = await agent.v_term_write(None, escape)
+                c.expect("#598 raw Escape forwarded without job stop", got,
+                         {"written": 1, "seq": 2, "outcome": "written"})
+                c.expect("#598 Escape does not close attach or synthesize signal", calls,
+                         [("input", b"\x03"), ("input", b"\x1b")])
+                c.expect("#598 Escape retry keeps receipt without retyping",
+                         await agent.v_term_write(None, escape), got)
+                c.expect("#598 Escape retry never types again", calls,
+                         [("input", b"\x03"), ("input", b"\x1b")])
+            finally:
+                await registry.shutdown()
+                lock.release()
+
+        class Driver:
+            def attach_argv(self, name, *, read_only=False):
+                calls.append((name, read_only))
+                return ["test-attach", name]
+        async def fake_spawn(argv, *args):
+            calls.append(tuple(argv))
+        calls.clear()
+        with patched(agent, DRIVER=Driver()), patched(terminal.PTY, spawn=fake_spawn):
+            await agent._terminal_spawn("pu-mop-1", "ro", 80, 24, None, None)
+            c.expect("#598 read-only driver keyword", calls, [("pu-mop-1", True), ("test-attach", "pu-mop-1")])
+            calls.clear()
+            try:
+                await agent._terminal_spawn("bad;name", "rw", 80, 24, None, None)
+            except ValueError:
+                pass
+            c.expect("#598 only validated name reaches driver argv", calls, [])
+
+    asyncio.run(scenario())
+
+
+def check_terminal_timing_598(c):
+    """HYPOTHESIS: timing берётся через bsh целевого тела, не узловой tmux.
+    Неизвестный ответ не получает 500ms fallback и не раскрывает stdout.
+    SOLUTION: изолированный read-only скрипт и optional callback реестра.
+    RESULT: известная задержка и неизвестные ответы проходят узловой путь.
+    STATUS: FIXED — see #598"""
+    import asyncio
+    from mop.node import terminal
+    async def scenario():
+        calls = []
+        response = ('837\n', 0)
+        async def body(name, script, timeout=20):
+            calls.append((name, script, timeout))
+            if isinstance(response, Exception):
+                raise response
+            return response
+        with patched(agent, bsh=body):
+            for response, expected in ((('837\n', 0), 837), (('10100\n', 0), 10100),
+                                       (('', 0), None), (('private\n837\n', 0), None),
+                                       (('837\n', 1), None), (('10101\n', 0), None),
+                                       (RuntimeError('private body failure'), None)):
+                got = await agent._terminal_interrupt_delay('pu-mop-1')
+                c.expect('#598 body timing optional bounded metadata', got, expected)
+            c.check('#598 timing callback wired to production registry',
+                    agent.TERMINALS.interrupt_delay is agent._terminal_interrupt_delay)
+            c.check('#598 all timing reads route through target body',
+                    all(name == 'pu-mop-1' and script == terminal.interrupt_script(name) and timeout <= 5
+                        for name, script, timeout in calls))
+    asyncio.run(scenario())
+
+
+def check_terminal_claim_598(c):
+    """HYPOTHESIS: второй снимок claim может потерять knownclone, а writer
+    после снятия аренды -- продолжить ввод без identity. Нельзя брать
+    владение позднее; подготовка должна закончиться до первого ввода.
+    RESULT: проверены три снимка и отказ writer после потери аренды.
+    STATUS: FIXED — see #598"""
+    import asyncio
+    clean = dict(cur="master", **{"def": "master"}, dirty=0, ahead=0, owner=None)
+    unknown = dict(cur="master", **{"def": "master"}, dirty=None, ahead=None, owner=None)
+
+    async def scenario():
+        calls = []
+        snapshots = [clean, clean, unknown]
+        async def clone(name):
+            return snapshots.pop(0) if snapshots else clean
+        async def body(name, script, timeout=20):
+            calls.append("lease-write")
+            return "", 0
+        async def install(*args):
+            calls.append("identity")
+            return None, None, {}, True
+        with patched(agent, clone_facts=clone, bsh=body, _install_identity=install,
+                     _owner_locks={}, _lease_claims={}, _lease_holder={}, _lease_generations={}):
+            try:
+                await agent._terminal_prepare(None, "pu-mop-1", "alice", True)
+            except ValueError:
+                pass
+            c.expect("#598 unknown final claim snapshot changes nothing", calls, [])
+            calls.clear()
+            snapshots[:] = [clean, clean, clean]
+            await agent._terminal_prepare(None, "pu-mop-1", "alice", True)
+            c.expect("#598 clean takeover claims then installs identity", calls, ["lease-write", "identity"])
+            try:
+                await agent._terminal_owner("pu-mop-1", "alice", require_owner=True)
+            except ValueError:
+                c.check("#598 lost writer ownership refuses before input", True)
+            except TypeError:
+                c.fail("#598 lost writer ownership is not checked", "no require_owner gate")
+            else:
+                c.fail("#598 lost writer ownership refuses before input", "allowed unowned writer")
+    asyncio.run(scenario())
+
+
+def check_terminal_failed_open_598(c):
+    """BUG: definite failed attach оставляет lease и git identity на 600с.
+    HYPOTHESIS: _terminal_prepare settle делает до spawn/identity proof.
+    Реальные локальные git/bash, заглушки только профиля и attach/пробы.
+    SOLUTION: квитанция staged claim, settle после attach/proof, rollback
+    под owner-lock через существующее generation-safe восстановление.
+    RESULT: spawn/probe возвращают прежнюю пару, newer claim не тронут;
+    провал rollback (в том числе вместе с close) сохраняет причину/владельца.
+    STATUS: FIXED — see #598
+    """
+    import asyncio
+    import subprocess
+    import tempfile
+    from mop.common import lease
+    from mop.common.domain import Owner
+    from mop.node import terminal
+
+    async def scenario(case):
+        with tempfile.TemporaryDirectory(prefix="mop-test-terminal-") as d:
+            subprocess.run(["git", "init", "-q", "-b", "master", d], check=True)
+            for key, value in (("name", "Prior"), ("email", "prior@example.dev")):
+                subprocess.run(["git", "-C", d, "config", "--local", "user." + key, value], check=True)
+            path = os.path.join(d, lease.FILE)
+            calls = []
+            def ident():
+                return subprocess.run(["git", "-C", d, "config", "--local", "user.name"],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            async def facts(name):
+                owner = Owner.parse(open(path).read()) if os.path.exists(path) else None
+                if case == "commit-exit" and agent._owner_locks.get(name, asyncio.Lock()).locked():
+                    for s in registry.sessions.values():
+                        if s.process is not None:
+                            s.exited(1)
+                return dict(cur="master", **{"def": "master"}, dirty=0, ahead=0,
+                            owner=owner and owner.to_dict())
+            async def profile(*args):
+                return dict(name="Alice", email="alice@example.dev"), None
+            async def body(name, script, timeout=20):
+                c.check(f"#598 {case}: lease/identity shell holds owner lock",
+                        agent._owner_locks[name].locked())
+                calls.append("body")
+                return await bash(name, script, timeout)
+            count = 0
+            async def probe(name):
+                nonlocal count
+                count += 1
+                if case in ("probe-failed", "restore-and-close-failed") and count > 1:
+                    raise ValueError("fixture proof failure")
+                return dict(pid=1, start="9", sessionId="s", pane="%0", tty="/dev/pts/0")
+            class Process:
+                def write(self, raw):
+                    raise AssertionError("no input during preparation")
+                async def close(self):
+                    calls.append("close")
+                    if case == "restore-and-close-failed":
+                        raise ValueError("fixture attach close failure")
+            async def spawn(*args):
+                c.expect(f"#598 {case}: claim remains staged at attach", agent._lease_claims[path][1][0], "live")
+                c.expect(f"#598 {case}: git identity installed before attach", ident(), "Alice")
+                if case.startswith("race-"):
+                    async with agent._owner_locks["pu-mop-1"]:
+                        refused, undo, note = await agent._claim("pu-mop-1", {"owner": "alice", "_caller": "alice"})
+                        c.expect("#598 same-owner new claim succeeds", refused, None)
+                        subprocess.run(["git", "-C", d, "config", "--local", "user.name", "Newer Alice"], check=True)
+                        if case == "race-settled":
+                            agent._settle(undo[0], undo[3])
+                    raise ValueError("fixture attach failure")
+                if case in ("spawn-failed", "restore-failed"):
+                    raise ValueError("fixture attach failure")
+                return Process()
+            registry = terminal.Registry(probe, agent._terminal_owner, spawn)
+            patches = dict(TERMINALS=registry, clone_facts=facts, clone_dir=lambda name: d,
+                           bsh=body, owner_profile=profile, _owner_locks={}, _lease_claims={},
+                           _lease_holder={}, _lease_generations={})
+            if case in ("restore-failed", "restore-and-close-failed"):
+                patches["_restore_script"] = lambda *args: "exit 1"
+            with patched(agent, **patches):
+                try:
+                    req = dict(verb="term_open", _project="admin", name="pu-mop-1", owner="alice",
+                               mode="rw", cols=80, rows=24)
+                    got = await agent.v_term_open(None, req)
+                    if case == "success":
+                        c.check("#598 proof then commit returns handle", "tid" in got, repr(got))
+                        c.expect("#598 successful open settles only after proof", agent._lease_claims[path][1][0], "settled")
+                    else:
+                        c.check(f"#598 {case}: failed open returns reason", "error" in got, repr(got))
+                        c.expect(f"#598 {case}: no leaked terminal", registry.sessions, {})
+                        if case.startswith("race-"):
+                            c.expect(f"#598 {case}: newer same-owner git identity untouched", ident(), "Newer Alice")
+                            c.expect(f"#598 {case}: newer lease generation untouched", agent._lease_holder[path], 2)
+                        elif case in ("restore-failed", "restore-and-close-failed"):
+                            c.check("#598 rollback failure reason survives", "git identity not restored" in got.get("error", ""), repr(got))
+                            c.check("#598 failed restoration retains actual owner", os.path.exists(path))
+                            c.expect("#598 retained lease names actual owner", Owner.parse(open(path).read()).user, "alice")
+                            c.expect("#598 failed restoration retains actual git identity", ident(), "Alice")
+                            c.expect("#598 failed restoration never marked restored", agent._lease_claims[path][1][0], "live")
+                        else:
+                            c.check(f"#598 {case}: new lease removed", not os.path.exists(path))
+                            c.expect(f"#598 {case}: prior git identity restored", ident(), "Prior")
+                            email = subprocess.run(["git", "-C", d, "config", "--local", "user.email"],
+                                                   capture_output=True, text=True, check=True).stdout.strip()
+                            c.expect(f"#598 {case}: prior email restored", email, "prior@example.dev")
+                            for hook in ("pre-commit", "pre-merge-commit"):
+                                c.check(f"#598 {case}: no leaked {hook}",
+                                        not os.path.exists(os.path.join(d, ".git", "hooks", hook)))
+                            c.expect(f"#598 {case}: no leaked claim", agent._lease_claims[path], {})
+                finally:
+                    await registry.shutdown()
+    for case in ("spawn-failed", "probe-failed", "race-live", "race-settled",
+                 "restore-failed", "restore-and-close-failed", "commit-exit", "success"):
+        asyncio.run(scenario(case))
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -4123,7 +4460,9 @@ def main():
                   check_junk_without_templates_276, check_owner_hook_313,
                   check_sweep_report_358, check_sweep_bodies_363,
                   check_hung_sweep_373, check_role_node_gates_584,
-                  check_startup_soul_584, check_serve_creds_584):
+                  check_startup_soul_584, check_serve_creds_584,
+                  check_terminal_admin_598, check_terminal_protocol_598,
+                  check_terminal_claim_598, check_terminal_failed_open_598, check_terminal_timing_598):
         try:
             check(c)
         except Exception as e:
