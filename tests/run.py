@@ -66,34 +66,34 @@ def meta_env(role_name, digest, inc):
 
 
 def registered_env(role_name, digest, inc, origin="git@host:group/repo.git"):
-    """Окружение НАСТОЯЩЕГО ролевого джоба -- как его собирает принятый
-    spec.task_env #582: тройка роли -- явные PU_* в task_env, НЕ
-    NOMAD_META_автоключи (сервер договорился не полагаться на регистр
-    автореки Nomad). Источник -- живой spec.py, когда он уже несёт
-    тройку (ветка 590 ответвилась до #582), иначе ЗАПИСАННЫЙ слепок
-    выхода task_env с принятыго SHA 56033df (584-комбайн); слепок --
-    только ключи тройки/origin, с примечанием происхождения. Копия
-    руками разошлась бы со спекой молча."""
+    """Окружение НАСТОЯЩЕГО ролевого джоба -- ТОЛЬКО из живой spec.task_env
+    #582: тройка роли -- явные PU_* в task_env, НЕ NOMAD_META_автоключи
+    (сервер договорился не полагаться на регистр автореки Nomad). Живость
+    обязательна: спека, переставшая нести тройку (потерялись поля), или
+    старая сигнатура -- ГРОМКИЙ отказ провала, не тихий проход по записи;
+    иначе проводной тест зелёнел бы против устаревшего слепка (случай
+    уже был). Обрезаем только ключи тройки/origin: остальное окружение
+    задачи лаунчеру не принадлежит."""
+    from mop.server import spec
     try:
-        from mop.server import spec
         env = spec.task_env("pu-x-1", origin, soul=role_name,
                             soul_digest=digest, soul_inc=inc)
-    except TypeError:
-        # Спека ветки ещё без тройки: подставляем свои значения в слепок
-        # (ключи и пустые значения -- как собрал сервер, значения -- теста).
-        env = {**SPEC_582_TASK_ENV, "PU_SOUL": role_name,
-               "PU_SOUL_DIGEST": digest, "PU_SOUL_INC": inc,
-               "PU_SOUL_DIR": SPEC_582_TASK_ENV["PU_SOUL_DIR"].replace(
-                   SPEC_582_TASK_ENV["PU_SOUL_INC"], inc)}
+    except TypeError as e:
+        raise ValueError(f"spec.task_env no longer accepts the role triple "
+                         f"-- the wire test is stale: {e}") from None
+    missing = [k for k in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC")
+               if not env.get(k)]
+    if missing:
+        raise ValueError(f"spec.task_env came without the role triple "
+                         f"({', '.join(missing)}) -- the wire test is stale")
     out = {"PU_ORIGIN": env.get("PU_ORIGIN")}
     for k in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC", "PU_SOUL_DIR"):
         out[k] = env.get(k)
     return {k: v for k, v in out.items() if v is not None}
 
 
-# Слепок выхода task_env(pu-x-1, git@host:group/repo.git, soul=puppet)
-# с принятого дерева 56033df (#582). Digest/инкарнация в тестах свои:
-# подставляются, остальное -- как собрал сервер.
+# Записанный выход task_env с принятого дерева 56033df (#582) — только
+# диагностическая справка происхождения фикстуры; тест из него НЕ читает.
 SPEC_582_TASK_ENV = {
     "PU_ORIGIN": "git@host:group/repo.git",
     "PU_SOUL": "puppet",
@@ -433,6 +433,31 @@ def main():
     c.expect("#590 a PU_* job with an agreeing NOMAD_META triple stays a role job",
              (lambda g: (g.soul, g.soul_digest, g.soul_inc))(run.expected_role(mixed_same)),
              ("puppet", digest, INC))
+
+    # registered_env ходит ТОЛЬКО в живую спеку: если task_env перестала
+    # нести тройку (правка потеряла поля) или сигнатура ещё старая --
+    # громкий отказ, не тихий проход по записанному слепку. Иначе
+    # критический проводной тест зелёнел бы против устаревшей записи.
+    from mop.server import spec as live_spec
+    real_task_env = live_spec.task_env
+    def stripped_task_env(*a, **k):
+        env = dict(real_task_env(*a, **k))
+        for key in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC", "PU_SOUL_DIR"):
+            env.pop(key, None)
+        return env
+    def legacy_task_env(name, origin, cont=False, mem=0):
+        return {"PU_NAME": name}
+    for label, stub, word in (
+            ("without the triple", stripped_task_env, "role triple"),
+            ("of the old signature", legacy_task_env, "task_env")):
+        with patched(live_spec, task_env=stub):
+            try:
+                registered_env("puppet", digest, INC)
+                c.check(f"#590 registered_env refuses a spec task_env {label}",
+                        False, "fell through to the recorded snapshot")
+            except ValueError as e:
+                c.check(f"#590 registered_env refuses a spec task_env {label}",
+                        word in str(e), str(e))
 
     before_file = bus.FILE  # до первого ролевого запуска: подмена видна
 
