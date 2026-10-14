@@ -147,12 +147,44 @@ clear, Escape stream/Bash interruption, permission prompt и actual history.
 закрывают запуск, собственные PID/start identities проверяются при cleanup.
 Это не OS network sandbox и не проверка платного провайдера.
 
-`mop dev chat-smoke` (#615) служит воспроизводимой итоговой проверкой actual
-PTY registry/bridge/private HTTP над отдельной локальной сессией. Provider,
-bus boundary и тестовая identity изолированы; результат не выдаётся за
-живой пул. Матрица финальных фактических сценариев и точные SHA/CI находятся
-в #602. Реальная раскатка, container SSH, NATS и платный провайдер остаются
-отдельными проверками на разрешённой установке.
+`mop dev chat-smoke` (#615) проверил настоящий Claude 2.1.296 через
+private HTTP → server bridge → node Registry → собственный tmux PTY.
+Использован loopback fixture provider с фиктивным ключом; bus boundary и
+тестовая identity подставлены, чтобы не входить в рабочий пул. Результат
+не выдаётся за проверку реального NATS, контейнерного SSH или платного
+провайдера. Отчёт с временным browser cookie остаётся приватным на машине
+исполнения, не в Git, артефактах и общем журнале.
+
+| Проверка в fixture | Наблюдение |
+|---|---|
+| Admin/Origin и чтение | Неавторизованный GET и чужой Origin отвергнуты; приватная история и card читаются |
+| Read-only attach и writer | Реальные terminal escape bytes доставлены в браузер, RO write отвергнут; второй writer получил 409 |
+| Ввод и команды | Unicode/multiline дошли до fixture request; `/help` остался локальной командой CLI без model call |
+| Разговор | `/clear` сменил session_id/epoch, старый writer отказал, прежний cursor дал reset |
+| Прерывание | Escape прервал stream и Bash, дочерние shell/sleep исчезли, следующий ход завершился |
+| Окно CLI | До одобрения Bash не стартовал; `AskUserQuestion` отсутствовал в bare tool set и не засчитан |
+| Lifecycle | Resize реально изменил tmux, потерянный ответ не повторил input, logout отозвал handle, после выхода Claude ввод отказал |
+
+Браузерная проверка открыла тот же private fixture с committed hybrid `dist`:
+на компьютере видны запись истории, фактический xterm.js-экран и composer;
+через явное «Взять управление» отправлен новый fixture prompt, и его ответ
+появился в истории. На ширине 375 px вкладки работали без горизонтального
+scroll. Прежний «Экран» в этом fixture вернул отказ panel reader: этот
+runtime не моделирует старый tail, а #612 подтверждён отдельно в установке;
+это не проверка startup-log через тот же браузер.
+
+Итоговый локальный `--keep-serving` teardown обнаружил ожидание abandoned
+long-poll в тестовом HTTP server-close. #615 ограничил ожидание; повторный
+запуск подтвердил остановку собственных Claude/tmux/fixture threads без
+остатков, но завершился намеренно по сигналу до проверки `no-input-after-exit`.
+Последняя проверка отдельно прошла в полном запуске без `--keep-serving`.
+
+Ограничения: нет настоящего container SSH/NATS, rollout и платного LLM;
+permission prompt показан в default-mode тестовой CLI, тогда как текущие
+автономные папеты используют другой профиль. Состояние после `/resume`,
+нескольких реальных браузеров и реальные запросы разрешений на пуле остаются
+непроверенными. Точные SHA и CI каждого issue и интеграции фиксируются
+в #602; CI успех не означает раскатку.
 
 Все issue-ветки интегрируются в `epic/594-chat-terminal`. Зелёный CI эпика
 не является rollout. В `master` эпик попадает и раскатывается только по
