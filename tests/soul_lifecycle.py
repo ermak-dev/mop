@@ -824,6 +824,44 @@ def check_add_delegated_gates_582(c):
                 retry.get("ok") and retry.get("name") == parent, retry)
 
 
+def check_seam_adoption_582(c):
+    """Шов pu3 (#581 b8d9faf) вместо своих проверок в _answer/_delegated:
+    authorize_request -- единственный вход авторизации глагола роли.
+    Ручная сборка субъекта (f"{ROOT}.{project}.cluster.role.{caller}")
+    запрещена: грамматика -- busnames.cluster, и _answer не должен
+    держать свою копию сравнения. Проверки пускают РЕАЛЬНЫЙ путь через
+    cluster.answer с субъектом от busnames.cluster."""
+    from mop.common import busnames as bn
+    # Инвариант кода: ручных subject-строк в кластере нет.
+    raw = re.compile(r'cluster\.role')
+    bad = []
+    for line in open("mop/server/cluster.py"):
+        if raw.search(line.split("#")[0]) and "busnames" not in line:
+            bad.append(line.strip())
+    c.check("#582 no hand-built role subject strings in cluster.py",
+            not bad, bad)
+    # Путь: правильный субъект от busnames.cluster проходит шов,
+    # легаси-rpc субъект отзывается швом, а не нашей строкой.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        good = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                     "soul": "puppet", "request_id": "se-1",
+                                     "_caller": principal, "_subject":
+                                     bn.cluster("alpha", login=principal)})
+        c.check("#582 the busnames-made role subject passes the seam",
+                good.get("ok") and good.get("name") == "pu-alpha-2", good)
+        bad_subject = answer(api, "alpha",
+                             {"verb": "add", "origin": ALPHA,
+                              "soul": "puppet", "request_id": "se-2",
+                              "_caller": principal, "_subject":
+                              "mop.alpha.cluster.rpc.anton"})
+        c.check("#582 the legacy rpc subject is refused by the seam",
+                "error" in bad_subject
+                and "role subject" in (bad_subject.get("error") or ""),
+                bad_subject)
+
+
 def check_bootstrap_snapshot_coherence_582(c):
     """Блокатор 6: согласованный снапшот -- одни байты на чтение, хеш и
     запись. Хеш сверяется с прочитанными байтами, копируются они же;
@@ -891,7 +929,7 @@ def check_add_workspace_boundary_582(c):
         c.check("#582 a grant principal does not reach the legacy add "
                 "at all (#603 fence)",
                 "error" in fenced
-                and "role channel" in fenced.get("error", "")
+                and "role subject" in fenced.get("error", "")
                 and len(api.jobs) == 1, fenced)
         legacy = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                        "_caller": "anton",
@@ -1137,6 +1175,7 @@ def main():
                check_add_request_payload_582, check_add_source_gates_582,
                check_add_legacy_untouched_582, check_add_delegated_582,
                check_add_delegated_gates_582,
+               check_seam_adoption_582,
                check_bootstrap_snapshot_coherence_582,
                check_add_workspace_boundary_582,
                check_add_quota_counts_roles_582,

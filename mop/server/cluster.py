@@ -474,13 +474,15 @@ class _Launch:
                 "soul_inc": soul_inc}
 
 
-def _delegated(project, req, caller):
+def _delegated(project, req, ctx):
     """Делегированный add по каналу роли (#582/#603): принципал
     поднимает ребёнка сам, сервер выбирает всё остальное. Границы:
 
-    - родитель -- ИЗ РЕЕСТРА по принципалу (grants.binding), никогда из
-      тела: клиент не называет ни родителя, ни происхождение;
-    - роль цели -- по списку spawn бандла родителя (fail closed);
+    - авторизация -- УЖЕ швом authorize_request (#581) в _answer: субъект
+      проверен busnames.cluster, глагол -- свежим resolve, контекст шва
+      (actor/owner/job/spawn) -- единственная правда о родителе; здесь
+      своих чтений реестра НЕТ: второе чтение -- вторая правда;
+    - роль цели -- по списку spawn КОНТЕКСТА шва (fail closed);
     - клиентский workspace/bootstrap_sent -- отказ ДО всего: грант не
       грузит текст и не создаёт легаси-ребёнка без души (omitting soul --
       обход роли, не легаси-путь);
@@ -492,6 +494,7 @@ def _delegated(project, req, caller):
       человеком-хозяином родителя: актёр не открывает путь загрузки.
 
     -> ответ словарем; None здесь невозможен (ветка только add)."""
+    caller = ctx["actor"]
     if req.get("verb") != "add":
         return {"error": f"{caller}: the role channel carries the add "
                          f"verb only in this protocol version (#582)"}
@@ -499,36 +502,23 @@ def _delegated(project, req, caller):
         return {"error": f"{caller}: a delegated add takes no client "
                          f"workspace text: the child inherits the parent's "
                          f"approved bootstrap (#582)"}
-    parent_rec = grants.binding(caller, root=SOUL_ROOT)
-    if parent_rec is None:
-        return {"error": f"{caller}: unknown principal on the role channel"}
-    if parent_rec.get("project") != project:
-        return {"error": f"{caller}: the binding lives in project "
-                         f"{parent_rec.get('project')}, not {project}"}
-    # Свежая годность И право -- одним снимком реестра (grants.resolve,
-    # #581): отозванный родитель на открытом соединении не поднимает
-    # ребёнка, и право add -- у души (cluster_verbs), не у провода.
-    # Это общая авторизация роли, не спецслучай add: любой глагол канала
-    # роли резолвится тем же вызовом (#603).
-    verdict = grants.resolve(caller, "cluster", "add", root=SOUL_ROOT)
-    if not verdict.get("allow"):
-        return {"error": f"{caller}: {verdict.get('reason') or 'may not add'}"}
     # Граница проекта -- для всех актёров (#567): легаси-путь держит её
     # refusal(add), делегированная ветка идёт мимо -- тот же вопрос здесь.
     why = _foreign_origin(project, req.get("origin"))
     if why:
         return {"error": f"{caller}: {why}"}
-    allowed = grants.spawn_of(caller, root=SOUL_ROOT)
-    if req.get("soul") not in allowed:
+    if req.get("soul") not in ctx["spawn"]:
         return {"error": f"{caller}: the role {req.get('soul')} is not in "
                          f"its parent's spawn allowlist "
-                         f"({', '.join(allowed) or 'none'}); spawn is the "
-                         f"parent soul's, not the caller's to choose (#582)"}
+                         f"({', '.join(ctx['spawn']) or 'none'}); spawn is "
+                         f"the parent soul's, not the caller's to choose "
+                         f"(#582)"}
     # Дальше -- путь _add с маркером делегирования: тот держит ворота
     # проекта, резерв и активацию, здесь только граница источника.
+    # Родитель и хозяин -- из контекста шва: он читал реестр, мы -- нет.
     req = {**req, "_delegated_by": caller,
-           "_parent_job": parent_rec.get("job"),
-           "_owner": parent_rec.get("owner") or project}
+           "_parent_job": ctx["job"],
+           "_owner": ctx["owner"] or project}
     return _add(project, req)
 
 
@@ -1449,16 +1439,20 @@ def _answer(project, req):
     # старый контроллер на смешанном роллауте. Отказ -- до таблиц глаголов.
     caller = req.get("_caller") or ""
     if soul.is_grant(caller):
-        # Канал роли на месте (факт транспорта #603: субъект запроса)?
-        # Тогда глагол идёт с резолвером -- делегированная ветка add (#582).
-        subject = req.get("_subject") or ""
-        on_role_channel = (subject ==
-                           f"{busnames.ROOT}.{project}.cluster.role.{caller}")
-        if not (on_role_channel and config.get("MOP_SOUL_ROLES")):
+        # Роль выключена -- протокол не рекламируется (полусобранный
+        # сервер); сам шов флага не знает: грамматика -- не настройка.
+        if not config.get("MOP_SOUL_ROLES"):
             return {"error": f"{caller}: grant principals speak on the role "
                              f"channel, not the legacy rpc (#603)"}
+        # Авторизация -- шов реестра (#581 authorize_request), не своя
+        # сборка: субъект собран busnames.cluster, глагол -- свежим
+        # resolve, spawn-контекст -- тем же снимком. Отказ шва едет
+        # дословно: его формулировка -- часть контракта реестра.
+        ctx = grants.authorize_request(project, req, verb, root=SOUL_ROOT)
+        if "error" in ctx:
+            return ctx
         try:
-            return _delegated(project, req, caller)
+            return _delegated(project, req, ctx)
         except ValueError as e:
             return {"error": f"add: {e}"}
         except Exception as e:
