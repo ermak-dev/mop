@@ -194,14 +194,16 @@ def pick(rows, project, owner):
 # позвать: инструмент, на который сервер ответит отказом, модели не нужен.
 # Требования -- весь маршрут инструмента, не последний глагол: node_of
 # идёт глаголом alloc сервиса кластера (роль -- под своим токеном, C4),
-# ростер рендерится глаголом states агентов, autopick dispatch обещан
-# описанием и ходит ростером. Роль без дороги не видит инструмента --
+# ростер рендерится глаголом states агентов (и autopick dispatch читает
+# из него «свободный клон» тем же глаголом), autopick обещан описанием
+# и ходит ростером. Роль без дороги не видит инструмента --
 # fail closed: тихий permissions violation на первом же адресате хуже.
 HAND_TOOLS = {"agents": {"cluster_verbs": ("roster",), "node_verbs": ("states",)},
               "send": {"node_verbs": ("send",), "cluster_verbs": ("alloc",)},
               "tail": {"node_verbs": ("tail",), "cluster_verbs": ("alloc",)},
               "slash": {"node_verbs": ("type",), "cluster_verbs": ("alloc",)},
-              "dispatch": {"cluster_verbs": ("alloc", "roster"), "dispatch": True}}
+              "dispatch": {"cluster_verbs": ("alloc", "roster"),
+                          "node_verbs": ("states",), "dispatch": True}}
 CHANNEL_TOOLS = ("agents", "send", "tail")
 
 
