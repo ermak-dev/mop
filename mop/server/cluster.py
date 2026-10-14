@@ -1466,7 +1466,17 @@ def _answer(project, req):
                 return {"error": f"{ctx['actor']}: a grant request carries "
                                  f"no client workspace text: the policy is "
                                  f"approved by its human owner (#582)"}
-            req = {**req, "_owner": ctx["owner"], "_actor": ctx["actor"]}
+            # Власть -- хозяин-человек: ворота аренды, токен посадки и
+            # журнал читают _caller (lease.caller), и после шва это
+            # человек, не принципал (#582, как у узла актёра #584).
+            # Штамп -- НА МЕСТЕ: словарь после обработчика читает журнал,
+            # копия оставила бы строку «by grant-…» (аудит -- человек).
+            # Актёр -- отдельно, для аудита. Поля власти из тела (force,
+            # owner, holder) срезаются: у гранта их нет, чужую аренду и
+            # токен тело снять не может; force человека не меняется.
+            for key in ("force", "owner", "holder"):
+                req.pop(key, None)
+            req.update(_caller=ctx["owner"], _actor=ctx["actor"])
             name = req.get("name")
             vrow = _row(verb)
             origin, exists = (None, False)

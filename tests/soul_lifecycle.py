@@ -974,6 +974,181 @@ def check_role_channel_verbs_582(c):
                 revoked)
 
 
+def check_role_channel_lease_582(c):
+    """Блокатор ревью da580a2: владение на канале роли. Существующие
+    ворота -- lease.caller(req) -> _caller, и на канале роли _caller --
+    принципал: чужая живая аренда ЧЕЛОВЕКА обязана отказывать гранту,
+    своя -- пускать, и заметка/журнал называют человека, а не грант.
+    force из тела гранта не может снять чужую аренду: узел актёра force
+    срезает (#584 -- контракт уже там), сервис кластера -- нет; без
+    среза force:true брал бы чужое молча. Токен посадки -- тем же
+    правилом: держатель -- человек-хозяин.
+    HYPOTHESIS: сегодня _answer штампует только _owner, который ворота
+    не читают, -- _caller остаётся принципалом, и may_touch видит его:
+    своя аренда человека отказывает, чужая проходит, landing держит
+    принципал, а force из тела снимает чужое. SOLUTION: доверенный
+    _caller=ctx['owner'] после authorize_request (актёр -- отдельно),
+    force срезается на глаголах управления ролью; легаси-force человека
+    не меняется. STATUS: pending — RED first."""
+    import time as _time
+    from mop.common import busnames as bn, landing, lease
+    from mop.common.domain import Owner
+
+    def held_clone(login, dirty=0, ahead=0):
+        """Факты клона с живой арендой: свежая запись владельца."""
+        return {"clone": {"cur": "feat/1-x", "def": "master",
+                          "dirty": dirty, "ahead": ahead,
+                          "owner": Owner(login, int(_time.time()) - 60).to_dict()}}
+
+    def idle_clone(login):
+        """Факты клона с мёртвой арендой: чистый клон, окно вышло."""
+        return {"clone": {"cur": "master", "def": "master",
+                          "dirty": 0, "ahead": 0,
+                          "owner": Owner(login, int(_time.time()) - 9999).to_dict()}}
+
+    def on_role(api, project, worker, fields):
+        return answer(api, project, {**fields, "_caller": worker,
+                                     "_subject": bn.cluster(project,
+                                                            login=worker)})
+
+    # restart/update по каналу роли против РЕАЛЬНЫХ ворот (не подмены
+    # _clone_of=None): чужая живая аренда отказывает, своя -- нет.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        rec = grants.by_job("alpha", parent, root=g)
+        target = soul_job("pu-alpha-9", digest=rec["soul_digest"])
+        target["Meta"]["soul"] = rec["role"]
+        target["Meta"]["soul_inc"] = rec["soul_inc"]
+        api.jobs["pu-alpha-9"] = target
+        api.allocs["pu-alpha-9"] = {"ID": "a1", "NodeName": "hyper",
+                                    "JobID": "pu-alpha-9",
+                                    "ClientStatus": "running",
+                                    "TaskStates": {}}
+        human = rec["owner"]
+        # Своя живая аренда человека-хозяина: грант проходит -- ворота
+        # видят человека; журнал называет его же, без self-declared:
+        # штамп доверенного _caller меняет сам словарь запроса, который
+        # журнал читает после обработчика (как у узла актёра #584).
+        served = {"verb": "restart", "name": "pu-alpha-9", "_caller": principal,
+                  "_subject": bn.cluster("alpha", login=principal)}
+        with patched(cluster, _clone_of=lambda name: held_clone(human)):
+            mine = answer(api, "alpha", served)
+        c.check("#582 a grant passes its owner's own live lease",
+                mine.get("ok"), mine)
+        c.check("#582 the grant branch stamps the served request with "
+                "the human owner",
+                served.get("_caller") == human
+                and served.get("_actor") == principal, served)
+        line = " ".join(cluster.journal("alpha", served, {"ok": True}))
+        c.check("#582 the journal names the grant's human owner",
+                f"by {human}" in line and "self-declared" not in line, line)
+        # Чужая живая аренда: отказ, имя владельца -- человек, не грант.
+        with patched(cluster, _clone_of=lambda name: held_clone("olga")):
+            theirs = on_role(api, "alpha", principal,
+                             {"verb": "restart", "name": "pu-alpha-9"})
+        c.check("#582 a grant cannot break a foreign live lease",
+                "error" in theirs and "olga" in theirs.get("error", ""), theirs)
+        # Мёртвая аренда -- не работа: чистый клон после окна проходит.
+        with patched(cluster, _clone_of=lambda name: idle_clone("olga")):
+            stale = on_role(api, "alpha", principal,
+                            {"verb": "restart", "name": "pu-alpha-9"})
+        c.check("#582 a dead foreign lease does not block a grant",
+                stale.get("ok"), stale)
+        # force из тела гранта НЕ снимает чужую живую аренду: срез -- как
+        # у узла актёра (#584), своего force у гранта нет.
+        with patched(cluster, _clone_of=lambda name: held_clone("olga")):
+            forced = on_role(api, "alpha", principal,
+                             {"verb": "restart", "name": "pu-alpha-9",
+                              "force": True})
+        c.check("#582 a grant's body force cannot take a foreign live lease",
+                "error" in forced and "olga" in forced.get("error", ""), forced)
+        # update -- тот же прогон ворот: своя аренда проходит.
+        with patched(cluster, _clone_of=lambda name: held_clone(human)):
+            upd = on_role(api, "alpha", principal,
+                          {"verb": "update", "name": "pu-alpha-9",
+                           "origin": ALPHA})
+        c.check("#582 a grant update passes its owner's own lease",
+                upd.get("error") is None, upd)
+
+    # Токен посадки: держатель -- человек-хозяин, не принципал; отдаёт
+    # тот же человек, чужой -- нет. Файл -- настоящий, под швом.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        rec = grants.by_job("alpha", parent, root=g)
+        human = rec["owner"]
+        d = tempfile.mkdtemp(prefix="mop-test-582l-")
+        try:
+            with patched(landing, FILE=os.path.join(d, "landing.json")):
+                got = on_role(api, "alpha", principal,
+                              {"verb": "landing", "action": "take",
+                               "puppet": "pu-alpha-2"})
+                held_by = (landing.read().get("alpha") or {}).get("holder")
+                c.check("#582 the landing token is held by the grant's "
+                        "human owner",
+                        got.get("ok") and held_by == human, (got, held_by))
+                # Повторно берёт тот же человек -- повтор, не отказ.
+                again = on_role(api, "alpha", principal,
+                                {"verb": "landing", "action": "take",
+                                 "puppet": "pu-alpha-2"})
+                c.check("#582 a repeated take by the same human repeats",
+                        again.get("ok"), again)
+                # Токен держит чужой человек: грант без force не берёт и
+                # не отдаёт, force:true из тела не отбирает (срезан).
+                with patched(landing, FILE=os.path.join(d, "landing.json"),
+                             read=lambda path=None: {"alpha": {
+                                 "holder": "olga", "puppet": "pu-olga-1",
+                                 "since": "2026-10-14T00:00:00Z"}},
+                             write=lambda tokens, path=None: stolen.append(
+                                 tokens) or tokens):
+                    stolen = []
+                    thief = on_role(api, "alpha", principal,
+                                    {"verb": "landing", "action": "take",
+                                     "puppet": "pu-alpha-3", "force": True})
+                    c.check("#582 a grant's body force cannot take a "
+                            "foreign-held token",
+                            "error" in thief and not stolen, (thief, stolen))
+                    rogue = on_role(api, "alpha", principal,
+                                    {"verb": "landing", "action": "give",
+                                     "force": True})
+                    c.check("#582 a grant's body force cannot give away a "
+                            "foreign-held token",
+                            "error" in rogue and not stolen, (rogue, stolen))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    # Легаси-контраст на тех же воротах: force человека снимает чужое,
+    # держатель -- логин субъекта. Регресс двоих сразу -- не один фикс.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        api.jobs["pu-alpha-1"] = soul_job("pu-alpha-1")
+        api.allocs["pu-alpha-1"] = {"ID": "a2", "NodeName": "hyper",
+                                    "JobID": "pu-alpha-1",
+                                    "ClientStatus": "running",
+                                    "TaskStates": {}}
+        with patched(cluster, _clone_of=lambda name: held_clone("olga")):
+            human_force = answer(api, "alpha", {"verb": "restart",
+                                                "name": "pu-alpha-1",
+                                                "_caller": "anton",
+                                                "force": True})
+        c.check("#582 a human's force keeps taking a foreign live lease",
+                human_force.get("ok")
+                and (human_force.get("owner_note") or "") == "taken from olga",
+                human_force)
+        d = tempfile.mkdtemp(prefix="mop-test-582h-")
+        try:
+            with patched(landing, FILE=os.path.join(d, "landing.json")):
+                got = answer(api, "alpha", {"verb": "landing", "action": "take",
+                                            "puppet": "pu-alpha-1",
+                                            "_caller": "anton"})
+                held_by = (landing.read().get("alpha") or {}).get("holder")
+                c.check("#582 a human keeps holding the landing token",
+                        got.get("ok") and held_by == "anton", (got, held_by))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def check_bootstrap_snapshot_coherence_582(c):
     """Блокатор 6: согласованный снапшот -- одни байты на чтение, хеш и
     запись. Хеш сверяется с прочитанными байтами, копируются они же;
@@ -1289,6 +1464,7 @@ def main():
                check_add_delegated_gates_582,
                check_seam_adoption_582,
                check_role_channel_verbs_582,
+               check_role_channel_lease_582,
                check_bootstrap_snapshot_coherence_582,
                check_add_workspace_boundary_582,
                check_add_quota_counts_roles_582,
