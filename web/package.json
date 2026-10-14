@@ -16,6 +16,8 @@
     "@mantine/hooks": "^9.6.3",
     "@mantine/notifications": "^9.6.3",
     "@tabler/icons-react": "^3.48.0",
+    "@xterm/xterm": "5.5.0",
+    "@xterm/addon-fit": "0.10.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "recharts": "^3.10.1"

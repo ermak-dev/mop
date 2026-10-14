@@ -1,0 +1,30 @@
+.hybrid-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.hybrid-screen { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.hybrid-controls, .hybrid-history-toolbar, .hybrid-composer { flex-shrink: 0; background: var(--mantine-color-gray-0); border-bottom: 1px solid var(--mantine-color-default-border); }
+.hybrid-panes { flex: 1; min-height: 0; min-width: 0; }
+.hybrid-chat-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.hybrid-history { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+.hybrid-transcript { max-width: 76ch; margin: 0 auto; }
+.hybrid-message { padding: 12px 0; border-bottom: 1px solid var(--mantine-color-default-border); }
+.hybrid-chat-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.hybrid-detail { margin: 12px 0; padding: 8px 12px; border-left: 3px solid var(--mantine-color-gray-4); background: var(--mantine-color-gray-0); }
+.hybrid-detail summary { cursor: pointer; overflow-wrap: anywhere; padding: 4px 0; }
+.hybrid-detail pre { font: 12px/1.5 var(--mantine-font-family-monospace); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.hybrid-composer { border-bottom: 0; border-top: 1px solid var(--mantine-color-default-border); }
+.hybrid-composer-extra { margin-top: 8px; font-size: var(--mantine-font-size-sm); }
+.hybrid-composer-extra summary { cursor: pointer; padding: 4px 0; }
+.hybrid-terminal-pane { flex: 1; min-width: 0; min-height: 0; flex-direction: column; padding: 16px; }
+.hybrid-terminal { flex: 1; min-height: 160px; width: 100%; overflow: hidden; background: #1a1b1e; padding: 8px; }
+.hybrid-terminal .xterm { height: 100%; }
+.hybrid-panes-split > .hybrid-chat-pane { flex: 1.1; }
+.hybrid-panes-split > .hybrid-terminal-pane { flex: 1; border-left: 1px solid var(--mantine-color-default-border); }
+.hybrid-workspace :focus-visible { outline: 2px solid var(--mantine-color-blue-6); outline-offset: 2px; }
+[data-mantine-color-scheme="dark"] .hybrid-controls,
+[data-mantine-color-scheme="dark"] .hybrid-history-toolbar,
+[data-mantine-color-scheme="dark"] .hybrid-composer,
+[data-mantine-color-scheme="dark"] .hybrid-detail { background: var(--mantine-color-dark-6); }
+@media (max-width: 700px) {
+  .hybrid-split-toggle { display: none; }
+  .hybrid-panes-split > .hybrid-terminal-pane { display: none !important; }
+  .hybrid-controls button { min-height: 32px; }
+}

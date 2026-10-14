@@ -12,8 +12,15 @@ import { renderUi } from "../test-utils";
 const ADMIN = { login: "admin", role: "admin" as const };
 const ok = (lines: string[]) => ({ ok: true, status: 200, json: async () => ({ lines }) }) as Response;
 const tick = async (ms = 0) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
-const open = () => renderUi(
-  <PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
+const open = () => {
+  const fetchTail = vi.mocked(fetch);
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
+    : fetchTail(url, init));
+  const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  return view;
+};
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
