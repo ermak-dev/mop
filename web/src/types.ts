@@ -25,7 +25,25 @@ export interface Puppet {
   name: string; node: string; alloc_status: string; state: string;
   kind: VerdictKind; bucket?: Kind; detail?: string | null; branch?: string | null;
   owner: string; llm: string; origin: string; disk_kb: number | null;
+  soul?: string | null; soul_digest?: string | null; soul_inc?: string | null;
+  receives_dispatch?: boolean | null;
 }
+
+/** Канонический ростер (#587): инкарнация папета не равна разговору или
+ *  транспортному endpoint. Локальная строка не допускает Nomad-действий. */
+export interface ManagedSession extends Omit<Puppet, "owner" | "origin"> {
+  source: "managed"; id: string; project: string; user: string | null;
+  role: string | null; role_source: "meta"; unmanaged: false;
+  incarnation: string | null; soul_digest: string | null; origin: string | null;
+  conversation: string | null; addresses: string[];
+}
+export interface LocalSession {
+  source: "local"; id: string; project: string; user: string | null;
+  role: null; role_source: "legacy"; unmanaged: true;
+  conversation: string | null; display: string; cwd: string | null;
+  addresses: string[]; identified: boolean;
+}
+export type RosterSession = ManagedSession | LocalSession;
 
 export interface Project { name: string; puppets: Puppet[]; counts: Counts }
 
@@ -64,6 +82,7 @@ export interface Load { total: number; allocated: number; free_slots: number; se
 export interface Snapshot {
   at: number | null;
   projects: Project[];
+  sessions?: RosterSession[];
   counts: Counts;
   nodes: Node[];
   usage: UsageDay[];

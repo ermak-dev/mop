@@ -76,14 +76,29 @@ class _Writer:
     def __enter__(self):
         fsutil.make_private_dir(self.root)
         self.fd = _locked(self.root)
-        self.reg = _read(self.root)
+        try:
+            self.reg = _read(self.root)
+        except BaseException:
+            # Битый реестр роняет чтение ПОСЛЕ захвата flock (#581):
+            # без отпуска fd держал бы LOCK_EX навсегда, и следующий
+            # писатель в другом процессе (callout, сервис) висел бы.
+            self._release()
+            raise
         return self
 
-    def __exit__(self, *exc):
-        if exc[0] is None:
-            _write(self.root, self.reg)
+    def _release(self):
+        """Отпустить замок и закрыть fd -- на любом выходе."""
         fcntl.flock(self.fd, fcntl.LOCK_UN)
         self.fd.close()
+
+    def __exit__(self, *exc):
+        try:
+            if exc[0] is None:
+                _write(self.root, self.reg)
+        finally:
+            # Сбой записи -- не повод держать замок (#581): следующий
+            # писатель читает и видит причину, а не молчание.
+            self._release()
         return False
 
 
@@ -103,7 +118,11 @@ def _read(root):
     except FileNotFoundError:
         return {}
     if not raw.strip():
-        return {}
+        # Пустой ФАЙЛ -- порча, а не «нет реестра» (#581): отсутствие --
+        # единственный пустой. Тихо стёртый реестр родился бы заново,
+        # и отозванные привязки воскресли бы.
+        raise ValueError(f"grants: registry {path} is corrupted: "
+                         f"empty file")
     try:
         reg = json.loads(raw)
     except ValueError as e:
@@ -135,7 +154,7 @@ def _pass_path(root, principal):
 
 
 def prepare(project, role, digest, manifest, prompt, owner, request_id,
-            job, soul_inc, intent, root=None):
+            job, soul_inc, intent, root=None, actor=None):
     """Подготовить грант до регистрации: новый принципал, резерв job/inc.
 
     Идемпотентна по request_id с привязкой к интенту: ретрай того же
@@ -147,7 +166,12 @@ def prepare(project, role, digest, manifest, prompt, owner, request_id,
     отдельная случайная строка, 0600, в реестр не попадает; бандл
     write-once по дайджесту (#579). Запись неактивна: активного гранта до
     подтверждения регистрации нет. Ответ -- вся запись: принципал в ней
-    поле, отдельным кортежем он был бы второй правдой о том же."""
+    поле, отдельным кортежем он был бы второй правдой о том же.
+
+    owner -- человек-хозяин записи; actor (#582) -- кто ЗАВЕЛ, отдельным
+    полем: делегированный add заводит принципал роли, и его происхождение
+    -- факт аудита, не право. Actor не входит в душу: владелец и после
+    делегирования человек, и путь загрузки workspace грант не получает."""
     manifest = dict(manifest or {})
     with _THREAD_LOCK, _Writer(_root_dir(root)) as w:
         for principal, rec in w.reg.items():
@@ -156,18 +180,20 @@ def prepare(project, role, digest, manifest, prompt, owner, request_id,
             same = (rec.get("intent") == intent
                     and rec.get("soul_digest") == digest
                     and rec.get("job") == job and rec.get("soul_inc") == soul_inc
-                    and rec.get("owner") == owner and rec.get("project") == project)
+                    and rec.get("owner") == owner and rec.get("project") == project
+                    and rec.get("actor") == actor)
             if not same:
                 raise ValueError(
                     f"grants: request {request_id} is already prepared with "
-                    f"a different payload (intent/digest/job/inc/owner/project)")
+                    f"a different payload (intent/digest/job/inc/owner/"
+                    f"project/actor)")
             return dict(rec)
         principal = soul.grant_user(secrets.token_hex(16))
         password = secrets.token_urlsafe(32)
         rec = soul.binding(principal, owner=owner, project=project, job=job,
                            soul_inc=soul_inc, soul_digest=digest, role=role,
                            active=False)
-        rec.update(request_id=request_id, intent=intent)
+        rec.update(request_id=request_id, intent=intent, actor=actor)
         _store_bundle(_root_dir(root), digest, manifest, prompt)
         w.reg[principal] = rec
         fsutil.write_private(_pass_path(_root_dir(root), principal), password + "\n")
@@ -306,6 +332,16 @@ def by_job(project, job, soul_inc=None, root=None):
         return _select_job(_read(_root_dir(root)), project, job, soul_inc)
 
 
+def binding_named(project, job, root=None):
+    """Есть ли у имени ХОТЬ какая-то привязка (#590): pending, активная,
+    отозванная -- без различения. Ветвление bootstrap'а: ролевое имя
+    не должно молча уйти на легаси-путь с проектным кредом, даже когда
+    привязка ещё не активна или уже отозвана -- отказ, не подмена."""
+    reg = _read(_root_dir(root))
+    return any(rec.get("project") == project and rec.get("job") == job
+               for rec in reg.values())
+
+
 def admit(principal, root=None):
     """Годен ли принципал к НОВОМУ входу: активная связанная привязка.
 
@@ -315,7 +351,12 @@ def admit(principal, root=None):
     rec = binding(principal, root=root)
     if rec is None:
         return False, f"grants: unknown principal {principal}"
-    if rec.get("revoked_at") or not rec.get("active"):
+    if rec.get("revoked_at"):
+        # Отзыв и неподтверждённость -- разные причины (#579): pu4's
+        # cluster._answer читает «is revoked» явно; один текст на обе
+        # ветки прятал отзыв от диагностики и от ретрая callout.
+        return False, f"grants: {principal} is revoked"
+    if not rec.get("active"):
         return False, f"grants: {principal} is not an active binding"
     if not rec.get("job") or not rec.get("soul_inc"):
         return False, f"grants: {principal} is not bound to an incarnation"
@@ -333,17 +374,70 @@ def password_ok(principal, password, root=None):
     return bool(stored) and hmac.compare_digest(stored, password or "")
 
 
+def password_of(principal, root=None):
+    """Пароль принципала для выдачи телу (#590), либо None.
+
+    Единственный читатель файла пароля НА ВЫДАЧУ: ответ bootstrap'а роли
+    собирает bootstrap.role_payload, и пароль едет одним полем bus.password
+    -- не в реестр, не в журнал. Срезанный (cut, #579) файл -- None: вход
+    и выдача отказаны, живое соединение держит свой ACL до переподключения."""
+    try:
+        with open(_pass_path(_root_dir(root), principal)) as f:
+            out = f.read().strip()
+    except OSError:
+        return None
+    return out or None
+
+
 def bundle(digest, root=None):
-    """Закреплённый бандл по дайджесту, либо None."""
+    """Закреплённый бандл по дайджесту, либо None. Внутренний IO (#581):
+    путь для авторитета -- load_bundle/_validated_bundle, не этот словарь.
+    Имя файла промпта -- общая проверка ДО открытия (#581): путь может
+    прийти только из хранимого manifest.json, и побег за пределы каталога
+    бандла -- отказ, а не чтение чужого файла."""
     path = _bundle_dir(_root_dir(root), digest)
     try:
         with open(os.path.join(path, "manifest.json")) as f:
             manifest = json.load(f)
+        # from_manifest канонизует тем же parse: имя промпта валидно
+        # прежде, чем по нему открывается файл.
+        soul.from_manifest(manifest, b"")
         with open(os.path.join(path, soul_bundle_name(manifest)), "rb") as f:
             prompt = f.read()
     except (OSError, ValueError):
         return None
     return {"manifest": manifest, "prompt": prompt}
+
+
+def load_bundle(digest, root=None):
+    """Бандл хранилища как soul.Bundle (#592/#581), либо None.
+
+    Прогон роли кормит allowlist секретов из ДОВЕРЕННОГО закреплённого
+    бандла (play(bundle=...)), а словарь bundle() -- сырые manifest.json
+    и промпт без схемы. Сборка и сверка -- общий конструктор from_manifest
+    (#580): digest собранных байт обязан совпасть с запрошенным, иначе
+    хранилище держит не то, что закрепила регистрация. None -- бандла нет
+    или он не собирается: отказ, не пустая душа."""
+    got = bundle(digest, root=root)
+    if got is None:
+        return None
+    try:
+        made = soul.from_manifest(got["manifest"], got["prompt"])
+    except ValueError:
+        return None
+    return made if made.digest == digest else None
+
+
+def _validated_bundle(digest, root=None):
+    """Валидированный бандл для ЧИТАТЕЛЕЙ АВТОРИТЕТА (#581), либо None.
+
+    Тот же путь, что load_bundle: from_manifest проверяет схему и
+    переваривает digest, сверки -- одной формулой, без второй копии
+    хеша. resolve/_target_flag/spawn_of/permissions не читают сырой
+    словарь: байты, не сходящиеся с digest'ом реестра, -- отказ
+    авторитета (allow False, пустой spawn, пустой ACL), а не источник
+    прав. bundle() -- внутренний IO, авторитет его в руки не берёт."""
+    return load_bundle(digest, root=root)
 
 
 def resolve(principal, service, verb, target=None, root=None):
@@ -361,15 +455,19 @@ def resolve(principal, service, verb, target=None, root=None):
     if rec is None:
         return {"allow": False,
                 "reason": f"grants: unknown principal {principal}"}
-    if rec.get("revoked_at") or not rec.get("active"):
+    if rec.get("revoked_at"):
+        return {"allow": False,
+                "reason": f"grants: {principal} is revoked"}
+    if not rec.get("active"):
         return {"allow": False,
                 "reason": f"grants: {principal} is not an active binding"}
-    got = bundle(rec.get("soul_digest"), root=root)
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
     if got is None:
         return {"allow": False,
-                "reason": f"grants: bundle {rec.get('soul_digest')} "
-                          f"is not in the store"}
-    parsed = soul.parse(json.dumps(got["manifest"]))
+                "reason": f"grants: the pinned bundle {rec.get('soul_digest')}"
+                          f" does not verify against its digest -- the store "
+                          f"holds bytes the registration never pinned"}
+    parsed = got.manifest
     verbs = tuple(getattr(parsed.capabilities,
                           "node_verbs" if service == "node"
                           else "cluster_verbs"))
@@ -418,26 +516,101 @@ def resolve_target(project, target, root=None):
     return _target_block(_read(_root_dir(root)), project, target, root)
 
 
+def describe_target(project, target, soul_inc=None, root=None):
+    """Полное состояние привязки цели для узла (#584): data-only.
+
+    Режим только-цели resolve: узел читает привязку ДО того, как процесс
+    роли сможет действовать. Отбор свой, не by_job: без инкарнации живая
+    привязка предпочтительна (переиспользованное имя держит новый грант),
+    но единственная неживая видима С её состоянием -- узлу различить
+    «никогда не была привязана» (легаси-путь) и «привязана, но отозвана»
+    (снести) важнее, чем не видеть ничего; неоднозначность неживых --
+    тот же громкий отказ. Пароля здесь нет и не бывает: это чтение,
+    не выдача кредов."""
+    reg = _read(_root_dir(root))
+    rec = _select_job(reg, project, target, soul_inc)
+    if rec is None and soul_inc is None:
+        rest = [r for r in reg.values()
+                if r.get("project") == project and r.get("job") == target]
+        if len(rest) > 1:
+            raise ValueError(f"grants: {project}/{target} has ambiguous "
+                             f"bindings: {', '.join(sorted(
+                                 r.get('principal', '?') for r in rest))}")
+        rec = dict(rest[0]) if rest else None
+    if rec is None:
+        return {"found": False}
+    return {"found": True, "job": rec.get("job"),
+            "project": rec.get("project"), "role": rec.get("role"),
+            "soul_inc": rec.get("soul_inc"), "owner": rec.get("owner"),
+            "soul_digest": rec.get("soul_digest"),
+            "active": bool(rec.get("active")),
+            "revoked_at": rec.get("revoked_at"),
+            "receives_dispatch": _target_flag(_root_dir(root), rec)}
+
+
 def _target_flag(root, rec):
-    got = bundle(rec.get("soul_digest"), root=root)
+    """Флаг цели из ВАЛИДИРОВАННОГО бандла (#581): сырой словарь без
+    сверки digest рендерил бы факт из байтов, которые регистрация не
+    закрепляла. Бандл не собирается -- False: цель не принимает
+    диспетчеризацию, fail closed."""
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
     if got is None:
         return False
-    return _runtime(got["manifest"], "receives_dispatch")
+    return got.manifest.runtime.receives_dispatch
 
 
-def _role_verbs(manifest, service):
-    parsed = soul.parse(json.dumps(manifest))
-    return tuple(getattr(parsed.capabilities,
-                         "node_verbs" if service == "node"
-                         else "cluster_verbs"))
+def spawn_of(principal, root=None):
+    """Разрешённые роли цели принципала (#582): список spawn его бандла.
+    Пусто -- принципал никого не поднимает; нет бандла или байты не
+    сходятся с digest'ом -- тоже пусто: fail closed. Право поднимать --
+    у души, не у провода: делегированный add сверяет роль цели по
+    ЭТОМУ списку, не по грамматике субъекта."""
+    rec = binding(principal, root=root)
+    if rec is None:
+        return ()
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
+    return tuple(got.manifest.capabilities.spawn) if got else ()
 
 
-def _flag(manifest, name):
-    return bool((manifest.get("capabilities") or {}).get(name))
+def authorize_request(project, req, verb, root=None):
+    """Доверенный контекст глагола роли на канале кластера (#582/#584).
 
+    Один вход вместо двух независимых _answer: серверная проверка ФАКТА
+    -- субъект, вызывающий, глагол -- и свежий grants.resolve по
+    ФАКТИЧЕСКОМУ глаголу. Закрывает дыру 809ffc7: отозванный родитель
+    не проходит -- binding+spawn без проверки жизни проходили бы мимо
+    отзыва. Правила:
 
-def _runtime(manifest, name):
-    return bool((manifest.get("runtime") or {}).get(name))
+    -- вызывающий -- принципал роли, названный субъектом (_caller
+       каркаса #207, не тело): не-грант -- отказ, у человека легаси-rpc;
+    -- субъект -- ТОЛЬКО настоящий role-субъект кластера, хелпером
+       busnames.cluster, не строкой: самовольный легаси cluster.rpc
+       старый контроллер исполнил бы без резолвера;
+    -- проект субъекта совпадает с проектом вызова: чужой проект не
+       читается чужим принципалом;
+    -- глагол -- свежим resolve(service='cluster'): отзыв виден сразу,
+       без кэша; цель add (soul) -- по списку spawn того же resolve-контекста.
+
+    -> {actor, owner, job, soul_inc, role, soul_digest, spawn} либо
+    {"error": причина}. Владелец-человек едет дальше -- существующие
+    ворота аренды (#133) читают его как сегодня."""
+    who = req.get("_caller") or ""
+    subject = req.get("_subject") or ""
+    if not soul.is_grant(who):
+        return {"error": f"{who or 'anonymous'}: the role channel serves "
+                         f"grant principals only (#603)"}
+    if subject != busnames.cluster(project, login=who):
+        return {"error": f"{who}: grant principals speak on the role "
+                         f"subject {busnames.cluster(project, login=who)}, "
+                         f"not {subject or 'the legacy rpc'} (#603)"}
+    verdict = resolve(who, "cluster", verb, root=root)
+    if not verdict.get("allow"):
+        return {"error": f"{who}: {verdict.get('reason') or 'refused'}"}
+    return {"actor": who, "owner": verdict.get("owner"),
+            "job": verdict.get("job"), "soul_inc": verdict.get("soul_inc"),
+            "role": verdict.get("role"),
+            "soul_digest": verdict.get("soul_digest"),
+            "spawn": spawn_of(who, root=root)}
 
 
 def _now():
@@ -451,25 +624,32 @@ def permissions(principal, rec=None, root=None):
     Проволочное ограждение #603: НИ ОДНОГО легаси-rpc-субъекта человека --
     ни node rpc, ни cluster rpc, ни с логином, ни без. Старый агент или
     контроллер на смешанном роллауте исполнял бы глагол роли БЕЗ
-    резолвера; role-субъекты (node.<n>.role.<grant>, cluster.role.<grant>)
-    высаживает #603, до них принципал публикацией в чужие каналы не
-    говорит вовсе. Dispatch -- отдельный канал, без изменений. Подписка --
-    только _INBOX (ответы); после #603 -- собственный приватный префикс.
-    Легаси-набор puppet-<проект> (ан .msg, broadcast, events) принципалу
-    не достаётся вовсе (#579)."""
+    резолвера; роль говорит субъектами канала role (node.<n>.role.<grant>,
+    cluster.role.<grant>) и dispatch -- полным принципалом (#603: голый
+    hex на проводе не появляется). Подписка -- ТОЛЬКО свой приватный
+    префикс ответов (_MOP_REPLY.<grant>.>): публичный _INBOX человеку
+    читаем, и ответ узла несёт служебные данные; свой ответ принципал
+    публикует тем же префиксом. Легаси-набор puppet-<проект> (ан .msg,
+    broadcast, events) принципалу не достаётся вовсе (#579)."""
     rec = rec or binding(principal, root=root)
     if rec is None:
         return {"publish": [], "subscribe": []}
-    got = bundle(rec.get("soul_digest"), root=root) or {}
-    manifest = got.get("manifest") or {}
+    # Один валидированный путь (#581): ACL рендерится из сверенного
+    # бандла; байты, не сходящиеся с digest'ом, субъектов роли не
+    # дают -- пустой ACL вместо расширенного.
+    got = _validated_bundle(rec.get("soul_digest"), root=root)
+    caps = got.manifest.capabilities if got else None
     project = rec.get("project")
-    gid = soul.grant_id(principal) or principal
-    publish = [busnames.INBOX]
-    if _flag(manifest, "dispatch"):
-        publish.append(busnames.dispatch_subject(project, "*", gid))
-    # Кластерные глаголы роли едут субъектом cluster.role.<grant> (#603),
-    # не легаси cluster.rpc: helper высаживает #603, до него -- не выдан.
-    return {"publish": publish, "subscribe": [busnames.INBOX]}
+    publish = [busnames.private_prefix(principal) + ".*"]
+    if caps and caps.dispatch:
+        publish.append(busnames.dispatch_subject(project, "*", principal))
+    if caps and caps.node_verbs:
+        publish.append(busnames.node(project, "*", busnames.ROLE_CHANNEL,
+                                     login=principal))
+    if caps and caps.cluster_verbs:
+        publish.append(busnames.cluster(project, login=principal))
+    return {"publish": publish,
+            "subscribe": [busnames.private_scope(principal)]}
 
 
 class Provider:

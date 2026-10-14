@@ -13,7 +13,7 @@ from mop.common.domain import Gone
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "args": [
+MCP = {"annotations": "destructive", "node_verbs": ['wipe'], "cluster_verbs": ['alloc'], "args": [
     {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
     {"name": "force", "type": "boolean", "flag": "--force",
      "help": "act on a puppet another master leads; the answer names whom"}]}

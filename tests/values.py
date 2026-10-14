@@ -203,7 +203,11 @@ def agent_forms():
         agent.tmux_alive, agent.session_probe = yes, probe
         names = [f"pu-mop-{i}" for i in range(len(OWNER_LINES))]
         out["clone_facts"] = dump([asyncio.run(agent.clone_facts(n)) for n in names])
-        out["states"] = dump(asyncio.run(agent.v_states(None, {"names": names})))
+        # Глагол states зовём напрямую, но телом -- как его доставляет каркас:
+        # _project ставит handle из субъекта (#584), не тело и не имя папета.
+        # Без него глагол падает KeyError ещё до фактов -- как упало в CI 5137.
+        out["states"] = dump(asyncio.run(agent.v_states(
+            None, {"verb": "states", "names": names, "_project": "mop"})))
 
         # Аренда: запись, отказ, откат -- байты файла после каждого шага.
         agent.bsh, agent._event = bash, nothing

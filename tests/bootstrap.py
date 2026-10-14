@@ -135,13 +135,16 @@ def check_result_334(c):
 
     # Прогон по запросу узла пишет итог сам -- и когда кред не нашёлся:
     # прогон уже был.
+    from mop.common.domain import JobMeta
     with patched(bootstrap, ROOT=root, play=lambda req, project: dict(failed),
-                 puppet_creds=lambda project: None):
+                 puppet_creds=lambda project: None,
+                 _job_meta=lambda n: JobMeta(None, None)):
         bootstrap.answer("proj", {"verb": "bootstrap", "name": name})
     c.expect("#334 answer(bootstrap) writes the result of its play",
              (bootstrap.read_result(root, name) or {}).get("task"), "env file")
     with patched(bootstrap, ROOT=root, play=lambda req, project: dict(ok),
-                 puppet_creds=lambda project: None):
+                 puppet_creds=lambda project: None,
+                 _job_meta=lambda n: JobMeta(None, None)):
         bootstrap.answer("other", {"verb": "bootstrap", "name": name})
     c.expect("#334 a refused request (foreign project) plays nothing and writes nothing",
              (bootstrap.read_result(root, name) or {}).get("task"), "env file")
@@ -289,8 +292,10 @@ def check_give_up_345(c):
     def play(req, project):
         plays.append(req["name"])
         return dict(failed)
+    from mop.common.domain import JobMeta
     with patched(bootstrap, ROOT=root, play=play, puppet_creds=lambda project: None,
-                 _later=lambda delay, fn: later.append((delay, fn))):
+                 _later=lambda delay, fn: later.append((delay, fn)),
+                 _job_meta=lambda n: JobMeta(None, None)):
         replies = [bootstrap.answer("proj", {"verb": "bootstrap", "name": name}) for _ in range(4)]
     c.expect("#345 three plays, the fourth request plays nothing", len(plays), 3)
     c.expect("#345 replies: gave_up only from the third on",
@@ -664,6 +669,20 @@ def check_role_secrets_hard_592(c):
         try:
             with bootstrap.role_staging(nroot, "proj", {"files": [bad], "vars": []}):
                 c.fail(f"#592 a noncanonical name {bad!r} must be refused", bad)
+        except ValueError:
+            pass
+
+    # (3б) Ревью ac0fe15: хранилище само стрипит и нормализует имя
+    #      (valid_name), и написание с пробелом (' b') выбирало чужой
+    #      секрет ('b'): валидатор имена лишь проверял, а разницу между
+    #      «названо» и «лежит» не ловил. Любое написание, которое
+    #      хранилище канонизирует в другое, -- отказ: селекция выбирает
+    #      ровно названное, никогда молча другое имя.
+    for bad in (" b", "b ", " b ", "\tb", "b\n"):
+        try:
+            with bootstrap.role_staging(nroot, "proj", {"files": [bad], "vars": []}):
+                c.fail(f"#592 a storage-canonicalized name {bad!r} must be refused",
+                       bad)
         except ValueError:
             pass
 

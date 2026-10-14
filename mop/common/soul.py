@@ -413,6 +413,17 @@ def _uuid(value, field, where="soul.yaml"):
     return value
 
 
+def is_incarnation(value):
+    """Каноническая строка UUID инкарнации (str(uuid4), #579)? Грамматика
+    одной функцией: запись привязки (#581), лаунчер (#582) и клиент тела
+    (#585: корень инкарнации в раскладке) читают её одинаково, и копия в
+    клиенте разъехалась бы с первой же правкой формы."""
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def grant_user(grant_id):
     """id принципала (32 знака нижнего hex) -> имя на шине grant-<id>.
     Публичный идентификатор, не пароль (#579)."""

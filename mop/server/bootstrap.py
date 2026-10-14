@@ -44,7 +44,6 @@ import contextlib
 import hashlib
 import json
 import os
-import posixpath
 import re
 import shutil
 import stat
@@ -90,16 +89,28 @@ def _sent_path(root, name):
     return os.path.join(root, f"{name}-sent.json")
 
 
+def _approval_path(root, name):
+    return os.path.join(root, f"{name}-approved.json")
+
+
 def _result_path(root, name):
     return os.path.join(root, f"{name}-result.json")
 
 
-def _read_json(path):
+def _read_json(path, why=None):
+    """JSON по пути либо None, если файла нет. Битый/нечитаемый -- не
+    «пусто», а громкий отказ (#582): проглоченная причина метки
+    согласования читалась бы как «политика не согласована» -- и молча
+    меняла решение о наследовании."""
     try:
         with open(path) as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except OSError as e:
+        raise OSError(f"{why or path}: unreadable: {e}") from e
+    except ValueError as e:
+        raise ValueError(f"{why or path}: corrupted JSON: {e}") from e
 
 
 def read_sent(root, name):
@@ -137,6 +148,114 @@ GIVE_UP_AFTER = 3
 GIVE_UP_GRACE = 5
 # ansible-playbook: 2 -- упала задача на хосте (3 -- хост недоступен).
 TASK_FAILED_RC = 2
+
+
+def note_approval(root, name):
+    """Метка согласования политики папета-роли (#582): человек ЗАЯВИЛ
+    политику полем workspace -- текст любой, включая пустой («пусто
+    согласовано» -- законная политика, mop сам без .mop/bootstrap.yaml).
+    Метка держит хеш снапшота на момент согласования: копия ребёнку
+    сверяется с ней -- файлы, сменившиеся мимо человеческого пути,
+    согласованием не считаются. Кладётся только человеческим
+    add/update роли; грант метку не пишет."""
+    fsutil.make_private_dir(root)
+    fsutil.write_private(_approval_path(root, name), json.dumps(
+        {"at": int(time.time()), "key": _snapshot_key(root, name)}))
+    return True
+
+
+def _snapshot_files(root, name):
+    """(путь, байты) снапшота ОДНИМ чтением либо ValueError/OSError
+    (#582, блокатор ревью): дальше эти же байты и хешируются, и пишутся
+    -- хеш одного чтения, копия другого, разрешали подтасовку файлами,
+    сменившимися между двумя ходами. Отсутствующий файл -- законное
+    «пусто» (согласованный пустой снапшот); нечитаемый -- отказ."""
+    out = []
+    for path in files_of(root, name):
+        if path is None:
+            out.append((None, b""))
+            continue
+        try:
+            with open(path, "rb") as f:
+                out.append((path, f.read()))
+        except OSError as e:
+            raise OSError(f"{os.path.basename(path)}: unreadable: {e}") from e
+    return out
+
+
+def _snapshot_key(root, name):
+    """Хеш хранимого снапшота политики: те же байты, что workspace_key,
+    без метки регистрации -- согласование о файлах, не о прогонах."""
+    h = hashlib.sha256()
+    for _path, data in _snapshot_files(root, name):
+        h.update(data)
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def approval_of(root, name):
+    """Согласована ли политика папета-роли (#582): метка либо None."""
+    return _read_json(_approval_path(root, name))
+
+
+def drop_approval(root, name):
+    """Снять метку согласования (#582): папета нет -- политики нет."""
+    try:
+        os.unlink(_approval_path(root, name))
+    except FileNotFoundError:
+        pass
+
+
+def copy_approval(root, parent, child):
+    """Наследование согласованной политики (#582): снапшот родителя под
+    именем ребёнка, одним ходом и до Nomad -- ретрай того же request_id
+    не может молча получить политику новее той, что закреплена резервом.
+    Без метки согласования -- отказ: унаследовать несогласованное значило
+    бы обойти границу, которую держит человек. Снапшот, не сходящийся с
+    меткой (файлы сменились мимо человеческого пути), -- тот же отказ:
+    согласование -- факт человека о конкретных байтах. -> отказ | None.
+
+    Одно чтение -- одна запись (#582, блокатор ревью): байты читаются
+    один раз, хеш сверяется с НИМИ, и пишутся именно они -- атомарно и
+    приватно (fsutil.write_private): никакого re-read/copy между хешем
+    и записью, файлы, сменившиеся в этом зазоре, до ребёнка не доезжают."""
+    try:
+        mark = approval_of(root, parent)
+    except (OSError, ValueError) as e:
+        return (f"{parent}: the approval marker is unreadable: {e} (#582)")
+    if mark is None:
+        return (f"{parent}: no approved bootstrap to inherit: its human "
+                f"owner has not registered a policy (#582)")
+    try:
+        snapshot = _snapshot_files(root, parent)
+    except OSError as e:
+        return f"{parent}: the approved bootstrap is unreadable: {e} (#582)"
+    h = hashlib.sha256()
+    for _path, data in snapshot:
+        h.update(data)
+        h.update(b"\0")
+    if h.hexdigest() != mark.get("key"):
+        return (f"{parent}: the approved bootstrap changed outside the "
+                f"human path: the stored snapshot does not match its "
+                f"approval (#582)")
+    fsutil.make_private_dir(root)
+    for what, (path, data) in zip(("tasks", "vars"), snapshot):
+        dst = os.path.join(root, f"{child}-{what}.yml")
+        if path is None:
+            # Файла родителя нет -- и у ребёнка его быть не должно:
+            # пустая согласованная политика наследуется как пустота, а
+            # не как пустой файл (его уже считал бы проигрыватель).
+            try:
+                os.unlink(dst)
+            except FileNotFoundError:
+                pass
+            continue
+        fsutil.write_private(dst, data)
+    fsutil.write_private(
+        _approval_path(root, child),
+        json.dumps({"at": mark.get("at"), "key": mark.get("key"),
+                    "inherited_from": parent}))
+    return None
 
 
 def workspace_key(root, name):
@@ -255,6 +374,160 @@ def refusal(req, project):
     return None
 
 
+# ─── выдача кредов роли телу (#590/#603) ─────────────────────────────────
+def _node_of(caller):
+    """Имя узла из его машинного имени, либо None."""
+    if isinstance(caller, str) and caller.startswith(busnames.NODE_PREFIX):
+        return caller[len(busnames.NODE_PREFIX):] or None
+    return None
+
+
+def _soul_root():
+    """Корень хранилища душ: шов проверок (патчится на временный каталог)."""
+    from . import grants
+    return grants._root_dir(None)
+
+
+def _job_meta(name):
+    """Мета джоба (#256/#265) как JobMeta: шов проверок. Читают её только
+    через JobMeta -- сырые .get по ключам расходились умолчаниями. Отказ
+    НЕ глотается (#581): пустая мета от молчащего Nomad значила бы
+    «не роль» -- и ролевое имя уезжало на легаси-путь с проектным кредом.
+    Громкая ошибка едет наружу и читается отказом (fail closed); нет
+    джоба -- пустая мета, как у cluster._meta: «ничей» -- законный ответ
+    Nomad, не сбой."""
+    from ..common.domain import JobMeta
+    from . import nomad
+    job = nomad.get_job(name)
+    if not job:
+        return JobMeta(None, None)
+    return JobMeta.from_job(job)
+
+
+def _assigned_node(name):
+    """Узел последней аллокации джоба, либо None: шов проверок.
+
+    Отсутствие (нет аллокации, нет узла в сводке) -- None: молчание
+    Nomad законно, калитка resolve_soul читает его как «не найдено».
+    Сбой НЕ глотается (#581): причина едет наверх, и калитка возвращает
+    found:False с ней -- общий текст скрыл бы, ЧТО именно отказало."""
+    from . import nomad
+    alloc = nomad.latest_alloc(name)
+    if not alloc:
+        return None
+    node_id = alloc.get("NodeID")
+    if not node_id:
+        return None
+    for summary in nomad.get_nodes():
+        if summary.get("ID") == node_id:
+            return summary.get("Name")
+    return None
+
+
+def _owner_profile(login):
+    """Профиль владельца роли для ответа (#590): шов проверок."""
+    return identity.profile(identity.server_provider(), login)
+
+
+def role_gates(name, caller, reply, project, root=None, jobs=None,
+               assigned=None):
+    """Ворота выдачи кредов роли (#581/#603/#590) -> запись | {"error"}.
+
+    Четыре проверки, все до прогона:
+      1. вызывающий -- узел (субъект #603): анонимный легаси server.rpc
+         зовут и люди проекта, ролевые факты им не положены. caller --
+         полное машинное имя (node-<узел>): им же проверяется приватный
+         префикс ответа, голое имя узла -- Nomad-сверка назначения;
+      2. ответ -- приватный префикс ИМЕННО этого узла (valid_private_reply,
+         #603): кред роли не едет в глобально читаемый _INBOX и не в
+         чужой префикс;
+      3. джоб назначен Nomad ИМЕННО этому узлу (свежая аллокация);
+      4. тройка Meta джоба (#581) -- цельком и ровно привязке: роль,
+         дайджест и инкарнация совпадают все три; переиспользованное
+         имя (#579) держит новый грант, и by_job без инкарнации выбрал
+         бы любую живую привязку мимо факта Nomad.
+    by_job с инкарнацией приносит запись С её состоянием -- решение о
+    неживой (отозвана, не подтверждена) выносит выдающий: кред не выдают.
+
+    root -- корень хранилища душ (шов проверок); jobs(name) -> Meta и
+    assigned(name) -> имя узла аллокации (швы проверок, по умолчанию --
+    Nomad).
+
+    Тройка Meta -- требование целиком (#581): (soul, soul_digest,
+    soul_inc), и привязка обязана совпасть по ВСЕЙ тройке и проекту.
+    by_job(None) выбрал бы любую живую привязку имени -- молча, мимо
+    факта, который пишет в Nomad сам сервер; пустая Meta (Nomad молчит
+    или битый джоб) -- громкий отказ, не «не роль». Проект -- из origin
+    ФАКТИЧЕСКОЙ Meta: та же тройка на чужом origin -- запись чужого
+    проекта, и имени джоба мало: тройка без origin -- сломанная запись
+    новой роли. Легаси-мета (без тройки) живёт прежним путём."""
+    from . import grants
+    node = _node_of(caller)
+    if node is None:
+        return {"error": "role credentials are issued to the node the job "
+                         "is assigned to: the anonymous legacy server.rpc "
+                         "gets no role facts (#603)"}
+    if not busnames.valid_private_reply(reply or "", caller):
+        return {"error": f"role credentials ride the caller's own private "
+                         f"reply subject, not {reply!r} (#603)"}
+    meta = (jobs or _job_meta)(name)
+    if not (meta.soul and meta.soul_digest and meta.soul_inc):
+        raise ValueError(
+            f"{name}: job Meta carries no whole role triple (soul, "
+            f"soul_digest, soul_inc) -- the server writes it at "
+            f"registration, and its absence is a broken job, not a "
+            f"legacy one")
+    if not meta.origin or meta.project != project:
+        raise ValueError(
+            f"{name}: the role triple rides the origin {meta.origin!r} "
+            f"of project {meta.project!r}, not {project!r} -- the server "
+            f"writes the origin at registration, and a triple without "
+            f"its project's origin is a broken job")
+    rec = grants.by_job(project, name, soul_inc=meta.soul_inc, root=root)
+    if rec is None or not rec.get("active") or rec.get("revoked_at") \
+            or rec.get("role") != meta.soul \
+            or rec.get("soul_digest") != meta.soul_digest:
+        raise ValueError(
+            f"{name}: no live binding in project {project} for the Meta "
+            f"triple (role {meta.soul}, digest {meta.soul_digest[:8]}, "
+            f"incarnation {meta.soul_inc})")
+    where = (assigned or _assigned_node)(name)
+    if where != node:
+        return {"error": f"{name} is assigned to {where or 'no node'}, "
+                         f"not {node} (#603)"}
+    return rec
+
+
+def role_reply(rec, project, root=None):
+    """Ролевая надстройка ответа bootstrap'а (#590): индивидуальный кред
+    принципала и полезная нагрузка души. Прогон уже сыгран -- здесь
+    только выдача; пароль едет одним полем bus.password, не в реестр
+    и не в журнал."""
+    import base64
+    from . import grants
+    principal = rec.get("principal")
+    password = grants.password_of(principal, root=root)
+    if not password:
+        return {"error": f"{rec.get('job')}: the principal's password is "
+                         f"cut (transport revocation, #579)"}
+    got = grants.bundle(rec.get("soul_digest"), root=root)
+    if got is None:
+        return {"error": f"{rec.get('job')}: the pinned bundle "
+                         f"{rec.get('soul_digest') and rec.get('soul_digest')[:8]}"
+                         f" is missing from the store -- the role cannot "
+                         f"start with an empty soul"}
+    return {
+        "bus": creds.bus_config(config.get("MOP_SERVER_LAN"),
+                                config.get("MOP_NATS_PORT"), project,
+                                password, user=principal),
+        "soul": {"role": rec.get("role"), "soul_inc": rec.get("soul_inc"),
+                 "soul_digest": rec.get("soul_digest"),
+                 "manifest": got["manifest"],
+                 "prompt": base64.b64encode(got["prompt"]).decode(),
+                 "principal": principal,
+                 "owner": _owner_profile(rec.get("owner"))}}
+
+
 # ─── селекция секретов по роли (#592) ────────────────────────────────────
 # Allowlist роли (soul.yaml, блок secrets) приходит из доверенного бандла
 # роли, не из тела запроса: локально отредактированный YAML прав не даёт
@@ -286,11 +559,19 @@ def _allow_of(role):
 def _canonical_file_name(name):
     """Имя секретного файла, каноническое, без масок. Нормализация --
     валидатор, а не пропуск: 'a/../b' и './b' остаются собой и
-    отказываются до хранилища; '*' -- маска, а не имя."""
-    if not isinstance(name, str) or name != posixpath.normpath(name) \
-            or any(w in name for w in ("*", "?", "[")):
+    отказываются до хранилища; '*' -- маска, а не имя. Канонично и то,
+    чего хранилище не меняет: оно само стрипит и нормализует (valid_name),
+    и написание, отличающееся от его канонической формы (' b' против 'b'),
+    выбрало бы чужой секрет -- молча другое имя не выбирается никогда."""
+    if not isinstance(name, str) or any(w in name for w in ("*", "?", "[")):
         raise ValueError(f"{name!r}: a secret file is named exactly, in canonical form")
-    return project_secrets.valid_name(name)
+    try:
+        stored = project_secrets.valid_name(name)
+    except ValueError:
+        stored = None
+    if stored != name:
+        raise ValueError(f"{name!r}: a secret file is named exactly, in canonical form")
+    return stored
 
 
 def secrets_of(root, project, allow):
@@ -611,24 +892,63 @@ def owner_identity(req):
     return identity.profile(identity.server_provider(), login)
 
 
-def resolve_soul(project, req):
-    """Глагол resolve (#579/#581): единый wire-вердикт ИСТОЧНИКА и, при
-    названной цели, вложенный блок target -- один атомарный снимок реестра.
+def resolve_soul(project, req, root=None, assigned=None):
+    """Глагол resolve (#579/#581/#584): единый wire-вердикт. Два режима:
+
+    -- с принципалом -- делегированное действие {principal, service,
+       verb_name, target?}: вердикт ИСТОЧНИКА и, при названной цели,
+       вложенный блок target, один атомарный снимок реестра;
+    -- без принципала -- режим только-цели (#584): узел читает
+       состояние привязки ДО того, как процесс роли сможет действовать.
+       Это data-only: found/job/project/owner/role/soul_inc/soul_digest/
+       active/revoked_at/receives_dispatch, пароля нет. Отсутствие
+       принципала НЕ становится молча анонимным привилегированным
+       действием -- только этот явный режим и только узлу.
 
     Здесь, а не в cluster.rpc (#579): спросить может только узел, кластеру
     -- та же библиотека in-process. Проект -- из субъекта, не из тела:
     субъект проверен правами NATS. Проектный человек тоже публикует в
     легаси server.rpc (#603), поэтому анонимный вызов -- отказ без фактов:
     вердикт о принципале едет только узловому вызывающему, которого назвал
-    субъект (_caller каркаса, не тело). Отказ -- тоже ответ: fail closed."""
+    субъект (_caller каркаса, не тело). root -- шов проверок: реальный
+    вызов читает хранилище сервера. Отказ -- тоже ответ: fail closed.
+
+    Режим только-цели сверяет НАЗНАЧЕНИЕ (#581): узел спрашивает о чужой
+    цели -- сервер смотрит узел последней аллокации джоба (assigned --
+    шов проверок) и не раскрывает состояние узлу-не-хозяину: авторитет
+    старта -- Nomad, и чужое состояние соседнему узлу не нужно. Сверка
+    обязана ОТВЕТИТЬ именем узла (fail closed): молчаливый Nomad и сбой
+    сверки -- «не найдено», с причиной сбоя -- узел-хозяин переспросит,
+    а соседний не прочитает. Гейт накрывает ВСЕ найденные состояния:
+    отозванная или неподтверждённая цель соседнему узлу -- тоже факт
+    проекта, не «мертва -- значит можно»."""
     from . import grants
     if not _node_caller(req):
         return {"allow": False,
                 "reason": "resolve serves node callers only: the anonymous "
                           "legacy server.rpc carries no grant facts (#603)"}
+    if not req.get("principal"):
+        out = grants.describe_target(project, req.get("target") or "",
+                                     soul_inc=req.get("soul_inc"), root=root)
+        if out.get("found"):
+            try:
+                where = (assigned or _assigned_node)(out.get("job"))
+            except Exception as e:
+                return {"found": False,
+                        "reason": f"{out.get('job')}: the assignment lookup "
+                                  f"failed: {e}"}
+            if not where:
+                return {"found": False,
+                        "reason": f"{out.get('job')}: Nomad names no node "
+                                  f"for the job -- the assignment decides "
+                                  f"who may read the state"}
+            if _node_of(req.get("_caller") or "") != where:
+                return {"found": False}
+        return out
     return grants.resolve(req.get("principal"),
                           req.get("service") or "node",
-                          req.get("verb_name") or "", target=req.get("target"))
+                          req.get("verb_name") or "", target=req.get("target"),
+                          root=root)
 
 
 def _node_caller(req):
@@ -681,13 +1001,50 @@ def answer(project, req, _send=None):
             why = refusal(req, project)
             if why:
                 return {"error": why}
+            # Ролевой джоб -- выдают индивидуальный кред принципала, и
+            # ворота строже (#581/#603): анонимный легаси-путь ролевому
+            # имени -- отказ без фактов, узловому -- проверка назначения
+            # и приватного ответа, ДО прогона. Прогон тот же: секреты и
+            # рамка sandbox едут и роли. Легаси-имя (привязки нет) живёт
+            # прежним путём с проектным кредом (переход #603).
+            from . import grants
+            soul_root = _soul_root()
+            # Классификация -- по ФАКТИЧЕСКОЙ Meta джоба (#581): тройка
+            # роли в Nomad делает джоб ролевым, что бы ни держал реестр
+            # (привязка стёрта/битая -- отказ в воротах, не легаси-путь);
+            # нет тройки и нет привязки -- легаси-джоб, как прежде.
+            meta = _job_meta(req.get("name") or "")
+            is_role = bool(meta.soul and meta.soul_digest and meta.soul_inc) \
+                or grants.binding_named(project, req.get("name") or "",
+                                        root=soul_root)
+            if is_role:
+                bound = role_gates(req.get("name") or "",
+                                   req.get("_caller") or "",
+                                   req.get("_reply"), project, root=soul_root,
+                                   jobs=lambda name: meta,
+                                   assigned=_assigned_node)
+                if bound.get("error"):
+                    return bound
+            # `put` снят (#133): workspace кладут глаголы жизненного цикла
+            # папета у сервиса кластера, а в этот субъект пишут и узлы.
             # Сдавшийся ключ (#345) -- без прогона: ansible не переигрывается,
             # а стоп просится снова (прежний мог не дойти).
             prev = read_result(ROOT, req["name"]) or {}
             if prev.get("gave_up") and prev.get("key") == workspace_key(ROOT, req["name"]):
                 ask_give_up(req["name"])
                 return gave_up_reply(prev)
-            out = play(req, project)
+            # Роль играет с закреплённым бандлом (#592/#581): allowlist
+            # секретов -- из доверенного хранения сервера, не из тела.
+            pinned = None
+            if is_role:
+                pinned = grants.load_bundle(bound.get("soul_digest"),
+                                            root=soul_root)
+                if pinned is None:
+                    return {"error": f"{req.get('name')}: the pinned bundle "
+                                     f"is unreadable -- refusing to play "
+                                     f"the role with the whole store"}
+            out = play(req, project, bundle=pinned) if is_role \
+                else play(req, project)
             # Итог -- рядом с отправленным (#334): `mop update` ждёт его. Не
             # записался -- подсказка пропала, а прогон и кред важнее.
             try:
@@ -697,6 +1054,29 @@ def answer(project, req, _send=None):
             if rec.get("gave_up"):
                 ask_give_up(req["name"])
                 return {**out, "gave_up": True, "failures": rec["failures"]}
+            if is_role:
+                # Кред роли едет тем же ответом, что и легаси-кред папета:
+                # разговора два не нужно. Индивидуальный принципал вместо
+                # проектного -- ролевая надстройка (#590), отказ -- отказ.
+                # Только при успешном прогоне (#590): упавший ansible --
+                # узел без рабочего workspace, и пароль принципала с душой
+                # ему не выдаются; причина провала сохраняется как есть.
+                if not out.get("ok"):
+                    return out
+                # Прогон идёт минуты (#581): привязку проверяет и ПОСЛЕ
+                # него -- отзыв, приехавший за время ansible, не выдаёт
+                # кредов уже поднятому телу.
+                fresh = grants.binding(bound.get("principal"),
+                                       root=soul_root)
+                if not fresh or not fresh.get("active") \
+                        or fresh.get("revoked_at"):
+                    return {"error": f"{req.get('name')}: the binding was "
+                                     f"revoked while the play ran -- no "
+                                     f"credentials"}
+                role = role_reply(bound, project, root=soul_root)
+                if role.get("error"):
+                    return role
+                return {**out, **role}
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
             return with_creds(out, puppet_creds(project), project)
@@ -744,10 +1124,15 @@ def banner(subject, root, puppets):
 async def serve(log):
     """Подписчик сервера. Креды — машинного пользователя service (#104), не
     оператора: сервер слушает все проекты, и своего файла кредов у него нет —
-    тот же каталог, что у дашборда (mop/common/creds.py)."""
-    subj = bus.server_subject(busnames.ANY)
+    тот же каталог, что у дашборда (mop/common/creds.py).
+
+    Семейство субъектов (#581/#603): анонимный легаси mop.*.server.rpc и
+    квалифицированный хвост mop.*.server.rpc.node-<узел>, на котором узловой
+    резолвер (#584) просит от своего имени. Одно определение с ACL
+    (busnames.server_family): подписка мимо него ждала бы таймаут молчания."""
+    subj = busnames.server_family()
     await service.serve("mop-bootstrap", subj, answer, log, journal,
-                        lambda: banner(subj, ROOT, _puppets_here()))
+                        lambda: banner(", ".join(subj), ROOT, _puppets_here()))
 
 
 # ─── мастер ──────────────────────────────────────────────────────────────
