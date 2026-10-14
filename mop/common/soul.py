@@ -33,6 +33,11 @@ NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 
 HEX32 = re.compile(r"^[0-9a-f]{32}$")
 
+# Digest бандла -- SHA256 (#579): 64 знака hex. Отдельно от HEX32 id
+# принципала: попытка сверить один с другим -- ошибка кодировок, а не
+# «короткий digest».
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
 # Глаголы, доступные роли, по таблицам своих сервисов. Узел: публичные и
 # мастерские глаголы агента; кластер: глаголы проекта. Админские (узловые
 # disk/junk/sweep, секретные и админские кластера) роли не достаются:
@@ -79,6 +84,33 @@ def _str_list(value, field, vocab=None):
     if len(set(value)) != len(value):
         _refuse(field, "names must not repeat", value)
     return tuple(value)
+
+
+# Имена секретов (#592): файл -- точное имя из хранилища проекта (путь от
+# корня files/, как его показывает project_secrets.list_files), переменная
+# -- KEY строки vars.env. Правило хранилища (valid_name) молча
+# нормализует написанное -- для allowlist это не годится: digest закрепляет
+# написанное, и «как-нибудь написанное» имя -- не точное имя (#579).
+# Поэтому здесь каноническая ФОРМА написанного, без нормализации на лету.
+def _secret_file(value, field):
+    import posixpath
+    ok = isinstance(value, str) and value and value not in (".", "..") \
+        and not value.startswith("/") and "\\" not in value \
+        and not value.startswith("../") and not any(
+            part == ".." for part in value.split("/")) \
+        and not any(wild in value for wild in "*?[]") \
+        and posixpath.normpath(value) == value
+    if not ok:
+        _refuse(field, "a canonical file path inside the project secrets, "
+                "no escape, no wildcards", value)
+    return value
+
+
+def _secret_var(value, field):
+    if not (isinstance(value, str) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$",
+                                                value)):
+        _refuse(field, "a variable name, [A-Za-z_][A-Za-z0-9_]*", value)
+    return value
 
 
 def _keys(doc, what, fields, optional=()):
@@ -152,10 +184,15 @@ def parse(text):
                 runtime["driver"])
     caps = _keys(doc["capabilities"], "capabilities",
                  ("node_verbs", "cluster_verbs", "dispatch", "spawn"))
-    # Секреты -- явный allowlist точных имён, пусто по умолчанию (#579):
-    # блока нет -- ничего, и половина блока -- названное, остальное пусто.
-    secrets = {"files": [], "vars": [], **(doc.get("secrets") or {})}
-    secrets = _keys(secrets, "secrets", ("files", "vars"))
+    # Секреты -- явный allowlist точных имён (#592), пусто по умолчанию
+    # (#579): блока нет -- ничего, и половина блока -- названное, остальное
+    # пусто. Ложный ТИП блока (false/[]/0/'') -- мусор, а не «пусто»: `or {}`
+    # читал его умолчанием и молча выдавал пустой allowlist (review #580).
+    block = doc.get("secrets", {})
+    if not isinstance(block, dict):
+        _refuse("secrets", "a mapping", block)
+    secrets = _keys({"files": [], "vars": [], **block}, "secrets",
+                    ("files", "vars"))
     return Soul(
         soul=_name(doc["soul"], "soul"),
         version=version,
@@ -172,9 +209,21 @@ def parse(text):
             spawn=tuple(_name(s, "spawn") for s in _str_list(
                 caps["spawn"], "spawn"))),
         secrets=Secrets(
-            files=_str_list(secrets["files"], "secrets.files"),
-            vars=_str_list(secrets["vars"], "secrets.vars")),
+            files=tuple(_secret_file(f, "secrets.files") for f in _str_list(
+                secrets["files"], "secrets.files")),
+            vars=tuple(_secret_var(v, "secrets.vars") for v in _str_list(
+                secrets["vars"], "secrets.vars"))),
         prompt=_filename(doc["prompt"]))
+
+
+def _canonical(manifest):
+    """Манифест -> канонический вход digest: полный набор ключей схемы v1
+    (умолчания вставлены), чтобы один смысл не жил двумя бандлами -- yaml без
+    блока secrets и с явным пустым одним digest'ом (#579: «по умолчанию --
+    пусто»). Один источник канонизации на оба входа бандла: load и
+    from_manifest."""
+    parsed = parse(json.dumps(dict(manifest), ensure_ascii=False))
+    return parsed.to_dict()
 
 
 def from_manifest(manifest, prompt):
@@ -182,13 +231,17 @@ def from_manifest(manifest, prompt):
     Bundle. Конструктор in-memory (#581): digest -- то же правило, что у
     load, одним местом, и сервер собирает бандл из словаря, не катая
     каталог по диску. Словарь дубликат ключа унести не может, остальную
-    форму проверяет тот же parse."""
-    doc = dict(manifest)
-    parsed = parse(json.dumps(doc, ensure_ascii=False))
+    форму проверяет тот же parse. Промпт -- UTF-8, как у load: битые байты
+    -- отказ, а не молча в digest (review #580)."""
+    doc = _canonical(manifest)
     raw = prompt if isinstance(prompt, bytes) else prompt.encode()
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"prompt: not UTF-8: {e}") from None
+    parsed = parse(json.dumps(doc, ensure_ascii=False))
     return Bundle(role=parsed.soul, manifest=parsed, prompt=raw,
                   digest=digest(doc, raw))
-
 
 def _filename(value):
     """Имя файла промпта: одно имя в каталоге роли, не путь. Абсолютный
@@ -208,7 +261,8 @@ import dataclasses  # noqa: E402 -- значения ниже разбора, р
 @dataclasses.dataclass(frozen=True)
 class Runtime:
     """Где роль живёт и принимает ли задания: isolating -- только драйверы
-    с IS_CONTAINER (решает placement), receives_dispatch -- цель dispatch."""
+    с отдельными телами (решает placement), receives_dispatch -- цель
+    dispatch."""
     driver: str
     receives_dispatch: bool
 
@@ -272,10 +326,12 @@ class Bundle:
 def digest(manifest, prompt):
     """Digest бандла -- формула контракта #579 одним общим местом:
     sha256(канонический JSON разобранного манифеста + NUL + сырой промпт).
-    manifest -- словарь, какой дал yaml (не Soul): digest считает сервер при
-    регистрации и обёртка при сверке, и вход у них один."""
-    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"),
-                           ensure_ascii=False).encode()
+    manifest -- словарь в ЛЮБОМ допустимом виде схемы (yaml как есть или
+    to_dict): канонизацию до полного набора ключей делает _canonical, и
+    оба входа бандла сходятся в один digest. Digest -- 64 знака hex
+    (SHA256), НЕ HEX32 id принципала."""
+    canonical = json.dumps(_canonical(manifest), sort_keys=True,
+                           separators=(",", ":"), ensure_ascii=False).encode()
     raw = prompt if isinstance(prompt, bytes) else prompt.encode()
     return hashlib.sha256(canonical + b"\x00" + raw).hexdigest()
 
@@ -341,6 +397,12 @@ def _hex32(value, field, where="soul.yaml"):
     return value
 
 
+def _hex64(value, field, where="soul.yaml"):
+    if not (isinstance(value, str) and HEX64.match(value)):
+        _refuse(field, "64 lower-case hex characters (SHA256)", value, where)
+    return value
+
+
 def _uuid(value, field, where="soul.yaml"):
     try:
         parsed = uuid.UUID(value)
@@ -390,10 +452,11 @@ BINDING_KEYS = ("principal", "owner", "project", "job", "soul_inc",
 def binding(principal, owner, project, job, soul_inc, soul_digest, role,
             active=True):
     """Собрать запись привязки. -> словарь с точными ключами; мусор --
-    ValueError с именем поля."""
+    ValueError с именем поля. active -- точный bool: строка 'false' --
+    опечатка, а не согласие, и отказ, а не молчаливый True (review #580)."""
     record = {"principal": principal, "owner": owner, "project": project,
               "job": job, "soul_inc": soul_inc, "soul_digest": soul_digest,
-              "role": role, "active": bool(active)}
+              "role": role, "active": active}
     _check_binding(record)
     return record
 
@@ -424,7 +487,9 @@ def _check_binding(record):
         if not (isinstance(record[key], str) and record[key]):
             _refuse(key, "a non-empty string", record[key], W)
     _uuid(record["soul_inc"], "soul_inc", W)
-    _hex32(record["soul_digest"], "soul_digest", W)
+    # Digest бандла -- SHA256 (64 hex), не HEX32 id принципала: живой бандл
+    # обязан проходить собственную привязку (review #580).
+    _hex64(record["soul_digest"], "soul_digest", W)
     _name(record["role"], "role", W)
     if not isinstance(record["active"], bool):
         _refuse("active", "true or false", record["active"])
