@@ -110,11 +110,11 @@ def _create(role, origin, reconciles, p):
     """Регистрация с ролью общей операцией ops.add -> (имя, тройка роли) |
     None (отказ уже напечатан). request_id -- один на попытку создания.
 
-    Поля роли едут транспортом, который ops.add уже принимает: общий
-    workflow не дублируется, а ops.add(soul=, request_id=) -- работа общего
-    слоя (#580), и тогда транспорт сожмётся до вызова."""
+    Поля роли идут общим ops.add(soul=, request_id=) (#603): провод
+    регистрации собирает общий слой, клиент не держит копии. Повтор --
+    только у сервера, сказавшего в рукопожатии, что сводит повторы к
+    одному джобу по request_id (#582), тем же идентификатором."""
     request_id = uuid.uuid4().hex
-    fields = {"soul": role, "request_id": request_id}
     attempts = ADD_ATTEMPTS if reconciles else 1
     seen = {}
 
@@ -123,7 +123,7 @@ def _create(role, origin, reconciles, p):
             return bus.call_cluster(verb, **kw)
         for attempt in range(1, attempts + 1):
             try:
-                got = bus.call_cluster(verb, **kw, **fields)
+                got = bus.call_cluster(verb, **kw)
                 break
             except bus.BusError as e:
                 if attempt == attempts:
@@ -145,7 +145,8 @@ def _create(role, origin, reconciles, p):
     p.step("registering")
     text, sent = _common.workspace_text(origin)
     print(_common.sent_line(sent), flush=True)
-    v = ops.add(transport, origin, (text, sent), branch=context.current().branch,
+    v = ops.add(transport, origin, (text, sent), soul=role,
+                request_id=request_id, branch=context.current().branch,
                 step=p.step, sleep=time.sleep, clock=time.time)
     name = v.get("name") or seen.get("name")
     kind = v.get("outcome")

@@ -7,14 +7,7 @@
 сессия. Библиотека молчит: отказ -- исключение с причиной, печатает
 командлет.
 """
-import os
-
-from mop.common import busnames, soul
-
-# Каталог ролей пакета (#580): skills/<роль>/ рядом с пакетом, а не с
-# клоном -- у клиента из git skills/ клона нет (#351).
-PACKAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.realpath(__file__))), "skills")
+from mop.common import busnames, soul, souldirs
 
 # Имена шины, которые роль не берёт (docs/SOUL.md, «CLI, имена»): роль с
 # таким именем читалась бы как служебный пользователь или принципал.
@@ -27,10 +20,11 @@ ROLE_COMMANDS = ("master",)
 
 
 def dirs():
-    """Каталоги ролей по старшинству. Пока общий модуль (#580) не назвал
-    корни установки одним местом, клиент берёт только каталог пакета: своя
-    таблица внешних корней здесь разошлась бы с серверной."""
-    return [PACKAGE_DIR]
+    """Каталоги ролей по старшинству -> [путь, ...]. Общая таблица корней
+    (#603): доверенные внешние каталоги MOP_SOUL_DIRS раньше пакетного,
+    чтобы роль установки не терялась за пакетной того же имени. Свой
+    список -- запретная копия таблицы."""
+    return souldirs.roots()
 
 
 def collisions(roles, commands):
@@ -113,14 +107,24 @@ def echo(got, role):
 def session_ready(answers, node, name, triple):
     """Ответ узловых states -> готова ли сессия роли. Чистая функция.
 
-    Готова -- tmux-сессия есть И в фактах стоит тройка роли, совпавшая с
-    эхом регистрации: метку ставит обёртка только после сверки бандла
-    (#583/#590), и голый tmux может быть прежней ролью или bootstrap'ом
-    без неё. Узел отказал или молчит -- RuntimeError."""
+    Готова -- живая сессия есть И вложенный soul-факт узла (#584)
+    подтверждает тройку: {ready: true, role, soul_inc, soul_digest},
+    совпавшая с эхом регистрации. Голый tmux -- ещё не роль: факт узел
+    ставит только после своей проверки привязки и ready-доказательства
+    (#583/#590), и его отсутствие значит «ещё не сверено». Узел отказал
+    или молчит -- RuntimeError."""
     got = (answers or {}).get(node)
     if isinstance(got, Exception):
         raise RuntimeError(f"agent on {node}: {got}")
     facts = ((got or {}).get("puppets") or {}).get(name) or {}
     if facts.get("error"):
         raise RuntimeError(f"{name} on {node}: {facts['error']}")
-    return bool(facts.get("present")) and facts.get("soul") == triple
+    if not facts.get("present"):
+        return False
+    # Факт #584 называет роль ключом role (как маркер #590), эхо add --
+    # ключом soul (#582): тройка одна, ключи у источника и читателя свои.
+    soul_fact = facts.get("soul") or {}
+    return soul_fact.get("ready") is True \
+        and soul_fact.get("role") == triple.get("soul") \
+        and soul_fact.get("soul_digest") == triple.get("soul_digest") \
+        and soul_fact.get("soul_inc") == triple.get("soul_inc")

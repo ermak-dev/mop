@@ -15,14 +15,15 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched, run_command  # noqa: E402
+from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, ROOT)
 
 from mop import cli  # noqa: E402
 from mop.cli import lib  # noqa: E402
 from mop.cli.core import _common, attach, master  # noqa: E402
 from mop.cli.pool import login  # noqa: E402
-from mop.common import bus, config, context, puppets  # noqa: E402
+from mop.client import roles  # noqa: E402
+from mop.common import bus, config, context, ops, puppets  # noqa: E402
 
 ORIGIN = "git@h:g/mop.git"
 NAME = "pu-mop-3"
@@ -97,10 +98,17 @@ class Pool:
         self.polls += 1
         present = not self.gone and self.polls > self.ready_after
         facts = {"present": present}
+        # Факт узла (#584): вложенный soul с ключом role, как маркер #590.
         if present and self.marker == "match":
-            facts["soul"] = dict(self.triple or {})
+            facts["soul"] = {"ready": True, "role": (self.triple or {}).get("soul"),
+                             **{k: v for k, v in (self.triple or {}).items()
+                                if k != "soul"}}
         elif present and self.marker == "other":
-            facts["soul"] = {**(self.triple or {}), "soul_digest": "f" * 32}
+            facts["soul"] = {"ready": True,
+                             "role": (self.triple or {}).get("soul"),
+                             **{k: v for k, v in (self.triple or {}).items()
+                                if k not in ("soul", "soul_digest")},
+                             "soul_digest": "f" * 32}
         return {node: {"puppets": {NAME: facts}} for node in nodes}
 
     def run_ssh(self, argv):
@@ -125,9 +133,9 @@ def launch(argv, pool, tty=True, catalogue_dirs=None, login_calls=None):
     def call(argv, *a, **kw):
         return pool.run_ssh(list(argv))
 
-    from mop.client import roles
-    dirs = [roles.PACKAGE_DIR, *(catalogue_dirs or [])]
-    with patched(roles, dirs=lambda: list(dirs)), \
+    from mop.common import souldirs
+    dirs = [*(catalogue_dirs or []), *souldirs.roots()]
+    with patched(souldirs, roots=lambda: list(dirs)), \
             patched(os, isatty=lambda fd: tty), \
             patched(subprocess, call=call), \
             patched(time, sleep=sleep, time=lambda: clock[0]), \
@@ -139,6 +147,23 @@ def launch(argv, pool, tty=True, catalogue_dirs=None, login_calls=None):
             context.use(context.resolve({"server": "srv.test", "user": "alice"},
                                         {}, {})):
         return run_command(cli.main, argv)
+
+
+# HYPOTHESIS: каталог клиента знал только пакетный каталог -- внешний
+# корень MOP_SOUL_DIRS (#603) молча не виден, и роль установки не
+# запускается, пока сервер её видит.
+# SOLUTION: таблица корней -- общая (souldirs.roots), клиент не держит
+# своей; приоритет -- настройка раньше пакета.
+def check_catalogue_roots_586(c):
+    from mop.common import souldirs
+    with tempfile.TemporaryDirectory() as root:
+        role_dir(root, "installed")
+        before = souldirs.roots()
+        with patched_env(MOP_SOUL_DIRS=root):
+            c.expect("#586 external roots lead the client catalogue",
+                     roles.dirs(), [root, *before])
+        c.expect("#586 without the setting the package catalogue stands alone",
+                 roles.dirs(), before)
 
 
 # HYPOTHESIS: `mop <роль>` не знает ролей -- диспетчер отвечает «unknown
@@ -204,7 +229,42 @@ def check_readiness_586(c):
         c.expect(f"#586 marker timeout ({marker}) does not attach", pool.ssh, [])
 
 
-# HYPOTHESIS: провал после создания (bootstrap, ssh) читается как «не
+# HYPOTHESIS: готовность читалась по плоским ключам факта -- узел #584
+# отдаёт вложенный soul-факт {ready, role, soul_inc, soul_digest}, и
+# лаунчер не видел ни готовности, ни причины.
+# SOLUTION: session_ready читает вложенный факт и сверяет тройку с эхом
+# регистрации; ключа нет -- сессия ещё не роль (обёртка не сверила бандл).
+def check_readiness_shape_586(c):
+    def facts(soul=None, present=True):
+        f = {"present": present}
+        if soul is not None:
+            f["soul"] = soul
+        return {NODE: {"puppets": {NAME: f}}}
+
+    triple = {"soul": "builder", "soul_digest": DIGEST, "soul_inc": INC}
+
+    def soul_fact(role="builder", digest=DIGEST, inc=INC):
+        # Факт узла (#584): {ready, role, soul_inc, soul_digest}; имя роли
+        # -- ключом role, как в маркере #590, а не soul, как в эхе add.
+        return {"ready": True, "role": role, "soul_digest": digest,
+                "soul_inc": inc}
+
+    c.check("#586 the nested role fact is readiness",
+            roles.session_ready(facts(soul_fact()), NODE, NAME, triple), True)
+    c.check("#586 readiness needs the nested fact at all",
+            roles.session_ready(facts(None), NODE, NAME, triple) is False)
+    c.check("#586 the marker's unverified session is not readiness",
+            roles.session_ready(facts({"ready": False, "why": "absent"}),
+                                NODE, NAME, triple) is False)
+    c.check("#586 another soul's fact is not readiness",
+            roles.session_ready(facts(soul_fact(digest="f" * 32)),
+                                NODE, NAME, triple) is False)
+    c.check("#586 another role's fact is not readiness",
+            roles.session_ready(facts(soul_fact(role="other")),
+                                NODE, NAME, triple) is False)
+
+
+# HYPOTHEHSIS: провал после создания (bootstrap, ssh) читается как «не
 # вышло» без имени, и следующий запуск плодит второго папета.
 # SOLUTION: каждый отказ после регистрации называет созданного папета и
 # `mop attach`; повторного add нет.
@@ -250,6 +310,30 @@ def check_request_id_586(c):
     c.check("#586 a new launch is a new request_id",
             other.adds and ids and other.adds[0].get("request_id") != ids[0],
             (ids, other.adds))
+
+    # Поля роли -- общим ops.add (#603): клиент не собирает провод сам, а
+    # передаёт soul/request_id аргументами операции. Проверка смотрит и
+    # аргументы ops.add, и провод: аргументы без провода -- поля потерялись
+    # в клиенте, провод без аргументов -- клиент собрал его копией.
+    pool = Pool()
+    seen = {}
+
+    real_add = ops.add
+
+    def recording_add(transport, *a, **kw):
+        seen["kwargs"] = {k: kw.get(k) for k in ("soul", "request_id")}
+        out = real_add(transport, *a, **kw)
+        seen["wire"] = pool.adds[-1] if pool.adds else None
+        return out
+
+    with patched(ops, add=recording_add):
+        launch(["builder"], pool)
+    kw, wire = seen.get("kwargs") or {}, seen.get("wire") or {}
+    c.check("#586 ops.add is called with the role fields",
+            kw.get("soul") == "builder" and bool(kw.get("request_id")), kw)
+    c.check("#586 the wire carries the role fields once",
+            wire.get("soul") == "builder" and bool(wire.get("request_id")), wire)
+    c.expect("#586 exactly one add on the wire", len(pool.adds), 1)
 
     pool = Pool(timeouts=10)
     out, err, code = launch(["builder"], pool)
@@ -428,7 +512,8 @@ def check_attach_586(c):
 
 def main():
     c = Checks()
-    for check in (check_role_dispatch_586, check_readiness_586,
+    for check in (check_catalogue_roots_586, check_readiness_shape_586,
+                  check_role_dispatch_586, check_readiness_586,
                   check_failures_after_creation_586, check_request_id_586,
                   check_handshake_586, check_server_refusal_586, check_options_586, check_no_tty_586,
                   check_reserved_586, check_master_alias_586, check_attach_586):
