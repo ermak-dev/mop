@@ -78,6 +78,10 @@ class PuppetRow:
     soul: str = None
     soul_digest: str = None
     soul_inc: str = None
+    # Цель dispatch или нет (#603): серверный факт из поля джоба MopSoul
+    # (#582), не местная политика -- что сервер прислал, то и в строке.
+    # None -- легаси-джоб без поля: прежний провод, ключа нет (to_dict).
+    receives_dispatch: bool = None
 
     def render(self):
         """Строка для человека, модели и страницы: None -- прежним прочерком
@@ -96,6 +100,8 @@ class PuppetRow:
         if not self.soul:
             for key in ("soul", "soul_digest", "soul_inc"):
                 out.pop(key)
+        if self.receives_dispatch is None:
+            out.pop("receives_dispatch")
         return out
 
     @classmethod

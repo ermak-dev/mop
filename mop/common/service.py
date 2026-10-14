@@ -46,7 +46,8 @@ def trusted(req, caller):
     return body
 
 
-async def answer(name, project, data, handler, journal, log, send, caller=None):
+async def answer(name, project, data, handler, journal, log, send, caller=None,
+                  reply=None, subject=None):
     """Ответ на одно сообщение -> dict; строки журнала -- в log.
 
     Ответ есть всегда (#162). Раньше обработчик, бросивший вне своего try
@@ -61,7 +62,15 @@ async def answer(name, project, data, handler, journal, log, send, caller=None):
 
     caller -- логин из субъекта (#207). Тело до обработчика проходит через
     trusted (#580): все каркасные ключи ('_') снимаются, проверенный логин
-    кладётся поверх -- тело его не подделает, и не только его."""
+    кладётся поверх -- тело его не подделает, и не только его.
+
+    reply/subject (#603) -- транспортные факты: настоящий reply-субъект
+    NATS и субъект запроса, как их видит подписчик. Ставятся тем же ходом,
+    что _caller, -- ПОСЛЕ trusted(), поверх снятых: тело не подделает ни
+    вызывающего, ни адрес ответа. None (прямой вызов проверок) -- прежнее
+    поведение, ключей нет. Это факты транспорта, не политики: значение --
+    как есть, решение по нему -- у обработчика (#581 отличает грант на
+    cluster.role от самовольного легаси cluster.rpc по _subject)."""
     try:
         req = json.loads(data.decode())
     except ValueError:
@@ -70,6 +79,10 @@ async def answer(name, project, data, handler, journal, log, send, caller=None):
         req, out = {}, {"error": NOT_AN_OBJECT, "done": True}
     else:
         req = trusted(req, caller)
+        if reply is not None:
+            req["_reply"] = reply
+        if subject is not None:
+            req["_subject"] = subject
         try:
             out = await asyncio.get_running_loop().run_in_executor(
                 None, handler, project, req, send)
@@ -103,7 +116,8 @@ async def serve(name, subject, handler, log, journal, banner):
 
         out = await answer(name, project_from_subject(msg.subject), msg.data,
                            handler, journal, log, send,
-                           caller=busnames.caller(msg.subject))
+                           caller=busnames.caller(msg.subject),
+                           reply=msg.reply or None, subject=msg.subject)
         try:
             await msg.respond(json.dumps(out, ensure_ascii=False).encode())
         except Exception:
