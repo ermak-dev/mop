@@ -55,26 +55,47 @@ REPLY_PREFIX = "_MOP_REPLY"
 
 
 def private_prefix(user):
-    """Префикс приватных ответов машины: _MOP_REPLY.<user>. user -- полное
-    машинное имя (узел node-<имя> или принципал grant-<id>); человек
+    """Префикс приватных ответов машины: _MOP_REPLY.<токен>. user -- полное
+    машинное имя (узел node-<имя> или принципал grant-<id>), и оно едет
+    ОДНИМ токеном субъекта -- login_token, как логин человека: точка в
+    имени (dhcp-хост «node-a.b») иначе резала бы префикс на два токена, и
+    разбор startswith читал бы ответ node-a.b как ответ node-a. Человек
     приватного префикса не имеет."""
-    return f"{REPLY_PREFIX}.{user}"
+    return f"{REPLY_PREFIX}.{login_token(user)}"
 
 
 def private_scope(user):
-    """Маска подписки на свои приватные ответы: _MOP_REPLY.<user>.>."""
+    """Маска подписки на свои приватные ответы: _MOP_REPLY.<токен>.>."""
     return f"{private_prefix(user)}.>"
+
+
+def private_publish():
+    """Глобальная маска ПУБЛИКАЦИИ в приватные ответы (#603): её даёт #581
+    отвечающему машинам -- агенту узла и сервисам сервера, -- и это НЕ
+    чья-то private_scope: подписка на свои ответы и публикация в чужие --
+    разные строки ACL у разных сторон, и маска накрывает все закодированные
+    токены разом."""
+    return f"{REPLY_PREFIX}.>"
 
 
 def valid_private_reply(subject, user):
     """Это -- приватный ответ ИМЕННО этому пользователю? Чистая. Свой
-    префикс и непустой хвост-NUID; всё остальное -- нет: чужой приватный
-    префикс и публичный _INBOX не читаются как свой (#581 проверяет то же
-    ACL-строкой, здесь -- разбором)."""
-    if not isinstance(subject, str) or not subject.startswith(
-            private_prefix(user) + "."):
+    закодированный префикс (один токен -- чужой видимый префикс не
+    совпадает с целым токеном) и хвост-NUID без масок, пустых сегментов и
+    пробельных/управляющих хвостов: хвост с маской ловил бы чужие ответы
+    подпиской, с пустым сегментом -- расползался бы вглубь. Всё остальное
+    -- нет: чужой приватный префикс и публичный _INBOX не читаются как
+    свои (#581 проверяет то же ACL-строкой, здесь -- разбором)."""
+    if not isinstance(subject, str):
         return False
-    return bool(subject[len(private_prefix(user)) + 1:])
+    parts = subject.split(".")
+    if len(parts) < 3 or parts[0] != REPLY_PREFIX:
+        return False
+    if parts[1] != login_token(user or ""):
+        return False
+    return all(seg and not any(
+        ch.isspace() or ord(ch) < 32 or 127 <= ord(ch) < 160 or ch in "*>"
+        for ch in seg) for seg in parts[2:])
 
 
 def is_grant(user):
@@ -101,13 +122,31 @@ def node(project, name, channel="rpc", login=None):
         return dispatch_subject(project, name, login)
     if is_grant(login):
         if channel in (CALLER_CHANNEL, ROLE_CHANNEL):
-            return f"{ROOT}.{project}.node.{name}.{ROLE_CHANNEL}.{login}"
+            return node_role(project, name, principal=login)
         raise ValueError(
             f"a delegated principal rides only the {ROLE_CHANNEL} and "
             f"{DISPATCH_CHANNEL} channels, not {channel}")
     # Человек своё имя возит только в rpc (#207); прочие каналы публичны, и
     # токен там молча не ставился и раньше.
     return f"{subj}.{_token(login)}" if channel == CALLER_CHANNEL else subj
+
+
+def node_role(project, node, principal=None):
+    """Маска канала роли на узле (#603): mop.<p>.node.<узел>.role.> -- для
+    ACL ответа (#581) и подписок (#584); без principal -- маска всех
+    принципалов (хвостовой >), полный grant-<id> -- точный субъект. Одна
+    таблица с node(): субъект гранта строится здесь же, и расхождение
+    подписки с правами (молчит до пула -- отказ прав едет в error_cb)
+    ловится проверкой маски на точный субъект."""
+    tail = principal if principal is not None else ">"
+    return f"{ROOT}.{project}.node.{node}.{ROLE_CHANNEL}.{tail}"
+
+
+def cluster_role(project, principal=None):
+    """Маска канала роли у сервиса кластера (#603): mop.<p>.cluster.role.>
+    -- тот же договор, что у node_role: одна таблица с cluster()."""
+    tail = principal if principal is not None else ">"
+    return f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{ROLE_CHANNEL}.{tail}"
 
 
 def dispatch_subject(project, name, user):
@@ -164,7 +203,7 @@ def cluster(project, login=None):
     принципал роли -- в своём канале role (#603): тот же забор, что у агента
     узла (node)."""
     if is_grant(login):
-        return f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{ROLE_CHANNEL}.{login}"
+        return cluster_role(project, principal=login)
     subj = f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{CALLER_CHANNEL}"
     return f"{subj}.{_token(login)}" if login else subj
 
@@ -256,8 +295,10 @@ def caller(subject):
     elif len(parts) == 5 and parts[0] == ROOT and parts[2] == "server" \
             and parts[3] == CALLER_CHANNEL:
         # Квалифицированный server.rpc -- узловой (#603): токен -- машинное
-        # имя узла, человек там не вызывающий.
-        return parts[4] if parts[4].startswith(NODE_PREFIX) else None
+        # имя узла (узел с точкой -- одним закодированным токеном,
+        # login_of), человек там не вызывающий.
+        node = login_of(parts[4])
+        return node if node and node.startswith(NODE_PREFIX) else None
     elif len(parts) == 3 and parts[0] == JOIN_ROOT and parts[2] == CALLER_CHANNEL:
         return login_of(parts[1])
     return None
@@ -273,9 +314,10 @@ def server(project, caller=None):
     """Сервер как адресат (#62). caller -- машинное имя узла (#603):
     квалифицированный субъект mop.<p>.server.rpc.node-<узел> отличает
     запрос узла от анонимного легаси-пути; человек и сервис остаются на
-    прежнем субъектe."""
+    прежнем субъектe. Имя узла с точкой -- одним токеном (login_token),
+    чтобы адрес резался обратно на то же имя."""
     subj = f"{ROOT}.{project}.server.rpc"
-    return f"{subj}.{caller}" if caller else subj
+    return f"{subj}.{login_token(caller)}" if caller else subj
 
 
 def build():
