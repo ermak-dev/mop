@@ -191,12 +191,11 @@ def role_bootstrap_ask(project, name, address):
 
 
 def use_node_credentials():
-    """Креды узла -- креды этого процесса (#603): config() без аргумента
-    читает bus.FILE, а node_name() (ask_server node_auth, канал startup)
-    зовёт именно его. До правки #603 (node_name не принимает файл) процесс
-    лаунчера сам называет свой файл -- это его единственные креды, не
-    подмена: файл настоящий, читает его сам bus."""
-    bus.FILE = bus.NODE_FILE
+    """Соединение процесса -- узловым файлом (#603): соединение несёт
+    снимок кредов (conn.creds), и node_name() (ask_server node_auth,
+    канал startup) читает снимок, а не дефолтный config(). От бывшей
+    подмены bus.FILE ушли: глобаль меняла ВСЕ последующие config() без
+    аргумента, а не только узловой путь лаунчера."""
     bus.connect(bus.NODE_FILE)
 
 

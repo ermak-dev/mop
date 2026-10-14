@@ -162,6 +162,7 @@ class FakeBus:
 
     def __enter__(self):
         import _lib
+        import types
         async def fake_arequest(nc, subj, data, timeout):
             body = json.loads(data.decode())
             self.log.append((subj, body))
@@ -180,9 +181,24 @@ class FakeBus:
             out = dict(out)
             import types
             return types.SimpleNamespace(data=json.dumps(out).encode())
+        # FILE тут не патчуем: патч скрывал бы глобальную подмену FILE
+        # лаунчером (#603-обход) — чек «laунчер не трогает FILE» обязан
+        # видеть настоящее значение процесса. connect подменён, файл в
+        # фейковом пути никто не читает.
+        # connect повторяет шов настоящего bus.connect (#603): объект
+        # соединения несёт creds-снимок выбранного файла — его читает
+        # node_name(); голый object() ломал бы узловой путь молча. Креды
+        # для снимка читает config(file) ТОЛЬКО для явного file (узловой
+        # путь лаунчера); без file — пустой снимок: легаси-справочник
+        # сервера фейковому процессу не нужен, config() без аргумента
+        # здесь поднимать нельзя.
+        def fake_connect(file=None):
+            creds = bus.config(file) if file else {}
+            conn = types.SimpleNamespace(is_closed=False, creds=creds)
+            bus._conn = conn
+            return conn
         self._cm = _lib.patched(bus, arequest=fake_arequest,
-                                connect=lambda file=None: object(),
-                                FILE=self.creds_file)
+                                connect=fake_connect)
         # Файл кредов узла -- туда, откуда его читает config(file): NODE_FILE
         # модуля run подменяем путём подмены busnames.NODE_FILE через env не
         # выйдет (expanduser на импорте), поэтому сам атрибут.
@@ -195,6 +211,7 @@ class FakeBus:
             self._cm.__exit__(*exc)
             self._file_cm.__exit__(*exc)
         finally:
+            bus._conn = None
             os.unlink(self.creds_file)
         return False
 
@@ -243,11 +260,25 @@ class Body:
         return {"written": [p for p, _ in files]}
 
 
+def launcher_role_triple(env):
+    """Тройка роли так, как её видит лаунчер: PU_* первичен, авторека --
+    переходный источник; расхождение здесь не проверяется (это дело
+    самого лаунчера), читаем как прочитал бы он."""
+    pu = [env.get(f"PU_{k.upper()}") for k in ("soul", "soul_digest", "soul_inc")]
+    if any(k in env for k in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC")):
+        keys = pu
+    else:
+        keys = [env.get(f"NOMAD_META_{k}") for k in ("soul", "soul_digest", "soul_inc")]
+    return dict(zip(("soul", "soul_digest", "soul_inc"), [v or None for v in keys]))
+
+
 def launch(body, reply, env, name=NAME, node=NODE_USER):
     """main() с подменённым миром. -> (код|SystemExit-текст, stdout, лог).
     Лог -- push'и, шеллы в теле и запуск врапера в порядке исполнения."""
-    body.triple = (env.get("NOMAD_META_soul"), env.get("NOMAD_META_soul_digest"),
-                   env.get("NOMAD_META_soul_inc"))
+    # Тройка -- из источника лаунчера (PU_* первичен, #590): expected_role
+    # решает, а фикстура лишь повторяет его грамматику для расписки.
+    meta = launcher_role_triple(env)
+    body.triple = (meta.get("soul"), meta.get("soul_digest"), meta.get("soul_inc"))
     role_name, digest, inc = body.triple
     # Режим identity у Body -- сценарий ответа агента: гуд-расписка по умолчанию,
     # отказ -- свой ответ глагола (или его отсутствие).
@@ -403,6 +434,8 @@ def main():
              (lambda g: (g.soul, g.soul_digest, g.soul_inc))(run.expected_role(mixed_same)),
              ("puppet", digest, INC))
 
+    before_file = bus.FILE  # до первого ролевого запуска: подмена видна
+
     # Легаси (контроль): джоб без тройки -- прежний путь байт в байт.
     body = Body()
     code, out, log, transport = launch(body, legacy_reply(), {})
@@ -428,6 +461,15 @@ def main():
     env = meta_env("puppet", digest, INC)
     good = reply_for(payload("puppet", digest, INC, GRANT, manifest, prompt),
                      creds(GRANT, SECRET))
+    # Обход bus.FILE (#603-до-снимка) снят: connect() штампует creds на
+    # соединение, node_name() читает снимок первым -- глобальную подмену
+    # FILE больше не делает никто, и лаунчер в том числе: config() без
+    # аргумента продолжает видеть СВОЙ файл процесса, не узловой.
+    body = Body()
+    code, out, log, _t = launch(body, good, env)
+    c.expect("#590 a role job launches over the 603 transport", code, 0)
+    c.check("#590 the launcher no longer swaps bus.FILE to the node file",
+            bus.FILE == before_file, (before_file, bus.FILE))
 
     # Ролевой джоб, ответ легаси (только проектный кред): отказ до модели,
     # проектный кред в тело не едет.
