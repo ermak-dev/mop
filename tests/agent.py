@@ -16,6 +16,7 @@ SOLUTION: одна таблица {глагол: Verb(fn, scope, named)}, пре
 STATUS: FIXED — see #150
 """
 import dataclasses
+import json
 import os
 import sys
 
@@ -24,7 +25,7 @@ from _lib import Checks, Msg, bash, canned, patched, patched_env, restored, GATE
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.node import agent  # noqa: E402
-from mop.common import busnames  # noqa: E402
+from mop.common import busnames, soul  # noqa: E402
 
 # ─── до #150: наборы и логика handle, переписанные дословно ──────────────
 OLD_VERBS = ("ping", "local", "state", "states", "sizes", "send", "tail",
@@ -2930,6 +2931,1184 @@ def _doctor_sweep_timeout():
     return float(re.search(r"^SWEEP_TIMEOUT = (\d+)", src, re.M)[1])
 
 
+# ─── #584: делегированный актёр на узле ──────────────────────────────────
+A, B, W, R, X = ("grant-" + ch * 32 for ch in "abcde")
+GRANTS_584 = {
+    # Мастер-роль хозяина anton: диспетчерит, обычное управление телами.
+    A: {"job": "pu-mop-7", "role": "master", "owner": "anton", "project": "mop", "active": True,
+        "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-a",
+        "node_verbs": ["send", "tail", "state", "states", "ping", "local",
+                       "type", "wipe", "usage", "clone"]},
+    # Вторая мастер-роль того же человека (#584: «один человек, два мастера»).
+    B: {"job": "pu-mop-8", "role": "master", "owner": "anton", "project": "mop", "active": True,
+        "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-b",
+        "node_verbs": ["send", "tail", "state", "states", "ping", "local",
+                       "type", "wipe", "usage", "clone"]},
+    # Рабочий: send есть, dispatch нет.
+    W: {"job": "pu-mop-5", "role": "puppet", "owner": "anton", "project": "mop", "active": True,
+        "dispatch": False, "receives_dispatch": True, "soul_inc": "inc-w",
+        "node_verbs": ["send", "tail", "state", "states", "ping", "local"]},
+    # Старая инкарнация: привязка отозвана, токен в субъекте по-прежнему
+    # правильной формы, соединение живо (факт 1 SOUL.md).
+    R: {"job": "pu-mop-6", "role": "master", "owner": "anton", "project": "mop", "active": False,
+        "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-old",
+        "node_verbs": ["send", "wipe"]},
+    # Чужой проект.
+    X: {"job": "pu-other-1", "role": "master", "owner": "olga", "project": "other", "active": True,
+        "dispatch": True, "receives_dispatch": False, "soul_inc": "inc-x",
+        "node_verbs": ["send", "wipe"]},
+}
+INC_1 = "11111111-1111-1111-1111-111111111111"
+INC_2 = "22222222-2222-2222-2222-222222222222"
+MARK_584 = "mop-soul-inc"       # маркер identity этой инкарнации (агент, .git/)
+READY_584 = "ready.json"        # готовность 590/583 в каталоге инкарнации (souls/)
+
+# Настоящие digest'ы бандлов -- формулой пакета (#580: SHA256, не
+# подставки из 32 знаков): привязка и ready-файл обязаны совпасть с тем,
+# что реальный реестр и реальная обёртка кладут в тело.
+PUPPET_MANIFEST = {"soul": "puppet", "version": 1,
+                   "runtime": {"driver": "any", "receives_dispatch": True},
+                   "capabilities": {"node_verbs": ["send", "tail", "state", "states",
+                                                   "ping", "local"],
+                                    "cluster_verbs": [], "dispatch": False,
+                                    "spawn": []},
+                   "prompt": "soul.md"}
+DIGEST_1 = soul.digest(PUPPET_MANIFEST, b"You are the role.\n")
+DIGEST_2 = soul.digest(PUPPET_MANIFEST, b"You are the other one.\n")
+
+
+def marked_584(root, inc):
+    """Маркер identity инкарнации: пишет агент под замком, в .git/, как
+    файл аренды -- клон git не пачкает."""
+    path = os.path.join(root, ".git", MARK_584)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write(json.dumps({"inc": inc}))
+
+
+def marker_584(root):
+    try:
+        got = json.loads(open(os.path.join(root, ".git", MARK_584)).read() or "null")
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def ready_584(root, role="puppet", inc=INC_1, digest=None):
+    """Доказательство готовности 590: обёртка пишет его ПОСЛЕДНИМ и
+    отдельным файлом в каталог инкарнации (souls/<name>/<inc>/), уже
+    сверив бандл с Meta -- ключ роли в нём role, не soul."""
+    os.makedirs(root, exist_ok=True)   # каталог инкарнации создаёт обёртка
+    path = os.path.join(root, READY_584)
+    open(path, "w").write(json.dumps(
+        {"ready": True, "role": role, "soul_inc": inc,
+         "soul_digest": digest or DIGEST_1}))
+
+
+class NodeConn:
+    """Соединение узла, как его держит агент: creds-снимок открытого
+    соединения (#603) -- из него строится узловой квалифицированный
+    субъект резолвера (#581)."""
+
+    creds = {"user": "node-hyper", "password": "node-pass",
+             "url": "nats://10.0.0.1:4222"}
+
+
+TARGETS_584 = {
+    "pu-mop-1": {"found": True, "job": "pu-mop-1", "project": "mop",
+                 "role": "puppet", "owner": "anton", "soul_inc": INC_1,
+                 "soul_digest": DIGEST_1, "receives_dispatch": True,
+                 "active": True},
+    "pu-mop-2": {"found": True, "job": "pu-mop-2", "project": "mop",
+                 "role": "master", "owner": "anton",
+                 "soul_inc": "33333333-3333-3333-3333-333333333333",
+                 "soul_digest": DIGEST_2, "receives_dispatch": False,
+                 "active": True},
+    "pu-mop-3": {"found": False},
+    "pu-mop-5": {"found": True, "job": "pu-mop-5", "project": "mop",
+                 "role": "puppet", "owner": "anton", "soul_inc": INC_1,
+                 "soul_digest": DIGEST_1, "receives_dispatch": True,
+                 "active": True},
+}
+
+
+def resolver_584(req, project, mode=None):
+    """Резолвер сервера, каким его обещает #581: решает реестр, не тело;
+    проект -- из субъекта запроса."""
+    principal, verb, target = req.get("principal"), req.get("verb_name"), req.get("target")
+    if "principal" not in req:
+        # Привязка по имени джоба (resolve_target): чужой проект -- не найдено.
+        t = dict(TARGETS_584.get(target, {"found": False}))
+        if t.get("found") and t.get("project") != project:
+            t = {"found": False}
+        if mode == "other-job" and t.get("found"):
+            t = dict(t, job="pu-mop-9")
+        if mode == "bad-digest" and t.get("found"):
+            t = dict(t, soul_digest="zz!")
+        if mode == "bad-inc" and t.get("found"):
+            t = dict(t, soul_inc="not-a-uuid")
+        # Контракт #581 (by_job dd1e357): точная инкарнация возвращает
+        # запись С её состоянием -- отвергать неактивную обязан
+        # вызывающий; без инкарнации -- только живая. Вопрос узла
+        # обязан нести ожидаемую инкарнацию (soul_inc поля конверта).
+        if mode == "inactive" and t.get("found"):
+            if req.get("soul_inc"):
+                t = dict(t, active=False)
+            else:
+                t = {"found": False}
+        if mode == "revoked" and t.get("found"):
+            if req.get("soul_inc"):
+                t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
+            else:
+                # Контракт #581 (describe_target): без инкарнации сервер
+                # ВСЁ РАВНО возвращает единственную неживую запись С её
+                # состоянием -- «отозвана» и «не привязана вовсе» узлу
+                # различать обязательно.
+                t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
+        if mode == "revoked-no-inc" and t.get("found"):
+            t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
+        if mode == "inactive-no-inc" and t.get("found"):
+            t = dict(t, active=False)
+        if mode == "active-missing" and t.get("found"):
+            t = {k: v for k, v in t.items() if k != "active"}
+            t.pop("revoked_at", None)
+        if mode == "ambiguous" and t.get("found"):
+            t = {"found": False,
+                 "reason": "grants: mop/pu-mop-1/… has ambiguous bindings: "
+                           "grant-a…, grant-b…"}
+        return t
+    g = GRANTS_584.get(principal)
+    if g is None:
+        return {"allow": False, "reason": f"unknown principal {principal}"}
+    out = {"principal": principal, "role": g["role"], "owner": g["owner"],
+           "project": g["project"], "job": g["job"], "soul_inc": g["soul_inc"],
+           "soul_digest": DIGEST_1 if g["role"] == "puppet" else DIGEST_2,
+           "receives_dispatch": g["receives_dispatch"],
+           "capabilities": {"dispatch": g["dispatch"], "node_verbs": g["node_verbs"]}}
+    if target is not None:
+        out["target"] = dict(TARGETS_584.get(target, {"found": False}))
+    if mode == "other-principal":
+        out["principal"] = GRANTS_584 and [k for k in GRANTS_584 if k != principal][0]
+    if mode == "other-job" and target is not None:
+        out["target"] = dict(TARGETS_584["pu-mop-1"], job="pu-mop-9")
+    if mode == "other-target-project" and target is not None:
+        out["target"] = dict(out["target"], project="other")
+    # Состояние цели (#581): актёрский ответ несёт ту же запись
+    # привязки, и право цели -- не только receives_dispatch, но и
+    # живость привязки.
+    if mode == "target-revoked" and target is not None:
+        out["target"] = dict(out["target"], active=True,
+                             revoked_at="2026-10-01T00:00:00Z")
+    if mode == "target-inactive" and target is not None:
+        out["target"] = dict(out["target"], active=False)
+    if mode == "target-active-missing" and target is not None:
+        t = {k: v for k, v in out["target"].items() if k != "active"}
+        t.pop("revoked_at", None)
+        out["target"] = t
+    if mode == "no-owner":
+        out["owner"] = ""
+    if mode == "no-job":
+        out.pop("job")
+    if not g["active"]:
+        return dict(out, allow=False, reason=f"principal {principal} is not active")
+    if g["project"] != project:
+        return dict(out, allow=False, reason=f"principal {principal} is not in project {project}")
+    if verb == "dispatch":
+        ok = g["dispatch"] and TARGETS_584.get(target, {}).get("receives_dispatch") is True
+    else:
+        ok = verb in g["node_verbs"]
+    return dict(out, allow=ok, reason=None if ok else f"verb {verb} is not granted to {g['role']}")
+
+
+def check_role_node_gates_584(c):
+    """HYPOTHESIS (#584): агент узла не знает делегированных принципалов.
+    rpc.grant-<id> читается как логин человека: send захватывает аренду и
+    ставит identity, глагол вне node_verbs исполняется, отозванная привязка
+    и молчащий резолвер ничего не останавливают; dispatch-субъекта агент не
+    слушает вовсе, а в handle он идёт прежним self-declared путём, где
+    владельца называет тело.
+    SOLUTION: см. agent.resolve_actor / handle -- разрешение принципала
+    свежим запросом к резолверу сервера (server.rpc, узловой кред) перед
+    любым эффектом; send нового актёра -- без аренды и identity; dispatch --
+    своим субъектом, аренда и identity -- хозяина-человека из ответа
+    резолвера (политика аренды прежняя), актёр -- в аудите, from-name --
+    его джоб; транзакция #574 целиком.
+    RESULT: RED на fa60d1e (21 провал); зелёный после правки агента.
+    STATUS: FIXED — see #584"""
+    import asyncio
+    import subprocess
+    import tempfile
+    from mop.common import bus, lease
+    from mop.common.domain import Owner
+    profiles = {"anton": {"name": "Anton E", "email": "anton@example.dev"},
+                "petr": {"name": "Petr P", "email": "petr@example.dev"}}
+    root = tempfile.mkdtemp(prefix="mop-test-584-")
+    clones = {}
+
+    def fresh(name):
+        d = tempfile.mkdtemp(dir=root)
+        subprocess.run(["git", "init", "-q", "-b", "master", d], check=True)
+        for key in ("name", "email"):
+            subprocess.run(["git", "-C", d, "config", "--local", f"user.{key}",
+                            profiles["petr"][key]], check=True)
+        clones[name] = d
+
+    def ident(name):
+        got = {}
+        for key in ("name", "email"):
+            r = subprocess.run(["git", "-C", clones[name], "config", "--local", f"user.{key}"],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                got[key] = r.stdout.strip()
+        return got
+
+    def holder(name):
+        path = os.path.join(clones[name], lease.FILE)
+        return Owner.parse(open(path).read()).user if os.path.exists(path) else None
+
+    async def clonefacts(name):
+        path = os.path.join(clones[name], lease.FILE)
+        owner = Owner.parse(open(path).read()) if os.path.exists(path) else None
+        return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
+                "cur": "master", "def": "master"}
+
+    st = {"mode": None, "deliver_error": None}
+    asks, delivered, events, destroyed = [], [], [], []
+
+    class Reply:
+        def __init__(self, body):
+            self.data = json.dumps(body).encode()
+
+    async def arequest(conn, subject, data, timeout):
+        req = json.loads(data)
+        asks.append((subject, req))
+        if st["mode"] == "down":
+            raise asyncio.TimeoutError()
+        if req.get("verb") == "identity":
+            p = profiles.get(req.get("login"))
+            return Reply(p if p else {"error": f"no profile for {req.get('login')}"})
+        if req.get("verb") == "resolve":
+            return Reply(resolver_584(req, subject.split(".")[1], st["mode"]))
+        return Reply({"error": f"no such verb {req.get('verb')}"})
+
+    async def deliver(name, cmd, timeout=20):
+        if "wait-idle" in cmd:
+            return {"state": "idle"}
+        delivered.append({"name": name, "cmd": cmd, "ident": ident(name),
+                          "holder": holder(name)})
+        if st["deliver_error"]:
+            return {"error": st["deliver_error"]}
+        return {"msg_id": f"m-{len(delivered)}"}
+
+    async def event(conn, kind, name=None, **fields):
+        events.append((kind, name, fields))
+
+    async def project(name):
+        return "mop"
+
+    async def dead(name):
+        return False
+
+    class Drv:
+        SESSION_PY = "/x/session.py"
+
+        async def destroy(self, name, branch=None):
+            destroyed.append(name)
+            return {"wiped": name}
+
+    def ask(subject, body):
+        m = Msg(subject, body=body)
+        asyncio.run(agent.handle(NodeConn(), m, public=subject.endswith(".msg")))
+        return m.replies[-1] if m.replies else None
+
+    def reset(*names):
+        asks.clear(), delivered.clear(), events.clear(), destroyed.clear()
+        st.update(mode=None, deliver_error=None)
+        agent.__dict__.update(_owner_locks={}, _lease_generations={},
+                              _lease_claims={}, _lease_holder={})
+        for n in names or ("pu-mop-1", "pu-mop-2", "pu-mop-3"):
+            fresh(n)
+
+    rpc = lambda g: f"mop.mop.node.hyper.rpc.{g}"                      # noqa: E731
+    role = lambda g: f"mop.mop.node.hyper.role.{g}"                    # noqa: E731
+    # Диспетчерский субъект -- полный принципал grant-<id> (#603): голый
+    # hex на проводе не появляется, и busnames.dispatch_subject
+    # ровно это и требует.
+    dsp = lambda g: busnames.dispatch_subject("mop", "hyper", g)  # noqa: E731
+    resolves = lambda: [r for _s, r in asks if r.get("verb") == "resolve"]  # noqa: E731
+
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "session_json",
+                  "_event", "puppet_project", "_owner_locks", "_lease_generations",
+                  "_lease_claims", "_lease_holder", "IDENTITY_WAIT", "tmux_alive",
+                  "DRIVER"), \
+            restored(agent.time, "time"), restored(bus, "arequest"):
+        agent.bsh, agent.clone_facts, agent.session_json = bash, clonefacts, deliver
+        agent._event, agent.puppet_project, agent.tmux_alive = event, project, dead
+        agent.DRIVER, agent.IDENTITY_WAIT = Drv(), 0.1
+        agent.clone_dir = lambda name: clones[name]
+        agent.time.time = lambda: 1000
+        bus.arequest = arequest
+        send = {"verb": "send", "name": "pu-mop-1", "message": "hi", "from_name": "anton"}
+
+        # 0. Проволочный забор (#603): обычный RPC актёра -- субъект
+        # mop.<p>.node.<узел>.role.<принципал>. Старый rpc-путь принципала
+        # отклонён ДО резолвера: на смешанной раскатке старый агент иначе
+        # исполнил бы глагол без резолвера. Не-принципал на role -- тоже
+        # отказ: канал роли не человеческий.
+        reset()
+        got = ask(rpc(W), send)
+        c.check("584 a delegated principal on the old rpc subject is fenced off",
+                bool(got and got.get("error")) and not delivered
+                and not [r for _s, r in asks if r.get("verb") == "resolve"
+                         and r.get("principal") == W], (got, asks))
+        reset()
+        got = ask("mop.mop.node.hyper.role.anton", send)
+        c.check("584 a non-principal token on the role subject is refused",
+                bool(got and got.get("error")) and not delivered, (got, delivered))
+
+        # 1. Обычный send нового актёра -- сообщение соседу: доставка, без
+        # аренды и без identity; резолвер спрошен; from-name -- джоб актёра.
+        reset()
+        got = ask(role(W), send)
+        c.check("584 grant send is authorized by the server resolver",
+                [(r.get("principal"), r.get("verb_name"), r.get("target"))
+                 for r in resolves()] == [(W, "send", "pu-mop-1")], asks)
+        c.check("584 the resolver request carries exactly the decided envelope",
+                [(s, sorted(r)) for s, r in asks if r.get("verb") == "resolve"]
+                == [(busnames.server("mop", caller=busnames.node_user("hyper")),
+                     ["principal", "service", "target", "verb", "verb_name"])], asks)
+        c.check("584 grant send is delivered", bool(got and got.get("msg_id")), got)
+        c.check("584 grant send takes no lease", holder("pu-mop-1") is None,
+                holder("pu-mop-1"))
+        c.check("584 grant send sets no git identity",
+                ident("pu-mop-1") == profiles["petr"]
+                and not [r for _s, r in asks if r.get("verb") == "identity"],
+                (ident("pu-mop-1"), asks))
+        c.check("584 grant send: from-name is the actual actor's job, not the body",
+                bool(delivered) and "--from-name pu-mop-5" in delivered[0]["cmd"]
+                and "--from-name anton" not in delivered[0]["cmd"], delivered)
+        c.check("584 grant send: the audit event names the actual actor",
+                [(k, f.get("actor")) for k, _n, f in events if k == "send"] == [("send", W)],
+                events)
+
+        # 2. Поддельные каркасные и авторитетные поля в теле ничего не дают.
+        reset()
+        forged = dict(send, _caller="anton", _actor=A, _owner="anton", _dispatch=True,
+                      _project="admin", owner="anton", role="master", dispatch=True,
+                      soul_digest="0" * 32, grant=A, force=True)
+        got = ask(role(W), forged)
+        c.check("584 forged '_' and authority fields: still a plain send, no lease",
+                holder("pu-mop-1") is None and bool(got and got.get("msg_id")),
+                (holder("pu-mop-1"), got))
+        c.check("584 forged fields: the resolver is asked about the subject's actor",
+                [r.get("principal") for r in resolves()] == [W], resolves())
+
+        # 3. Глагол вне node_verbs -- отказ с причиной до эффекта.
+        reset()
+        got = ask(role(W), {"verb": "wipe", "name": "pu-mop-1"})
+        c.check("584 a verb outside node_verbs is refused before effect",
+                not destroyed and bool(got and got.get("error"))
+                and "wipe" in got["error"], (destroyed, got))
+
+        # 4. Отозванная привязка (старая инкарнация) -- отказ, хотя токен
+        # в субъекте правильной формы и соединение живо.
+        reset()
+        got = ask(role(R), send)
+        c.check("584 a revoked principal is refused before delivery",
+                not delivered and bool(got and got.get("error"))
+                and "not active" in got["error"], (delivered, got))
+
+        # 5. Резолвер молчит -- отказ до эффекта, не «пропустить».
+        reset()
+        st["mode"] = "down"
+        got = ask(role(W), send)
+        c.check("584 a silent resolver denies before effect",
+                not delivered and holder("pu-mop-1") is None
+                and bool(got and got.get("error")), (delivered, got))
+        reset()
+        st["mode"] = "down"
+        got = ask(dsp(A), dict(send, verb="dispatch"))
+        c.check("584 a silent resolver denies dispatch before the lease",
+                not delivered and holder("pu-mop-1") is None
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 6. dispatch: свой субъект; аренда и identity -- хозяина-человека из
+        # резолвера, до доставки (#574); from-name -- джоб актёра, аудит --
+        # принципал актёра.
+        reset()
+        got = ask(dsp(A), dict(send, verb="dispatch"))
+        c.check("584 dispatch asks the resolver for verb dispatch on the target",
+                [(r.get("principal"), r.get("verb_name"), r.get("target"))
+                 for r in resolves()] == [(A, "dispatch", "pu-mop-1")], asks)
+        c.check("584 dispatch is delivered", bool(got and got.get("msg_id")), got)
+        c.check("584 dispatch: the lease and the identity are the resolved "
+                "human owner's, both before delivery",
+                bool(delivered) and delivered[0]["holder"] == "anton"
+                and delivered[0]["ident"] == profiles["anton"], delivered)
+        c.check("584 dispatch: from-name is the actor's job",
+                bool(delivered) and "--from-name pu-mop-7" in delivered[0]["cmd"], delivered)
+        c.check("584 dispatch: the audit event names the actor and the owner",
+                [(f.get("actor"), f.get("owner")) for k, _n, f in events if k == "send"]
+                == [(A, "anton")], events)
+
+        # 7. Один человек, два мастера: тот же человек по прежней политике
+        # аренды; аудит различает актёров.
+        events.clear()
+        got = ask(dsp(B), dict(send, verb="dispatch"))
+        c.check("584 the same human's second master works under the same lease",
+                len(delivered) == 2 and holder("pu-mop-1") == "anton"
+                and bool(got and got.get("msg_id")), (delivered, got))
+        c.check("584 two masters of one human stay apart in the audit",
+                [(f.get("actor"), f.get("owner")) for k, _n, f in events if k == "send"]
+                == [(B, "anton")], events)
+        # Чужая живая аренда (другой человек) закрывает dispatch, и force
+        # тела её не снимает.
+        reset()
+        ask("mop.mop.node.hyper.rpc.petr", send)
+        got = ask(dsp(A), dict(send, verb="dispatch", force=True))
+        c.check("584 another human's live lease refuses dispatch, body force ignored",
+                len(delivered) == 1 and holder("pu-mop-1") == "petr"
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 8. Роль без dispatch -- отказ.
+        reset()
+        got = ask(dsp(W), dict(send, verb="dispatch"))
+        c.check("584 a role without dispatch cannot dispatch",
+                not delivered and holder("pu-mop-1") is None
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 9. Цель без receives_dispatch -- отказ, хотя она свободна: право
+        # цели -- отдельная проверка от свободы клона.
+        reset()
+        got = ask(dsp(A), dict(send, verb="dispatch", name="pu-mop-2"))
+        c.check("584 a free target without receives_dispatch is refused",
+                not delivered and holder("pu-mop-2") is None
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 9b. Цель с мёртвой привязкой -- отказ: право цели (#581) -- это
+        # состояние записи, не только receives_dispatch; ответ без active
+        # вовсе -- не согласие, умолчание не пускает.
+        for mode, word in (("target-revoked", "revoked"),
+                           ("target-inactive", "not active"),
+                           ("target-active-missing", "not active")):
+            reset()
+            st["mode"] = mode
+            got = ask(dsp(A), dict(send, verb="dispatch"))
+            c.check(f"584 dispatch into a {mode} target binding is refused",
+                    not delivered and holder("pu-mop-1") is None
+                    and bool(got and got.get("error"))
+                    and word in (got or {}).get("error", ""),
+                    (delivered, got))
+
+        # 10. Непривязанная цель -- отказ.
+        reset()
+        got = ask(dsp(A), dict(send, verb="dispatch", name="pu-mop-3"))
+        c.check("584 an unbound target is refused",
+                not delivered and holder("pu-mop-3") is None
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 11. Чужой проект: принципал из other в субъекте mop -- отказ; ответ
+        # о цели из чужого проекта -- отказ на узле, не только на сервере.
+        reset()
+        got = ask(role(X), send)
+        c.check("584 a principal of another project is refused",
+                not delivered and bool(got and got.get("error")), (delivered, got))
+        reset()
+        st["mode"] = "other-target-project"
+        got = ask(dsp(A), dict(send, verb="dispatch"))
+        c.check("584 a target the resolver places in another project is refused",
+                not delivered and holder("pu-mop-1") is None
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 12. Ответ не о том: другой принципал или другая цель (имя
+        # переиспользовано) -- отказ.
+        for mode in ("other-principal", "other-job"):
+            reset()
+            st["mode"] = mode
+            got = ask(dsp(A), dict(send, verb="dispatch"))
+            c.check(f"584 a resolver answer about someone else ({mode}) is refused",
+                    not delivered and holder("pu-mop-1") is None
+                    and bool(got and got.get("error")), (delivered, got))
+
+        # 13. Нет хозяина-человека или джоба в ответе -- отказ до эффекта.
+        for mode in ("no-owner", "no-job"):
+            reset()
+            st["mode"] = mode
+            got = ask(dsp(A), dict(send, verb="dispatch"))
+            c.check(f"584 dispatch without a resolved {mode[3:]} is refused",
+                    not delivered and holder("pu-mop-1") is None
+                    and bool(got and got.get("error")), (delivered, got))
+
+        # 14. Путаница операций: субъект dispatch с глаголом wipe -- отказ;
+        # rpc с телом «dispatch: true» -- обычный send; глагол dispatch по
+        # rpc -- не глагол.
+        reset()
+        got = ask(dsp(A), {"verb": "wipe", "name": "pu-mop-1"})
+        c.check("584 the dispatch subject executes dispatch only, not wipe",
+                not destroyed and bool(got and got.get("error")), (destroyed, got))
+        reset()
+        got = ask(role(A), dict(send, dispatch=True, mode="dispatch"))
+        c.check("584 an rpc body asking for dispatch stays a plain send",
+                holder("pu-mop-1") is None and bool(got and got.get("msg_id")),
+                (holder("pu-mop-1"), got))
+        reset()
+        got = ask(role(A), dict(send, verb="dispatch"))
+        c.check("584 verb dispatch over rpc is refused (the subject decides)",
+                not delivered and holder("pu-mop-1") is None
+                and bool(got and got.get("error")), (delivered, got))
+
+        # 15. Частичный провал: доставка упала -- аренда и identity
+        # откатываются (#574).
+        reset()
+        st["deliver_error"] = "socket gone"
+        got = ask(dsp(A), dict(send, verb="dispatch"))
+        c.check("584 a failed dispatch delivery rolls the lease and identity back",
+                holder("pu-mop-1") is None and ident("pu-mop-1") == profiles["petr"]
+                and bool(got and got.get("error")),
+                (holder("pu-mop-1"), ident("pu-mop-1"), got))
+
+        # 16. Изменяющий глагол актёра -- через ворота аренды его хозяина:
+        # живая аренда другого человека закрывает wipe.
+        reset()
+        ask("mop.mop.node.hyper.rpc.petr", send)
+        got = ask(role(A), {"verb": "wipe", "name": "pu-mop-1"})
+        c.check("584 another human's live lease gates an actor's mutating verb",
+                not destroyed and bool(got and got.get("error")), (destroyed, got))
+
+        # 17. Легаси без изменений: человек по rpc -- аренда и identity, без
+        # резолвера; публичный msg -- без владельца и без резолвера.
+        reset()
+        got = ask("mop.mop.node.hyper.rpc.anton", send)
+        c.check("584 legacy human rpc send keeps lease and identity, no resolver",
+                holder("pu-mop-1") == "anton" and not resolves()
+                and bool(delivered) and delivered[0]["ident"] == profiles["anton"],
+                (holder("pu-mop-1"), resolves(), delivered))
+        reset()
+        got = ask("mop.mop.node.hyper.msg", send)
+        c.check("584 legacy public msg send: no owner, no resolver",
+                holder("pu-mop-1") is None and not resolves()
+                and bool(got and got.get("msg_id")), (holder("pu-mop-1"), got))
+        # Узловые глаголы -- никогда актёру, что бы ни ответил резолвер.
+        reset()
+        got = ask(role(A), {"verb": "disk"})
+        c.check("584 node-level verbs are never given to an actor",
+                bool(got and got.get("error")), got)
+
+        # 18. Шов #590: первая аренда и identity хозяина до первого хода.
+        reset()
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
+        c.check("584 initial identity: a fresh body gets the human lease and "
+                "identity", holder("pu-mop-1") == "anton"
+                and ident("pu-mop-1") == profiles["anton"] and not got.get("error"),
+                (holder("pu-mop-1"), ident("pu-mop-1"), got))
+        c.check("584 initial identity records the incarnation marker inside .git",
+                marker_584(clones["pu-mop-1"]) == {"inc": INC_1}
+                and not os.path.exists(os.path.join(clones["pu-mop-1"], MARK_584)),
+                marker_584(clones["pu-mop-1"]))
+        asks.clear()
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
+        c.check("584 initial identity: resume of the same incarnation asks nothing",
+                got == {"resumed": True} and not asks
+                and holder("pu-mop-1") == "anton", (got, asks))
+        reset()
+        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
+            f.write(Owner("petr", 1).render())       # чужая, и давно не живая
+        got = asyncio.run(agent.initial_identity(None, "pu-mop-1", "anton", INC_1))
+        c.check("584 initial identity: a foreign lease refuses, nothing rewritten",
+                bool(got.get("error")) and holder("pu-mop-1") == "petr"
+                and ident("pu-mop-1") == profiles["petr"], (got, holder("pu-mop-1")))
+
+        # Чистый вердикт: только явное allow, иное -- отказ, не «пропустить».
+        ok = {"allow": True, "principal": A, "project": "mop", "owner": "anton",
+              "job": "pu-mop-7"}
+        for label, got in (("no allow", {k: v for k, v in ok.items() if k != "allow"}),
+                           ("truthy allow", dict(ok, allow="yes")),
+                           ("not a mapping", ["allow"]),
+                           ("owner not a string", dict(ok, owner=["anton"]))):
+            c.check(f"584 actor_verdict fails closed: {label}",
+                    bool(agent.actor_verdict(got, A, "mop", "send")), got)
+        c.check("584 actor_verdict passes an explicit allow about the asked principal",
+                agent.actor_verdict(ok, A, "mop", "send") is None)
+        tgt = {"target": {"found": True, "job": "pu-mop-1", "project": "mop",
+                          "receives_dispatch": True, "active": True}}
+        for label, extra, want in (
+                ("source_dispatch", {"source_dispatch": True}, None),
+                ("capabilities.dispatch", {"capabilities": {"dispatch": True}}, None),
+                ("bare top-level dispatch is not a source right", {"dispatch": True}, "deny"),
+                ("no source right", {}, "deny")):
+            got = agent.actor_verdict(dict(ok, **tgt, **extra), A, "mop", "dispatch", "pu-mop-1")
+            c.check(f"584 dispatch source right: {label}",
+                    (got is None) == (want is None), got)
+        c.check("584 dispatch subject token must be a principal id",
+                agent.actor_of("mop.mop.node.hyper.dispatch.anton") == ("dispatch", None)
+                and agent.actor_of("mop.mop.node.hyper.rpc.anton") == ("rpc", None)
+                and agent.actor_of(role(W)) == ("role", W)
+                and agent.actor_of("mop.mop.node.hyper.role.anton") == ("role", None)
+                and agent.actor_of(dsp(A)) == ("dispatch", A))
+
+    subs = asyncio.run(_subjects_584())
+    c.check("584 the agent listens on its dispatch subject",
+            "mop.*.node.hyper.dispatch.*" in subs, subs)
+    c.check("584 the agent listens on the role channel, disjoint from the old "
+            "rpc patterns",
+            busnames.node_role(busnames.ANY, "hyper") in subs
+            and busnames.node_role(busnames.ANY, "hyper")
+            not in busnames.agent_subscriptions("hyper")["rpc"]
+            and "mop.*.node.hyper.role" not in subs, subs)
+
+
+def check_startup_soul_584(c):
+    """HYPOTHESIS (#584, ревизия-2): готовность роли в ростере опиралась на
+    угаданный список статусов и строку сессии без идентификатора, а «живая
+    сессия» по усечённой строке пускала любой мусор; структурной записи
+    state (alive/listen/sessionId) код не читал вовсе, и при отсутствующей
+    записи новая роль не отказывалась, а молчала. Доказательство готовности
+    было самодельным маркером в рабочем клоне -- git его видел грязью, и
+    доказывал он только initial_identity, а не проверенный обёрткой бандл.
+    SOLUTION: живость -- только структурный факт state: alive === True,
+    listen === True, непустой sessionId (session.py его даёт только живой);
+    записи нет -- fail closed, без угадывания статусов. Готовность =
+    привязка + маркер identity этой инкарнации (в .git, как файл аренды) +
+    ready-файл 590/583 в target-каталоге с той же ролью/инкарнацией/digest.
+    Кэш -- по (проект, имя, инкарнация, sessionId).
+    RESULT: RED до правки агента; зелёный после.
+    STATUS: FIXED — see #584"""
+    import asyncio
+    import subprocess
+    import tempfile
+    from mop.common import bus, lease
+    from mop.common.domain import Owner
+    profiles = {"anton": {"name": "Anton E", "email": "anton@example.dev"},
+                "petr": {"name": "Petr P", "email": "petr@example.dev"}}
+    root = tempfile.mkdtemp(prefix="mop-test-584b-")
+    clones, targets = {}, {}
+
+    def fresh(name):
+        d = tempfile.mkdtemp(dir=root)
+        subprocess.run(["git", "init", "-q", "-b", "master", d], check=True)
+        subprocess.run(["git", "-C", d, "config", "--local", "user.name",
+                        profiles["petr"]["name"]], check=True)
+        subprocess.run(["git", "-C", d, "config", "--local", "user.email",
+                        profiles["petr"]["email"]], check=True)
+        clones[name] = d
+        targets[name] = tempfile.mkdtemp(dir=root)
+
+    def holder(name):
+        path = os.path.join(clones[name], lease.FILE)
+        return Owner.parse(open(path).read()).user if os.path.exists(path) else None
+
+    async def clonefacts(name):
+        path = os.path.join(clones[name], lease.FILE)
+        owner = Owner.parse(open(path).read()) if os.path.exists(path) else None
+        return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
+                "cur": "master", "def": "master"}
+
+    st = {"mode": None, "facts": {}}
+    asks = []
+
+    class Reply:
+        def __init__(self, body):
+            self.data = json.dumps(body).encode()
+
+    async def arequest(conn, subject, data, timeout):
+        req = json.loads(data)
+        asks.append((subject, req))
+        if st["mode"] == "down":
+            raise asyncio.TimeoutError()
+        if req.get("verb") == "identity":
+            p = profiles.get(req.get("login"))
+            return Reply(p if p else {"error": f"no profile for {req.get('login')}"})
+        if req.get("verb") == "resolve":
+            return Reply(resolver_584(req, subject.split(".")[1], st["mode"]))
+        return Reply({"error": f"no such verb {req.get('verb')}"})
+
+    async def no_event(*a, **k):
+        return None
+
+    async def project(name):
+        return "mop"
+
+    async def local(name):
+        return name in clones
+
+    def live_fact(status="idle", sid="s-1", alive=True, listen=True, state=True):
+        """Живой факт по настоящей форме session.state (#222/#468): строка
+        «<status> <alive> <listen>» и структурная запись state с sessionId
+        живой сессии; sessionId есть только у слушающей."""
+        fact = {"present": True, "session": f"{status} {int(alive)} {int(listen)}"}
+        if state:
+            fact["state"] = {"status": status, "waitingFor": None, "alive": alive,
+                             "listen": listen, "turn": None,
+                             "sessionId": sid if (alive and listen) else None,
+                             "model_at": None, "model": None}
+        return fact
+
+    def ask(subject, body, startup=False):
+        m = Msg(subject, body=body)
+        try:
+            asyncio.run(agent.handle(NodeConn(), m, public=subject.endswith(".msg"),
+                                     startup=startup))
+        except TypeError:
+            asyncio.run(agent.handle(None, m, public=subject.endswith(".msg")))
+        return m.replies[-1] if m.replies else None
+
+    def reset(*names):
+        asks.clear()
+        souls.clear()
+        st.update(mode=None, facts={})
+        agent.__dict__.update(_owner_locks={}, _lease_generations={},
+                              _lease_claims={}, _lease_holder={}, _soul_cache={},
+                              SOUL_FACT_TTL=0)
+        for n in names or ("pu-mop-1", "pu-mop-2", "pu-mop-3"):
+            fresh(n)
+
+    rpc = lambda g: f"mop.mop.node.hyper.rpc.{g}"                      # noqa: E731
+    role = lambda g: f"mop.mop.node.hyper.role.{g}"                    # noqa: E731
+    binding_asks = lambda: [r for _s, r in asks  # noqa: E731
+                            if r.get("verb") == "resolve" and "principal" not in r]
+
+    souls = {}
+
+    def soul_root(name):
+        souls.setdefault(name, tempfile.mkdtemp(prefix="soul-"))
+        return souls[name]
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "target_dir", "soul_dir",
+                  "_event", "puppet_project", "_owner_locks", "_lease_generations",
+                  "_lease_claims", "_lease_holder", "IDENTITY_WAIT",
+                  "SOUL_FACT_TTL", "_soul_cache", "facts", "local_puppet",
+                  "clone_present"), restored(bus, "arequest"):
+        agent.bsh, agent.clone_facts = bash, clonefacts
+        agent.clone_dir = lambda name: clones[name]
+        agent.target_dir = lambda name: targets[name]
+        agent.soul_dir = lambda name, inc: os.path.join(soul_root(name), inc)
+
+        async def facts_of(name):
+            return st["facts"].get(name, {"present": False})
+        agent.facts = facts_of
+        agent._event, agent.puppet_project = no_event, project
+        agent.local_puppet = local
+        # Свежий старт ещё НЕ в списках драйвера/tmux: подъём роли
+        # происходит до первого процесса в теле, членство -- не по живому
+        # телу, а по клональному факту (клон уже стоит -- #247, до identity).
+        agent.clone_present = clonefacts
+        agent.IDENTITY_WAIT, agent.SOUL_FACT_TTL = 0.1, 0
+        bus.arequest = arequest
+
+        # 1. Настоящие статусы (idle/busy -- живые) + маркер identity этой
+        # инкарнации + ready-файл 590 с той же тройкой -> готовность.
+        for status in ("idle", "busy", "waiting", "shell"):
+            reset()
+            st["facts"] = {"pu-mop-1": live_fact(status=status)}
+            marked_584(clones["pu-mop-1"], INC_1)
+            ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 a real live session status ({status}) is ready when "
+                    "the proofs match",
+                    soul == {"ready": True, "role": "puppet", "soul_inc": INC_1,
+                             "soul_digest": DIGEST_1}, (soul, got))
+
+        # 2. Чего-то нет -- не готовность: живой сессии нет вовсе (записи
+        # state нет, сокет мёртв, sessionId пуст) -- факта нет; привязка,
+        # маркер или ready-файл не сходятся -- причина.
+        for label, fact, marker, ready, why_word in (
+                ("no marker", live_fact(), False, True, "identity"),
+                ("marker of another incarnation", live_fact(), INC_2, True, "identity"),
+                ("no ready proof", live_fact(), True, False, "ready"),
+                ("ready of another role", live_fact(), True, "master", "ready"),
+                ("ready of another digest", live_fact(), True,
+                 ("puppet", INC_1, DIGEST_2), "ready")):
+            reset()
+            st["facts"] = {"pu-mop-1": fact}
+            if marker:
+                marked_584(clones["pu-mop-1"], marker if isinstance(marker, str) else INC_1)
+            if ready:
+                if isinstance(ready, tuple):
+                    ready_584(os.path.join(soul_root("pu-mop-1"), INC_1), role=ready[0], digest=ready[2])
+                else:
+                    ready_584(os.path.join(soul_root("pu-mop-1"), INC_1),
+                             role=ready if isinstance(ready, str) else "puppet")
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 not ready: {label}",
+                    soul == {"ready": False, "why": soul.get("why")}
+                    if isinstance(soul, dict) and soul.get("ready") is False
+                    and why_word in (soul.get("why") or "") else False, soul)
+        for label, fact in (("dead session string", {"present": True, "session": "none"}),
+                            ("no body", {"present": False}),
+                            ("no structured state", live_fact(state=False)),
+                            ("dead in state", live_fact(alive=False)),
+                            ("socket down", live_fact(listen=False)),
+                            ("no session id", live_fact(sid="")),
+                            ("state says no session", live_fact(state=True)
+                             | {"state": {"status": None, "waitingFor": None,
+                                          "alive": False, "listen": False, "turn": None,
+                                          "sessionId": None, "model_at": None,
+                                          "model": None}})):
+            reset()
+            marked_584(clones["pu-mop-1"], INC_1)
+            ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
+            st["facts"] = {"pu-mop-1": fact}
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 no soul fact without a live session ({label})",
+                    soul is None and not binding_asks(), (soul, asks))
+
+        # 2b. ready-файл в target-каталоге (старое место) -- не
+        # доказательство: путь 590 -- каталог инкарнации, и файл не в
+        # нём узел не читает вовсе.
+        reset()
+        st["facts"] = {"pu-mop-1": live_fact()}
+        marked_584(clones["pu-mop-1"], INC_1)
+        ready_584(targets["pu-mop-1"])
+        got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+        c.check("584 a ready proof outside the incarnation directory is ignored",
+                soul == {"ready": False} | {"why": (soul or {}).get("why")}
+                if isinstance(soul, dict) and soul.get("ready") is False else False,
+                (soul, got))
+
+        # 3. Конверт вопроса о привязке -- точно target-вид.
+        reset()
+        st["facts"] = {"pu-mop-1": live_fact()}
+        marked_584(clones["pu-mop-1"], INC_1)
+        ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
+        asks.clear()
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        # #581: узел спрашивает резолвер квалифицированным субъектом
+        # server.rpc.node-<узел> -- анонимный server.rpc сервисный маршрут
+        # НЕ пускает. Узел -- из кредов ОТКРЫТОГО соединения (conn.creds),
+        # не из дефолтного конфига и не из hostname.
+        c.check("584 the binding lookup rides the node-qualified server subject",
+                [(s, sorted(r)) for s, r in asks
+                 if r.get("verb") == "resolve" and "principal" not in r]
+                == [(busnames.server("mop", caller=busnames.node_user("hyper")),
+                     ["service", "target", "verb"])], asks)
+        got = ask(role(W), {"verb": "state", "name": "pu-mop-1"})
+        c.check("584 state carries the soul fact too",
+                (got or {}).get("soul", {}).get("ready") is True, got)
+
+        # 3b. Отозванная/неактивная привязка -- не готовность и ПО ИМЕНИ
+        # (вопрос без инкарнации): #581 возвращает единственную неживую
+        # запись с состоянием, и узел обязан отвергнуть её -- иначе ростер
+        # опубликовал бы ready по мёртвой привязке. Запись без active
+        # вовсе -- тоже не готовность: умолчание не согласие.
+        for mode, word in (("revoked-no-inc", "revoked"),
+                           ("inactive-no-inc", "not active"),
+                           ("active-missing", "not active")):
+            reset()
+            st["mode"] = mode
+            st["facts"] = {"pu-mop-1": live_fact()}
+            marked_584(clones["pu-mop-1"], INC_1)
+            ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 a {mode} binding is not ready by name",
+                    isinstance(soul, dict) and soul.get("ready") is False
+                    and word in (soul.get("why") or ""), (soul, got))
+
+        # 4. Битая привязка сервера -- не готовность, а причина.
+        for mode, word in (("down", "resolver"), (None, "binding"),
+                           ("bad-digest", "digest"), ("bad-inc", "incarnation")):
+            reset()
+            st["mode"] = mode
+            name = "pu-mop-3" if mode is None else "pu-mop-1"
+            st["facts"] = {name: live_fact()}
+            marked_584(clones[name], INC_1)
+            ready_584(os.path.join(soul_root(name), INC_1))
+            got = ask("mop.mop.node.hyper.rpc.anton", {"verb": "states", "names": [name]})
+            soul = (got or {}).get("puppets", {}).get(name, {}).get("soul")
+            c.check(f"584 a malformed or missing binding is not ready ({mode})",
+                    soul == {"ready": False, "why": soul.get("why")}
+                    if isinstance(soul, dict) and soul.get("ready") is False
+                    and word in (soul.get("why") or "") else False, soul)
+
+        # 5. Кэш: повтор в пределах TTL -- без вопроса; другая сессия или
+        # инкарнация -- мимо кэша.
+        reset()
+        agent.SOUL_FACT_TTL = 60
+        st["facts"] = {"pu-mop-1": live_fact(sid="s-1")}
+        marked_584(clones["pu-mop-1"], INC_1)
+        ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        c.check("584 the soul fact is cached for the read within the TTL",
+                len(binding_asks()) == 1, asks)
+        st["facts"] = {"pu-mop-1": live_fact(sid="s-2")}
+        ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+        c.check("584 a new session of the same name misses the cache",
+                len(binding_asks()) == 2, asks)
+
+        # 6. Канал подъёма: initial_identity с шины; хозяин -- из привязки.
+        reset()
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 startup initializes the body for the binding's owner",
+                not (got or {}).get("error") and holder("pu-mop-1") == "anton", (got, holder("pu-mop-1")))
+        # #590: расписка успеха -- ВЕРХНЕГО УРОВНЯ identity_ready + тройка
+        # роли (роль/инкарнация/digest), НЕ вложенный soul.ready -- тот
+        # публикует отдельный факт узла после живого доказательства.
+        # owner_note (git-подпись хозяина) ездит рядом -- обёртке; сверяем
+        # обязательные поля расписки, не запрет соседних.
+        c.check("584 startup returns the top-level identity receipt",
+                isinstance(got, dict) and got.get("identity_ready") is True
+                and got.get("role") == "puppet" and got.get("soul_inc") == INC_1
+                and got.get("soul_digest") == DIGEST_1
+                and "soul" not in got, got)
+        c.check("584 startup records the incarnation marker inside .git",
+                marker_584(clones["pu-mop-1"]) == {"inc": INC_1}, marker_584(clones["pu-mop-1"]))
+        # Resume доказан маркером инкарнации: ничего не пишет.
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 startup resume of the same incarnation writes nothing",
+                isinstance(got, dict) and got.get("identity_ready") is True
+                and got.get("resumed") is True and got.get("role") == "puppet"
+                and got.get("soul_inc") == INC_1
+                and got.get("soul_digest") == DIGEST_1 and "soul" not in got
+                and marker_584(clones["pu-mop-1"]) == {"inc": INC_1},
+                (got, marker_584(clones["pu-mop-1"])))
+        # Свежее тело того же хозяина без маркера -- полный путь.
+        fresh("pu-mop-5")
+        ask("mop.mop.node.hyper.startup",
+            {"verb": "initial_identity", "name": "pu-mop-5", "soul_inc": INC_1},
+            startup=True)
+        c.check("584 a fresh same-owner body without the marker is fully initialized",
+                holder("pu-mop-5") is not None
+                and marker_584(clones["pu-mop-5"]) == {"inc": INC_1},
+                holder("pu-mop-5"))
+        # Маркер жив, аренда уехала законным dispatch'ем -- не наша война.
+        reset("pu-mop-1")
+        ask("mop.mop.node.hyper.startup",
+            {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+            startup=True)
+        with open(os.path.join(clones["pu-mop-1"], lease.FILE), "w") as f:
+            f.write(Owner("petr", 1).render())
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 a markered body keeps its runtime proof even when the "
+                "lease moved on by a later dispatch",
+                not (got or {}).get("error"), got)
+
+        # 7. Власть -- не тело: точная инкарнация обязательна, хозяин телом
+        # не назначается, ответ не о том джобе -- отказ.
+        reset()
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1"}, startup=True)
+        c.check("584 startup requires the exact expected incarnation",
+                bool((got or {}).get("error")) and holder("pu-mop-1") is None,
+                (got, holder("pu-mop-1")))
+        reset()
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_2},
+                  startup=True)
+        c.check("584 startup refuses an old incarnation of a reused name",
+                bool((got or {}).get("error")) and holder("pu-mop-1") is None,
+                (got, holder("pu-mop-1")))
+        reset()
+        st["mode"] = "other-job"
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 startup refuses an answer about another job",
+                bool((got or {}).get("error")) and holder("pu-mop-1") is None,
+                (got, holder("pu-mop-1")))
+        reset()
+        got = ask("mop.mop.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1",
+                   "owner": "petr", "soul_inc": INC_1}, startup=True)
+        c.check("584 startup ignores the body owner",
+                holder("pu-mop-1") == "anton" and not (got or {}).get("error"),
+                (holder("pu-mop-1"), got))
+        reset()
+        got = ask("mop.other.node.hyper.startup",
+                  {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+                  startup=True)
+        c.check("584 startup of another project does not reach this binding",
+                bool((got or {}).get("error")) and holder("pu-mop-1") is None,
+                (got, holder("pu-mop-1")))
+
+        # 7b. Контракт поиска #581: вопрос несёт ожидаемую инкарнацию
+        # (by_job точной записью -- с состоянием), и неактивная либо
+        # отозванная запись не пишет identity, как и неоднозначная --
+        # отказ с причиной, а не молчаливый пустой ответ.
+        reset()
+        ask("mop.mop.node.hyper.startup",
+            {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
+            startup=True)
+        incs = [r.get("soul_inc") for r in binding_asks()]
+        c.check("584 the binding lookup carries the expected incarnation",
+                incs == [INC_1], (incs, asks))
+        for mode, word in (("inactive", "not active"), ("revoked", "revoked"),
+                           ("ambiguous", "ambiguous")):
+            reset()
+            st["mode"] = mode
+            got = ask("mop.mop.node.hyper.startup",
+                      {"verb": "initial_identity", "name": "pu-mop-1",
+                       "soul_inc": INC_1}, startup=True)
+            c.check(f"584 startup refuses a binding that is {mode} for the "
+                    "named incarnation",
+                    bool((got or {}).get("error")) and word in (got or {}).get("error", "")
+                    and holder("pu-mop-1") is None
+                    and marker_584(clones["pu-mop-1"]) is None,
+                    (got, holder("pu-mop-1"), marker_584(clones["pu-mop-1"])))
+
+        # 8. Один глагол на канале; чужие субъекты его не имеют.
+        reset()
+        got = ask("mop.mop.node.hyper.startup", {"verb": "ping"}, startup=True)
+        c.check("584 the startup channel carries initial_identity only",
+                bool((got or {}).get("error")), got)
+        for label, subj, body in (
+                ("human rpc", "mop.mop.node.hyper.rpc.anton",
+                 {"verb": "initial_identity", "name": "pu-mop-1"}),
+                ("grant rpc", role(W),
+                 {"verb": "initial_identity", "name": "pu-mop-1"}),
+                ("dispatch subject", busnames.dispatch_subject(
+                    "mop", "hyper", A),
+                 {"verb": "initial_identity", "name": "pu-mop-1"}),
+                ("public msg", "mop.mop.node.hyper.msg",
+                 {"verb": "initial_identity", "name": "pu-mop-1"})):
+            reset()
+            got = ask(subj, body)
+            c.check(f"584 initial_identity is not callable via {label}",
+                    bool((got or {}).get("error")) and holder("pu-mop-1") is None,
+                    (got, holder("pu-mop-1")))
+
+        # 9. Совместимость: новый принципал не трогает легаси-цель без
+        # привязки -- закрыто до миграции, и это проверено, а не обещано.
+        reset()
+        got = ask(role(W), {"verb": "send", "name": "pu-mop-4", "message": "hi"})
+        c.check("584 a legacy target without a binding fails closed for a grant",
+                bool((got or {}).get("error"))
+                and "binding" in ((got or {}).get("error") or ""), got)
+
+    # Членство канала подъёма: свежая роль ещё не в DRIVER.bodies/tmux --
+    # клон стоит (его поднял лаунчер ДО identity), сокетов сессии нет.
+    # local_puppet обязан признать такой джоб своим по клону, а не по
+    # живому телу; тело без клона -- чужое.
+    with restored(agent, "DRIVER", "clone_dir", "local_puppet"):
+        class NoBodies:
+            async def bodies(self):
+                return []          # свежий старт: живых тел нет вовсе
+
+            def argv(self, name):
+                return []          # host: без префикса, шелл локален
+        real = tempfile.mkdtemp(prefix="mop-test-584-member-")
+        subprocess.run(["git", "-C", real, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", real, "remote", "add", "origin",
+                        "git@example:mop.git"], check=True)
+        class CloneDir:
+            def __call__(self, name):
+                return real if name == "pu-mop-1" else \
+                    os.path.join("/nonexistent", name)
+        agent.DRIVER, agent.clone_dir = NoBodies(), CloneDir()
+        c.check("584 a fresh startup with a clone but no body is this node's job",
+                asyncio.run(agent.local_puppet("pu-mop-1")) is True,
+                "local_puppet derives membership from live bodies")
+        c.check("584 a body without a clone is not this node's job",
+                asyncio.run(agent.local_puppet("pu-mop-9")) is False,
+                "local_puppet admits clones-less names")
+
+    subs = asyncio.run(_subjects_584())
+    c.check("584 the agent listens on its startup subject",
+            "mop.*.node.hyper.startup" in subs, subs)
+    c.check("584 the agent listens on the role channel",
+            busnames.node_role(busnames.ANY, "hyper") in subs, subs)
+
+
+async def _subjects_584():
+    """Субъекты attach без шины: conn -- записывающая заглушка."""
+    got = []
+
+    class Conn:
+        async def subscribe(self, subj, cb=None):
+            got.append(subj)
+
+        async def publish(self, *a, **k):
+            pass
+    with restored(agent, "_event"):
+        async def quiet(*a, **k):
+            return None
+        agent._event = quiet
+        await agent.attach(Conn(), "hyper")
+    return got
+
+
+
+
+async def _serve_584(fake_nats, agent_mod, bus_mod):
+    """Запуск настоящего serve() с фальшивым NATS: соединение обязано нести
+    creds-снимок ДО attach -- его читает resolver_subject (#581), и без
+    него живой агент спрашивал бы резолвер анонимно или вовсе отказом."""
+    import asyncio
+    from mop.cli.service import agent as cli_agent
+
+    seen = {}
+
+    class Conn:
+        creds = None
+
+        async def subscribe(self, *a, **k):
+            return None
+
+    class Nats:
+        async def connect(self, **kw):
+            conn = Conn()
+            seen["auth"] = kw
+            seen["conn"] = conn
+            return conn
+
+    async def attach(conn, node):
+        seen["creds_at_attach"] = getattr(conn, "creds", None)
+        return []
+
+    fake_nats.connect = Nats().connect
+    real_attach = agent_mod.attach
+    agent_mod.attach = attach
+    try:
+        task = asyncio.create_task(cli_agent.serve(fake_nats, agent_mod, bus_mod))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+    finally:
+        agent_mod.attach = real_attach
+    return seen
+
+
+def check_serve_creds_584(c):
+    """HYPOTHESIS (#584): serve() зовёт nats.connect напрямую и никогда не
+    ставит creds-снимок на соединение -- #603 штампует только bus.connect().
+    Живой агент оставался бы без узлового имени для квалифицированных
+    вопросов резолверу (#581), при зелёных тестах с фикстурой NodeConn.
+    SOLUTION: serve ставит creds-снимок (тот же c, что ушёл в auth) на
+    соединение ДО attach.
+    RESULT: RED до правки командлета; зелёный после.
+    """
+    import asyncio
+    from mop.node import agent as agent_mod
+    from mop.common import bus as bus_mod
+    from _lib import patched
+    import tempfile, json as _json
+
+    fd, path = tempfile.mkstemp(prefix="mop-test-584-serve-")
+    import os as _os
+    with _os.fdopen(fd, "w") as f:
+        _json.dump({"url": "nats://10.0.0.1:4222", "user": "node-hyper",
+                    "password": "node-pass"}, f)
+    class Nats:
+        pass
+    with patched(bus_mod, NODE_FILE=path):
+        seen = asyncio.run(_serve_584(Nats(), agent_mod, bus_mod))
+    _os.unlink(path)
+    c.check("584 serve stamps the credential snapshot on the connection",
+            seen.get("creds_at_attach") is not None
+            and seen["creds_at_attach"].get("user") == "node-hyper", seen)
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -2943,7 +4122,8 @@ def main():
                   check_usage_by_login_244, check_owner_gate_267,
                   check_junk_without_templates_276, check_owner_hook_313,
                   check_sweep_report_358, check_sweep_bodies_363,
-                  check_hung_sweep_373):
+                  check_hung_sweep_373, check_role_node_gates_584,
+                  check_startup_soul_584, check_serve_creds_584):
         try:
             check(c)
         except Exception as e:
