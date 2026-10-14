@@ -99,8 +99,10 @@ def check_launchers_408(c):
             patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
             patched(master._common, session_env=lambda: {}), \
             patched(master.os, execvpe=lambda *a: calls.append("master exec")):
+        # #586: прежний локальный запуск -- явный `mop master --local`; у
+        # лаунчера роли свой порядок (tests/launch.py), вход и там до сети.
         try:
-            master.main([])
+            master.main(["--local"])
         except RuntimeError:
             pass
         c.expect("#408 master logs in before cluster precheck and exec", calls, ["login"])
