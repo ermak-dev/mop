@@ -285,12 +285,14 @@ def _job_meta(name):
 
 
 def _assigned_node(name):
-    """Узел последней аллокации джоба, либо None: шов проверок."""
+    """Узел последней аллокации джоба, либо None: шов проверок.
+
+    Отсутствие (нет аллокации, нет узла в сводке) -- None: молчание
+    Nomad законно, калитка resolve_soul читает его как «не найдено».
+    Сбой НЕ глотается (#581): причина едет наверх, и калитка возвращает
+    found:False с ней -- общий текст скрыл бы, ЧТО именно отказало."""
     from . import nomad
-    try:
-        alloc = nomad.latest_alloc(name)
-    except Exception:
-        return None
+    alloc = nomad.latest_alloc(name)
     if not alloc:
         return None
     node_id = alloc.get("NodeID")

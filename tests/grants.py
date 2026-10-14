@@ -1510,6 +1510,33 @@ def check_target_node_581(c):
                 err.get("found") is False
                 and "Nomad unreachable" in (err.get("reason") or "")
                 and "role" not in err and "owner" not in err, err)
+        # HYPOTHESIS (#581, отчёт против источника): сам помощник
+        # _assigned_node ГЛОТАЛ любой сбой Nomad в None -- продакшнный
+        # сбой сверки читался бы общим «узла нет», а не своей причиной;
+        # проверка выше инъектирует сбой в СЕAM, сам помощник не трогая.
+        # SOLUTION: помощник не глотает: сбой едет в resolve_soul, где
+        # калитка возвращает found:False с причиной. Отсутствие
+        # (нет аллокации/узла) остаётся None -- молчание Nomad это
+        # законный ответ, не сбой.
+        from mop.server import nomad
+
+        with patched(nomad, latest_alloc=broken):
+            real = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                                  "_caller": "node-pve1"},
+                                          root=root.name)
+        c.check("#581 the real assignment helper surfaces the Nomad "
+                "failure through the gate",
+                real.get("found") is False
+                and "Nomad unreachable" in (real.get("reason") or "")
+                and "role" not in real and "owner" not in real, real)
+        with patched(nomad, latest_alloc=lambda name: None):
+            absent = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                                    "_caller": "node-pve1"},
+                                            root=root.name)
+        c.check("#581 a genuine missing allocation stays a silent "
+                "not-found with its reason",
+                absent.get("found") is False
+                and "no node" in (absent.get("reason") or ""), absent)
         mod.revoke(rec["principal"], root=root.name)
         alien2 = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                                 "_caller": "node-pve2"},
