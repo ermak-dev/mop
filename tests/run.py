@@ -360,7 +360,44 @@ def main():
                 False, mixed)
     except ValueError as e:
         c.check("#590 a PU_* job with a conflicting NOMAD_META triple refuses",
-                "soul" in str(e), str(e))
+                "disagree" in str(e), str(e))
+    # Целостность источника: тройка выбирается ЦЕЛИКОМ из одного места,
+    # поля не сшиваются. Частичная PU_* + полная авторека -- не «дырки
+    # доложить из META», а отказ; взаимодополняющие половины -- тоже;
+    # явно-пустая PU-тройка (легаси-джоб новой спеки) при непустой автореке
+    # -- противоречие окружений, а не тихий выбор.
+    partial = {**env, "PU_SOUL_DIGEST": "", "PU_SOUL_INC": "",
+               **meta_env("puppet", digest, INC)}
+    try:
+        run.expected_role(partial)
+        c.check("#590 a partial PU_* triple is not filled from NOMAD_META",
+                False, partial)
+    except ValueError as e:
+        c.check("#590 a partial PU_* triple is not filled from NOMAD_META",
+                "whole" in str(e) or "PU_" in str(e), str(e))
+    complementary = {"PU_SOUL": "puppet", "NOMAD_META_soul_digest": digest,
+                     "NOMAD_META_soul_inc": INC}
+    try:
+        run.expected_role(complementary)
+        c.check("#590 complementary PU_*/NOMAD_META halves do not merge",
+                False, complementary)
+    except ValueError as e:
+        c.check("#590 complementary PU_*/NOMAD_META halves do not merge",
+                "whole" in str(e) or "PU_" in str(e), str(e))
+    empty_pu = {**meta_env("puppet", digest, INC),
+                "PU_SOUL": "", "PU_SOUL_DIGEST": "", "PU_SOUL_INC": ""}
+    try:
+        run.expected_role(empty_pu)
+        c.check("#590 explicitly empty PU_* with a NOMAD_META triple is a contradiction",
+                False, empty_pu)
+    except ValueError as e:
+        c.check("#590 explicitly empty PU_* with a NOMAD_META triple is a contradiction",
+                "PU_" in str(e) or "disagree" in str(e) or "contradict" in str(e), str(e))
+    # Явно-пустая PU-тройка БЕЗ автореки -- легаси-джоб новой спеки: None.
+    c.check("#590 explicitly empty PU_* without NOMAD_META stays legacy",
+            run.expected_role({"PU_SOUL": "", "PU_SOUL_DIGEST": "",
+                               "PU_SOUL_INC": ""}) is None, None)
+
     mixed_same = {**env, **meta_env("puppet", digest, INC)}
     c.expect("#590 a PU_* job with an agreeing NOMAD_META triple stays a role job",
              (lambda g: (g.soul, g.soul_digest, g.soul_inc))(run.expected_role(mixed_same)),

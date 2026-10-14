@@ -283,27 +283,61 @@ def expected_role(environ):
     (#582): сервер кладёт тройку сам, не полагаясь на автореку Nomad по
     Meta (NOMAD_META_<ключ>), чей регистр не обещан. Авторека читается
     тоже -- переходный период: джоб, поднятый по старой спеке, видит
-    тройку только в ней. Но это совмещение, а не откат: расходящиеся
-    тройки -- ValueError, молчаливого «авто не совпало -- беру PU_*» нет.
-    Origin -- PU_ORIGIN из того же task_env, с авторекой так же.
+    тройку только в ней. Источник выбирается ЦЕЛИКОМ: тройка берётся из
+    PU_*-ключей, если хоть один из них ОБЪЯВЛЕН (есть в env -- непустой
+    или пустой), иначе -- из автореки; сшивание полей из двух мест --
+    не выбор, а отказ. Объявлены оба и тройки их расходятся -- ValueError,
+    молчаливого «авто не совпало -- беру PU_*» нет; явные пустые PU-ключи
+    при непустой автореке -- то же противоречие окружений, не откат.
+    Origin -- тем же правилом из одного источника с выбранной тройкой.
     Половина тройки или битое значение -- ValueError тем же договором
     JobMeta: битый джоб не поднимается ни ролью, ни легаси."""
-    # Имена env: Meta-ключ soul_digest в явном виде -- PU_SOUL_DIGEST
-    # (верхний регистр, как их пишет task_env #582), авторека Nomad --
-    # NOMAD_META_soul_digest как есть.
-    def pick(key, pu_name):
-        pu = environ.get(pu_name) or None
-        meta = environ.get(f"NOMAD_META_{key}") or None
-        if pu is not None and meta is not None and pu != meta:
-            raise ValueError(f"the job's environment carries both {pu_name} and "
-                             f"NOMAD_META_{key} and they disagree")
-        return pu if pu is not None else meta
+    KEYS = ("soul", "soul_digest", "soul_inc")
 
-    triple = {k: pick(k, f"PU_{k.upper()}") for k in ("soul", "soul_digest",
-                                                      "soul_inc")}
+    def declared(names):
+        # «Объявлен» -- ключ есть в env вовсе: task_env #582 пишет тройку
+        # всегда, пустыми значениями для легаси; авторека Nomad появляется
+        # только вместе с Meta-тройкой.
+        return {k: (environ[names[k]] if names[k] in environ else None)
+                for k in KEYS}
+
+    def whole(names, where):
+        # Тройка из одного места, целиком: None -- ключ не объявлен,
+        # пустая строка -- объявлен пустым; и то и то не «значение».
+        got = {k: (environ.get(names[k]) or None) for k in KEYS}
+        if got != {k: None for k in KEYS} and any(
+                v is None for v in got.values()):
+            raise ValueError(f"the role triple from {where} comes whole "
+                             f"({'/'.join(names[k] for k in KEYS)}) or not at all")
+        return got
+
+    pu_names = {k: f"PU_{k.upper()}" for k in KEYS}
+    meta_names = {k: f"NOMAD_META_{k}" for k in KEYS}
+    pu_here = [k for k in KEYS if pu_names[k] in environ]
+    meta_here = [k for k in KEYS if meta_names[k] in environ]
+    if not pu_here and not meta_here:
+        return None
+    triple = None
+    source = None
+    if pu_here:
+        # Явные PU-ключи объявлены -- источник PU_*: и когда тройка полна,
+        # и когда явно пуста (легаси новой спеки). Пустая при непустой
+        # автореке -- противоречие, не откат к автореке.
+        triple = whole(pu_names, "the job's PU_* environment")
+        if meta_here:
+            other = whole(meta_names, "NOMAD_META")
+            if triple != other:
+                raise ValueError("the job's environment declares the role "
+                                 "triple both in PU_* and NOMAD_META and "
+                                 "they disagree")
+    elif meta_here:
+        triple = whole(meta_names, "NOMAD_META")
     if not any(triple.values()):
         return None
-    return JobMeta(pick("origin", "PU_ORIGIN"), **triple)
+    # Origin -- из источника тройки: PU_ORIGIN у новой спеки,
+    # NOMAD_META_origin у старой; не сшивать.
+    origin = environ.get("PU_ORIGIN" if pu_here else "NOMAD_META_origin") or None
+    return JobMeta(origin, **{k: triple[k] for k in KEYS})
 
 
 def _short(value):
