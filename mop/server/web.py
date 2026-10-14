@@ -18,6 +18,7 @@ inode, расход токенов — разбор транскриптов в 
 Модуль возвращает данные и ничего не печатает; HTTP живёт в bin/web.
 """
 import dataclasses
+import hashlib
 import json
 import re
 import os
@@ -25,6 +26,7 @@ import threading
 import time
 
 from ..common import bus, paths, puppets, state
+from ..common import domain
 from ..common.domain import WHO_WAIT, MasterAnswer
 from .. import usage
 from . import nodes as node_facts
@@ -222,6 +224,103 @@ def master_rows(answers, rows):
     return sorted(out, key=lambda m: (m["project"], m["user"], m["master"]))
 
 
+def unified_roster(rows, answers):
+    """Канонический ростер сессий пула (#587): управляемые папеты и
+    легаси-локальные сессии перехода одним списком. Чистая.
+
+    Discriminator -- source ('managed' | 'local'); kind у managed -- вид
+    вердикта строки (слово статуса, nullable), bucket -- корзина classify
+    (цвет) тем же раздельным договором, что строка puppets (#452/#210), и
+    есть только у managed -- страница не примет «managed» за состояние.
+    id стабильный: managed -- джоб@инкарнация (легаси-джоб без тройки --
+    сам джоб: новый разговор в теле НЕ добавляет строку, личность -- джоб
+    и инкарнация, не разговор); local -- непрозрачный публичный id
+    (sha256 личностного ключа), сырой sessionId на сервере и в провод
+    не едет.
+
+    Единица -- сессия, как в секции мастеров (#421): два MCP-endpoint'а
+    одной сессии -- одна строка, одинаковые имена разговоров разных
+    сессий -- разные строки. Четыре имени не сливаются (#579): джоб
+    (name), инкарнация (incarnation, из JobMeta), разговор (conversation
+    -- человекочитаемое имя или null) и адрес доставки (addresses).
+
+    Роль -- данные из доверенной меты джоба (#580, JobMeta), не
+    самозванная: самотчёт who роли не несёт. role_source: 'meta' у
+    managed, 'legacy' у local. Битая половина тройки -- громкий
+    ValueError от JobMeta (from_meta), строка не теряется молча.
+
+    Локальные легаси-сессии помечены unmanaged: переход (#579), к ним
+    нет Nomad-действий и они не входят в счётчики ёмкости/квот (counts
+    считает аллокации, не сессии). Хозяин сессии назван (user: владелец
+    аренды у managed, логин сессии у local; null -- аренды нет), и
+    действий по роли нет: их определяют зритель и цель, не строка."""
+    out = []
+    for r in rows:
+        # origin=None (сирота, «ничей» джоб) -- легален и едет как None:
+        # `or ""` делал из него пустую строку, и from_meta ронял весь
+        # снимок одной строкой (ревью 0b56374). Валидация тройки -- та же.
+        meta = domain.JobMeta.from_meta({"origin": r.origin,
+                                         "soul": r.soul,
+                                         "soul_digest": r.soul_digest,
+                                         "soul_inc": r.soul_inc})
+        shown = r.render()
+        # «-» показа на проводе -- None (#274): владельца без аренды
+        # страница читает как null, не как логин «-».
+        user = None if shown["owner"] == "-" else shown["owner"]
+        out.append({"source": "managed", "id": r.name + ("@" + r.soul_inc
+                                                          if r.soul_inc else ""),
+                    "project": row_project(r),
+                    "name": r.name, "node": shown["node"],
+                    "alloc_status": r.alloc_status, "state": shown["state"],
+                    # kind -- вид вердикта (слово статуса, nullable как в
+                    # самой строке), bucket -- корзина classify (цвет):
+                    # раздельно, как в строке puppets (#452/#210). «sick»/
+                    # «down»/«silent» -- корзины; у больного вид -- «hung»/
+                    # «error»/..., и смешение рендерит неверное слово
+                    # (ревью 1cee7c7: kind был classify(r)).
+                    "kind": r.kind, "bucket": classify(r),
+                    "branch": shown["branch"],
+                    # detail -- прежняя короткая причина вердикта (#452):
+                    # PoolTable рисует её как есть, UI строку состояния не
+                    # разбирает. Nullable, как в самой строке.
+                    "detail": r.detail,
+                    "llm": shown["llm"], "origin": r.origin,
+                    "disk_kb": r.disk_kb,
+                    "role": r.soul, "role_source": "meta",
+                    "soul_digest": r.soul_digest,
+                    "incarnation": r.soul_inc,
+                    "user": user, "unmanaged": False,
+                    "conversation": None, "addresses": [r.name]})
+    # Локальные сессии -- те же who-ответы, что строят master_rows: единица
+    # и ключ склейки одни (#421), на выходе -- строки другого рода.
+    for m in master_rows(answers, rows):
+        out.append(_local_row(m))
+    return sorted(out, key=lambda s: (s["source"], s["user"] or "",
+                                      s.get("name") or s["conversation"] or ""))
+
+
+def _local_row(m):
+    """Строка master_rows -> неуправляемая строка ростера (#587). Локальная
+    легаси-сессия перехода: хозяин -- логин сессии, личности Nomad нет
+    (ключи managed-строк не едут вовсе), unmanaged -- без действий и без
+    счётчиков ёмкости. id непрозрачен: sha256 личностного ключа, не сырой
+    sessionId (он остаётся на сервере). conversation/display -- метка
+    показа из who-ответа (человекочитаемое имя сессии), не имя файла и
+    не UUID: сырой sessionId на провод не едет."""
+    key = json.dumps([m["project"], m["user"], m["session"], m["addresses"]],
+                     sort_keys=True).encode()
+    ident = hashlib.sha256(key).hexdigest()[:16]
+    user = None if m["user"] == "-" else m["user"]
+    return {"source": "local", "id": ident, "unmanaged": True,
+            "project": m["project"],
+            "role": None, "role_source": "legacy",
+            "user": user, "conversation": m["session"],
+            "display": m["session"] or m["master"],
+            "cwd": m["cwd"], "addresses": m["addresses"],
+            "identified": m["identified"]}
+
+
+
 def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
              masters=()):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
@@ -232,7 +331,14 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
     остаётся за `mop server doctor`; больной папет и так виден корзиной sick.
     creds -- строки реестра кредитов (#285), уже без секретов (cred_rows);
     masters -- живые мастера по опросу who (#305, master_rows); load --
-    места пула (#378) по nodes, строкам node_rows."""
+    места пула (#378) по nodes, строкам node_rows.
+
+    sessions -- канонический ростер сессий (#587): аддитивно, прежние ключи
+    -- проекция, страница читает что ей нужно, не ломаясь о новое."""
+    sessions = list(unified_roster(rows, {}))
+    sessions += [_local_row(m) for m in masters]
+    sessions.sort(key=lambda s: (s["source"], s["user"] or "",
+                                 s.get("name") or s["conversation"] or ""))
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
@@ -243,6 +349,9 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
             # Период опроса мастеров (#325): страница пишет «раз в N с» по
             # нему, а не своей копией числа.
             "masters_every": MASTERS_EVERY,
+            # Канонический ростер сессий (#587): managed + local одним
+            # списком; masters остаётся проекцией для старой страницы.
+            "sessions": sessions,
             # Места пула и полоса аллокаций (#378): суммы и сегменты
             # считает сервер, страница только рисует.
             "load": load(rows, nodes)}
