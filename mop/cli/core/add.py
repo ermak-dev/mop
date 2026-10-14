@@ -82,37 +82,58 @@ def _role_add(origin, role, request_id, reconciles, p):
     """Роль-создание (#618): человек везет свою политику, грант -- ничего
     (наследование снапшота родителя #582); эхо тройки -- обязательная
     часть успеха: безролевой ответ -- не запуск роли, второго не создаём.
-    Попытка одна, без слепых повторов (#586): request_id в отказе
-    неизвестности -- ручной повтор тем же идентификатором сведёт джобы у
-    сервера со сводом, слепой второй -- развёл бы двух."""
+    Эхо сверяется ВНУТРИ транспорта, сразу после ответа регистрации --
+    до аллокаций и ожиданий (#618-ревью): отказ сервера (spawn, чужой
+    request_id) -- его причина, эхо ее не подменяет; безречный ответ --
+    провал с именем созданного. Попытка одна, без слепых повторов
+    (#586): request_id в отказе неизвестности -- ручной повтор тем же
+    идентификатором сведет джобы у сервера со сводом, слепой второй --
+    развел бы двух."""
     if bus.principal() is None:
         text, sent = _common.workspace_text(origin)
         print(_common.sent_line(sent), flush=True)
         workspace = (text, sent)
     else:
         workspace = None
-    raw = {}
+    audit = {}
 
     def transport(verb, **kw):
         got = bus.call_cluster(verb, **kw)
-        if verb == "add":
-            raw.update(got)
+        if verb == "add" and got.get("ok"):
+            try:
+                triple = roles.echo(got, role)
+            except ValueError as e:
+                who = got.get("name") or "the new puppet"
+                raise RuntimeError(f"{who}: {e}; the job is created, but "
+                                   f"this is not a role start — check it: "
+                                   f"mop list, mop attach {who}") from None
+            audit["name"] = got["name"]
+            print(f"{got['name']}: role {role} "
+                  f"({triple['soul_digest'][:12]})", flush=True)
         return got
 
-    v = ops.add(transport, origin, workspace, soul=role,
-                request_id=request_id, branch=context.current().branch,
-                step=lambda s: p.step(s), place_wait=120,
-                bootstrap_wait=_common.BOOTSTRAP_WAIT)
-    name = v.get("name")
-    p.clear()
     try:
-        triple = roles.echo(raw, role)
-    except ValueError as e:
-        who = name or "the new puppet"
-        raise RuntimeError(f"{who}: {e}; nothing is created again "
-                           f"(request {request_id}): mop list, "
-                           f"mop attach {who}") from None
-    print(f"{name}: role {role} ({triple['soul_digest'][:12]})", flush=True)
+        v = ops.add(transport, origin, workspace, soul=role,
+                    request_id=request_id, branch=context.current().branch,
+                    step=lambda s: p.step(s), place_wait=120,
+                    bootstrap_wait=_common.BOOTSTRAP_WAIT)
+    except bus.BusError as e:
+        # Два разных «нет ответа» (#618-ревью). Регистрация молчит --
+        # исход неизвестен: повтор тем же request_id сведет джобы у
+        # сервера, слепой второй развел бы двух. Регистрация ОТВЕТИЛА
+        # (имя уже в аудите операции #575), молчит чтение после неё --
+        # папет создан, и отказ зовет его по имени с первопричиной,
+        # а не «эха нет».
+        name = audit.get("name")
+        if name:
+            raise RuntimeError(f"{name} is created (role {role}, request "
+                               f"{request_id}), but reading its start "
+                               f"failed: {e}; check mop list, "
+                               f"mop attach {name}") from None
+        raise RuntimeError(f"add {role}: registration answer unknown "
+                           f"({e}); do not repeat blindly — retry with the "
+                           f"same request_id {request_id} to reconcile, "
+                           f"and check mop list first") from None
     return _common.render(v, p)
 
 

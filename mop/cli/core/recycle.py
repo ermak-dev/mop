@@ -30,6 +30,8 @@ def main(argv):
     # контракт `mop server gc`) -- сервер оставляет положенную политику,
     # текст от принципала он отвергает (#582).
     grant = bus.principal() is not None
+    if grant:
+        _route_guard(name)
     p = lib.Progress(name)
     p.step("stopping, resetting the clone, wiping target")
     try:
@@ -47,6 +49,30 @@ def main(argv):
     finally:
         p.clear()
 
+
+def _route_guard(name):
+    """Предзапрос маршрута рецикла для принципала (#618-ревью): снести
+    джоб может и урезанная роль (delete), а вернуть к жизни -- нет (update,
+    wipe), и останов на полпути теряет папета. Проверка -- тем же
+    инструментом, что режет каталог инструментов модели (channel.own_bundle
+    + tools_for по объявлению ЭТОГО командлета): нового API прав нет,
+    власть остаётся у сервера; человек пути не касается."""
+    from mop.client import channel
+    bundle, why = channel.own_bundle()
+    if bundle is None:
+        raise RuntimeError(f"{name}: cannot verify this role's route — {why}; "
+                           "a recycle stops the job before it can be "
+                           "re-registered, refusing until the bundle is back")
+    caps = bundle.manifest.capabilities
+    if "recycle" not in channel.tools_for(channel.GRANT, caps, {"recycle": MCP}):
+        lack = [v for v in MCP["node_verbs"]
+                if v not in caps.node_verbs]
+        lack += [v for v in MCP["cluster_verbs"]
+                 if v not in caps.cluster_verbs]
+        raise RuntimeError(f"{name}: this role's route cannot finish a "
+                           f"recycle — its bundle lacks {', '.join(lack)}; "
+                           "the server stays the authority, but a stopped "
+                           "job would stay stopped — nothing is touched")
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

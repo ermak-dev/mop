@@ -22,7 +22,7 @@ import sys
 import uuid
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, FakeNomad, patched, run_command  # noqa: E402
+from _lib import Checks, FakeNomad, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 os.environ.setdefault("MOP_SERVER_LAN", "127.0.0.1")
 
@@ -80,7 +80,8 @@ class Wire:
         got = soul_answer(self.api, self.project, req)
         if got.get("error"):
             raise bus.Refused(got["error"])
-        if verb == "add" and got.get("bootstrap_marker"):
+        if verb in ("add", "update") and got.get("bootstrap_marker"):
+            # Метку возвращает и регистрация, и перерегистрация рецикла.
             self.marker = got["bootstrap_marker"]
         return got
 
@@ -113,6 +114,8 @@ def drive(module, argv, api, who, grant=False):
     увидит вызовом, а проверка скажет «не должен был»."""
     w = Wire(api, who, grant)
     reads = []
+    wipes = []
+    _note_wipe = wipes.append
     with patched(bus, call_cluster=w, login=lambda: None if grant else who,
                  principal=lambda: who if grant else None), \
             patched(cli_add.lib, project_ready=lambda p: True,
@@ -123,10 +126,17 @@ def drive(module, argv, api, who, grant=False):
             patched(cli_update._common, workspace_text=lambda o: reads.append(("update", o)) or ("- name: greet\n  tasks: []\n", {"source": "origin", "present": True, "tasks": 1})), \
             patched(cli_recycle._common, workspace_text=lambda o: reads.append(("recycle", o)) or ("- name: greet\n  tasks: []\n", {"source": "origin", "present": True, "tasks": 1})), \
             patched(cli_recycle.puppets, _wait_stopped=lambda n: None,
-                    wipe=lambda *a, **k: None), \
+                    wipe=lambda *a, **k: _note_wipe((a, k))), \
+            patched(bus, request=lambda node, verb, **kw:
+                    # Факты клона по проводу (#266): ключи cur/def, числа
+                    # парами -- чистый клон, ни работы, ни владельца.
+                    {"clone": {"cur": "dev", "def": "dev", "origin": ORIGIN,
+                               "dirty": 0, "ahead": 0, "owner": None}}), \
             context.isolated(context.Context()):
-        w.code = run_command(module.main, argv, via_cli=True)[2]
+        out, err, code = run_command(module.main, argv, via_cli=True)
+    w.code, w.out, w.err = code, out, err
     w.reads = reads
+    w.wipes = wipes
     return w
 
 
@@ -147,6 +157,85 @@ def grant_env():
 def child_of(api, parent):
     """Джобы-дети родителя (все, кроме него)."""
     return [n for n in api.jobs if n != parent]
+
+
+def _snapshot_of(name):
+    """Текст одобренного снапшота папета в хранилище сервера (#133):
+    задачи и конфигурация вместе -- «политика целиком»."""
+    from mop.server import bootstrap
+    tasks, of_vars = bootstrap.files_of(bootstrap.ROOT, name)
+    return (open(tasks).read() if tasks else "") + \
+           (open(of_vars).read() if of_vars else "")
+
+
+import contextlib  # noqa: E402
+import json  # noqa: E402
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+from mop import driver  # noqa: E402
+from mop.common import soul as souls  # noqa: E402
+from mop.client import channel  # noqa: E402
+
+BODY_HOME = {"dir": None}
+
+
+@contextlib.contextmanager
+def body(job, caps_over=None):
+    """Честное тело роли на время блока: дом тел, бандл-пресет пакета,
+    расписка готовности, MOP_SOUL_DIR/MOP_PUPPET в окружении. caps_over --
+    чужие capabilities (реквизит инкарнации: файл правится, расписка и
+    загрузка пересобираются -- это не подделка digest'а). Фикстура та же,
+    что у #585: пресет под тестовым driver.HOME, own_bundle его принимает."""
+    if BODY_HOME["dir"] is None:
+        BODY_HOME["dir"] = tempfile.mkdtemp(prefix="mop-test-618-body-")
+    presets = souls.catalogue([os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        "mop", "skills")])
+    src = presets["master"]
+    # Раскладка тел -- под тестовым домом ВМЕСТЕ со сборкой: soul_dir зовут
+    # и сборка фикстуры, и own_bundle проверяемого, и оба -- одним HOME.
+    with patched(driver, HOME=BODY_HOME["dir"]):
+        inc = str(uuid.uuid4())
+        root = driver.soul_dir(job, inc)
+        bundle = os.path.join(root, driver.SOUL_BUNDLE)
+        os.makedirs(bundle)
+        for f in os.listdir(src):
+            shutil.copy(os.path.join(src, f), os.path.join(bundle, f))
+        if caps_over is not None:
+            text = open(os.path.join(bundle, souls.MANIFEST)).read()
+            doc = _yaml_of(text, caps_over)
+            with open(os.path.join(bundle, souls.MANIFEST), "w") as fh:
+                fh.write(doc)
+        loaded = souls.load(bundle)
+        with open(os.path.join(root, driver.READY), "w") as fh:
+            json.dump({"ready": True, "role": loaded.role, "soul_inc": inc,
+                       "soul_digest": loaded.digest}, fh)
+        with patched_env(MOP_SOUL_DIR=bundle, MOP_PUPPET=job):
+            yield
+
+
+def _yaml_of(text, caps_over):
+    """Манифест с перекрытым блоком capabilities: строка за строкой,
+    без сторонних зависимостей -- пресет читаем, а не пересобираем."""
+    out, in_caps = [], False
+    for line in text.splitlines():
+        if line.startswith("capabilities:"):
+            in_caps = True
+            out.append(line)
+            out.append("  node_verbs: [" + ", ".join(
+                caps_over.get("node_verbs", [])) + "]")
+            out.append("  cluster_verbs: [" + ", ".join(
+                caps_over.get("cluster_verbs", [])) + "]")
+            out.append(f"  dispatch: {str(caps_over.get('dispatch', True)).lower()}")
+            out.append("  spawn: [" + ", ".join(
+                caps_over.get("spawn", ["puppet"])) + "]")
+            continue
+        if in_caps and line.startswith("  "):
+            continue
+        if in_caps:
+            in_caps = False
+        out.append(line)
+    return "\n".join(out) + "\n"
 
 
 def main():
@@ -172,6 +261,10 @@ def main():
                 list(api.jobs))
         c.check("#618 the echo is validated and the commandlet succeeds",
                 w.code == 0, (w.code, w.seen[:1]))
+        c.check("#618 the success line names the created puppet and the role",
+                kids[0] in w.out and "puppet" in w.out, (w.out, w.err))
+        c.check("#618 the success is silent in stderr",
+                w.err == "", w.err)
     finally:
         g.__exit__(None, None, None)
 
@@ -184,6 +277,37 @@ def main():
         w = drive(cli_add, [], api, principal, grant=True)
         c.check("#618 grant add without a role refuses before any call",
                 w.seen == [] and w.code not in (0, None), (w.code, w.seen))
+    finally:
+        g.__exit__(None, None, None)
+
+    # ── 2b. Неизвестность регистрации: BusError без второго создания ────
+    # Отзыв ревью 2: ответ регистрации не пришёл -- исход неизвестен; отказ
+    # называет request_id (ручной повтор тем же идентификатором сведёт джобы
+    # у сервера со сводом), второго слепого создания нет.
+    api, g, principal, parent = grant_env()
+    try:
+        class Deaf(Wire):
+            def __call__(self, verb, **fields):
+                if verb == "add":
+                    self.adds = getattr(self, "adds", 0) + 1
+                    if self.adds == 1:
+                        raise bus.BusError("cluster: no answer in 30s")
+                return Wire.__call__(self, verb, **fields)
+
+        w = Deaf(api, principal, grant=True)
+        reads = []
+        with patched(bus, call_cluster=w, login=lambda: None,
+                     principal=lambda: principal), \
+                patched(cli_add.lib, project_ready=lambda p: True,
+                        origin=lambda *a: ORIGIN, Progress=Quiet), \
+                patched(cli_add._common, workspace_text=lambda o: reads.append(("add", o)) or (PLAY, {"source": "origin", "present": True, "tasks": 1})), \
+                context.isolated(context.Context()):
+            out, err, code = run_command(cli_add.main, ["--role", "puppet"], via_cli=True)
+        c.check("#618 an unanswered registration names the request_id and creates nothing blindly",
+                code != 0 and w.adds == 1
+                and w.sent("add").get("request_id", "") in err
+                and "unknown" in err,
+                (code, w.adds, err))
     finally:
         g.__exit__(None, None, None)
 
@@ -233,6 +357,69 @@ def main():
                 "soul" in add and len(api.jobs) == 1, (add, list(api.jobs)))
         c.check("#618 the refusal surfaces as the commandlet's failure",
                 w.code != 0, w.code)
+        # Отзыв ревью 1: причина ОТКАЗА сервера (spawn) обязана доехать до
+        # stderr -- эхо не подменяет её «нет имени созданного».
+        c.check("#618 the server's refusal reason reaches stderr, echo does not mask it",
+                "spawn" in w.err, w.err)
+    finally:
+        g.__exit__(None, None, None)
+
+    # ── 5b. Неполный ответ: созданный без тройки -- провал с именем ─────
+    # Отзыв ревью 1: сервер создал джоб, но эха нет (легаси-режим, битый
+    # ответ) -- это НЕ успех: отказ называет созданного и не создаёт второго.
+    # HYPOTHESIS: echo зовётся после ops.add независимо от исхода и не
+    # видит имени, когда verdict его потерял; SOLUTION: эхо сверяется с
+    # ответом регистрации внутри транспорта, сразу после успеха.
+    api, g, principal, parent = grant_env()
+    try:
+        stripped = {}
+        orig = Wire.__call__
+
+        def cutting(self, verb, **fields):
+            got = orig(self, verb, **fields)
+            if verb == "add" and got.get("name"):
+                stripped.update(got)
+                for k in ("soul", "soul_digest", "soul_inc"):
+                    got.pop(k, None)
+            return got
+
+        with patched(Wire, __call__=cutting):
+            w = drive(cli_add, ["--role", "puppet"], api, principal, grant=True)
+        c.check("#618 an echo-less add answer fails naming the created puppet",
+                w.code != 0 and stripped.get("name") in (w.err + w.out),
+                (w.code, w.out, w.err))
+        c.check("#618 no second creation follows a bad echo",
+                len(child_of(api, parent)) == 1, list(api.jobs))
+    finally:
+        g.__exit__(None, None, None)
+
+    # ── 5c. Смерть провода ПОСЛЕ ответа регистрации: имя + первопричина ──
+    # Отзыв ревью 2, вторая половина: alloc/bootstrap_result молчат, когда
+    # джоб УЖЕ создан -- это не «эха нет» и не «исход неизвестен»: отказ
+    # зовет созданного по имени и везет первопричину; повтор слепым
+    # вторым add не предлагается вовсе.
+    api, g, principal, parent = grant_env()
+    try:
+        class Dead(Wire):
+            def __call__(self, verb, **fields):
+                if verb == "alloc":
+                    raise bus.BusError("cluster: no answer in 30s")
+                return Wire.__call__(self, verb, **fields)
+
+        w = Dead(api, principal, grant=True)
+        reads = []
+        with patched(bus, call_cluster=w, login=lambda: None,
+                     principal=lambda: principal), \
+                patched(cli_add.lib, project_ready=lambda p: True,
+                        origin=lambda *a: ORIGIN, Progress=Quiet), \
+                patched(cli_add._common, workspace_text=lambda o: reads.append(("add", o)) or (PLAY, {"source": "origin", "present": True, "tasks": 1})), \
+                context.isolated(context.Context()):
+            out, err, code = run_command(cli_add.main, ["--role", "puppet"], via_cli=True)
+        kids = child_of(api, parent)
+        c.check("#618 a post-registration outage names the created job and its cause",
+                code != 0 and len(kids) == 1 and kids[0] in err
+                and "no answer in 30s" in err and "unknown" not in err,
+                (code, kids, err))
     finally:
         g.__exit__(None, None, None)
 
@@ -261,6 +448,11 @@ def main():
                 "workspace" not in up and "bootstrap_sent" not in up, up)
         c.check("#618 grant update reads no client policy",
                 not [r for r in w.reads if r[0] == "update"], w.reads)
+        # Отзыв ревью 4: не только «полей нет» -- успех и ДОБРОСЛОВЛЕННАЯ
+        # политика живого папета не тронута (снапшот сервера на месте).
+        c.check("#618 grant update succeeds and keeps the approved snapshot",
+                w.code == 0 and "answer" in _snapshot_of(parent),
+                (w.code, w.err))
     finally:
         g.__exit__(None, None, None)
 
@@ -272,12 +464,71 @@ def main():
     try:
         api.allocs[parent] = {"ID": "a1", "NodeName": "n1",
                               "ClientStatus": "running"}
-        w = drive(cli_recycle, [parent], api, principal, grant=True)
+        # Полный маршрут роли (пресет мастера держит весь путь рецикла):
+        # префлайт 9 -- не фильтр «только избранным», а честный коридор.
+        with body(parent):
+            w = drive(cli_recycle, [parent], api, principal, grant=True)
         up = w.sent("update")
         c.check("#618 grant recycle re-registers without policy fields",
                 "workspace" not in up and "bootstrap_sent" not in up, up)
         c.check("#618 grant recycle reads no client policy",
                 not [r for r in w.reads if r[0] == "recycle"], w.reads)
+        # Отзыв ревью 3: не только поля -- код 0, джоб перерегистрирован
+        # (Meta жива, ветка прежняя) и политика снапшота не тронута.
+        c.check("#618 grant recycle succeeds, the job re-registered, snapshot kept",
+                w.code == 0 and api.jobs.get(parent, {}).get("Meta", {}).get("origin") == ORIGIN
+                and "answer" in _snapshot_of(parent),
+                (w.code, list(api.jobs), w.err))
+    finally:
+        g.__exit__(None, None, None)
+
+    # ── 9. Recycle гранта: неполный маршрут -- отказ ДО сноса ────────────
+    # Отзыв ревью 3: рецикл сносит джоб ДО перерегистрации: если бандл
+    # роли держит delete, но не держит update/wipe -- останов доедет, а
+    # поднять папета нечем, и пул потерян на полпути. SOLUTION: предзапрос
+    # маршрута тем же инструментом, что режет инструменты модели
+    # (channel.own_bundle + tools_for по ОБЪЯВЛЕНИЮ самого командлета):
+    # новый API прав нет, сервер -- по-прежнему власть; человек пути не
+    # касается вовсе.
+
+    # 9a. Бандл с delete без update: отказ ДО первого разрушительного
+    # глагола, джоб и его Meta живы.
+    api, g, principal, parent = grant_env()
+    try:
+        with body("pu-alpha-9", {"node_verbs": ["send"], "cluster_verbs":
+                                 ["ping", "roster", "alloc", "spec", "delete"],
+                                 "spawn": []}):
+            w = drive(cli_recycle, [parent], api, principal, grant=True)
+        destructive = [v for v, _ in w.seen
+                       if v in ("delete", "update", "stop", "restart")]
+        c.check("#618 a grant lacking update on its route refuses before any damage",
+                w.code != 0 and destructive == [] and w.wipes == []
+                and api.jobs.get(parent, {}).get("Meta", {}).get("origin") == ORIGIN,
+                (w.code, destructive, w.wipes, w.err))
+        c.check("#618 the refusal explains the missing route verb",
+                "update" in w.err, w.err)
+
+        # 9b. Бандл недоступен -- тот же отказ до сноса, не молчание.
+        with patched_env(MOP_SOUL_DIR=None, MOP_PUPPET=None):
+            w = drive(cli_recycle, [parent], api, principal, grant=True)
+        c.check("#618 an unavailable bundle refuses the grant recycle too",
+                w.code != 0
+                and not [v for v, _ in w.seen if v == "delete"]
+                and api.jobs.get(parent, {}).get("Meta", {}).get("origin") == ORIGIN,
+                (w.code, w.err))
+    finally:
+        g.__exit__(None, None, None)
+
+    # 9c. Человек: префлайта нет, путь прежний (workspace читается).
+    api, g, principal, parent = grant_env()
+    try:
+        with patched_env(MOP_SOUL_DIR=None, MOP_PUPPET=None):
+            w = drive(cli_recycle, [parent], api, "anton")
+        up = w.sent("update")
+        c.check("#618 the human legacy recycle path is unchanged",
+                w.code == 0 and up.get("workspace") == PLAY
+                and not [r for r in w.reads if r[0] != "recycle"],
+                (w.code, up.get("workspace"), w.reads))
     finally:
         g.__exit__(None, None, None)
 
