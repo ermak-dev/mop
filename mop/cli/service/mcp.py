@@ -137,7 +137,10 @@ def _bus_user():
 
 
 MASTER_ID = master_id(_bus_user())
-MY_INBOX = bus.inbox(MASTER_ID)
+# Инбокс процесса -- транспортом вестей и reply_to (#585): человек слушает
+# мастер-инбокс шины, принципал роли -- свой приватный префикс ответов
+# (channel.own_inbox): ACL принципала (#581) подписывает только его.
+MY_INBOX = channel.own_inbox(_bus_user(), MASTER_ID)
 
 
 def loud(fn):

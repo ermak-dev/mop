@@ -52,22 +52,38 @@ def main():
     GRANT = "grant-" + "a" * 32
     import tempfile
     import json as _json
-    d = tempfile.mkdtemp(prefix="mop-test-profile-585-")
-    bundle = os.path.join(d, "worker")
-    os.makedirs(bundle)
-    with open(os.path.join(bundle, "soul.yaml"), "w") as f:
-        f.write("soul: worker\nversion: 1\n"
-                "runtime: {driver: any, receives_dispatch: true}\n"
-                "capabilities: {node_verbs: [send, tail], cluster_verbs: [], "
-                "dispatch: false, spawn: []}\n"
-                "secrets: {files: [], vars: []}\n"
-                "prompt: soul.md\n")
-    with open(os.path.join(bundle, "soul.md"), "w") as f:
-        f.write("prompt\n")
-    c.expect("#585 grant is its own actor", channel.actor(GRANT), channel.GRANT)
-    with patched(bus, config=lambda: {"user": GRANT}, PROJECT="cloudpub"):
-        with patched_env(MOP_SOUL_DIR=bundle):
-            text, _, code = run_command(profile.main, [])
+    import uuid
+    from mop import driver
+    from mop.common import soul as souls
+    # Честное тело (#585): бандл -- под инкарнацией своего джоба в
+    # Published-раскладке (driver.soul_dir), у корня -- расписка
+    # готовности; самообъявленный MOP_SOUL_DIR больше роли не открывает.
+    tmp = tempfile.mkdtemp(prefix="mop-test-profile-585-")
+    job = "pu-test-585-1"
+    inc = str(uuid.uuid4())
+    # Дом патчим ДО построения путей: driver.soul_dir считает от него, и
+    # каталог, построенный по старому дому, в новом доме не стоит.
+    with patched(driver, HOME=tmp):
+        root = driver.soul_dir(job, inc)
+        bundle = os.path.join(root, driver.SOUL_BUNDLE)
+        os.makedirs(bundle)
+        with open(os.path.join(bundle, "soul.yaml"), "w") as f:
+            f.write("soul: worker\nversion: 1\n"
+                    "runtime: {driver: any, receives_dispatch: true}\n"
+                    "capabilities: {node_verbs: [send, tail], cluster_verbs: [], "
+                    "dispatch: false, spawn: []}\n"
+                    "secrets: {files: [], vars: []}\n"
+                    "prompt: soul.md\n")
+        with open(os.path.join(bundle, "soul.md"), "w") as f:
+            f.write("prompt\n")
+        loaded = souls.load(bundle)
+        with open(os.path.join(root, driver.READY), "w") as f:
+            _json.dump({"ready": True, "role": loaded.role, "soul_inc": inc,
+                        "soul_digest": loaded.digest}, f)
+        c.expect("#585 grant is its own actor", channel.actor(GRANT), channel.GRANT)
+        with patched(bus, config=lambda: {"user": GRANT}, PROJECT="cloudpub"):
+            with patched_env(MOP_SOUL_DIR=bundle, MOP_PUPPET=job):
+                text, _, code = run_command(profile.main, [])
     c.expect("#585 a grant is profiled as its bundle's role", text.strip(),
              "profile role worker; integration branch not set")
     with patched(bus, config=lambda: {"user": GRANT}, PROJECT="cloudpub"):

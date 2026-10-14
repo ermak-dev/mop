@@ -409,7 +409,7 @@ def check_role_channel_585(c):
         s.put(mcp, "KIND", "grant")
         s.put(mcp, "CAPS", caps_of("puppet"))
         s.put(mcp, "MASTER_ID", f"{GRANT}.host-77")
-        s.put(mcp, "MY_INBOX", f"mop.mop.master.{GRANT}.host-77.inbox")
+        s.put(mcp, "MY_INBOX", f"_MOP_REPLY.{GRANT}.host-77")
         s.put(bus, "login", lambda: GRANT)
         s.put(bus, "gather", lambda *a, **kw: c.fail("#585 grant never broadcasts", a))
 
@@ -426,7 +426,7 @@ def check_role_channel_585(c):
                  "force" in kw, False)
         c.expect("#585 the process inbox is transport only (reply_to), not the sender",
                  (kw.get("reply_to"), kw.get("from_name")),
-                 (f"mop.mop.master.{GRANT}.host-77.inbox", "pu-mop-3"))
+                 (f"_MOP_REPLY.{GRANT}.host-77", "pu-mop-3"))
         c.expect("#585 me() of a grant", mcp.me(), "pu-mop-3")
     return True
 
@@ -454,7 +454,7 @@ def check_role_api_585(c):
         s.put(mcp, "KIND", channel.GRANT)
         s.put(mcp, "CAPS", caps_of("puppet"))
         s.put(mcp, "MASTER_ID", f"{GRANT}.host-77")
-        s.put(mcp, "MY_INBOX", f"mop.mop.master.{GRANT}.host-77.inbox")
+        s.put(mcp, "MY_INBOX", f"_MOP_REPLY.{GRANT}.host-77")
         s.put(bus, "login", lambda: GRANT)
         s.put(bus, "gather", lambda *a, **kw: c.fail("#585 grant never broadcasts", a))
 
@@ -485,7 +485,7 @@ def check_role_api_585(c):
             mcp.watch_inbox()
             c.expect("#585 a role answers no who-poll", "error" in mcp.on_inbox({"verb": "who"}), True)
         c.expect("#585 a role MCP subscribes its own inbox only",
-                 subs, [f"mop.mop.master.{GRANT}.host-77.inbox"])
+                 subs, [f"_MOP_REPLY.{GRANT}.host-77"])
 
         # dispatch: без права -- отказ; с правом -- свой канал, без owner.
         c.check("#585 dispatch refused without the capability",
@@ -680,7 +680,7 @@ def check_body_binding_585(c):
     if not c.check("#585 channel.own_inbox exists", callable(inbox)):
         return False
     local = f"{os.uname().nodename}-{os.getpid()}"
-    mine = channel.own_inbox(GRANT, f"{GRANT}.{local}")
+    mine = channel.own_inbox(GRANT, local)
     c.expect("#585 a grant's process inbox rides its private reply prefix",
              mine, f"{busnames.private_prefix(GRANT)}.{local}")
     c.check("#585 it lies inside the scope the grant ACL subscribes",

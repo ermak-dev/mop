@@ -86,7 +86,10 @@ def send_fields(kind, me, inbox, force, owner):
 
 # ─── тело роли: кто я и где стою ─────────────────────────────────────────
 # Окружение тела ставит доставка бандла (#590): MOP_PUPPET -- имя джоба,
-# MOP_SOUL_DIR -- каталог закреплённого бандла (soul.yaml и промпт).
+# MOP_SOUL_DIR -- каталог закреплённого бандла (soul.yaml и промпт) внутри
+# инкарнации (root/bundle), у корня инкарнации -- расписка готовности
+# лаунчера (driver.READY). Раскладку держат Published-константы driver,
+# а не строки здесь: узел и `mop driver run` кладут файлы по ней же.
 def role_name(environ=None):
     """Адрес роли -- имя её джоба. Без него роль не знает, как ей ответят."""
     env = os.environ if environ is None else environ
@@ -103,15 +106,61 @@ def role_name(environ=None):
 def own_bundle(environ=None):
     """Бандл роли тела -> (Bundle | None, причина | None). Каталог
     инструментов из него -- удобство модели, не защита: права проверяет
-    сервер. Нет бандла -- каталог закрыт до обнаружения адресатов."""
+    сервер. Бандл принимается, только когда тело подтверждает его
+    распиской готовности у корня инкарнации (ready/role/soul_inc/
+    soul_digest сходятся с загруженным бандлом), а корень -- ровно та
+    инкарнация этого джоба, которую держит Published-раскладка
+    (driver.soul_dir): самообъявленный MOP_SOUL_DIR чужого каталога ничего
+    не открывает, и «нет бандла» честнее подделки. Нет бандла -- каталог
+    закрыт до обнаружения адресатов."""
+    from mop import driver
     env = os.environ if environ is None else environ
     path = env.get("MOP_SOUL_DIR")
     if not path:
         return None, "no role bundle in this body (MOP_SOUL_DIR)"
+    root, sub = os.path.split(os.path.abspath(path))
+    if sub != driver.SOUL_BUNDLE:
+        return None, (f"{path}: the body bundle lives at "
+                      f"<incarnation>/{driver.SOUL_BUNDLE}, not here")
     try:
-        return soul.load(path), None
+        bundle = soul.load(path)
     except (OSError, ValueError) as e:
         return None, str(e)
+    # Джоб и инкарнация: имя джоба знает тело (MOP_PUPPET), инкарнацию --
+    # место корня в раскладке. Расписка лаунчера -- последним написанный
+    # маркер доставки -- обязана называть ровно эту пару и этот бандл.
+    try:
+        name = role_name(env)
+    except LookupError as e:
+        return None, f"{e} -- no bundle is verified without the job name"
+    inc = os.path.basename(root)
+    if os.path.realpath(root) != os.path.realpath(driver.soul_dir(name, inc)):
+        return None, (f"{path}: a self-declared bundle outside the body's "
+                      f"own incarnation layout opens nothing")
+    try:
+        with open(os.path.join(root, driver.READY), encoding="utf-8") as f:
+            import json
+            receipt = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, f"{root}/{driver.READY}: the ready receipt does not read: {e}"
+    for key, want in (("ready", True), ("role", bundle.role),
+                      ("soul_inc", inc), ("soul_digest", bundle.digest)):
+        if receipt.get(key) != want:
+            return None, (f"{root}/{driver.READY}: {key} is "
+                          f"{receipt.get(key)!r}, the body pins {want!r}")
+    return bundle, None
+
+
+def own_inbox(user, master_id):
+    """Субъект инбокса ЭТОГО процесса для вестей и reply_to. Человеку --
+    мастер-инбокс шины (его и слушает ACL); принципалу роли -- субъект под
+    его приватным префиксом ответов: подписка принципала (#581) -- только
+    свой private_scope, мастер-форму шина отказала бы молча. master_id
+    (хвост <хост>-<pid> или адрес мастера) едет хвостом субъекта -- адресом
+    для ответа остаётся имя джоба роли (send_fields)."""
+    if soul.is_grant(user):
+        return f"{busnames.private_prefix(user)}.{master_id}"
+    return bus.inbox(master_id)
 
 
 def candidates(rows):
