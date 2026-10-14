@@ -14,8 +14,14 @@
 
 Второй режим и есть причина запрета на импорты: на узел уезжает один файл.
 """
+import base64
 import glob
+import hashlib
 import json
+import re
+import stat
+import struct
+import unicodedata
 import os
 import socket
 import sys
@@ -102,6 +108,431 @@ def live_session_for_cwd(cwd):
         if socket_alive(d["messagingSocketPath"]):
             return d
     return None
+
+
+# ─── история: только файл текущей живой идентичности (#597) ──────────────
+# 64 KiB исходника дают менее 400 KiB при худшем JSON escaping. Дополнительный
+# предел сериализованной страницы оставляет запас под конверт шины (900 KB).
+HISTORY_CHUNK = 64 * 1024
+HISTORY_RECORD = 32 * 1024
+HISTORY_WIRE = 256 * 1024
+HISTORY_CURSOR = 2048
+_HISTORY_COMPONENT = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
+_HISTORY_SID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+
+
+def _history_json(raw):
+    """Строгий JSON: дубликаты ключей и нечисловые числа не являются объектом."""
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError("duplicate JSON key")
+            out[key] = value
+        return out
+
+    def constant(_value):
+        raise ValueError("non-finite JSON number")
+
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        out = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+        if not isinstance(out, dict):
+            raise ValueError("JSON record is not an object")
+        # Проверяет также бесконечность от 1e999 и одинокие UTF-16 surrogates.
+        json.dumps(out, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return out
+    except (ValueError, UnicodeError, RecursionError) as e:
+        raise ValueError("incompatible history JSON object") from e
+
+
+def _history_open(root, parts=(), directory=False):
+    """Открыть от корня без единого symlink, включая промежуточные каталоги.
+
+    dir_fd и O_NOFOLLOW не оставляют окна между realpath и open. Возвращённый
+    fd закрывает вызывающий. Обычный файл обязателен: FIFO мог бы повесить RPC.
+    """
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise ValueError("unsafe history config directory")
+    components = [p for p in root.split(os.sep) if p] + list(parts)
+    if any(not isinstance(p, str) or p in (".", "..") or not p
+           or os.sep in p or "\x00" in p for p in components):
+        raise ValueError("unsafe history path component")
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("history confinement is unavailable on this platform")
+    fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for i, part in enumerate(components):
+            is_dir = i < len(components) - 1 or directory
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            if is_dir:
+                flags |= os.O_DIRECTORY
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        st = os.fstat(fd)
+        if not (stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)):
+            raise ValueError("history path is not a regular file or directory")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _history_config(env):
+    """Корень из окружения процесса, не из RPC и не из путей транскрипта."""
+    if not isinstance(env, dict):
+        raise LookupError("live session environment is unknown")
+    root = env.get("CLAUDE_CONFIG_DIR")
+    if not root:
+        home = env.get("HOME")
+        if not isinstance(home, str) or not os.path.isabs(home):
+            raise LookupError("live session config home is unknown")
+        root = os.path.join(home, ".claude")
+    if not isinstance(root, str) or not os.path.isabs(root) or "\x00" in root:
+        raise ValueError("unsafe live session config home")
+    return unicodedata.normalize("NFC", root)
+
+
+def _history_project(cwd, env):
+    """Правило каталога Claude Code 2.1.296: override только с config home.
+
+    Обычный slug заменяет каждый не-ASCII-alnum дефисом. Длинный slug требует
+    версионного хеша Claude, пока он не принят живым контрактом — отказ, не
+    попытка подобрать соседний файл. Невалидный override Claude игнорирует.
+    """
+    custom = env.get("CLAUDE_CODE_PROJECT_DIR_NAME") if env.get("CLAUDE_CONFIG_DIR") else None
+    if (isinstance(custom, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", custom)
+            and not re.fullmatch(r"(?:con|prn|aux|nul|com[0-9]|lpt[0-9])", custom, re.I)):
+        return custom
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    if len(slug) > 200:
+        raise ValueError("long Claude project slug is not supported by history")
+    return slug
+
+
+def _history_process(pid):
+    """Linux identity: boot id + start ticks; окружение и cwd именно PID.
+
+    Чтения stat до и после не позволяют принять окружение переиспользованного
+    PID. Нет /proc или доступа — нет доказанной живой идентичности.
+    """
+    if type(pid) is not int or pid <= 0:
+        raise LookupError("live session PID is unknown")
+    root = f"/proc/{pid}"
+
+    def start():
+        with open(root + "/stat") as f:
+            text = f.read(8192)
+        fields = text[text.rfind(")") + 2:].split()
+        if len(fields) < 20 or fields[0] in ("Z", "X") or not fields[19].isdigit():
+            raise LookupError("live session process start is unknown")
+        return fields[19]
+
+    try:
+        before = start()
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            boot = f.read(128).strip()
+        if not re.fullmatch(r"[0-9a-f-]{36}", boot):
+            raise LookupError("live session boot identity is unknown")
+        with open(root + "/environ", "rb") as f:
+            raw = f.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024 or not raw.endswith(b"\x00"):
+            raise LookupError("live session environment is unknown")
+        env = {}
+        for item in raw[:-1].split(b"\x00"):
+            key, sep, value = item.partition(b"=")
+            if not sep:
+                raise LookupError("live session environment is unknown")
+            key, value = key.decode("utf-8"), value.decode("utf-8")
+            if key in env:
+                raise LookupError("live session environment is ambiguous")
+            env[key] = value
+        cwd = os.readlink(root + "/cwd")
+        uid = os.stat(root).st_uid
+        if start() != before or not os.path.isdir(cwd):
+            raise LookupError("live session process changed")
+        return {"start": boot + ":" + before, "proc_start": before, "env": env,
+                "cwd": os.path.realpath(cwd), "uid": uid}
+    except (OSError, UnicodeError, IndexError) as e:
+        raise LookupError("live session process identity is unavailable") from e
+
+
+def _history_peer(path):
+    """Проба без кадров, attach и inject: SO_PEERCRED связывает сокет с PID."""
+    if not isinstance(path, str) or not os.path.isabs(path) or not hasattr(socket, "SO_PEERCRED"):
+        raise LookupError("live session peer identity is unavailable")
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISSOCK(before.st_mode):
+        raise ValueError("unsafe live session socket")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        try:
+            sock.connect(path)
+        except (ConnectionRefusedError, FileNotFoundError):
+            return None
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        pid, uid, _gid = struct.unpack("3i", creds)
+        after = os.lstat(path)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise LookupError("live session socket changed")
+        return pid, uid, [after.st_dev, after.st_ino]
+
+
+def _history_identity(cwd):
+    """Ровно один живой кандидат, совпавшие cwd, config home и peer PID.
+
+    Реестр discovery выбирается окружением тела. Отличающийся config home
+    живого процесса не разрешает искать произвольный путь — это отказ.
+    """
+    target = os.path.realpath(cwd)
+    config = _history_config(dict(os.environ))
+    directory = _history_open(config, ("sessions",), directory=True)
+    hits = []
+    try:
+        names = sorted(os.listdir(directory))
+    finally:
+        os.close(directory)
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        fd = _history_open(config, ("sessions", name))
+        with os.fdopen(fd, "rb") as f:
+            raw = f.read(16 * 1024 + 1)
+        if len(raw) > 16 * 1024:
+            continue
+        try:
+            d = _history_json(raw)
+        except ValueError:
+            # Discovery содержит остатки и незаконченные записи других сессий.
+            # Это ещё не кандидат; fences живого endpoint ниже не ослабляются.
+            continue
+        if not isinstance(d.get("cwd"), str) or not os.path.isabs(d["cwd"]) or "\x00" in d["cwd"]:
+            continue
+        if os.path.realpath(d["cwd"]) != target:
+            continue
+        pid, sid, path = d.get("pid"), d.get("sessionId"), d.get("messagingSocketPath")
+        if type(pid) is not int or pid <= 0 or not isinstance(sid, str) or not _HISTORY_SID.fullmatch(sid):
+            continue
+        if not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path:
+            continue
+        peer = _history_peer(path)
+        if peer is None:
+            continue
+        process = _history_process(pid)
+        if (not isinstance(process, dict) or not isinstance(process.get("start"), str)
+                or not process["start"] or not isinstance(process.get("env"), dict)
+                or process.get("cwd") != target or type(process.get("uid")) is not int):
+            raise LookupError("live session process identity is unknown")
+        if peer[0] != pid or peer[1] != process["uid"] or peer[1] != os.getuid():
+            raise LookupError("live session socket peer does not match registry")
+        if _history_config(process["env"]) != config:
+            raise LookupError("live session config home does not match discovery")
+        # Опубликованный key связывает остаток реестра с process-start. Сам
+        # peerToken не нужен чтению, не отправляется и не выходит в ответ.
+        key_hash = _history_digest(os.path.realpath(path).encode())
+        key_fd = _history_open(config, ("sessions", f"{pid}.{key_hash}.key"))
+        with os.fdopen(key_fd, "rb") as f:
+            key_raw = f.read(4097)
+        if len(key_raw) > 4096:
+            raise ValueError("session identity key is too large")
+        key = _history_json(key_raw)
+        proc_start = process.get("proc_start")
+        if (not isinstance(proc_start, str) or not re.fullmatch(r"[0-9]{1,32}", proc_start)
+                or key.get("procStart") != proc_start):
+            raise LookupError("session process-start key is unknown or stale")
+        hits.append({"session_id": sid, "pid": pid, "start": process["start"],
+                     "config": config, "project_dir": _history_project(target, process["env"]),
+                     "cwd": target, "socket": peer[2]})
+    if not hits:
+        raise LookupError("no proven live Claude session for history")
+    if len(hits) != 1:
+        raise Ambiguous("several live Claude session candidates for history")
+    return hits[0]
+
+
+def _history_digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _history_cursor(cursor):
+    """Курсор — позиция, не полномочие: ни одного пути, ограниченная схема."""
+    if cursor is None:
+        return None
+    if not isinstance(cursor, str) or not 0 < len(cursor) <= HISTORY_CURSOR or not re.fullmatch(r"[A-Za-z0-9_-]+", cursor):
+        raise ValueError("invalid history cursor")
+    try:
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        d = _history_json(raw)
+    except (ValueError, UnicodeError) as e:
+        raise ValueError("invalid history cursor") from e
+    keys = {"v", "epoch", "base", "file", "offset", "size", "anchor", "head", "head_bytes", "skip", "mtime", "ctime"}
+    if set(d) != keys or type(d["v"]) is not int or d["v"] != 1 or type(d["skip"]) is not bool:
+        raise ValueError("invalid history cursor schema")
+    for key in ("epoch", "base", "anchor", "head"):
+        if not isinstance(d[key], str) or not re.fullmatch(r"[0-9a-f]{64}", d[key]):
+            raise ValueError("invalid history cursor identity")
+    for key in ("offset", "size", "head_bytes", "mtime", "ctime"):
+        if type(d[key]) is not int or not 0 <= d[key] <= 2**63 - 1:
+            raise ValueError("invalid history cursor offset")
+    if d["offset"] > d["size"] or d["head_bytes"] > min(64, d["size"]):
+        raise ValueError("invalid history cursor bounds")
+    if not isinstance(d["file"], list) or len(d["file"]) != 2 or any(type(n) is not int or n < 0 for n in d["file"]):
+        raise ValueError("invalid history cursor file identity")
+    return d
+
+
+def _history_bytes(fd, offset, length):
+    return os.pread(fd, length, offset)
+
+
+def _history_anchor(fd, offset):
+    return _history_digest(_history_bytes(fd, max(0, offset - 64), min(64, offset)))
+
+
+def _history_page(fd, offset, size, skip):
+    """Одна ограниченная byte-страница; незаконченная обычная строка остаётся.
+
+    Слишком длинная строка пропускается частями с явным notice и продвижением.
+    Не пытаемся разобрать её куски или приписать ей состояние инструмента.
+    """
+    raw = _history_bytes(fd, offset, min(HISTORY_CHUNK, size - offset))
+    records, used, pos, partial = [], 0, 0, False
+    while pos < len(raw):
+        end = raw.find(b"\n", pos)
+        complete = end != -1
+        stop = end + 1 if complete else len(raw)
+        line = raw[pos:stop]
+        if not skip and not complete and len(line) <= HISTORY_RECORD:
+            partial = True
+            break
+        if skip or len(line) > HISTORY_RECORD:
+            record = {"type": "mop_history_notice", "reason": "record_too_large",
+                      "offset": offset + pos, "skipped_bytes": len(line), "complete": complete}
+        else:
+            try:
+                record = _history_json(line)
+            except ValueError:
+                # Завершённая запись отображения не исполняется: сообщаем пропуск,
+                # не выдавая исходник или текст исключения. Cursor идёт дальше.
+                record = {"type": "mop_notice", "reason": "invalid_record",
+                          "offset": offset + pos, "skipped_bytes": len(line), "complete": True}
+        length = len(json.dumps(record, ensure_ascii=True, allow_nan=False).encode())
+        if length > HISTORY_WIRE - 4096:
+            record = {"type": "mop_history_notice", "reason": "record_too_large",
+                      "offset": offset + pos, "skipped_bytes": len(line), "complete": complete}
+            length = len(json.dumps(record).encode())
+        if used + length + 2 > HISTORY_WIRE - 4096:
+            break
+        records.append(record)
+        used += length + 2
+        pos = stop
+        skip = not complete
+        partial = skip
+    new_offset = offset + pos
+    more = offset + len(raw) < size or (new_offset < size and not (partial and not skip))
+    return records, new_offset, skip, partial, more, raw
+
+
+def history(cwd, cursor=None):
+    """Транскрипт живой сессии: страницы объектов, без логов и публичных событий.
+
+    Cursor позволяет повторить страницу и продолжить после reconnect без
+    повторной выдачи уже прочитанных строк. Смена процесса/сессии/файла или
+    нарушение byte fence начинают новую эпоху с reset. Смена во время чтения
+    закрывает ответ отказом: старые records не должны выйти наружу.
+    """
+    previous = _history_cursor(cursor)
+    identity = _history_identity(cwd)
+    sid, project = identity.get("session_id"), identity.get("project_dir")
+    if (not isinstance(sid, str) or not _HISTORY_SID.fullmatch(sid)
+            or not isinstance(project, str) or not _HISTORY_COMPONENT.fullmatch(project)):
+        raise ValueError("unsafe history session or project path")
+    parts = ("projects", project, sid + ".jsonl")
+    base = _history_digest(json.dumps(identity, sort_keys=True).encode())
+    try:
+        fd = _history_open(identity["config"], parts)
+    except FileNotFoundError:
+        # До первого transcript каталоги projects тоже могут отсутствовать.
+        # Но недоступный/пропавший config home не является пустой историей.
+        config_fd = _history_open(identity["config"], directory=True)
+        os.close(config_fd)
+        epoch = _history_digest(json.dumps([base, "pending"]).encode())
+        empty = _history_digest(b"")
+        token = {"v": 1, "epoch": epoch, "base": base, "file": [0, 0],
+                 "offset": 0, "size": 0, "skip": False, "mtime": 0, "ctime": 0,
+                 "anchor": empty, "head_bytes": 0, "head": empty}
+        if _history_identity(cwd) != identity:
+            raise LookupError("live session changed during history read")
+        config_fd = _history_open(identity["config"], directory=True)
+        os.close(config_fd)
+        try:
+            check_fd = _history_open(identity["config"], parts)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(check_fd)
+            raise LookupError("transcript appeared during history read")
+        encoded = base64.urlsafe_b64encode(json.dumps(token, separators=(",", ":")).encode()).decode().rstrip("=")
+        return {"epoch": epoch, "session_id": sid, "cursor": encoded, "records": [],
+                "reset": previous is not None and previous != token,
+                "has_more": False, "partial": True}
+    try:
+        st = os.fstat(fd)
+        file_id, size = [st.st_dev, st.st_ino], st.st_size
+        tail_start = max(0, size - 64)
+        tail = _history_bytes(fd, tail_start, size - tail_start)
+        reset, offset, skip = False, 0, False
+        epoch = _history_digest(json.dumps([base, file_id]).encode())
+        if previous is not None:
+            compatible = (previous["base"] == base and previous["file"] == file_id
+                          and size >= previous["size"]
+                          and (size > previous["size"] or (st.st_mtime_ns == previous["mtime"]
+                                                           and st.st_ctime_ns == previous["ctime"]))
+                          and _history_anchor(fd, previous["offset"]) == previous["anchor"]
+                          and _history_digest(_history_bytes(fd, 0, previous["head_bytes"])) == previous["head"])
+            if compatible:
+                offset, skip, epoch = previous["offset"], previous["skip"], previous["epoch"]
+                if offset and not skip and _history_bytes(fd, offset - 1, 1) != b"\n":
+                    raise ValueError("history cursor is not on a record boundary")
+            else:
+                reset = True
+                # inode может пережить truncate: новая эпоха нужна даже тогда.
+                epoch = _history_digest(json.dumps([base, file_id, st.st_ctime_ns, previous["epoch"]]).encode())
+        read_offset = offset
+        records, offset, skip, partial, more, observed = _history_page(fd, offset, size, skip)
+        head_bytes = min(64, size)
+        token = {"v": 1, "epoch": epoch, "base": base, "file": file_id,
+                 "offset": offset, "size": size, "skip": skip,
+                 "mtime": st.st_mtime_ns, "ctime": st.st_ctime_ns,
+                 "anchor": _history_anchor(fd, offset), "head_bytes": head_bytes,
+                 "head": _history_digest(_history_bytes(fd, 0, head_bytes))}
+        # Append разрешён, а замена/перезапись snapshot нет. Повторное discovery
+        # идёт до последней проверки файла, чтобы замена в этом окне не уехала.
+        if _history_identity(cwd) != identity:
+            raise LookupError("live session changed during history read")
+        check_fd = _history_open(identity["config"], parts)
+        try:
+            after = os.fstat(check_fd)
+            if ([after.st_dev, after.st_ino] != file_id or after.st_size < size
+                    or (after.st_size == size and (after.st_mtime_ns != st.st_mtime_ns
+                                                   or after.st_ctime_ns != st.st_ctime_ns))
+                    or _history_bytes(check_fd, read_offset, len(observed)) != observed
+                    or _history_bytes(check_fd, tail_start, size - tail_start) != tail
+                    or _history_anchor(check_fd, offset) != token["anchor"]
+                    or _history_digest(_history_bytes(check_fd, 0, head_bytes)) != token["head"]):
+                raise LookupError("transcript changed during history read")
+        finally:
+            os.close(check_fd)
+        encoded = base64.urlsafe_b64encode(json.dumps(token, separators=(",", ":")).encode()).decode().rstrip("=")
+        return {"epoch": epoch, "session_id": sid, "cursor": encoded, "records": records,
+                "reset": reset, "has_more": more, "partial": partial}
+    finally:
+        os.close(fd)
 
 
 def resolve(target):
@@ -622,6 +1053,18 @@ def main(argv):
         except BaseException:
             pass
         return 0
+    if argv[:1] == ["history"]:
+        try:
+            if len(argv) == 2:
+                out = history(argv[1])
+            elif len(argv) == 4 and argv[2] == "--cursor":
+                out = history(argv[1], argv[3])
+            else:
+                raise ValueError("usage: session.py history <cwd> [--cursor CURSOR]")
+        except Exception as e:
+            out = {"error": str(e)}
+        print(json.dumps(out, ensure_ascii=True, allow_nan=False))
+        return 0 if "error" not in out else 1
     if len(argv) >= 2 and argv[0] == "state":
         try:
             out = state(argv[1])
@@ -660,7 +1103,8 @@ def main(argv):
             out = {"error": str(e)}
         print(json.dumps(out, ensure_ascii=False))
         return 0 if "error" not in out else 1
-    print("usage: session.py probe <cwd> | state <cwd> | hook (stdin) | "
+    print("usage: session.py probe <cwd> | state <cwd> | "
+          "history <cwd> [--cursor CURSOR] | hook (stdin) | "
           "statusline (stdin) | wait-idle <cwd> <timeout> [tag] | "
           "send <target> <text> [--priority P] [--mode M] [--from-name N] "
           "[--wait SEC]", file=sys.stderr)

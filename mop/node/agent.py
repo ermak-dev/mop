@@ -301,7 +301,7 @@ def _last_json(out):
     return None
 
 
-async def session_json(name, script, timeout=20):
+async def session_json(name, script, timeout=20, private=False):
     """Ответ session.py, который печатает JSON (send, wait-idle).
 
     Тишина тела (код None) и ответ без итоговой JSON-строки (разрыв
@@ -311,7 +311,11 @@ async def session_json(name, script, timeout=20):
     известно, доехало ли» -- второе не откатывает ни аренду, ни identity:
     сообщение могло дойти, и откат испортил бы чужой ход. Подтверждённый
     отказ -- только структурированный ответ session.py, угадывание по
-    строкам мусора -- не способ."""
+    строкам мусора -- не способ.
+
+    private (#597) запрещает эхо неразобранного stdout: оборванный JSON истории
+    может содержать реплики. Структурированный отказ reader сохраняет причину.
+    """
     out, code = await bsh(name, script, timeout)
     if code is None:
         return {"error": f"{name}: the body did not answer in {timeout}s",
@@ -319,6 +323,9 @@ async def session_json(name, script, timeout=20):
     got = _last_json(out)
     if got is not None:
         return got
+    if private:
+        return {"error": f"{name}: history reader exit {code} — no parsable answer",
+                "timeout": True}
     return {"error": (out.strip() or f"session.py exit {code}")
             + " — no parsable answer, delivery unknown",
             "timeout": True}
@@ -1302,6 +1309,45 @@ async def _event(conn, kind, name=None, **fields):
         pass
 
 
+async def v_history(_conn, req):
+    """Мастерское чтение транскрипта внутри тела, без захвата владельца.
+
+    Проект уже проверен handle по named. Запрос задаёт только cursor; cwd,
+    config home, transcript path и live identity выбирает standalone reader.
+    Не публикуем records в события, аудит или лог.
+    """
+    allowed = {"verb", "name", "cursor", "_project", "_caller"}
+    if set(req) - allowed:
+        return {"error": "history request accepts only name and cursor"}
+    cursor = req.get("cursor")
+    if cursor is not None and (not isinstance(cursor, str) or not 0 < len(cursor) <= 2048
+                               or not re.fullmatch(r"[A-Za-z0-9_-]+", cursor)):
+        return {"error": "invalid history cursor"}
+    args = [clone_dir(req["name"])]
+    if cursor is not None:
+        args += ["--cursor", cursor]
+    out = await session_json(req["name"], _session_cmd("history", *args), private=True)
+    if (isinstance(out, dict) and set(out) <= {"error", "timeout"}
+            and isinstance(out.get("error"), str)
+            and ("timeout" not in out or type(out["timeout"]) is bool)):
+        return out
+    keys = {"epoch", "session_id", "cursor", "records", "reset", "has_more", "partial"}
+    if (not isinstance(out, dict) or set(out) != keys
+            or any(not isinstance(out[k], str) or not 0 < len(out[k]) <= limit
+                   for k, limit in (("epoch", 128), ("session_id", 128), ("cursor", 2048)))
+            or any(type(out[k]) is not bool for k in ("reset", "has_more", "partial"))
+            or not isinstance(out["records"], list)
+            or any(not isinstance(record, dict) for record in out["records"])):
+        return {"error": "incompatible history response from body"}
+    try:
+        size = len(json.dumps(out, ensure_ascii=True, allow_nan=False).encode())
+    except (ValueError, UnicodeError, RecursionError):
+        return {"error": "incompatible history response from body"}
+    if size >= 300_000:
+        return {"error": "history response from body exceeds byte limit"}
+    return out
+
+
 async def v_tail(_conn, req):
     return {"lines": await pane_lines(req["name"])}
 
@@ -1674,6 +1720,7 @@ VERBS = {
     "usage":  Verb(v_usage,  MASTER, False),
     "junk":   Verb(v_junk,   NODE,   False),
     "clone":  Verb(v_clone,  MASTER, True),
+    "history": Verb(v_history, MASTER, True),
     "sweep":  Verb(v_sweep,  NODE,   False),
 }
 # Прежние наборы -- выводом из таблицы, для тех, кто их читает.

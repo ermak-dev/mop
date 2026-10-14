@@ -926,10 +926,14 @@ class Handler(BaseHTTPRequestHandler):
         if not sub:
             return self._json(200, {"puppet": row.to_dict()})
         if sub == "tail":
-            lines, note = web.puppet_tail(name, puppets.pane_lines, puppets.node_of)
-            if lines is None:
-                return self._json(502, {"error": note})
-            return self._json(200, {"lines": lines, "truncated": note})
+            output, error = web.puppet_output(row, puppets.pane_lines, puppets.node_of,
+                                              puppets.startup_lines)
+            if output is None:
+                body = {"error": error}
+                if row.kind in ("starting", "failing") or row.alloc_status == "pending":
+                    body["source"] = "initialization"
+                return self._json(502, body)
+            return self._json(200, output)
         # #507: маршрута stderr больше нет -- кнопка «лог» ушла из GUI;
         # неизвестный подсубъект по-прежнему 404.
         return self._json(404, {"error": "no such puppet"})
