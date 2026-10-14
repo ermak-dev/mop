@@ -668,9 +668,31 @@ def check_body_binding_585(c):
         # Джоб неизвестен -- телу неоткуда знать свою инкарнацию
         b, _ = body(str(uuid.uuid4()))
         cases.append(("no job name", {"MOP_SOUL_DIR": b}, ()))
+        # Расписка -- валидный JSON, но не объект: обещание own_bundle --
+        # (None, причина), а не AttributeError из receipt.get
+        for shape in ([], None, "x", 7):
+            i7 = str(uuid.uuid4())
+            b, l = body(i7, receipt=shape)
+            cases.append((f"ready receipt is JSON {type(shape).__name__}",
+                          {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                          ("receipt",)))
+        # Инкарнация -- не UUID вовсе или не канонической формы: раскладка
+        # держит UUID инкарнации (soul.incarnation, запись привязки), и
+        # согласованно сговорившаяся пара «путь + расписка» с не-UUID
+        # -- не инкарнация этого тела
+        for bad_inc in ("not-a-uuid", str(uuid.uuid4()).upper()):
+            b, l = body(bad_inc, receipt_of(bad_inc, l))
+            cases.append((f"incarnation {bad_inc!r} is no canonical uuid",
+                          {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                          ("canonical uuid",)))
 
         for name, env, words in cases:
-            got, why = channel.own_bundle(env)
+            try:
+                got, why = channel.own_bundle(env)
+            except Exception as e:  # ровно то, чего обещание API не даёт
+                c.fail(f"#585 refused: {name}",
+                       f"{type(e).__name__}: {e}")
+                continue
             ok = got is None and all(w in (why or "") for w in words)
             c.check(f"#585 refused: {name}", ok, (got, why))
 
