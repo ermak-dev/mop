@@ -376,6 +376,10 @@ class FakeNomad:
         self._call("alloc_stderr", alloc_id, task)
         return ""
 
+    def alloc_stdout(self, alloc_id, task, tail=8000):
+        self._call("alloc_stdout", alloc_id, task)
+        return ""
+
     def alloc_stop(self, alloc_id):
         self._call("alloc_stop", alloc_id)
 

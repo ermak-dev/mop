@@ -2713,8 +2713,18 @@ def readers_stub():
 # текущего номера и числа сохранённых кадров под тем же замком.
 # RESULT: кадры после 100 доезжают, replay при новом соединении отсутствует.
 # STATUS: FIXED — see #604
+# HYPOTHESIS (#616): completion соседней проверки дописывает в общий буфер.
+# SOLUTION: отдельный экземпляр реального HTTP-модуля, не фильтрация кадров.
+# RESULT: подставленный чужой callback давал два RED, теперь полный список
+# 115 кадров и отсутствие replay проверяются без ослабления утверждений.
+# STATUS: FIXED — see #616
 def check_operation_stream_capacity_604(c):
-    from mop.cli.server import web as webcli
+    from mop.cli.server import web as shared_web
+    import importlib.util
+    foreign_completion = shared_web._on_operation
+    spec = importlib.util.spec_from_file_location("mop.cli.server._capacity_616", shared_web.__file__)
+    webcli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(webcli)
 
     class Collector:
         def __init__(self, batches):
@@ -2726,6 +2736,9 @@ def check_operation_stream_capacity_604(c):
                 batch = next(self.batches)
             except StopIteration:
                 raise BrokenPipeError()
+            if self.version == 0:
+                foreign_completion({"id": "foreign-completion-616", "action": "send",
+                                    "target": "pu-other-1", "status": "refused"})
             for number in batch:
                 webcli._on_operation({"id": f"op-{number}", "action": "add",
                                       "target": f"pu-demo-{number}", "status": "done"})
@@ -2795,6 +2808,91 @@ def check_operation_result_http_gate_610(c):
     c.expect("#610 unknown is an operation status, not an auth failure", json.loads(body)["status"], "unknown")
 
 
+# STATUS: FIXED — see #612
+def check_startup_screen_612(c):
+    import dataclasses
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    from mop.common import bus, puppets
+    store = websession.SessionStore(now=lambda: 1000.0)
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    user = store.open(identity.Identity("olga", "user", ()))
+    row = dataclasses.replace(CARD_ROW, kind="starting", state="starting")
+    calls = []
+    mode = {"pane": False, "broken": False, "refused": False, "malformed": False}
+
+    def pane(node, name):
+        calls.append(("pane", node, name))
+        if not mode["pane"]:
+            raise RuntimeError("no tmux session")
+        return ["Claude ready"]
+
+    def startup(name):
+        calls.append(("startup", name))
+        if mode["malformed"]:
+            return {"lines": ["safe stage"], "note": {"password": "PRIVATE-NOTE"}}
+        if mode["refused"]:
+            raise bus.Refused("initialization log unavailable: Nomad client is unreachable")
+        if mode["broken"]:
+            raise RuntimeError("PRIVATE-TOKEN /private/error.env")
+        return {"lines": ["body ready", "TASK [Configure database]", "MOP_PROXY_KEY=hush-hush"],
+                "truncated": False, "note": None}
+
+    def get(name="pu-mop-1", token=admin):
+        return _fake_handler(webcli, "GET", f"/api/puppet/{name}/tail",
+            headers={"Cookie": f"mop_session={token}"} if token else None)
+
+    with patched(webcli, SESSIONS=store, COLLECTOR=_card_collector([row])), \
+         patched(websession, provider=lambda: FakeProvider()), \
+         patched(webcli.config, get=lambda key, default=None: {
+             "MOP_SERVER_LAN": "10.0.0.1", "MOP_HTTPS_PORT": "443"}.get(key, default)), \
+         patched(puppets, pane_lines=pane, node_of=lambda name: "mate", startup_lines=startup):
+        headers, raw = get()
+        data = json.loads(raw)
+        c.expect("#612 starting screen returns its initialization log, not 502", headers[0][1], 200)
+        c.expect("#612 startup source is explicit", data.get("source"), "initialization")
+        c.check("#612 actual initialization stages reach the screen",
+                "TASK [Configure database]" in data.get("lines", []), data)
+        c.check("#612 startup secrets do not reach browser", "hush-hush" not in raw.decode(), raw)
+        c.check("#612 initialization read carries no-store",
+                ("Cache-Control", "no-store") in headers, headers)
+        with patched(webcli, COLLECTOR=_card_collector([
+                dataclasses.replace(row, kind="failing", alloc_status="failing")])):
+            headers, raw = get()
+            c.expect("#612 initialization failures keep their process log visible",
+                     (headers[0][1], json.loads(raw).get("source")), (200, "initialization"))
+        mode["pane"] = True
+        calls.clear()
+        headers, raw = get()
+        data = json.loads(raw)
+        c.expect("#612 next poll prefers a newly available live screen", data.get("source"), "screen")
+        c.expect("#612 live screen lines replace initialization", data.get("lines"), ["Claude ready"])
+        c.check("#612 live screen needs no startup log lookup", not any(x[0] == "startup" for x in calls), calls)
+        mode["pane"] = False
+        mode["broken"] = True
+        headers, raw = get()
+        c.expect("#612 a genuinely failed initialization reader is an error", headers[0][1], 502)
+        c.check("#612 raw reader exceptions are not published", "PRIVATE-TOKEN" not in raw.decode(), raw)
+        mode["refused"] = True
+        headers, raw = get()
+        c.expect("#612 an already safe library refusal keeps its reason",
+                 json.loads(raw).get("error"), "initialization log unavailable: Nomad client is unreachable")
+        c.expect("#612 a private log refusal names its source", json.loads(raw).get("source"), "initialization")
+        mode["malformed"] = True
+        headers, raw = get()
+        c.expect("#612 unexpected note structure is not published as process data", headers[0][1], 502)
+        c.check("#612 credentials in a malformed note stay private", "PRIVATE-NOTE" not in raw.decode(), raw)
+        for label, token, code in (("guest", None, 401), ("user", user, 403)):
+            calls.clear()
+            headers, raw = get(token=token)
+            c.expect(f"#612 {label} cannot read process log", headers[0][1], code)
+            c.expect(f"#612 {label} touches no process reader", calls, [])
+        calls.clear()
+        headers, raw = get("../../private")
+        c.expect("#612 unknown target is refused before any reader", (headers[0][1], calls), (404, []))
+
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -2817,7 +2915,8 @@ def main():
                check_gateway_key_path_425,
                check_hash_echo_523, check_panel_routes_523,
                check_section_array_523, check_hotfix_unwrap_523,
-               check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462):
+               check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462,
+               check_startup_screen_612):
         fn(c)
     return c.report("web")
 
