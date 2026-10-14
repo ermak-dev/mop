@@ -37,9 +37,10 @@ PACKAGE = os.path.join(ROOT, "mop", "skills")
 # таблицами агента (mop/node/agent.py VERBS) и сервиса кластера
 # (mop/server/cluster.py VERBS) -- постфактум их проверит soul.parse.
 MASTER_NODE = ["send", "tail", "state", "states", "ping", "local",
-               "type", "wipe", "usage"]
-MASTER_CLUSTER = ["roster", "add", "alloc", "spec", "bootstrap_result",
-                  "update", "restart", "stop", "delete", "landing"]
+               "type", "wipe", "usage", "sizes", "clone"]
+MASTER_CLUSTER = ["ping", "roster", "alloc", "spec", "pool", "stderr",
+                  "bootstrap_result", "add", "update", "restart", "stop",
+                  "delete", "landing"]
 MASTER_YAML = f"""soul: master
 version: 1
 runtime:
@@ -57,7 +58,9 @@ version: 1
 runtime: {driver: any, receives_dispatch: true}
 capabilities:
   node_verbs: [send, tail, state, states, ping, local]
-  cluster_verbs: []
+  # Обнаружение адресов (#585) -- только чтение своего проекта: без
+  # анонимной broadcast-рассылки и без привилегированного locate-прокси.
+  cluster_verbs: [ping, roster, alloc, spec]
   dispatch: false
   spawn: []
 prompt: soul.md
@@ -67,7 +70,7 @@ version: 1
 runtime: {driver: any, receives_dispatch: true}
 capabilities:
   node_verbs: [send, tail, state, states, ping, local]
-  cluster_verbs: []
+  cluster_verbs: [ping, roster, alloc, spec]
   dispatch: false
   spawn: []
 prompt: soul.md
@@ -237,7 +240,7 @@ def check_parse_580(c):
         "node_verbs: [send, tail, state, states, ping, local]", "node_verbs: 5"),
         "node_verbs")
     # Глаголы -- точные имена своих таблиц (#579): выдуманный не проходит.
-    refused(MASTER_YAML.replace("cluster_verbs: [roster",
+    refused(MASTER_YAML.replace("cluster_verbs: [ping, roster",
                                 "cluster_verbs: [nuke, roster"), "verb")
     refused(MASTER_YAML.replace("node_verbs: [send",
                                 "node_verbs: [reboot, send"), "verb")
@@ -245,7 +248,7 @@ def check_parse_580(c):
     # в allowlist роли не входят вовсе.
     refused(MASTER_YAML.replace("node_verbs: [send",
                                 "node_verbs: [disk, send"), "verb")
-    refused(MASTER_YAML.replace("cluster_verbs: [roster",
+    refused(MASTER_YAML.replace("cluster_verbs: [ping, roster",
                                 "cluster_verbs: [drain, roster"), "verb")
     # Промпт -- одно имя файла в каталоге роли: не абсолютный путь, не
     # вложенность, не побег вверх.
@@ -431,11 +434,16 @@ runtime:
     c.expect("#580 review: to_dict round-trips to the same digest",
              rebuilt.digest, bundle.digest)
     # Пакетный пресет -- тот же закон: реальный load→store→deliver без
-    # расхождения форм.
+    # расхождения форм. «Доставка» -- словарь, как его хранит сервер (#581)
+    # и везёт шина: бандл → словарь → бандл с тем же digest и равным
+    # содержимым.
     real = soul.load(os.path.join(PACKAGE, "puppet"))
+    delivered = soul.from_manifest(real.manifest.to_dict(), real.prompt)
     c.expect("#580 review: a packaged preset round-trips its digest",
-             soul.from_manifest(real.manifest.to_dict(), real.prompt).digest,
-             real.digest)
+             delivered.digest, real.digest)
+    c.expect("#580 review: the delivered bundle equals the stored one",
+             (delivered.role, delivered.manifest.to_dict(), delivered.prompt),
+             (real.role, real.manifest.to_dict(), real.prompt))
     # Явный пустой блок в yaml -- та же каноническая форма, что вставленный:
     # «по умолчанию -- пусто» не делает два написания одного смысла двумя
     # бандлами.
@@ -493,13 +501,26 @@ def check_catalogue_580(c):
               master.manifest.capabilities.dispatch,
               master.manifest.capabilities.spawn),
              ("isolating", False, True, ("puppet", "builder")))
-    for role, dispatch in (("puppet", False), ("builder", False)):
+    # Права мастера -- аудит реальных вызовов его инструментов, а не список
+    # «на всякий случай» (review #580): ростер зовёт sizes и, через alloc
+    # сервиса, clone (cluster._clone_of); MCP-инструменты -- pool, stderr,
+    # states, type, wipe, send, tail. Только чтение и управление своим
+    # проектом: админских и секретных глаголов нет и быть не может
+    # (грамматика их не пускает).
+    c.expect("#580 the master preset carries the audited tool calls",
+             (master.manifest.capabilities.node_verbs,
+              master.manifest.capabilities.cluster_verbs),
+             (tuple(MASTER_NODE), tuple(MASTER_CLUSTER)))
+    for role in ("puppet", "builder"):
         m = soul.load(got[role]).manifest
-        c.expect(f"#580 the {role} preset is a receiving worker",
+        # Обнаружение адресов (#585) -- чтение своего проекта: ping/roster/
+        # alloc/spec, без анонимного broadcast и без locate-прокси.
+        c.expect(f"#580 the {role} preset discovers addresses read-only",
                  (m.runtime.driver, m.runtime.receives_dispatch,
                   m.capabilities.dispatch, m.capabilities.spawn,
                   m.capabilities.cluster_verbs),
-                 ("any", True, dispatch, (), ()))
+                 ("any", True, False, (),
+                  ("ping", "roster", "alloc", "spec")))
     # Динамическая четвёртая роль -- каталогом, без правки кода.
     base = tempfile.mkdtemp(prefix="mop-soul-cat-580-")
     make_role(base, "watcher", PUPPET_YAML.replace("soul: puppet", "soul: watcher"))
@@ -508,8 +529,9 @@ def check_catalogue_580(c):
              sorted(got), ["builder", "master", "puppet", "watcher"])
     # Кто раньше в списке -- тот и хозяин имени: приоритет каталогов зовёт
     # вызывающий, а не порядок на диске.
-    mine = make_role(base, "puppet", PUPPET_YAML.replace("cluster_verbs: []",
-                                                         "cluster_verbs: [roster]"))
+    mine = make_role(base, "puppet", PUPPET_YAML.replace(
+        "cluster_verbs: [ping, roster, alloc, spec]",
+        "cluster_verbs: [roster]"))
     c.expect("#580 the earlier catalogue wins the role name",
              soul.catalogue([PACKAGE, base])["puppet"], got["puppet"])
 
