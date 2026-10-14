@@ -16,7 +16,7 @@ from mop.common.domain import JobMeta
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "args": [
+MCP = {"annotations": "destructive", "node_verbs": [], "cluster_verbs": ['spec', 'update', 'bootstrap_result'], "args": [
     {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
     {"name": "origin", "type": "string", "help": "new git origin; without it, the repository is kept"},
     {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "come up with a clean session"},

@@ -6,6 +6,7 @@ push the inner wrapper in and hold its session until it ends.
 """
 import asyncio
 import base64
+import binascii
 import json
 import os
 import shlex
@@ -16,7 +17,8 @@ import time
 
 from mop.cli import lib
 from mop.common import bus, busnames, config
-from mop.common.domain import Body
+from mop.common import soul
+from mop.common.domain import Body, JobMeta
 from mop import driver
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -139,9 +141,30 @@ def refusal(name, error):
     return f"bootstrap of {name} failed: {error}"
 
 
-def bootstrap_sandbox(d, name, project):
+async def initial_identity(name, soul_inc, login, profile):
+    """Начальная identity хозяина в клоне -- глагол живого агента узла
+    (#584/#603), не локальная запись: замок #573/#574 живёт в агенте, и
+    лаунчер -- другой процесс. Профиль -- из ответа сервера (провайдер
+    личностей), не из тела запроса. Шов до появления транспорта; ответ и
+    отказ -- словарь глагола. -> dict."""
+    raise RuntimeError("initial identity is not wired to the node agent yet")
+
+
+async def role_bootstrap_ask(project, name, address):
+    """Спрос bootstrap ролевого джоба: именованный канал узла (#603/#581),
+    не анонимный server.rpc (его зовут и люди проекта, а личный кред
+    принципала выдаёт только хозяину узла). Шов до появления транспорта.
+    -> ответ сервера."""
+    raise RuntimeError("role bootstrap is not wired to the node channel yet")
+
+
+def bootstrap_sandbox(d, name, project, node_qualified=False):
     """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
     дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
+
+    node_qualified -- спросить именованным каналом узла (ролевой джоб,
+    #603): личный кред принципала выдаёт только хозяину узла, анонимный
+    server.rpc зовут и люди проекта. Легаси -- прежний анонимный вопрос.
 
     Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
     любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
@@ -160,8 +183,11 @@ def bootstrap_sandbox(d, name, project):
         if r.get("error"):
             raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
-        out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT, project=project,
-                             name=name, address=address)
+        if node_qualified:
+            out = asyncio.run(role_bootstrap_ask(project, name, address))
+        else:
+            out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
+                                 project=project, name=name, address=address)
     finally:
         # Закрыть -- и после неудачного впуска: стоп мог прийти посреди него.
         asyncio.run(d.admit(name, False))
@@ -184,8 +210,192 @@ def ensure_params(name, environ):
     return params
 
 
+# ─── роль (#590) ─────────────────────────────────────────────────────────
+# Раскладка в каталоге инкарнации (driver.soul_dir): бандл -- подкаталогом
+# ровно из soul.yaml и промпта, как его читает soul.load; рядом кред
+# принципала и метка готовности. Имена -- константы узла и имя промпта из
+# проверенного бандла, не поля ответа: тело запроса путей не выбирает.
+# Метка -- последней и отдельной записью: обёртка (#583) стартует только
+# над ней.
+BUS_FILE, READY = "bus.json", "ready.json"
+
+
+def expected_role(environ):
+    """Тройка роли из Meta джоба -> JobMeta | None (легаси-джоб). Чистая.
+
+    Nomad отдаёт Meta задаче как NOMAD_META_<ключ>, а Meta пишет сервер при
+    регистрации (#582) -- это доверенное ожидание, с которым сверяется
+    ответ. Половина тройки или битое значение -- ValueError тем же
+    договором JobMeta: битый джоб не поднимается ни ролью, ни легаси."""
+    triple = {k: environ.get(f"NOMAD_META_{k}") or None
+              for k in ("soul", "soul_digest", "soul_inc")}
+    if not any(triple.values()):
+        return None
+    return JobMeta(environ.get("NOMAD_META_origin") or None, **triple)
+
+
+def _short(value):
+    """Значение ответа в тексте отказа: repr, обрезанный -- ответ сервера
+    не печатается целиком."""
+    r = repr(value)
+    return r if len(r) <= 80 else r[:77] + "..."
+
+
+def role_files(name, expected, reply):
+    """Ролевой ответ bootstrap'а -> ([(путь, bytes)] файлов роли, (путь,
+    bytes) метки готовности). Чистая; отказ -- ValueError с причиной, без
+    пароля в тексте.
+
+    Авторитет -- Meta джоба (expected) и неизменяемый бандл: роль,
+    инкарнация и digest ответа обязаны совпасть с Meta, бандл собирается
+    soul.from_manifest и обязан хешироваться в digest Meta. Кред -- прежнее
+    поле b['bus'], но индивидуальный: его user -- принципал роли.
+    Проектный кред на его месте -- отказ: легаси-кред в ролевое тело не
+    едет никак, и роль без своего принципала не стартует на чужом. Второй
+    кред внутри роли -- дубль, тоже отказ."""
+    s = reply.get("soul")
+    if not isinstance(s, dict):
+        raise ValueError(f"bootstrap brought no role payload for {expected.soul} "
+                         f"-- the server predates role delivery or the binding is gone; "
+                         f"a role never starts on project credentials")
+    if "bus" in s:
+        raise ValueError("the role payload carries a second credential; "
+                         "the role's credential travels only as the reply's bus")
+    for key, want in (("role", expected.soul), ("soul_inc", expected.soul_inc),
+                      ("soul_digest", expected.soul_digest)):
+        if s.get(key) != want:
+            raise ValueError(f"the payload's {key} {_short(s.get(key))} is not "
+                             f"the job's {want!r}")
+    if not isinstance(s.get("manifest"), dict):
+        raise ValueError("the payload carries no manifest mapping")
+    try:
+        prompt = base64.b64decode(s.get("prompt") or "", validate=True)
+    except (binascii.Error, TypeError, ValueError):
+        raise ValueError("the payload's prompt is not base64") from None
+    try:
+        bundle = soul.from_manifest(s["manifest"], prompt)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"the bundle does not parse: {e}") from None
+    if bundle.role != expected.soul:
+        raise ValueError(f"the bundle is role {bundle.role!r}, the job's is "
+                         f"{expected.soul!r}")
+    if bundle.digest != expected.soul_digest:
+        raise ValueError(f"the bundle hashes to {bundle.digest}, the job pins "
+                         f"{expected.soul_digest}")
+    principal = s.get("principal")
+    if not soul.is_grant(principal):
+        raise ValueError(f"the principal {_short(principal)} is not grant-<id>")
+    creds = reply.get("bus")
+    if not isinstance(creds, dict) or creds.get("user") != principal:
+        raise ValueError(f"the bus credential is not {principal}'s")
+    for key in ("url", "password"):
+        if not (isinstance(creds.get(key), str) and creds[key]):
+            raise ValueError(f"the credential of {principal} has no {key}")
+    d = driver.soul_dir(name, expected.soul_inc)
+    # soul.yaml -- JSON манифеста (JSON -- это YAML): soul.load обёртки
+    # прочтёт тот же словарь и пересчитает тот же digest. ensure_ascii --
+    # чтобы YAML-загрузчику не досталось ни одного не-ASCII знака.
+    manifest = json.dumps(s["manifest"], sort_keys=True, ensure_ascii=True).encode()
+    files = [(f"{d}/{driver.SOUL_BUNDLE}/{soul.MANIFEST}", manifest),
+             (f"{d}/{driver.SOUL_BUNDLE}/{bundle.manifest.prompt}", prompt),
+             (f"{d}/{BUS_FILE}", json.dumps(creds).encode() + b"\n")]
+    ready = json.dumps({"ready": True, "role": bundle.role,
+                        "soul_inc": expected.soul_inc,
+                        "soul_digest": bundle.digest},
+                       sort_keys=True).encode() + b"\n"
+    return files, (f"{d}/{READY}", ready)
+
+
+def deliver_legacy(d, name, b):
+    """Легаси-джоб (без роли в Meta): проектный кред, как до #590."""
+    # Ролевой ответ легаси-джобу -- рассогласование сервера и Meta: роль
+    # без своей тройки в Meta не проверить, и класть её некуда.
+    if b.get("soul"):
+        sys.exit(f"role delivery of {name} refused: the server sent a role "
+                 f"payload for a job without a role in its Meta")
+    # Кред папета приезжает тем же ответом (#83), и только им (#114): узел
+    # его не хранит, файл появляется в теле на подъёме папета и для его
+    # проекта. Ответ без кредов сервер отдаёт отказом, так что здесь его нет
+    # -- но старый сервер ещё может так ответить, и тогда падаем громко:
+    # папет без шины мастеру читается живым, но молчащим.
+    if not b.get("bus"):
+        sys.exit(f"bootstrap of {name} brought no bus credentials -- "
+                 f"is the project registered? mop project add <origin>")
+    project = driver.project_of_name(name)
+    path = driver.project_creds(project)
+    w = asyncio.run(d.push(name, path, json.dumps(b["bus"]).encode() + b"\n"))
+    if w.get("error"):
+        sys.exit(f"bus credentials did not reach the body of {name}: {w['error']}")
+    print(f"{name}: bus credentials in {path}", flush=True)
+
+
+def deliver_role(d, name, role, b, inside):
+    """Ролевой джоб: бандл и кред принципала в каталог инкарнации, затем
+    identity хозяина глаголем агента, затем метка -- всё до модели (#590).
+    Любой отказ -- выход: обёртка не стартует.
+
+    Метка готовности прошлого старта той же инкарнации снимается ДО записи:
+    оборванная запись не оставит «готово» над половиной файлов, и повтор
+    после обрыва дописывает всё заново."""
+    try:
+        files, (ready, mark) = role_files(name, role, b)
+    except ValueError as e:
+        sys.exit(f"role delivery of {name} refused: {e}")
+    r = subprocess.run(inside(f"rm -f {shlex.quote(ready)}"),
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"role delivery of {name} refused: the previous ready mark "
+                 f"did not go: {driver.why(r.stderr or r.stdout, r.returncode)}")
+    w = asyncio.run(d.push_many(name, files))
+    if w.get("error"):
+        sys.exit(f"role delivery of {name} refused: the role files did not "
+                 f"reach the body: {w['error']}")
+    # Identity хозяина -- глагол живого агента (шов): чужой процесс не
+    # владеет замком #573/#574, и старт роли не пишет аренду сам. Отказ
+    # глагола -- отказ старта: метка готовности не ставится, обёртка не
+    # стартует.
+    owner = (b.get("soul") or {}).get("owner")
+    if not (isinstance(owner, dict) and busnames.valid_login(owner.get("login"))
+            and isinstance(owner.get("name"), str) and owner["name"]
+            and isinstance(owner.get("email"), str) and owner["email"]):
+        sys.exit(f"role delivery of {name} refused: the payload has no owner "
+                 f"with a login, name and email")
+    profile = {"name": owner["name"], "email": owner["email"]}
+    try:
+        r = asyncio.run(initial_identity(name, role.soul_inc, owner["login"],
+                                         profile))
+    except (RuntimeError, bus.BusError) as e:
+        sys.exit(f"role delivery of {name} refused: the owner identity did "
+                 f"not settle: {e}")
+    # Расписка -- доказательство глагола, а не «ok»: identity_ready и вся
+    # тройка роли в ней обязаны совпасть с Meta джоба (#603). Расписка без
+    # тройки -- не расписка этой роли.
+    why = r.get("error") if isinstance(r, dict) else _short(r)
+    if why is None and isinstance(r, dict):
+        why = "no identity_ready in the receipt"
+        if r.get("identity_ready"):
+            for key, want in (("role", role.soul), ("soul_inc", role.soul_inc),
+                              ("soul_digest", role.soul_digest)):
+                if r.get(key) != want:
+                    why = (f"the receipt's {key} {_short(r.get(key))} is not "
+                           f"the job's {want!r}")
+                    break
+            else:
+                why = None
+    if why is not None:
+        sys.exit(f"role delivery of {name} refused: the owner identity did "
+                 f"not settle: {why}")
+    w = asyncio.run(d.push(name, ready, mark))
+    if w.get("error"):
+        sys.exit(f"role delivery of {name} refused: the ready mark did not "
+                 f"reach the body: {w['error']}")
+    print(f"{name}: role {role.soul} ({role.soul_digest[:12]}) in "
+          f"{os.path.dirname(ready)}", flush=True)
+
+
 def main(argv):
     """Поднять тело и отработать в нём внутренний врапер. Зовётся из спеки.
+
 
     Смерть врапера обязана убивать сессию. На «живой папет = живая tmux-сессия
     с именем джоба» стоит и ростер, и сбор сирот: умри внешний врапер молча,
@@ -197,6 +407,12 @@ def main(argv):
     name = argv[0]
     if not driver.valid_name(name):
         sys.exit(f"{name!r} doesn't look like a puppet name")
+    # Роль джоба -- до тела (#590): битая тройка в Meta не поднимает ни
+    # роль, ни легаси-папета под ней.
+    try:
+        role = expected_role(os.environ)
+    except ValueError as e:
+        sys.exit(f"role delivery of {name} refused: {e}")
     d = driver.current()
 
     r = asyncio.run(d.ensure(name, ensure_params(name, os.environ)))
@@ -252,27 +468,18 @@ def main(argv):
     # ненулём, Nomad перезапускает, ростер показывает падение. Папет не
     # поднимается «наполовину» с окружением, которого нет.
     try:
-        b = bootstrap_sandbox(d, name, driver.project_of_name(name))
+        b = bootstrap_sandbox(d, name, driver.project_of_name(name),
+                              node_qualified=role is not None)
     except (RuntimeError, bus.BusError) as e:
         sys.exit(refusal(name, e))
     print(f"{name}: bootstrap "
           + (f"played in {b.get('seconds')}s" if b.get("played")
              else "none for the project"), flush=True)
 
-    # Кред папета приезжает тем же ответом (#83), и только им (#114): узел
-    # его не хранит, файл появляется в теле на подъёме папета и для его
-    # проекта. Ответ без кредов сервер отдаёт отказом, так что здесь его нет
-    # -- но старый сервер ещё может так ответить, и тогда падаем громко:
-    # папет без шины мастеру читается живым, но молчащим.
-    if not b.get("bus"):
-        sys.exit(f"bootstrap of {name} brought no bus credentials -- "
-                 f"is the project registered? mop project add <origin>")
-    project = driver.project_of_name(name)
-    path = driver.project_creds(project)
-    w = asyncio.run(d.push(name, path, json.dumps(b["bus"]).encode() + b"\n"))
-    if w.get("error"):
-        sys.exit(f"bus credentials did not reach the body of {name}: {w['error']}")
-    print(f"{name}: bus credentials in {path}", flush=True)
+    if role is not None:
+        deliver_role(d, name, role, b, lambda script: inside(probe, script))
+    else:
+        deliver_legacy(d, name, b)
 
     inner = os.path.join(config.get("MOP_HOME"), INNER)
     w = asyncio.run(d.push(name, inner, _inner_script().encode()))
