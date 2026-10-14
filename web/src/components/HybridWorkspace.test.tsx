@@ -23,14 +23,20 @@ const history = { epoch: 'h1-digest', session_id: 's', cursor: 'c', reset: false
   { type: 'user', origin: 'peer', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: 'denied', is_error: true }] } },
   { type: 'future', data: 'kept' },
 ] };
-const open = () => renderUi(<HybridWorkspace session={admin} target="p" fallback={<div>legacy tail</div>} />);
+const open = () => renderUi(<HybridWorkspace session={admin} target="p" />);
 afterEach(() => { vi.unstubAllGlobals(); terminals.length = 0; });
-test('chat opens first; legacy screen remains available and history renders safely', async () => {
-  vi.stubGlobal('fetch', vi.fn(async () => ok(history)));
+// HYPOTHESIS: третья вкладка дублирует терминал; снимок нужен как режим
+// просмотра внутри единственного терминала, а не как отдельная сессия.
+// STATUS: FIXED — see #622
+test('chat opens first; only chat and terminal tabs, with explicit old-output inspection', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => ok(url.endsWith('/tail')
+    ? { source: 'screen', lines: ['legacy tail'], truncated: false } : history)));
   open();
+  expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Чат', 'Терминал']);
   expect(screen.getByRole('tab', { name: 'Чат' })).toHaveAttribute('aria-selected', 'true');
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
-  expect(screen.getByText('legacy tail')).toBeVisible();
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
+  expect(await screen.findByText('legacy tail')).toBeVisible();
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   expect(await screen.findByText('<img src="https://evil.test/i">')).toBeVisible();
   expect(document.querySelector('img')).toBeNull();
@@ -145,6 +151,7 @@ test('different wire epochs preserve writer across Chat, Terminal and split with
   const mock = vi.fn((url: string, init?: RequestInit) => {
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.includes('/history')) return Promise.resolve(ok(wire.history));
+    if (url.endsWith('/tail')) return Promise.resolve(ok({ source: 'screen', lines: [], truncated: false }));
     return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { ...wire.open, mode: JSON.parse(String(init?.body)).mode }));
   });
   vi.stubGlobal('fetch', mock);
@@ -164,8 +171,11 @@ test('different wire epochs preserve writer across Chat, Terminal and split with
   expect(mock.mock.calls.filter(([url]) => url.endsWith('/close'))).toHaveLength(closes);
 });
 test('missing timing metadata disables only combined action with reason', async () => {
-  vi.stubGlobal('fetch', vi.fn((url: string) => url.includes('/read?') ? new Promise(() => {}) : Promise.resolve(ok(url.includes('/history') ? history : { ...wire.open, interrupt_delay_ms: undefined }))));
+  vi.stubGlobal('fetch', vi.fn((url: string) => url.includes('/read?') ? new Promise(() => {})
+    : Promise.resolve(ok(url.includes('/history') ? history : url.endsWith('/tail')
+      ? { source: 'screen', lines: [], truncated: false } : { ...wire.open, interrupt_delay_ms: undefined }))));
   open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Взять управление' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
   fireEvent.change(screen.getByRole('textbox', { name: 'Ввод человека в CLI' }), { target: { value: 'hello' } });
@@ -173,16 +183,22 @@ test('missing timing metadata disables only combined action with reason', async 
   expect(screen.getByText(/задержка Escape неизвестна/i)).toBeVisible();
   expect(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' })).toBeEnabled();
 });
-test('switching tabs preserves legacy draft rather than silently clearing it', async () => {
-  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
-  function LegacyDraft() { return <input aria-label="Legacy draft" defaultValue="half typed" />; }
-  renderUi(<HybridWorkspace session={admin} target="p" fallback={<LegacyDraft />} />);
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
-  const input = screen.getByRole('textbox', { name: 'Legacy draft' });
+test('switching tabs preserves unsent peer-message draft rather than silently clearing it', async () => {
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+    if (url.endsWith('/tail')) return Promise.resolve(ok({ source: 'screen', lines: [], truncated: false }));
+    if (url.includes('/history')) return Promise.resolve(ok(history));
+    if (url.includes('/read?')) return new Promise(() => {});
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true }
+      : { tid: 'ro', epoch: 'pty', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
+  }));
+  open();
+  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
+  const input = await screen.findByRole('textbox', { name: 'Сообщение' });
   fireEvent.change(input, { target: { value: 'keep this unsent text' } });
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
-  expect(screen.getByRole('textbox', { name: 'Legacy draft' })).toBe(input);
+  expect(screen.getByRole('textbox', { name: 'Сообщение' })).toBe(input);
   expect(input).toHaveValue('keep this unsent text');
 });
 test('Stop sends Escape only while read is pending; shortcut only appends draft and does not claim execution', async () => {
@@ -191,10 +207,12 @@ test('Stop sends Escape only while read is pending; shortcut only appends draft 
     const body = JSON.parse(String(init?.body ?? '{}'));
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.includes('/history')) return Promise.resolve(ok(history));
+    if (url.endsWith('/tail')) return Promise.resolve(ok({ source: 'screen', lines: [], truncated: false }));
     if (url.endsWith('/input')) { inputs.push(atob(body.data)); return Promise.resolve(ok({ seq: body.seq, written: 1, outcome: 'written' })); }
     return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: 'rw', cols: 80, rows: 24 }));
   }));
   open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Взять управление' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop: отправить Escape' })); });

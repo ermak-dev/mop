@@ -20,13 +20,14 @@ const open = () => {
     ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
     : fetchTail(url, init));
   const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   return view;
 };
 
 afterEach(() => vi.unstubAllGlobals());
 
-test("#487 opening the screen immediately loads only that endpoint", async () => {
+test("#622 opening the snapshot loads only its private tail endpoint", async () => {
   const fetchMock = vi.fn(async () => tailOk(["line 1", "line 2"], true));
   vi.stubGlobal("fetch", fetchMock);
   open();
@@ -37,9 +38,9 @@ test("#487 opening the screen immediately loads only that endpoint", async () =>
   expect(screen.getByText(/обрезано/)).toBeInTheDocument();
   for (const label of ["узел", "ветка", "владелец", "модель", "репозиторий", "место клона", "state-строка"])
     expect(screen.queryByText(label, { exact: true })).toBeNull();
-  // #601: чат открывается первым; старый экран явно доступен своей вкладкой.
-  expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Чат", "Терминал", "Экран"]);
-  expect(screen.getByRole("tab", { name: "Экран" })).toHaveAttribute("aria-selected", "true");
+  // #622: чат открывается первым; снимок доступен внутри единственного терминала.
+  expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Чат", "Терминал"]);
+  expect(screen.getByRole("tab", { name: "Терминал" })).toHaveAttribute("aria-selected", "true");
   fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
@@ -48,7 +49,8 @@ test("viewer has an accessible close button", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => tailOk([])));
   const onClose = vi.fn();
   renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={onClose} />);
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   const closer = screen.getByRole("button", { name: "Закрыть" });
   closer.focus();
   expect(document.activeElement).toBe(closer);
@@ -94,15 +96,16 @@ test("#487 switching sources never displays the old response", async () => {
   const view = open();
   await waitFor(() => expect(mock).toHaveBeenCalled());
   view.rerender(<MantineProvider><PuppetCard session={ADMIN} target="pu-mop-2" onClose={() => {}} /></MantineProvider>);
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   await screen.findByText("new screen");
   await act(async () => { release(tailOk(["old screen"])); });
   expect(screen.queryByText("old screen")).toBeNull();
   expect(screen.getByText("new screen")).toBeInTheDocument();
 });
 
-// #507: экран -- единственный источник карточки; диалога «лог» и запроса
-// .../stderr больше нет.
-test("#507 the card is screen-only: no log dialog, no stderr request", async () => {
+// #507/#622: снимок tmux доступен внутри одного терминала, запроса stderr нет.
+test("#622 the terminal offers a snapshot but no second log dialog or stderr request", async () => {
   const seen: string[] = [];
   const fetchMock = vi.fn(async (url: string | URL | Request) => {
     seen.push(String(url));

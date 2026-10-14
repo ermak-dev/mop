@@ -18,7 +18,8 @@ const open = () => {
     ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
     : fetchTail(url, init));
   const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
-  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   return view;
 };
 
@@ -28,6 +29,8 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(
 test("#489 the composer sits inside the screen dialog", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => ok(["screen"])));
   open(); await tick();
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
   const composer = screen.getByRole("textbox", { name: "Сообщение" });
   expect(composer.closest('[data-testid="output-scroll"]')).toBeNull();
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
@@ -42,6 +45,9 @@ test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", asyn
   vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(2000);
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
   open(); await tick();
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
+  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
   const terminal = screen.getByTestId("tail-lines");
   const input = screen.getByRole("textbox", { name: "Сообщение" });
   fireEvent.change(input, { target: { value: "unsent draft" } });
@@ -139,10 +145,14 @@ test.each([401, 403])("#489 HTTP %s removes private output and composer and stop
     .mockResolvedValue({ ok: false, status });
   vi.stubGlobal("fetch", mock);
   open(); await tick();
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
+  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
+  expect(screen.getByRole('textbox', { name: 'Сообщение' })).toBeInTheDocument();
   await tick(3000);
   expect(screen.queryByText("private output")).toBeNull();
   expect(screen.queryByRole("textbox", { name: "Сообщение" })).toBeNull();
-  expect(screen.getByRole("alert")).toHaveTextContent(/прав не хватает/);
+  expect(screen.getAllByRole('alert').some(el => /прав не хватает/.test(el.textContent ?? ''))).toBe(true);
   await tick(9000);
   expect(mock).toHaveBeenCalledTimes(2);
 });

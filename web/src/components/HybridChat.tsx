@@ -38,7 +38,7 @@ export function HybridChat({ records, partial, loading, error, refresh }: {
       <Text size="xs" c="dimmed">История сессии, не поток токенов</Text>
       <Button size="compact-sm" variant="subtle" disabled={loading} onClick={() => void refresh()}>Обновить историю</Button>
     </Group>
-    {error && <Text role="alert" c="red" size="sm" px="md">История недоступна: {error}. Прежний экран доступен во вкладке «Экран».</Text>}
+    {error && <Text role="alert" c="red" size="sm" px="md">История недоступна: {error}. Последние строки доступны во вкладке «Терминал».</Text>}
     {partial && <Text size="xs" c="dimmed" px="md">Неполная запись: продолжение появится после обновления</Text>}
     <div ref={viewport} className="hybrid-history" role="region" aria-label="История чата" tabIndex={0}
       onScroll={() => { const el = viewport.current!; follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 16; }}>
