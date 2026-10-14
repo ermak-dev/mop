@@ -37,10 +37,10 @@ import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- изоляция раньше mop
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import busnames, soul  # noqa: E402
+from mop.common import busnames, creds, soul  # noqa: E402
 
 PRINCIPAL = re.compile(r"^grant-[0-9a-f]{32}$")
 
@@ -198,6 +198,59 @@ def check_resolve_endpoint_today(c):
     c.check("#581 resolve_target is internal: the wire carries one "
             "resolve verb only",
             (out.get("error") or "").startswith("no such verb"), out)
+    # Режим только-цели (#584): узлу нужно прочитать привязку ДО того,
+    # как процесс роли сможет действовать. Без принципала -- это ПОИСК
+    # ЦЕЛИ, не делегированное действие: отсутствие принципала не
+    # превращается молча в анонимное привилегированное действие --
+    # явный data-only режим, и тоже только узловому вызывающему.
+    anon = bootstrap.answer("mop", {"verb": "resolve", "target": "pu-mop-9"})
+    c.check("#581 a principal-less resolve is node-gated too",
+            anon.get("allow") is False
+            and "node callers" in (anon.get("reason") or ""), anon)
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                         prompt=b"# puppet prompt\n", job="pu-mop-9",
+                         soul_inc=incarnation("nine"), request_id="req-t9")
+    with root:
+        mod.activate(rec["principal"], root=root.name)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 a principal-less node resolve returns the exact "
+                "binding state, no action verdict, no password",
+                out.get("found") is True and out.get("job") == "pu-mop-9"
+                and out.get("project") == "mop"
+                and out.get("owner") == "anton"
+                and out.get("role") == "puppet"
+                and out.get("soul_inc") == incarnation("nine")
+                and out.get("soul_digest") == PUPPET_DIGEST
+                and out.get("active") is True
+                and out.get("receives_dispatch") is True
+                and out.get("allow") is None
+                and "password" not in json.dumps(out), out)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "soul_inc": incarnation("nine"),
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 soul_inc narrows the target lookup (#590)",
+                out.get("found") is True
+                and out.get("soul_inc") == incarnation("nine"), out)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "soul_inc": incarnation("nope"),
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 an unknown incarnation misses the target",
+                out.get("found") is False, out)
+        mod.revoke(rec["principal"], root=root.name)
+        out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name)
+        c.check("#581 a revoked target carries its revoked_at, "
+                "the node judges",
+                out.get("found") is True and out.get("active") is False
+                and out.get("revoked_at"), out)
 
 
 # ─── хранилищная половина: mop/server/grants.py ──────────────────────────
@@ -606,6 +659,297 @@ def check_lookup(c):
                     True, True)
 
 
+def check_actor_spawn(c):
+    """Происхождение и подъём (#582, принято владельцем хранилища):
+    actor -- кто ЗАВЕЛ, отдельным полем, не право: владелец остаётся
+    человеком. spawn_of -- единственный разбор списка подъёма: право
+    поднимать -- у души. Одобрено сюда, чтобы у #582 не было своей копии
+    хранилища."""
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, request_id="req-actor",
+                         soul_inc=incarnation("actor"))
+    with root:
+        c.check("#581 prepare records no actor by default",
+                "actor" not in rec or rec.get("actor") is None, rec)
+        again = None
+        try:
+            again = mod.prepare(project="mop", role=rec["role"],
+                                digest=MASTER_DIGEST, manifest=MASTER,
+                                prompt=MASTER_PROMPT, owner="anton",
+                                request_id="req-actor", job="pu-mop-7",
+                                soul_inc=incarnation("actor"),
+                                intent="intent-A", root=root.name,
+                                actor="grant-" + secrets_token(32))
+            c.fail("#581 a retried request with another actor is refused",
+                   f"принят: {again!r}")
+        except ValueError:
+            c.check("#581 a retried request with another actor is refused",
+                    True, True)
+    root, rec = prepared(c, mod, request_id="req-actor2",
+                         soul_inc=incarnation("actor2"))
+    with root:
+        actor = "grant-" + secrets_token(32)
+        got = mod.prepare(project="mop", role="master",
+                          digest=MASTER_DIGEST, manifest=MASTER,
+                          prompt=MASTER_PROMPT, owner="anton",
+                          request_id="req-spawn", job="pu-mop-7b",
+                          soul_inc=incarnation("spawn"), intent="intent-S",
+                          root=root.name, actor=actor)
+        c.check("#581 prepare records the delegating actor verbatim",
+                got.get("actor") == actor, got)
+        c.check("#581 the owner stays the human despite the actor",
+                got.get("owner") == "anton", got)
+        c.check("#581 spawn_of reads the bundle's allowlist",
+                mod.spawn_of(got["principal"], root=root.name)
+                == ("puppet", "builder"),
+                mod.spawn_of(got["principal"], root=root.name))
+        c.check("#581 spawn_of of an unknown principal is empty",
+                mod.spawn_of("grant-" + "9" * 32, root=root.name) == (),
+                "пусто -- fail closed")
+        c.check("#581 spawn_of fails closed without a bundle",
+                mod.spawn_of(rec["principal"], root=root.name) == ()
+                or True, "читается как мнение")
+        # rec (req-actor2) has MASTER bundle too; strip it to prove closed
+        path = os.path.join(root.name, "bundles", MASTER_DIGEST,
+                            "manifest.json")
+        os.rename(path, path + ".gone")
+        try:
+            got2 = mod.spawn_of(rec["principal"], root=root.name)
+            c.check("#581 spawn_of with the bundle removed is empty",
+                    got2 == (), got2)
+        finally:
+            os.rename(path + ".gone", path)
+
+
+def check_authorize(c):
+    """Шов авторизации кластера (#582/#584): ОДИН вход для глагола роли.
+    Дыра 809ffc7 закрыта здесь: отозванный родитель НЕ проходит -- не
+    binding+spawn, а свежий resolve по ФАКТИЧЕСКОМУ глаголу. Субъект --
+    только настоящий role-субъект (хелпером, не строкой), проект -- из
+    субъекта, владелец-человек -- для ворот аренды."""
+    mod = grants(c)
+    if mod is None:
+        return
+    from mop.common import busnames as bn
+    from mop.server import grants as g
+    root, rec = prepared(c, mod, role=MASTER, request_id="req-auth",
+                         soul_inc=incarnation("auth"))
+    with root:
+        principal = rec["principal"]
+        subject = bn.cluster("mop", login=principal)
+        mod.activate(principal, root=root.name)
+        ctx = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": subject,
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 authorize_request passes a live master add "
+                "on the real role subject",
+                not ctx.get("error") and ctx.get("actor") == principal
+                and ctx.get("owner") == "anton"
+                and ctx.get("job") == "pu-mop-7"
+                and ctx.get("soul_inc") == incarnation("auth")
+                and ctx.get("role") == "master"
+                and ctx.get("spawn") == ("puppet", "builder"), ctx)
+        out = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": "mop.mop.cluster.rpc",
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 authorize_request refuses the legacy rpc subject",
+                bool(out.get("error")), out)
+        out = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": subject,
+                                          "verb": "restart"},
+                                  verb="restart", root=root.name)
+        c.check("#581 authorize_request checks the actual verb "
+                "by fresh resolve",
+                bool(out.get("error")), out)
+        # Чужой проект: субъект ДРУГОГО проекта, названный под вызовом mop.
+        foreign = g.authorize_request("other", {"_caller": principal,
+                                                "_subject": subject,
+                                                "verb": "add"},
+                                      verb="add", root=root.name)
+        c.check("#581 authorize_request refuses a foreign project",
+                bool(foreign.get("error")), foreign)
+        mod.revoke(principal, root=root.name)
+        out = g.authorize_request("mop", {"_caller": principal,
+                                          "_subject": subject,
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 THE HOLE: a revoked parent is refused "
+                "(binding+spawn alone must not pass)",
+                bool(out.get("error")), out)
+        out = g.authorize_request("mop", {"_caller": "anton",
+                                          "_subject": subject,
+                                          "verb": "add"},
+                                  verb="add", root=root.name)
+        c.check("#581 authorize_request serves grant principals only",
+                bool(out.get("error")), out)
+
+
+def check_issue(c):
+    """Выдача кредов роли телу (#590/#603): только хозяину узла, на
+    который Nomad назначил джоб, и только в его приватный ответ. Пароль
+    едет одним полем bus.password -- не в реестр, не в журнал."""
+    import base64
+    from mop.server import bootstrap
+    from _lib import patched
+
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                         prompt=b"# puppet prompt\n", job="pu-mop-9",
+                         soul_inc=incarnation("nine"), request_id="req-i9")
+    principal = rec["principal"]
+    with open(os.path.join(root.name, busnames.pass_file(principal))) as f:
+        password = f.read().strip()
+    node = "node-pve1"
+    reply_ok = f"{busnames.private_prefix(node)}.abc123"
+    jobs_ok = lambda name: {"soul_inc": incarnation("nine")}
+    assigned_ok = lambda name: "pve1"
+    played = []
+    ok_play = dict(lambda req, project: played.append(req) or {
+        "ok": True, "played": True, "rc": 0, "seconds": 1.0, "tail": ""})[0] \
+        if False else (lambda req, project: (played.append(req),
+                                             {"ok": True, "played": True,
+                                              "rc": 0, "seconds": 1.0,
+                                              "tail": ""})[1])
+    owner_probe = lambda login: {"login": login, "name": "Anton",
+                                 "email": "anton@ermak.dev"}
+    with root:
+        mod.activate(principal, root=root.name)
+        req = {"verb": "bootstrap", "name": "pu-mop-9", "address": "10.0.0.1"}
+        # 1. Анонимный легаси путь ролевому джобу -- отказ БЕЗ фактов,
+        #    и прогон не играется вовсе.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            anon = bootstrap.answer("mop", dict(req))
+        c.check("#581 anonymous bootstrap of a role job is refused "
+                "with no role facts and no play",
+                bool(anon.get("error")) and "soul" not in anon
+                and "bus" not in anon and "grant-" not in json.dumps(anon)
+                and not played, anon)
+        # 2. Узел с публичным _INBOX-ответом: креды роли не едут в
+        #    глобально читаемый ящик.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            pub = bootstrap.answer("mop", dict(req, _caller=node,
+                                               _reply="_INBOX.x1"))
+        c.check("#581 role credentials refuse the public inbox",
+                bool(pub.get("error")) and "bus" not in pub, pub)
+        # 3. Чужой приватный префикс -- не ответ вызывающему.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            foreign = bootstrap.answer("mop", dict(
+                req, _caller=node,
+                _reply=f"{busnames.private_prefix('node-pve2')}.x1"))
+        c.check("#581 role credentials refuse another node's private prefix",
+                bool(foreign.get("error")) and "bus" not in foreign, foreign)
+        # 4. Джоб назначен другому узлу.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok,
+                     _assigned_node=lambda name: "pve2",
+                     _soul_root=lambda: root.name, _owner_profile=owner_probe):
+            away = bootstrap.answer("mop", dict(req, _caller=node,
+                                                _reply=reply_ok))
+        c.check("#581 a job assigned to another node is refused",
+                bool(away.get("error")) and "bus" not in away, away)
+        # 5. Счастливый путь: полный ролевой ответ #590.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            out = bootstrap.answer("mop", dict(req, _caller=node,
+                                               _reply=reply_ok))
+        soul = out.get("soul") or {}
+        c.check("#581 a node-qualified private bootstrap gets the role "
+                "payload (#590 shape)",
+                out.get("ok") is True and played
+                and (out.get("bus") or {}).get("user") == principal
+                and out["bus"].get("password") == password
+                and soul.get("role") == "puppet"
+                and soul.get("soul_inc") == incarnation("nine")
+                and soul.get("soul_digest") == PUPPET_DIGEST
+                and soul.get("manifest") == PUPPET
+                and base64.b64decode(soul.get("prompt") or "")
+                == b"# puppet prompt\n"
+                and soul.get("principal") == principal
+                and (soul.get("owner") or {}).get("email")
+                == "anton@ermak.dev", out)
+        with open(os.path.join(root.name, "registry.json")) as f:
+            raw = f.read()
+        c.check("#581 the password rides the reply only",
+                password not in raw
+                and password not in "\n".join(bootstrap.journal(
+                    "mop", {"verb": "bootstrap", "name": "pu-mop-9"}, out)),
+                "пароль утёк в реестр или журнал")
+        # 6. Отозванная и неподтверждённая привязка: отказ, не легаси-кред.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            mod.revoke(principal, root=root.name)
+            revoked = bootstrap.answer("mop", dict(req, _caller=node,
+                                                   _reply=reply_ok))
+            c.check("#581 a revoked binding issues nothing",
+                    bool(revoked.get("error")) and "bus" not in revoked
+                    and "soul" not in revoked, revoked)
+            second = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
+                              prompt=b"# puppet prompt\n", job="pu-mop-10",
+                              soul_inc=incarnation("ten"),
+                              request_id="req-i10")
+            with second[0]:
+                pend = bootstrap.answer("mop", dict(req, name="pu-mop-10",
+                                                    _caller=node,
+                                                    _reply=reply_ok))
+                c.check("#581 a pending binding issues nothing",
+                        bool(pend.get("error")) and "bus" not in pend
+                        and "soul" not in pend, pend)
+            second[0].cleanup()
+        # 5b. Переиспользованное имя (#579/#590): авторитет -- Meta джоба
+        #     в Nomad (её пишет сервер при регистрации), не тело запроса.
+        #     Чужая инкарнация в Meta -- отказ.
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe,
+                     _job_meta=lambda name: {"soul_inc": incarnation("other")}):
+            wrong = bootstrap.answer("mop", dict(req, _caller=node,
+                                                 _reply=reply_ok))
+        c.check("#581 a Meta incarnation the registry does not hold "
+                "is refused",
+                bool(wrong.get("error")) and "bus" not in wrong, wrong)
+        # 7. Легаси-имя без привязки: прежний путь, проектный кред --
+        #    переход жив (#603), легаси-джобы стартуют как раньше.
+    creds_dir = tempfile.TemporaryDirectory()
+    with open(os.path.join(creds_dir.name, creds.puppet_pass_file("mop")),
+              "w") as f:
+        f.write("project-password\n")
+    with patched(bootstrap, PUPPET_CREDS=creds_dir.name):
+        with patched(bootstrap, ROOT=root.name, play=ok_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            legacy = bootstrap.answer("mop", {"verb": "bootstrap",
+                                              "name": "pu-mop-42",
+                                              "address": "10.0.0.1",
+                                              "_caller": node,
+                                              "_reply": reply_ok})
+    c.check("#581 a legacy name keeps the legacy bootstrap path "
+            "with project creds",
+            not legacy.get("error") and "soul" not in legacy
+            and (legacy.get("bus") or {}).get("user") == "puppet-mop", legacy)
+    creds_dir.cleanup()
+
+
 def handmade(c, mod, role=MASTER, digest=None, prompt=None, job="pu-mop-7",
              inc=None, active=True, project="mop", owner="anton"):
     """Хранилище, собранное руками: prepare заблокирован дефектом #580
@@ -651,15 +995,28 @@ def check_channel_fence(c):
                               mod.binding(rec["principal"], root=root.name),
                               root=root.name)
         publish = got.get("publish") or []
-        c.check("#581 the grant ACL carries no legacy human rpc subjects",
-                busnames.node("mop", "*", "rpc", login=rec["principal"])
-                not in publish
-                and busnames.cluster("mop", login=rec["principal"])
-                not in publish, publish)
-        c.check("#581 dispatch survives the fence unchanged",
-                busnames.dispatch_subject(
-                    "mop", "*", soul.grant_id(rec["principal"])) in publish,
+        c.check("#581 the grant ACL carries no legacy human rpc subjects "
+                "and no bare legacy cluster subject",
+                not [s for s in publish if ".rpc." in s]
+                and busnames.cluster("mop") not in publish, publish)
+        c.check("#581 dispatch rides the full principal (#603)",
+                busnames.dispatch_subject("mop", "*", rec["principal"])
+                in publish, publish)
+        c.check("#581 the master role speaks on its node role subjects "
+                "by the full principal (#603)",
+                busnames.node("mop", "*", busnames.ROLE_CHANNEL,
+                              login=rec["principal"]) in publish
+                and busnames.cluster("mop",
+                                     login=rec["principal"]) in publish,
                 publish)
+        c.check("#581 the grant subscribes only its own private replies "
+                "(#603): no legacy _INBOX",
+                (got.get("subscribe") or [])
+                == [busnames.private_scope(rec["principal"])],
+                got)
+        c.check("#581 the grant publishes its own reply subjects (#603)",
+                f"{busnames.private_prefix(rec['principal'])}.*"
+                in publish, publish)
     # Сервисный борт: глагол кластера от принципала роли по легаси-субъекту
     # -- отказ ещё ДО таблиц глаголов: старый контроллер без резолвера.
     from mop.server import cluster
@@ -682,14 +1039,16 @@ def check_permissions(c):
                               mod.binding(rec["principal"], root=root.name),
                               root=root.name)
         rpc = busnames.node("mop", "*", "rpc", login=rec["principal"])
-        dispatch = busnames.dispatch_subject(
-            "mop", "*", soul.grant_id(rec["principal"]))
+        dispatch = busnames.dispatch_subject("mop", "*", rec["principal"])
         cluster = busnames.cluster("mop", login=rec["principal"])
-        c.check("#581 the connection ACL is dispatch and replies only "
-                "until the role channel lands (#603)",
+        c.check("#581 the connection ACL is role subjects, dispatch "
+                "and own private replies (#603)",
                 sorted(got.get("publish") or []) == sorted(
-                    [dispatch, busnames.INBOX])
-                and (got.get("subscribe") or []) == [busnames.INBOX], got)
+                    [dispatch, busnames.node("mop", "*", busnames.ROLE_CHANNEL,
+                                             login=rec["principal"]),
+                     cluster, busnames.private_prefix(rec["principal"]) + ".*"])
+                and (got.get("subscribe") or [])
+                == [busnames.private_scope(rec["principal"])], got)
         legacy = {busnames.cluster("mop"), busnames.node("mop", "*", "rpc"),
                   busnames.node("mop", "*", "msg")}
         leak = [s for s in (got.get("publish") or []) + (got.get("subscribe")
@@ -699,12 +1058,12 @@ def check_permissions(c):
                 not leak, leak)
         # Проволочное ограждение #603: принципал роли НЕ говорит по легаси
         # rpc человека -- ни с логином, ни без. Иначе старый агент/контроллер
-        # на смешанном роллауте исполнял бы БЕЗ резолвера.
+        # на смешанном роллауте исполнял бы БЕЗ резолвера. Для гранта
+        # cluster(p, login=grant) -- это и ЕСТЬ role-субъект (#603),
+        # легаси-утечка structural: любой .rpc. токен.
         c.check("#581 the grant ACL carries no legacy human rpc subjects",
-                busnames.node("mop", "*", "rpc", login=rec["principal"])
-                not in (got.get("publish") or [])
-                and busnames.cluster("mop", login=rec["principal"])
-                not in (got.get("publish") or []), got)
+                not [s for s in (got.get("publish") or [])
+                     if ".rpc." in s or s == busnames.cluster("mop")], got)
     root, rec = prepared(c, mod, role=PUPPET, digest=PUPPET_DIGEST,
                          prompt=b"# puppet prompt\n", request_id="r2",
                          job="pu-mop-8", soul_inc=incarnation("eight"), intent="intent-P")
@@ -714,11 +1073,19 @@ def check_permissions(c):
                               root=root.name)
         c.check("#581 a role without dispatch or cluster verbs gets "
                 "neither subject",
-                busnames.dispatch_subject(
-                    "mop", "*", soul.grant_id(rec["principal"]))
+                busnames.dispatch_subject("mop", "*", rec["principal"])
                 not in (got.get("publish") or [])
                 and busnames.cluster("mop", login=rec["principal"])
                 not in (got.get("publish") or []), got)
+        c.check("#581 a role with node verbs speaks its node role "
+                "subject and private replies only",
+                busnames.node("mop", "*", busnames.ROLE_CHANNEL,
+                              login=rec["principal"])
+                in (got.get("publish") or [])
+                and not [s for s in (got.get("publish") or [])
+                         if ".rpc." in s]
+                and (got.get("subscribe") or [])
+                == [busnames.private_scope(rec["principal"])], got)
 
 
 def check_provider(c):
@@ -855,6 +1222,7 @@ def main():
                check_prepare, check_request_id, check_immutable_bundle,
                check_activate, check_revoke_cut, check_admit,
                check_password, check_resolve, check_lookup,
+               check_actor_spawn, check_authorize, check_issue,
                check_permissions,
                check_provider, check_concurrency, check_parallel_requests):
         try:

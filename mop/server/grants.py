@@ -166,7 +166,8 @@ def prepare(project, role, digest, manifest, prompt, owner, request_id,
             if not same:
                 raise ValueError(
                     f"grants: request {request_id} is already prepared with "
-                    f"a different payload (intent/digest/job/inc/owner/project/actor)")
+                    f"a different payload (intent/digest/job/inc/owner/"
+                    f"project/actor)")
             return dict(rec)
         principal = soul.grant_user(secrets.token_hex(16))
         password = secrets.token_urlsafe(32)
@@ -312,6 +313,16 @@ def by_job(project, job, soul_inc=None, root=None):
         return _select_job(_read(_root_dir(root)), project, job, soul_inc)
 
 
+def binding_named(project, job, root=None):
+    """Есть ли у имени ХОТЬ какая-то привязка (#590): pending, активная,
+    отозванная -- без различения. Ветвление bootstrap'а: ролевое имя
+    не должно молча уйти на легаси-путь с проектным кредом, даже когда
+    привязка ещё не активна или уже отозвана -- отказ, не подмена."""
+    reg = _read(_root_dir(root))
+    return any(rec.get("project") == project and rec.get("job") == job
+               for rec in reg.values())
+
+
 def admit(principal, root=None):
     """Годен ли принципал к НОВОМУ входу: активная связанная привязка.
 
@@ -337,6 +348,21 @@ def password_ok(principal, password, root=None):
     except OSError:
         return False
     return bool(stored) and hmac.compare_digest(stored, password or "")
+
+
+def password_of(principal, root=None):
+    """Пароль принципала для выдачи телу (#590), либо None.
+
+    Единственный читатель файла пароля НА ВЫДАЧУ: ответ bootstrap'а роли
+    собирает bootstrap.role_payload, и пароль едет одним полем bus.password
+    -- не в реестр, не в журнал. Срезанный (cut, #579) файл -- None: вход
+    и выдача отказаны, живое соединение держит свой ACL до переподключения."""
+    try:
+        with open(_pass_path(_root_dir(root), principal)) as f:
+            out = f.read().strip()
+    except OSError:
+        return None
+    return out or None
 
 
 def bundle(digest, root=None):
@@ -367,13 +393,7 @@ def resolve(principal, service, verb, target=None, root=None):
     if rec is None:
         return {"allow": False,
                 "reason": f"grants: unknown principal {principal}"}
-    if rec.get("revoked_at"):
-        # Отзыв -- не «не активен»: человек, читающий отказ, обязан видеть
-        # ПРИЧИНУ (отозван кем-то), а не угадывать между «ещё не подтверждён»
-        # и «отключён» (#582).
-        return {"allow": False,
-                "reason": f"grants: {principal} is revoked"}
-    if not rec.get("active"):
+    if rec.get("revoked_at") or not rec.get("active"):
         return {"allow": False,
                 "reason": f"grants: {principal} is not an active binding"}
     got = bundle(rec.get("soul_digest"), root=root)
@@ -430,6 +450,38 @@ def resolve_target(project, target, root=None):
     return _target_block(_read(_root_dir(root)), project, target, root)
 
 
+def describe_target(project, target, soul_inc=None, root=None):
+    """Полное состояние привязки цели для узла (#584): data-only.
+
+    Режим только-цели resolve: узел читает привязку ДО того, как процесс
+    роли сможет действовать. Отбор свой, не by_job: без инкарнации живая
+    привязка предпочтительна (переиспользованное имя держит новый грант),
+    но единственная неживая видима С её состоянием -- узлу различить
+    «никогда не была привязана» (легаси-путь) и «привязана, но отозвана»
+    (снести) важнее, чем не видеть ничего; неоднозначность неживых --
+    тот же громкий отказ. Пароля здесь нет и не бывает: это чтение,
+    не выдача кредов."""
+    reg = _read(_root_dir(root))
+    rec = _select_job(reg, project, target, soul_inc)
+    if rec is None and soul_inc is None:
+        rest = [r for r in reg.values()
+                if r.get("project") == project and r.get("job") == target]
+        if len(rest) > 1:
+            raise ValueError(f"grants: {project}/{target} has ambiguous "
+                             f"bindings: {', '.join(sorted(
+                                 r.get('principal', '?') for r in rest))}")
+        rec = dict(rest[0]) if rest else None
+    if rec is None:
+        return {"found": False}
+    return {"found": True, "job": rec.get("job"),
+            "project": rec.get("project"), "role": rec.get("role"),
+            "soul_inc": rec.get("soul_inc"), "owner": rec.get("owner"),
+            "soul_digest": rec.get("soul_digest"),
+            "active": bool(rec.get("active")),
+            "revoked_at": rec.get("revoked_at"),
+            "receives_dispatch": _target_flag(_root_dir(root), rec)}
+
+
 def _target_flag(root, rec):
     got = bundle(rec.get("soul_digest"), root=root)
     if got is None:
@@ -451,14 +503,55 @@ def _flag(manifest, name):
 def spawn_of(principal, root=None):
     """Разрешённые роли цели принципала (#582): список spawn его бандла.
     Пусто -- принципал никого не поднимает; нет бандла -- тоже пусто:
-    fail closed. Делегированный add сверяет роль цели по ЭТОМУ списку,
-    не по грамматике субъекта: право поднимать -- у души, не у провода."""
+    fail closed. Право поднимать -- у души, не у провода: делегированный
+    add сверяет роль цели по ЭТОМУ списку, не по грамматике субъекта."""
     rec = binding(principal, root=root)
     if rec is None:
         return ()
     got = bundle(rec.get("soul_digest"), root=root) or {}
-    return tuple((got.get("manifest") or {}).get(
-        "capabilities", {}).get("spawn") or ())
+    return tuple((got.get("manifest") or {}).get("capabilities", {})
+                 .get("spawn") or ())
+
+
+def authorize_request(project, req, verb, root=None):
+    """Доверенный контекст глагола роли на канале кластера (#582/#584).
+
+    Один вход вместо двух независимых _answer: серверная проверка ФАКТА
+    -- субъект, вызывающий, глагол -- и свежий grants.resolve по
+    ФАКТИЧЕСКОМУ глаголу. Закрывает дыру 809ffc7: отозванный родитель
+    не проходит -- binding+spawn без проверки жизни проходили бы мимо
+    отзыва. Правила:
+
+    -- вызывающий -- принципал роли, названный субъектом (_caller
+       каркаса #207, не тело): не-грант -- отказ, у человека легаси-rpc;
+    -- субъект -- ТОЛЬКО настоящий role-субъект кластера, хелпером
+       busnames.cluster, не строкой: самовольный легаси cluster.rpc
+       старый контроллер исполнил бы без резолвера;
+    -- проект субъекта совпадает с проектом вызова: чужой проект не
+       читается чужим принципалом;
+    -- глагол -- свежим resolve(service='cluster'): отзыв виден сразу,
+       без кэша; цель add (soul) -- по списку spawn того же resolve-контекста.
+
+    -> {actor, owner, job, soul_inc, role, soul_digest, spawn} либо
+    {"error": причина}. Владелец-человек едет дальше -- существующие
+    ворота аренды (#133) читают его как сегодня."""
+    who = req.get("_caller") or ""
+    subject = req.get("_subject") or ""
+    if not soul.is_grant(who):
+        return {"error": f"{who or 'anonymous'}: the role channel serves "
+                         f"grant principals only (#603)"}
+    if subject != busnames.cluster(project, login=who):
+        return {"error": f"{who}: grant principals speak on the role "
+                         f"subject {busnames.cluster(project, login=who)}, "
+                         f"not {subject or 'the legacy rpc'} (#603)"}
+    verdict = resolve(who, "cluster", verb, root=root)
+    if not verdict.get("allow"):
+        return {"error": f"{who}: {verdict.get('reason') or 'refused'}"}
+    return {"actor": who, "owner": verdict.get("owner"),
+            "job": verdict.get("job"), "soul_inc": verdict.get("soul_inc"),
+            "role": verdict.get("role"),
+            "soul_digest": verdict.get("soul_digest"),
+            "spawn": spawn_of(who, root=root)}
 
 
 def _runtime(manifest, name):
@@ -476,25 +569,29 @@ def permissions(principal, rec=None, root=None):
     Проволочное ограждение #603: НИ ОДНОГО легаси-rpc-субъекта человека --
     ни node rpc, ни cluster rpc, ни с логином, ни без. Старый агент или
     контроллер на смешанном роллауте исполнял бы глагол роли БЕЗ
-    резолвера; role-субъекты (node.<n>.role.<grant>, cluster.role.<grant>)
-    высаживает #603, до них принципал публикацией в чужие каналы не
-    говорит вовсе. Dispatch -- отдельный канал, без изменений. Подписка --
-    только _INBOX (ответы); после #603 -- собственный приватный префикс.
-    Легаси-набор puppet-<проект> (ан .msg, broadcast, events) принципалу
-    не достаётся вовсе (#579)."""
+    резолвера; роль говорит субъектами канала role (node.<n>.role.<grant>,
+    cluster.role.<grant>) и dispatch -- полным принципалом (#603: голый
+    hex на проводе не появляется). Подписка -- ТОЛЬКО свой приватный
+    префикс ответов (_MOP_REPLY.<grant>.>): публичный _INBOX человеку
+    читаем, и ответ узла несёт служебные данные; свой ответ принципал
+    публикует тем же префиксом. Легаси-набор puppet-<проект> (ан .msg,
+    broadcast, events) принципалу не достаётся вовсе (#579)."""
     rec = rec or binding(principal, root=root)
     if rec is None:
         return {"publish": [], "subscribe": []}
     got = bundle(rec.get("soul_digest"), root=root) or {}
     manifest = got.get("manifest") or {}
     project = rec.get("project")
-    gid = soul.grant_id(principal) or principal
-    publish = [busnames.INBOX]
+    publish = [busnames.private_prefix(principal) + ".*"]
     if _flag(manifest, "dispatch"):
-        publish.append(busnames.dispatch_subject(project, "*", gid))
-    # Кластерные глаголы роли едут субъектом cluster.role.<grant> (#603),
-    # не легаси cluster.rpc: helper высаживает #603, до него -- не выдан.
-    return {"publish": publish, "subscribe": [busnames.INBOX]}
+        publish.append(busnames.dispatch_subject(project, "*", principal))
+    if _role_verbs(manifest, "node"):
+        publish.append(busnames.node(project, "*", busnames.ROLE_CHANNEL,
+                                     login=principal))
+    if _role_verbs(manifest, "cluster"):
+        publish.append(busnames.cluster(project, login=principal))
+    return {"publish": publish,
+            "subscribe": [busnames.private_scope(principal)]}
 
 
 class Provider:

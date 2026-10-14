@@ -28,7 +28,9 @@ BASE = {
 # определение, и рефакторинг обязан не сдвинуть в файле ни байта. Снят заново
 # в #207, #212, #213 (права людей) и в #219 намеренно: людей и папетов в
 # файле больше нет -- их пускает auth callout (#206), а статически входят
-# только машины, которых callout не спрашивает.
+# только машины, которых callout не спрашивает. Переснят в #581: у сервиса
+# появился deny на каналы ролей, у узлов -- свой квалифицированный
+# server.rpc.node-<имя>, startup и приватный скоуп ответов.
 OPERATORS = "anton:admin; ivan:user:rugent,cloudpub; olga:user:*"
 USERS_CONF = """users = [
   {
@@ -41,22 +43,22 @@ USERS_CONF = """users = [
   {
     user: "service", password: "svc-pass"
     permissions: {
-      publish:   { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*", "mopjoin.*.rpc"] }
+      publish:   { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*", "mopjoin.*.rpc", "mop.*.node.*.role", "mop.*.node.*.role.>", "mop.*.node.*.dispatch", "mop.*.node.*.dispatch.>", "mop.*.cluster.role", "mop.*.cluster.role.>", "mop.*.node.*.startup", "mop.*.server.rpc.>"] }
       subscribe: { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"] }
     }
   }
   {
     user: "node-hyper", password: "hy-pass"
     permissions: {
-      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.hyper.msg", "mop.*.server.rpc", "_INBOX.>"] }
-      subscribe: { allow: ["mop.*.node.hyper.>", "mop.*.all.msg", "_INBOX.>"] }
+      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.hyper.msg", "mop.*.server.rpc", "mop.*.server.rpc.node-hyper", "mop.*.node.hyper.startup", "_INBOX.>"] }
+      subscribe: { allow: ["mop.*.node.hyper.>", "mop.*.all.msg", "_MOP_REPLY.node-hyper.>", "_INBOX.>"] }
     }
   }
   {
     user: "node-mini", password: "mi-pass"
     permissions: {
-      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.mini.msg", "mop.*.server.rpc", "_INBOX.>"] }
-      subscribe: { allow: ["mop.*.node.mini.>", "mop.*.all.msg", "_INBOX.>"] }
+      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.mini.msg", "mop.*.server.rpc", "mop.*.server.rpc.node-mini", "mop.*.node.mini.startup", "_INBOX.>"] }
+      subscribe: { allow: ["mop.*.node.mini.>", "mop.*.all.msg", "_MOP_REPLY.node-mini.>", "_INBOX.>"] }
     }
   }
 ]
@@ -253,6 +255,86 @@ def check_subscribe_212(c):
     c.expect(*rule("olga", "mop.admin.master.olga.wate-1.inbox", False))
 
 
+# HYPOTHESIS (#581): у сервиса allow mop.>, а deny прикрывает только
+# человеческие маршруты #207 (rpc с логином, cluster.rpc.*, join_config).
+# Каналы ролей #603 (node.<узел>.role.<грант>, dispatch.<грант>,
+# cluster.role.<грант>, startup, квалифицированный server.rpc.node-<узел>)
+# под маску mop.> попадают без остатка: машинный аккаунт сервиса опубликовал
+# бы запрос от имени любого принципала роли, и агент (#584) принял бы его
+# за живой грант -- подписка агента узла ...node.<имя>.> ловит канал role.
+# Приватные ответы машин (_MOP_REPLY.<машина>.<NUID>) несут креды роли
+# (#603): сервис их тоже не пишет -- адрес получателя выбирает шина, не
+# проситель.
+# SOLUTION: deny сервиса -- по каналу и префиксу, не по списку личностей:
+# role/dispatch/startup с любым последним токеном, квалифицированный
+# server.rpc.node-* и оба приватных префикса машин. Узлу -- парные права:
+# публиковать свой квалифицированный server.rpc.node-<имя> (resolve #584
+# ходит им) и свой startup, слушать свой приватный скоуп; чужой узел,
+# чужой проект и чужие каналы -- как было, нет.
+# RESULT: сервис не пишет ни один маршрут роли ни под какой личностью;
+# узел пишет только свои; легаси-маршруты всех сторон не тронуты.
+# STATUS: FIXED — see #581
+def check_machine_role_routes_581(c):
+    from mop.common import busnames
+    ops = operators.parse("alice:user:mop")
+    got = granted(ops)
+    grant = busnames.GRANT_PREFIX + "a" * 32
+    other = busnames.GRANT_PREFIX + "b" * 32
+
+    def pub(user, subj, want):
+        """-> (что, получено, ожидалось) для c.expect."""
+        allow, deny = got[user]["publish"]
+        return (f"{user} {'may' if want else 'must not'} publish {subj}",
+                permitted(allow, subj, deny), want)
+
+    def sub(user, subj, want):
+        allow, deny = got[user]["subscribe"]
+        return (f"{user} {'may' if want else 'must not'} subscribe {subj}",
+                permitted(allow, subj, deny), want)
+
+    # Каналы роли: сервис не публикует ни один -- ни под живым именем
+    # принципала, ни под любым прочим последним токеном. Приватные ответы
+    # (_MOP_REPLY.<машина>.<NUID>) тут не проверяются: это адрес ответа
+    # ПРОСИТЕЛЯ, его выбирает шина -- сервис туда только отвечает (#582),
+    # и подменить чужой ответ он может лишь правом публикации, не маршрутом
+    # роли.
+    routes = (busnames.node("mop", "n1", busnames.ROLE_CHANNEL, login=grant),
+              busnames.node("mop", "n1", busnames.ROLE_CHANNEL, login="mallory"),
+              busnames.node("mop", "n1", busnames.ROLE_CHANNEL, login=busnames.ANY),
+              busnames.dispatch_subject("mop", "n1", grant),
+              busnames.cluster("mop", login=grant),
+              busnames.startup_subject("mop", "n1"),
+              busnames.server("mop", caller=busnames.node_user("n1")))
+    for subj in routes:
+        c.expect(*pub("service", subj, False))
+    # Своё -- как было: анонимные легаси-маршруты и события.
+    for subj in (busnames.node("mop", "n1"), busnames.cluster("mop"),
+                 busnames.server("mop"), busnames.events("mop"), busnames.INBOX):
+        c.expect(*pub("service", subj, True))
+    # deny не съел подписки сервиса: свои subjects он слушает как прежде.
+    for subj in busnames.service_subscriptions():
+        c.expect(*sub("service", subj, True))
+
+    # Узел: свой квалифицированный server.rpc и свой startup -- да; свой
+    # приватный скоуп -- слушает (#603 переход), публичный _INBOX -- тоже.
+    c.expect(*pub("node-hyper", busnames.server("mop", caller=busnames.node_user("hyper")), True))
+    c.expect(*pub("node-hyper", busnames.startup_subject("mop", "hyper"), True))
+    c.expect(*sub("node-hyper", busnames.private_scope(busnames.node_user("hyper")), True))
+    c.expect(*sub("node-hyper", busnames.INBOX, True))
+    # Чужой узел, чужая личность -- нет; свой узел в любом проекте -- да,
+    # как и прежде у server(any_): агент пересекает проекты сознательно.
+    c.expect(*pub("node-hyper", busnames.server("mop", caller=busnames.node_user("mini")), False))
+    c.expect(*pub("node-hyper", busnames.server("rugent", caller=busnames.node_user("hyper")), True))
+    c.expect(*pub("node-hyper", busnames.startup_subject("mop", "mini"), False))
+    c.expect(*sub("node-hyper", busnames.private_scope(busnames.node_user("mini")), False))
+    c.expect(*sub("node-hyper", busnames.private_scope(grant), False))
+    c.expect(*pub("node-hyper", busnames.node("mop", "hyper", busnames.ROLE_CHANNEL,
+                                              login=grant), False))
+    c.expect(*pub("node-hyper", busnames.node("mop", "hyper", busnames.ROLE_CHANNEL,
+                                              login=other), False))
+    c.expect(*pub("node-hyper", busnames.dispatch_subject("mop", "hyper", grant), False))
+
+
 def check_inbox_login_213(c):
     """HYPOTHESIS (#213): после #207/#212 человек подписан на
     mop.<p>.master.> -- инбоксы всех мастеров проекта: адрес инбокса
@@ -382,6 +464,7 @@ def main():
     check_login_in_subject_207(c)
     check_subscribe_212(c)
     check_inbox_login_213(c)
+    check_machine_role_routes_581(c)
 
     # Пароли папетов рождаются на сервере: недостающий заводится, имеющийся
     # не меняется -- иначе живые папеты отвалились бы от шины.
