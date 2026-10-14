@@ -392,22 +392,25 @@ skills/master; внешние роли — каталог установки, з
 
 ## Приёмка (#589)
 
-Карта приёмки: сценарий → где он уже проверен без пула (файл/функция в
-ветке ребёнка) → что остаётся живому контуру. Строки говорят только о
-том, что реально прогонялось в ветках-детях на момент подготовки; ни
-один пункт здесь не результат прогона на живом пуле. Ничего из
-перечисленного не прогонялось вместе: дети ещё не слиты в эпик.
+Карта приёмки: сценарий → существующие проверки (намеченное покрытие)
+→ что остаётся живому контуру. Колонка проверок — инвентарь исходника:
+метки проверок найдены в ветках-детях и ссылаются на заявленное
+поведение; это не заявление о прогоне. Прогоны в ветках и
+верифицированные мастером результаты — отдельные вещи и называются
+отдельно; ни один пункт таблицы не результат прогона на живом пуле, и
+ничего из перечисленного не прогонялось вместе: дети ещё не слиты в
+эпик.
 
-| Сценарий | Проверено без пула | Живой контур |
+| Сценарий | Существующие проверки (намеченное покрытие) | Живой контур |
 |---|---|---|
 | Все три роли одним путём (`mop <роль>` → регистрация → готовность → attach) | `tests/launch.py` (#586): один и тот же конвейер для любой роли каталога, путь не зависит от имени роли | прогнать на реальном сервере #582 и узле #584 все три роли эпика |
-| Два мастера одного проекта не читают чужие отчёты | `tests/natsconf.py` `check_inbox_login_213` (эпик): подписка мастера сужена до `master.<свой логин>.>`; `tests/grants.py` «the owner stays the human despite the actor» (#581): владелец человек, актёр — принципал | два живых мастера, send от папета каждому |
+| Два мастера одного проекта не читают чужие отчёты | люди: `tests/natsconf.py` `check_inbox_login_213` (эпик) — подписка мастера сужена до `master.<свой логин>.>`; эта старая проверка не доказывает изоляцию новых сущностей. Гранты: `tests/grants.py` «the grant subscribes only its own private replies», «role credentials refuse another node's private prefix», «the connection ACL is role subjects, dispatch…» (#581) — изоляция приватных префиксов принципалов | два живых мастера, send от папета каждому; двое живых принципалов ролей и их приватные ответы |
 | Отправитель/владелец/адрес различимы | `tests/channel.py` «grant is its own actor», «the process inbox is transport only», «grant names itself by its job» (#585); `tests/grants.py` «prepare records the delegating actor» (#581) | видно в живом журнале кластера |
 | Отозванные/неактивные принципалы не проходят | `tests/grants.py` «a revoked binding issues nothing», «admit denies an inactive principal», «resolve fails closed on a revoked principal», «cut removes the password file» (#581) | отзыв на живом сервере, попытка входа/резолва после |
 | Bootstrap назначает узел, ответ с кредами едет приватным префиксом | `tests/run.py` «the role bootstrap ask rides the node-qualified server.rpc», «the password rides the reply only», «role credentials refuse the public inbox» (#590/#581) | на живом узле: старт роли, инспекция ACL и ответа |
-| Секреты по allowlist, отказ без выдачи | `tests/bootstrap.py` «the sibling file is not staged», «an unallowed var stays out», «a racy var read must refuse», «the refusal names the missing name» (#592) | живой bootstrap с роль-частным набором |
+| Секреты по allowlist, отказ без выдачи | `tests/bootstrap.py` «the sibling file is not staged», «an unallowed var stays out», «a racy var read must refuse», «the refusal names the missing name» (#592) — allowlist и отказы раздачи; полный отказ bootstrap без выдачи кредов это не доказывает: тот путь — регрессия полного ответа #581, в починке | живой bootstrap с роль-частным набором |
 | Готовность = метка настоящего бандла, клон под защитой | `tests/spec.py` «a role refuses on a prepared clone with a wrong…», «a resumed role session launches» (#583); `tests/run.py` «the delivered bundle loads to the job's digest», «the model starts after the ready mark» (#590); `tests/agent.py` `check_startup_soul_584` (#584) | живой старт, сверка ростера с телом |
-| Отсоединение/переподключение/возобновление | `tests/spec.py` «a resumed role session launches» (#583); `tests/launch.py` «attaches once», «timeout does not attach» (#586): attach — отдельный ход, состояние сессии не теряется | detach по Ctrl-b d, повторный `mop attach`, работа на месте |
+| Отсоединение/переподключение/возобновление | `tests/spec.py` «a resumed role session launches» (#583) — запуск обёртки над существующей сессией; «attaches once»/«timeout does not attach» (#586) говорят только о ходе attach лаунчера, не о сохранности состояния после отсоединения | живой detach (Ctrl-b d), повторный `mop attach`, работа на месте — состояние сессии переживает отсоединение; хода модели не нужно |
 | Квоты, сведение повторов по request_id, ожидающие резервы | `tests/soul_lifecycle.py` «the quota counts role puppets against the same limit», «a replay of the same request passes the quota gate», «a refused registration leaves a pending, inactive…», «a pending reservation keeps its name» (#582) | гонка двух add на живом сервере, последний слот квоты |
 | Мета роли переживает рестарт/перерегистрацию | `tests/soul_lifecycle.py` «restart leaves the job meta untouched», «respec carries the whole triple», «restore raises the puppet with its soul and branch», «the roster carries MopSoul.receives_dispatch» (#582) | рестарт аллокации и respec на живом джобе |
 | Единый ростер в UI, легаси-совместимость | `tests/web.py` `check_unified_roster_587` (#587): один ростер без отдельной секции мастеров, стабильные id; #588: старые снимки не resurrect-ят проекции, обычный зритель не получает управление | живой дашборд над смешанным пулом |
