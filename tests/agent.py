@@ -3016,15 +3016,18 @@ class NodeConn:
 TARGETS_584 = {
     "pu-mop-1": {"found": True, "job": "pu-mop-1", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
-                 "soul_digest": DIGEST_1, "receives_dispatch": True},
+                 "soul_digest": DIGEST_1, "receives_dispatch": True,
+                 "active": True},
     "pu-mop-2": {"found": True, "job": "pu-mop-2", "project": "mop",
                  "role": "master", "owner": "anton",
                  "soul_inc": "33333333-3333-3333-3333-333333333333",
-                 "soul_digest": DIGEST_2, "receives_dispatch": False},
+                 "soul_digest": DIGEST_2, "receives_dispatch": False,
+                 "active": True},
     "pu-mop-3": {"found": False},
     "pu-mop-5": {"found": True, "job": "pu-mop-5", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
-                 "soul_digest": DIGEST_1, "receives_dispatch": True},
+                 "soul_digest": DIGEST_1, "receives_dispatch": True,
+                 "active": True},
 }
 
 
@@ -3056,7 +3059,18 @@ def resolver_584(req, project, mode=None):
             if req.get("soul_inc"):
                 t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
             else:
-                t = {"found": False}
+                # Контракт #581 (describe_target): без инкарнации сервер
+                # ВСЁ РАВНО возвращает единственную неживую запись С её
+                # состоянием -- «отозвана» и «не привязана вовсе» узлу
+                # различать обязательно.
+                t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
+        if mode == "revoked-no-inc" and t.get("found"):
+            t = dict(t, active=True, revoked_at="2026-10-01T00:00:00Z")
+        if mode == "inactive-no-inc" and t.get("found"):
+            t = dict(t, active=False)
+        if mode == "active-missing" and t.get("found"):
+            t = {k: v for k, v in t.items() if k != "active"}
+            t.pop("revoked_at", None)
         if mode == "ambiguous" and t.get("found"):
             t = {"found": False,
                  "reason": "grants: mop/pu-mop-1/… has ambiguous bindings: "
@@ -3078,6 +3092,18 @@ def resolver_584(req, project, mode=None):
         out["target"] = dict(TARGETS_584["pu-mop-1"], job="pu-mop-9")
     if mode == "other-target-project" and target is not None:
         out["target"] = dict(out["target"], project="other")
+    # Состояние цели (#581): актёрский ответ несёт ту же запись
+    # привязки, и право цели -- не только receives_dispatch, но и
+    # живость привязки.
+    if mode == "target-revoked" and target is not None:
+        out["target"] = dict(out["target"], active=True,
+                             revoked_at="2026-10-01T00:00:00Z")
+    if mode == "target-inactive" and target is not None:
+        out["target"] = dict(out["target"], active=False)
+    if mode == "target-active-missing" and target is not None:
+        t = {k: v for k, v in out["target"].items() if k != "active"}
+        t.pop("revoked_at", None)
+        out["target"] = t
     if mode == "no-owner":
         out["owner"] = ""
     if mode == "no-job":
@@ -3358,6 +3384,21 @@ def check_role_node_gates_584(c):
                 not delivered and holder("pu-mop-2") is None
                 and bool(got and got.get("error")), (delivered, got))
 
+        # 9b. Цель с мёртвой привязкой -- отказ: право цели (#581) -- это
+        # состояние записи, не только receives_dispatch; ответ без active
+        # вовсе -- не согласие, умолчание не пускает.
+        for mode, word in (("target-revoked", "revoked"),
+                           ("target-inactive", "not active"),
+                           ("target-active-missing", "not active")):
+            reset()
+            st["mode"] = mode
+            got = ask(dsp(A), dict(send, verb="dispatch"))
+            c.check(f"584 dispatch into a {mode} target binding is refused",
+                    not delivered and holder("pu-mop-1") is None
+                    and bool(got and got.get("error"))
+                    and word in (got or {}).get("error", ""),
+                    (delivered, got))
+
         # 10. Непривязанная цель -- отказ.
         reset()
         got = ask(dsp(A), dict(send, verb="dispatch", name="pu-mop-3"))
@@ -3488,7 +3529,7 @@ def check_role_node_gates_584(c):
         c.check("584 actor_verdict passes an explicit allow about the asked principal",
                 agent.actor_verdict(ok, A, "mop", "send") is None)
         tgt = {"target": {"found": True, "job": "pu-mop-1", "project": "mop",
-                          "receives_dispatch": True}}
+                          "receives_dispatch": True, "active": True}}
         for label, extra, want in (
                 ("source_dispatch", {"source_dispatch": True}, None),
                 ("capabilities.dispatch", {"capabilities": {"dispatch": True}}, None),
@@ -3746,6 +3787,25 @@ def check_startup_soul_584(c):
         c.check("584 state carries the soul fact too",
                 (got or {}).get("soul", {}).get("ready") is True, got)
 
+        # 3b. Отозванная/неактивная привязка -- не готовность и ПО ИМЕНИ
+        # (вопрос без инкарнации): #581 возвращает единственную неживую
+        # запись с состоянием, и узел обязан отвергнуть её -- иначе ростер
+        # опубликовал бы ready по мёртвой привязке. Запись без active
+        # вовсе -- тоже не готовность: умолчание не согласие.
+        for mode, word in (("revoked-no-inc", "revoked"),
+                           ("inactive-no-inc", "not active"),
+                           ("active-missing", "not active")):
+            reset()
+            st["mode"] = mode
+            st["facts"] = {"pu-mop-1": live_fact()}
+            marked_584(clones["pu-mop-1"], INC_1)
+            ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
+            got = ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
+            soul = (got or {}).get("puppets", {}).get("pu-mop-1", {}).get("soul")
+            c.check(f"584 a {mode} binding is not ready by name",
+                    isinstance(soul, dict) and soul.get("ready") is False
+                    and word in (soul.get("why") or ""), (soul, got))
+
         # 4. Битая привязка сервера -- не готовность, а причина.
         for mode, word in (("down", "resolver"), (None, "binding"),
                            ("bad-digest", "digest"), ("bad-inc", "incarnation")):
@@ -3975,6 +4035,80 @@ async def _subjects_584():
     return got
 
 
+
+
+async def _serve_584(fake_nats, agent_mod, bus_mod):
+    """Запуск настоящего serve() с фальшивым NATS: соединение обязано нести
+    creds-снимок ДО attach -- его читает resolver_subject (#581), и без
+    него живой агент спрашивал бы резолвер анонимно или вовсе отказом."""
+    import asyncio
+    from mop.cli.service import agent as cli_agent
+
+    seen = {}
+
+    class Conn:
+        creds = None
+
+        async def subscribe(self, *a, **k):
+            return None
+
+    class Nats:
+        async def connect(self, **kw):
+            conn = Conn()
+            seen["auth"] = kw
+            seen["conn"] = conn
+            return conn
+
+    async def attach(conn, node):
+        seen["creds_at_attach"] = getattr(conn, "creds", None)
+        return []
+
+    fake_nats.connect = Nats().connect
+    real_attach = agent_mod.attach
+    agent_mod.attach = attach
+    try:
+        task = asyncio.create_task(cli_agent.serve(fake_nats, agent_mod, bus_mod))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+    finally:
+        agent_mod.attach = real_attach
+    return seen
+
+
+def check_serve_creds_584(c):
+    """HYPOTHESIS (#584): serve() зовёт nats.connect напрямую и никогда не
+    ставит creds-снимок на соединение -- #603 штампует только bus.connect().
+    Живой агент оставался бы без узлового имени для квалифицированных
+    вопросов резолверу (#581), при зелёных тестах с фикстурой NodeConn.
+    SOLUTION: serve ставит creds-снимок (тот же c, что ушёл в auth) на
+    соединение ДО attach.
+    RESULT: RED до правки командлета; зелёный после.
+    """
+    import asyncio
+    from mop.node import agent as agent_mod
+    from mop.common import bus as bus_mod
+    from _lib import patched
+    import tempfile, json as _json
+
+    fd, path = tempfile.mkstemp(prefix="mop-test-584-serve-")
+    import os as _os
+    with _os.fdopen(fd, "w") as f:
+        _json.dump({"url": "nats://10.0.0.1:4222", "user": "node-hyper",
+                    "password": "node-pass"}, f)
+    class Nats:
+        pass
+    with patched(bus_mod, NODE_FILE=path):
+        seen = asyncio.run(_serve_584(Nats(), agent_mod, bus_mod))
+    _os.unlink(path)
+    c.check("584 serve stamps the credential snapshot on the connection",
+            seen.get("creds_at_attach") is not None
+            and seen["creds_at_attach"].get("user") == "node-hyper", seen)
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -3989,7 +4123,7 @@ def main():
                   check_junk_without_templates_276, check_owner_hook_313,
                   check_sweep_report_358, check_sweep_bodies_363,
                   check_hung_sweep_373, check_role_node_gates_584,
-                  check_startup_soul_584):
+                  check_startup_soul_584, check_serve_creds_584):
         try:
             check(c)
         except Exception as e:

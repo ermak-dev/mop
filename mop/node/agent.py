@@ -1839,9 +1839,10 @@ def actor_verdict(got, principal, project, verb, target=None):
     вера в то, что сервер ответил о том, о чём спросили.
 
     Пускает только явное allow о том же принципале в том же проекте, с
-    хозяином-человеком; названная цель -- найдена, та же и в том же
-    проекте; dispatch -- источник с dispatch и цель с receives_dispatch
-    (право цели -- отдельная проверка от свободы клона, её решает аренда)."""
+    хозяином-человеком; названная цель -- найдена, та же, в том же
+    проекте и ЖИВА (без revoked_at, с явным active, #581); dispatch --
+    источник с dispatch и цель с receives_dispatch (право цели --
+    отдельная проверка от свободы клона, её решает аренда)."""
     if not isinstance(got, dict):
         return f"the resolver answered {type(got).__name__}, not a verdict"
     if got.get("allow") is not True:
@@ -1857,6 +1858,10 @@ def actor_verdict(got, principal, project, verb, target=None):
         t = got.get("target")
         if not (isinstance(t, dict) and t.get("found") is True):
             return f"puppet {target} has no binding"
+        if t.get("revoked_at"):
+            return f"binding of {target} is revoked"
+        if t.get("active") is not True:
+            return f"binding of {target} is not active"
         if t.get("job") != target:
             return f"the resolver answered about {t.get('job')}, not {target}"
         if t.get("project") != project:
@@ -1913,7 +1918,10 @@ async def target_binding(conn, project, name, soul_inc=None):
     Свежий вопрос без принципала (target-вид резолвера): тот же сервис,
     тот же узловой кред. Инкарнация в вопросе -- контракт by_job #581:
     точная запись приходит С состоянием (неактивная, отозванная), и
-    отвергает её вызывающий; без инкарнации ответ -- только живая.
+    отвергает её вызывающий; без инкарнации describe_target возвращает
+    единственную неживую запись ТОЖЕ с состоянием -- «отозвана» и «не
+    привязана» обязан различать сам узел. Живость -- для любого режима
+    вопроса: явное active и без revoked_at, умолчание не согласие.
     Проверяем и форму тройки: битый digest или инкарнация -- не
     готовность, а причина; «примерно та» привязка прав не даёт. Кэш --
     только у читающего глагола (_soul_fact), мутации зовут свежо."""
@@ -1929,6 +1937,10 @@ async def target_binding(conn, project, name, soul_inc=None):
         got = json.loads(msg.data.decode())
     except Exception as e:
         return None, f"the resolver did not answer ({type(e).__name__})"
+    # Живость записи -- для любого режима вопроса (#581: describe_target
+    # без инкарнации тоже возвращает единственную неживую запись с её
+    # состоянием): явное active и без revoked_at, умолчание не согласие.
+    # Отказ сервера (found: False) со своей причиной остаётся его words.
     if not isinstance(got, dict) or got.get("found") is not True:
         why = got.get("reason") if isinstance(got, dict) else None
         if soul_inc is not None and isinstance(got, dict) \
@@ -1939,10 +1951,10 @@ async def target_binding(conn, project, name, soul_inc=None):
         if why:
             return None, f"{name}: {why}"
         return None, f"puppet {name} has no binding"
-    if soul_inc is not None and got.get("revoked_at"):
-        return None, f"binding of {name} {soul_inc} is revoked"
-    if soul_inc is not None and got.get("active") is False:
-        return None, f"binding of {name} {soul_inc} is not active"
+    if got.get("revoked_at"):
+        return None, f"binding of {name} {got.get('soul_inc')} is revoked"
+    if got.get("active") is not True:
+        return None, f"binding of {name} {got.get('soul_inc')} is not active"
     if got.get("job") != name:
         return None, f"the resolver answered about {got.get('job')}, not {name}"
     if got.get("project") != project:
@@ -1954,13 +1966,11 @@ async def target_binding(conn, project, name, soul_inc=None):
     if not (isinstance(got.get("soul_digest"), str)
             and soul.HEX64.match(got["soul_digest"])):
         return None, f"puppet {name} has a malformed soul digest"
-    import uuid as _uuid
-    inc = got.get("soul_inc")
+    # Грамматика инкарнации -- общий помощник soul (#580), не своя
+    # проверка на месте: каноническая строка UUID, что и в реестре.
     try:
-        canonical = str(_uuid.UUID(inc)) == inc if isinstance(inc, str) else False
+        soul._uuid(got.get("soul_inc"), "soul_inc", "binding")
     except ValueError:
-        canonical = False
-    if not canonical:
         return None, f"puppet {name} has a malformed soul incarnation"
     return got, None
 
