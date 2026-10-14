@@ -277,17 +277,33 @@ BUS_FILE, READY = "bus.json", "ready.json"
 
 
 def expected_role(environ):
-    """Тройка роли из Meta джоба -> JobMeta | None (легаси-джоб). Чистая.
+    """Тройка роли окружения джоба -> JobMeta | None (легаси-джоб). Чистая.
 
-    Nomad отдаёт Meta задаче как NOMAD_META_<ключ>, а Meta пишет сервер при
-    регистрации (#582) -- это доверенное ожидание, с которым сверяется
-    ответ. Половина тройки или битое значение -- ValueError тем же
-    договором JobMeta: битый джоб не поднимается ни ролью, ни легаси."""
-    triple = {k: environ.get(f"NOMAD_META_{k}") or None
-              for k in ("soul", "soul_digest", "soul_inc")}
+    Первоисточник -- явные PU_SOUL/PU_SOUL_DIGEST/PU_SOUL_INC из task_env
+    (#582): сервер кладёт тройку сам, не полагаясь на автореку Nomad по
+    Meta (NOMAD_META_<ключ>), чей регистр не обещан. Авторека читается
+    тоже -- переходный период: джоб, поднятый по старой спеке, видит
+    тройку только в ней. Но это совмещение, а не откат: расходящиеся
+    тройки -- ValueError, молчаливого «авто не совпало -- беру PU_*» нет.
+    Origin -- PU_ORIGIN из того же task_env, с авторекой так же.
+    Половина тройки или битое значение -- ValueError тем же договором
+    JobMeta: битый джоб не поднимается ни ролью, ни легаси."""
+    # Имена env: Meta-ключ soul_digest в явном виде -- PU_SOUL_DIGEST
+    # (верхний регистр, как их пишет task_env #582), авторека Nomad --
+    # NOMAD_META_soul_digest как есть.
+    def pick(key, pu_name):
+        pu = environ.get(pu_name) or None
+        meta = environ.get(f"NOMAD_META_{key}") or None
+        if pu is not None and meta is not None and pu != meta:
+            raise ValueError(f"the job's environment carries both {pu_name} and "
+                             f"NOMAD_META_{key} and they disagree")
+        return pu if pu is not None else meta
+
+    triple = {k: pick(k, f"PU_{k.upper()}") for k in ("soul", "soul_digest",
+                                                      "soul_inc")}
     if not any(triple.values()):
         return None
-    return JobMeta(environ.get("NOMAD_META_origin") or None, **triple)
+    return JobMeta(pick("origin", "PU_ORIGIN"), **triple)
 
 
 def _short(value):

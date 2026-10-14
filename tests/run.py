@@ -65,6 +65,45 @@ def meta_env(role_name, digest, inc):
             "NOMAD_META_soul_inc": inc}
 
 
+def registered_env(role_name, digest, inc, origin="git@host:group/repo.git"):
+    """Окружение НАСТОЯЩЕГО ролевого джоба -- как его собирает принятый
+    spec.task_env #582: тройка роли -- явные PU_* в task_env, НЕ
+    NOMAD_META_автоключи (сервер договорился не полагаться на регистр
+    автореки Nomad). Источник -- живой spec.py, когда он уже несёт
+    тройку (ветка 590 ответвилась до #582), иначе ЗАПИСАННЫЙ слепок
+    выхода task_env с принятыго SHA 56033df (584-комбайн); слепок --
+    только ключи тройки/origin, с примечанием происхождения. Копия
+    руками разошлась бы со спекой молча."""
+    try:
+        from mop.server import spec
+        env = spec.task_env("pu-x-1", origin, soul=role_name,
+                            soul_digest=digest, soul_inc=inc)
+    except TypeError:
+        # Спека ветки ещё без тройки: подставляем свои значения в слепок
+        # (ключи и пустые значения -- как собрал сервер, значения -- теста).
+        env = {**SPEC_582_TASK_ENV, "PU_SOUL": role_name,
+               "PU_SOUL_DIGEST": digest, "PU_SOUL_INC": inc,
+               "PU_SOUL_DIR": SPEC_582_TASK_ENV["PU_SOUL_DIR"].replace(
+                   SPEC_582_TASK_ENV["PU_SOUL_INC"], inc)}
+    out = {"PU_ORIGIN": env.get("PU_ORIGIN")}
+    for k in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC", "PU_SOUL_DIR"):
+        out[k] = env.get(k)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+# Слепок выхода task_env(pu-x-1, git@host:group/repo.git, soul=puppet)
+# с принятого дерева 56033df (#582). Digest/инкарнация в тестах свои:
+# подставляются, остальное -- как собрал сервер.
+SPEC_582_TASK_ENV = {
+    "PU_ORIGIN": "git@host:group/repo.git",
+    "PU_SOUL": "puppet",
+    "PU_SOUL_DIGEST": "d" * 64,
+    "PU_SOUL_INC": "1b4e28ba-2fa1-4d2b-9a5e-3c1f0a7b8c9d",
+    "PU_SOUL_DIR": "/home/ermak/.config/mop/souls/pu-x-1/"
+                   "1b4e28ba-2fa1-4d2b-9a5e-3c1f0a7b8c9d",
+}
+
+
 OWNER = {"login": "ermak", "name": "Anton", "email": "anton@example.org"}
 
 
@@ -295,6 +334,37 @@ def main():
     manifest, prompt, digest = role("puppet")
     bmanifest, bprompt, bdigest = role("builder")
     project_path = driver.project_creds("mop")
+
+    # Окружение НАСТОЯЩЕГО ролевого джоба (#582): тройка -- явные PU_*,
+    # а лаунчер 3cf3f7ad читал только NOMAD_META_автоключи и такой джоб
+    # молча звал легаси-путь. PU_* -- первичный источник; NOMAD_META --
+    # совместимость, без молчаливого отката: расхождение -- ValueError.
+    env = registered_env("puppet", digest, INC)
+    c.check("#590 the registered role env carries the explicit PU_SOUL triple",
+            env.get("PU_SOUL") == "puppet" and env.get("PU_SOUL_DIGEST") == digest
+            and env.get("PU_SOUL_INC") == INC and "NOMAD_META_soul" not in env, env)
+    got = run.expected_role(env)
+    c.check("#590 a registered role job (PU_* only, no NOMAD_META) is a role job",
+            got is not None
+            and (got.soul, got.soul_digest, got.soul_inc)
+            == ("puppet", digest, INC), got)
+    c.check("#590 the registered role job's origin rides PU_ORIGIN",
+            got is not None and got.origin == "git@host:group/repo.git", got)
+    # Явная тройка PU_* решает и при автореке Nomad рядом (реальный кейс
+    # переходного периода): расхождение двух троек -- не откат к авто,
+    # а громкий отказ.
+    mixed = {**env, **meta_env("builder", bdigest, INC)}
+    try:
+        run.expected_role(mixed)
+        c.check("#590 a PU_* job with a conflicting NOMAD_META triple refuses",
+                False, mixed)
+    except ValueError as e:
+        c.check("#590 a PU_* job with a conflicting NOMAD_META triple refuses",
+                "soul" in str(e), str(e))
+    mixed_same = {**env, **meta_env("puppet", digest, INC)}
+    c.expect("#590 a PU_* job with an agreeing NOMAD_META triple stays a role job",
+             (lambda g: (g.soul, g.soul_digest, g.soul_inc))(run.expected_role(mixed_same)),
+             ("puppet", digest, INC))
 
     # Легаси (контроль): джоб без тройки -- прежний путь байт в байт.
     body = Body()
