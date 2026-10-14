@@ -48,9 +48,10 @@ import re
 import shlex
 import socket
 import time
+import zlib
 
 from ..common import bus, busnames, config, fsutil, lease, paths, service, soul
-from .. import driver, usage
+from .. import driver, session, usage
 from ..common.domain import CloneFacts, Owner, Verb, holds_work
 from . import terminal
 from ..driver import Tmux, clone_dir, target_dir, why
@@ -1385,6 +1386,28 @@ async def _event(conn, kind, name=None, **fields):
         pass
 
 
+def portable_history_cmd(args, source=None):
+    """Старое тело запускает новый reader из пакета узла без записи файла.
+
+    Только собственный session.py и только подтверждённый старый глагол;
+    base64/zlib держат исходник вне shell-грамматики. Никаких путей или
+    команд из RPC кроме уже проверенных cwd/cursor.
+    """
+    if source is None:
+        with open(session.__file__, "rb") as f:
+            source = f.read(128_001)
+    if not isinstance(source, bytes) or not 0 < len(source) <= 128_000:
+        raise ValueError("trusted history reader is unavailable on the node")
+    encoded = base64.b64encode(zlib.compress(source, 9)).decode("ascii")
+    runner = ("import base64,zlib; exec(compile(zlib.decompress("
+              f"base64.b64decode({encoded!r})), 'session.py', 'exec'))")
+    command = " ".join(["python3", "-I", "-c", shlex.quote(runner)]
+                       + [shlex.quote(str(arg)) for arg in args])
+    if len(command.encode()) >= 100_000:
+        raise ValueError("trusted history reader exceeds the command limit")
+    return command
+
+
 async def v_history(_conn, req):
     """Мастерское чтение транскрипта внутри тела, без захвата владельца.
 
@@ -1403,6 +1426,13 @@ async def v_history(_conn, req):
     if cursor is not None:
         args += ["--cursor", cursor]
     out = await session_json(req["name"], _session_cmd("history", *args), private=True)
+    old_reader = f"{req['name']}: history reader exit 2 — no parsable answer"
+    if out == {"error": old_reader, "timeout": True}:
+        try:
+            fallback = portable_history_cmd(["history", *args])
+        except (OSError, ValueError):
+            return {"error": "trusted history reader is unavailable on the node"}
+        out = await session_json(req["name"], fallback, private=True)
     if (isinstance(out, dict) and set(out) <= {"error", "timeout"}
             and isinstance(out.get("error"), str)
             and ("timeout" not in out or type(out["timeout"]) is bool)):

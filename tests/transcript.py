@@ -679,6 +679,70 @@ def check_private_transport_never_echoes_partial_transcript_or_incompatible_repl
         c.check("an error cannot smuggle transcript fields", "private-synthetic-marker" not in json.dumps(out))
 
 
+def check_running_container_old_reader_620(c):
+    """HYPOTHESIS: старый pve body exit 2 после deploy, хотя узел уже новый.
+    SOLUTION: только для этого исхода запускаем доверенный standalone reader
+    из пакета узла в памяти тела, без записи файла и рестарта чужой сессии.
+    """
+    expected = {"epoch": "e", "session_id": SID, "cursor": "c", "records": [],
+                "reset": False, "has_more": False, "partial": False}
+    legacy = {"error": "pu-test-1: history reader exit 2 — no parsable answer",
+              "timeout": True}
+    calls = []
+
+    async def old_then_new(name, script, timeout=20, private=False):
+        calls.append((name, script, private))
+        return legacy if len(calls) == 1 else expected
+
+    with patched(agent, session_json=old_then_new, clone_dir=lambda _name: "/body/clone"):
+        got = asyncio.run(agent.v_history(None, {"verb": "history", "name": "pu-test-1",
+                                                 "cursor": "safe-token"}))
+    c.expect("#620 an old standalone reader is replaced in memory once", got, expected)
+    c.expect("#620 only one retry of the target history read", len(calls), 2)
+    if len(calls) == 2:
+        c.check("#620 fallback stays private", all(call[2] for call in calls))
+        argv = shlex.split(calls[1][1])
+        c.expect("#620 fallback executes isolated Python from trusted code",
+                 argv[:3], ["python3", "-I", "-c"])
+        c.expect("#620 the validated target and cursor are positional only",
+                 argv[-4:], ["history", "/body/clone", "--cursor", "safe-token"])
+
+    for error in ({"error": "pu-test-1: history reader exit 1 — no parsable answer", "timeout": True},
+                  {"error": "pu-test-1: the body did not answer in 20s", "timeout": True},
+                  {"error": "no live claude session"}):
+        calls.clear()
+        async def failed(name, script, timeout=20, private=False):
+            calls.append((name, script))
+            return error
+        with patched(agent, session_json=failed, clone_dir=lambda _name: "/body/clone"):
+            got = asyncio.run(agent.v_history(None, {"verb": "history", "name": "pu-test-1"}))
+        c.expect("#620 no fallback for unrelated or uncertain reader errors", got, error)
+        c.expect("#620 unrelated failures execute once", len(calls), 1)
+
+    builder = getattr(agent, "portable_history_cmd", None)
+    c.check("#620 a bounded trusted-source command builder exists", callable(builder))
+    if builder:
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                builder(["history", "/body/clone"], source=b"x" * 300_000)
+            except ValueError:
+                c.check("#620 oversized node source fails closed before a shell", True)
+            else:
+                c.check("#620 oversized node source fails closed before a shell", False)
+            cmd = builder(["history", directory], source=open(session.__file__, "rb").read())
+            argv = shlex.split(cmd)
+            env = dict(os.environ, HOME=directory)
+            run = subprocess.run(argv, cwd=directory, env=env, capture_output=True,
+                                 text=True, timeout=10)
+            try:
+                answer = json.loads(run.stdout)
+            except ValueError:
+                answer = None
+            c.check("#620 trusted code runs standalone without a body package",
+                    isinstance(answer, dict) and isinstance(answer.get("error"), str),
+                    (run.returncode, len(run.stdout), len(run.stderr)))
+
+
 def main():
     c = Checks()
     checks = [fn for name, fn in globals().items() if name.startswith("check_")]
