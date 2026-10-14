@@ -665,7 +665,187 @@ def main():
             and "no live session" in v.get("error", "") and not seen,
             (v, seen))
 
+    # ── #617: роли на общих операциях, граница против РЕАЛЬНОГО сервера ──
+    # Мастер воспроизвёл: ops.add ВСЕГДА шлёт workspace/bootstrap_sent, а
+    # ops.update превращает workspace=None в пустой текст -- сервер #582
+    # глаголы роли отказывает («no client workspace text»), и заявленное
+    # управление мастером не работает вовсе. Проверка гоняет операцию не
+    # против подставного транспорта, а против настоящего cluster.answer с
+    # FakeNomad и живым реестром грантов: отказ сервера -- это красное.
+    # Политика в проверках -- фейк (текст не секрет), ни NATS, ни пула.
+    check_role_workflows_617(c)
+
     return c.report("ops")
+
+
+def check_role_workflows_617(c):
+    """#617: ops.add(None) / ops.update(preserve_workspace=True) обязаны
+    ОТПУСКАТЬ оба поля политики, а не слать их пустыми -- пустой текст
+    это тоже заявление (сервер #582 считает его согласованным «пусто»).
+    Легаси-вызовы байт в байт прежние; конфликт preserve+workspace --
+    отказ ДО любого эффекта. Всё -- против настоящего сервера."""
+    from _lib import ALPHA, FakeNomad, soul_answer, soul_env, soul_parent
+    from mop.common import busnames as bn
+    from mop.common import soul as soulmod
+
+    def _soul_job(name, origin=ALPHA, digest=None):
+        """Джоб с тройкой роли в Meta, как его оставил бы add #582:
+        цель update-глагола -- живой папет с той же закреплённой душой."""
+        return {"ID": name, "Status": "run", "Type": "service",
+                "Meta": {"origin": origin, "soul": "master",
+                         "soul_digest": digest,
+                         "soul_inc": soulmod.incarnation()}}
+
+    def role_transport(api, project, principal):
+        """Транспорт операции = канал роли: субъект шва #581. Пишет
+        провод в .calls -- проверка читает, что ушло на сервер."""
+        subject = bn.cluster(project, login=principal)
+
+        def call(verb, **fields):
+            call.calls.append((verb, dict(fields)))
+            return soul_answer(api, project, {**fields, "verb": verb,
+                                            "_caller": principal,
+                                            "_subject": subject})
+        call.calls = []
+        return call
+
+    def grant_family(api, g):
+        """Живой родитель-мастер + принципал-актёр: add человеком в
+        согласованном состоянии (политика EMPTY одобрена человеком).
+        Ребёнку сразу стоит аллокация: операции ждут подъёма узла, а
+        FakeNomad размещением не занимается -- проверка про провод
+        политики, не про размещение."""
+        principal, parent, got = soul_parent(api, g, workspace="")
+        assert got.get("ok"), got
+        api.allocs[parent] = {"ID": "a0", "NodeName": "hyper",
+                              "JobID": parent, "ClientStatus": "running",
+                              "TaskStates": {}}
+        rec = grants_by_job(g, "alpha", parent)
+        return principal, parent, rec
+
+    def seeded_transport(api, project, principal):
+        """Транспорт канала роли + аллокация на ДЖОБ ЗАПРОСА: операция
+        ждёт подъёма узла именем из ответа add, а FakeNomad размещением
+        не занимается. Провод -- в .calls."""
+        transport = role_transport(api, project, principal)
+        real_call = transport
+
+        def call(verb, **fields):
+            out = real_call(verb, **fields)
+            if verb == "add" and out.get("name"):
+                api.allocs[out["name"]] = {"ID": "a-" + out["name"],
+                                           "NodeName": "hyper",
+                                           "JobID": out["name"],
+                                           "ClientStatus": "running",
+                                           "TaskStates": {}}
+            return out
+        call.calls = real_call.calls
+        return call
+
+    def grants_by_job(root, project, job):
+        import json as _json
+        with open(os.path.join(root, "registry.json")) as f:
+            for rec in _json.load(f).values():
+                if rec.get("job") == job and rec.get("project") == project:
+                    return rec
+        raise AssertionError(f"no binding for {job} in {project}")
+
+    # add(None): оба поля политики отсутствуют на проводе; сервер роли
+    # принимает делегированный add (spawn master->puppet), ребёнок
+    # наследует одобренный EMPTY снапшот родителя.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, rec = grant_family(api, g)
+        transport = seeded_transport(api, "alpha", principal)
+        v = ops.add(transport, ALPHA, None,
+                    soul="puppet", request_id="w617-a",
+                    sleep=nosleep, clock=stuck_clock)
+        wire = next((f for verb, f in transport.calls
+                     if verb == "add"), {}) if hasattr(transport, "calls") \
+            else {}
+        registered = [j for j in api.jobs.values()
+                      if (j.get("Meta") or {}).get("soul") == "puppet"]
+        c.check("#617 ops.add(None) sends no policy fields and the real "
+                "server accepts the role add",
+                v.get("outcome") in ("registered", "accepted") and registered
+                and "workspace" not in wire and "bootstrap_sent" not in wire,
+                (v, wire))
+        kid = registered[-1].get("ID") if registered else None
+        from mop.server import bootstrap as _b
+        marker = _b.approval_of(_b.ROOT, kid) if kid else None
+        c.check("#617 the delegated child inherits the approved empty "
+                "policy, not a fresh empty upload",
+                kid and marker is not None
+                and marker.get("inherited_from") == parent, (kid, marker))
+
+    # update(preserve_workspace=True): оба поля отпущены, настоящий
+    # сервер пускает глагол роли; preserve+workspace -- отказ ДО эффекта.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, rec = grant_family(api, g)
+        target = _soul_job("pu-alpha-9", digest=rec["soul_digest"])
+        target["Meta"]["soul"] = rec["role"]
+        target["Meta"]["soul_inc"] = rec["soul_inc"]
+        api.jobs["pu-alpha-9"] = target
+        transport = role_transport(api, "alpha", principal)
+        v = ops.update(transport, "pu-alpha-9", origin=ALPHA,
+                       preserve_workspace=True,
+                       sleep=nosleep, clock=stuck_clock)
+        fields = next((f for verb, f in transport.calls
+                       if verb == "update"), {})
+        c.check("#617 ops.update(preserve_workspace=True) omits both policy "
+                "fields and the real server accepts it",
+                v.get("outcome") == "accepted" and fields
+                and "workspace" not in fields
+                and "bootstrap_sent" not in fields, (v, fields))
+        before = len(transport.calls)
+        clash = ops.update(transport, "pu-alpha-9", origin=ALPHA,
+                           workspace=("t", None), preserve_workspace=True,
+                           sleep=nosleep, clock=stuck_clock)
+        c.check("#617 preserve_workspace with an explicit workspace refuses "
+                "before any mutation",
+                clash.get("outcome") == "refused"
+                and not any(verb == "update"
+                            for verb, _ in transport.calls[before:])
+                and api.jobs["pu-alpha-9"]["Meta"]["soul_digest"]
+                == rec["soul_digest"], (clash, transport.calls[before:]))
+
+    # Легаси байт в байт: явный кортеж шлёт поля как сегодня; update без
+    # параметров -- прежний пустой текст (совместимость веб-воркера).
+    fake = Fake({"add": {"name": "pu-x-1"},
+                 "alloc": {"alloc": {"ID": "a1", "NodeName": "n1",
+                                     "ClientStatus": "running",
+                                     "TaskStates": {}}},
+                 "bootstrap_result": {"result": None}})
+    ops.add(fake, "git@h:g/x.git", ("text", {"source": "origin"}),
+            sleep=nosleep, clock=stuck_clock)
+    fields = fake.calls[0][1]
+    c.check("#617 the legacy tuple add keeps the exact wire fields",
+            fields.get("workspace") == "text"
+            and fields.get("bootstrap_sent") == {"source": "origin"}, fields)
+    fake = Fake({"spec": {"meta": {"origin": "git@h:g/old.git"}},
+                 "update": {"replaced": None}})
+    ops.update(fake, "pu-x-1", sleep=nosleep, clock=stuck_clock)
+    fields = fake.calls[1][1]
+    c.check("#617 the default update keeps sending the clearing empty text",
+            fields.get("workspace") == "" and fields.get("bootstrap_sent") is None,
+            fields)
+    # Позиционные колбэки прежние: sleep/clock/step/bootstrap_wait стоят в
+    # конце подписи и ДО нового параметра -- старый позиционный вызов
+    # сохраняет смысл, новое -- только ключевым.
+    import inspect
+    params = list(inspect.signature(ops.update).parameters)
+    c.check("#617 preserve_workspace is the last parameter, after the "
+            "legacy callbacks",
+            params[-1] == "preserve_workspace"
+            and params[-5:] == ["sleep", "clock", "step",
+                                "bootstrap_wait", "preserve_workspace"],
+            params[-6:])
+    ops.update(fake, "pu-x-1", nosleep, stuck_clock, None,
+               lambda s: None, 0)
+    c.check("#617 legacy positional callbacks keep their meaning",
+            fake.calls[-1][0] == "update"
+            and fake.calls[-1][1].get("workspace") == "", fake.calls[-1])
 
 
 
