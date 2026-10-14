@@ -550,10 +550,37 @@ def check_resolve(c):
         c.check("#581 resolve_target fails closed on an unbound target",
                 (mod.resolve_target("mop", "pu-mop-1", root=root.name)
                  .get("found")) is False, "чужая цель «найдена»")
+        # Отзыв и неподтверждённость -- РАЗНЫЕ причины (#579/#581): один
+        # текст прятал отзыв от диагностики; pu4's cluster._answer читает
+        # «is revoked» явно, и resolve/admit обязаны различать ветки.
         mod.revoke(rec["principal"], root=root.name)
         got = mod.resolve(rec["principal"], "node", "state", root=root.name)
         c.check("#581 resolve fails closed on a revoked principal",
-                got.get("allow") is False and (got.get("reason") or ""), got)
+                got.get("allow") is False and "is revoked" in
+                (got.get("reason") or ""), got)
+        why = mod.admit(rec["principal"], root=root.name)[1]
+        c.check("#581 admit names the revocation, not a bare inactivity",
+                "is revoked" in why, why)
+        with tempfile.TemporaryDirectory() as pending_root:
+            mod.prepare(project="mop", role=PUPPET["soul"],
+                        digest=PUPPET_DIGEST, manifest=PUPPET,
+                        prompt=PUPPET_PROMPT, owner="anton",
+                        request_id="req-pend", job="pu-mop-8",
+                        soul_inc=incarnation("eight"), intent="i",
+                        root=pending_root)
+            who = [p for p, r in json.load(open(os.path.join(
+                pending_root, "registry.json"))).items()
+                if r.get("request_id") == "req-pend"][0]
+            got = mod.resolve(who, "node", "state", root=pending_root)
+            c.check("#581 resolve keeps 'not an active binding' "
+                    "for a pending one",
+                    got.get("allow") is False and "is not an active binding"
+                    in (got.get("reason") or ""), got)
+            why = mod.admit(who, root=pending_root)[1]
+            c.check("#581 admit keeps 'not an active binding' "
+                    "for a pending one",
+                    "is not an active binding" in why
+                    and "revoked" not in why, why)
         got = mod.resolve("grant-" + "0" * 32, "node", "state", root=root.name)
         c.check("#581 resolve fails closed on an unknown principal",
                 got.get("allow") is False and (got.get("reason") or ""), got)
@@ -893,6 +920,23 @@ def check_issue(c):
                 and password not in "\n".join(bootstrap.journal(
                     "mop", {"verb": "bootstrap", "name": "pu-mop-9"}, out)),
                 "пароль утёк в реестр или журнал")
+        # 5a. Проваленный прогон НЕ выдаёт кредов (#590): прежде ролевая
+        #     надстройка ехала в ответ при любом исходе прогона -- узел
+        #     с упавшим ansible получал пароль принципала и душу.
+        fail_play = lambda rq, p: {"ok": False, "played": True, "rc": 2,
+                                   "task": "install", "message": "boom",
+                                   "tail": "TASK [install] *** boom"}
+        with patched(bootstrap, ROOT=root.name, play=fail_play,
+                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            failed = bootstrap.answer("mop", dict(req, _caller=node,
+                                                  _reply=reply_ok))
+        c.check("#581 a failed play issues no credentials and keeps "
+                "the failure",
+                failed.get("ok") is False and "bus" not in failed
+                and "soul" not in failed
+                and (failed.get("message") or "") == "boom", failed)
         # 6. Отозванная и неподтверждённая привязка: отказ, не легаси-кред.
         with patched(bootstrap, ROOT=root.name, play=ok_play,
                      _job_meta=jobs_ok, _assigned_node=assigned_ok,
