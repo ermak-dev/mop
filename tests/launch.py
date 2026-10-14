@@ -34,6 +34,22 @@ INC = "00000000-0000-4000-8000-000000000000"
 PROTOCOL = {"version": 1, "request_id": True}
 
 
+def raises(fn, *a, **kw):
+    """Вызов поднял ValueError (или названный тип / подстроку)? -> строка
+    неудачи или False (поднял ожидаемое). Не поднял -- тоже неудача."""
+    want_type = kw.pop("want_type", ValueError)
+    want_text = kw.pop("want_text", None)
+    try:
+        fn(*a, **kw)
+    except Exception as e:  # noqa: BLE001 -- проверка исключения
+        if not isinstance(e, want_type):
+            return f"{type(e).__name__}: {e}"
+        if want_text and want_text not in str(e):
+            return f"{type(e).__name__}: {e}"
+        return False
+    return "no exception"
+
+
 def role_dir(root, role, prompt="soul.md", extra=None):
     """Каталог роли во временном каталоге -> путь."""
     d = os.path.join(root, role)
@@ -146,7 +162,7 @@ def launch(argv, pool, tty=True, catalogue_dirs=None, login_calls=None):
             patched(config, require=lambda *a: None), \
             context.use(context.resolve({"server": "srv.test", "user": "alice"},
                                         {}, {})):
-        return run_command(cli.main, argv)
+        return run_command(cli.main, argv, via_cli=True)
 
 
 # HYPOTHESIS: каталог клиента знал только пакетный каталог -- внешний
@@ -253,9 +269,10 @@ def check_readiness_shape_586(c):
             roles.session_ready(facts(soul_fact()), NODE, NAME, triple), True)
     c.check("#586 readiness needs the nested fact at all",
             roles.session_ready(facts(None), NODE, NAME, triple) is False)
-    c.check("#586 the marker's unverified session is not readiness",
-            roles.session_ready(facts({"ready": False, "why": "absent"}),
-                                NODE, NAME, triple) is False)
+    c.check("#586 the node's refusal is loud, not a silent wait",
+            raises(roles.session_ready, facts({"ready": False, "why": "absent"}),
+                   NODE, NAME, triple, want_type=RuntimeError,
+                   want_text="absent") is False)
     c.check("#586 another soul's fact is not readiness",
             roles.session_ready(facts(soul_fact(digest="f" * 32)),
                                 NODE, NAME, triple) is False)
@@ -290,6 +307,90 @@ def check_failures_after_creation_586(c):
             NAME in err and "role" in err, err)
     c.expect("#586 a role-less puppet is not attached", pool.ssh, [])
     c.expect("#586 a role-less puppet is not created again", len(pool.adds), 1)
+
+
+# HYPOTHESIS: отказ агента и непрошедшая проверка узла терялись в общем
+# таймауте без причины: _wait_ready глотал их как «ещё не готово», и
+# человек смотрел на «no session ... after Ns» без почему.
+# SOLUTION: причина узла -- в текст таймаута последней; {error} ответа
+# агента и why непрошедшего soul-факта поднимаются сразу, «факта ещё
+# нет» -- тихое ожидание (False).
+def check_readiness_reasons_586(c):
+    def answers(what):
+        return {NODE: what}
+
+    triple = {"soul": "builder", "soul_digest": DIGEST, "soul_inc": INC}
+    c.check("#586 an agent error reaches the caller",
+            raises(roles.session_ready, answers({"error": "agent: disk full"}),
+                   NODE, NAME, triple,
+                   want_type=RuntimeError, want_text="disk full") is False)
+    puppet = {NAME: {"present": True, "soul": {"ready": False,
+                                                "why": "the binding is gone"}}}
+    c.check("#586 an unverified fact says why",
+            raises(roles.session_ready, answers({"puppets": puppet}),
+                   NODE, NAME, triple,
+                   want_type=RuntimeError, want_text="binding is gone") is False)
+    c.check("#586 a pending poll without the fact is not an error",
+            roles.session_ready(answers(
+                {"puppets": {NAME: {"present": False}}}), NODE, NAME,
+                triple) is False)
+    c.check("#586 a missing fact on a live session is not an error",
+            roles.session_ready(answers(
+                {"puppets": {NAME: {"present": True}}}), NODE, NAME,
+                triple) is False)
+
+
+# HYPOTHESIS: эхо проверяло только непустоту: битый digest (не 64 hex),
+# не-UUID инкарнация или отсутствие имени джоба проходили как
+# подтверждение роли.
+# SOLUTION: грамматика тройки -- общая JobMeta (#580), второй копии
+# парсера у клиента нет; имя джоба в ответе обязательно.
+def check_echo_grammar_586(c):
+    bad = [{"soul": "builder", "soul_digest": "f" * 32, "soul_inc": INC},
+           {"soul": "builder", "soul_digest": DIGEST, "soul_inc": "z" * 36},
+           {"soul": "builder", "soul_digest": ("ab" * 32).upper(),
+            "soul_inc": INC},
+           {"soul": "builder", "soul_digest": 5, "soul_inc": INC},
+           {"soul": "", "soul_digest": DIGEST, "soul_inc": INC}]
+    for triple in bad:
+        c.check(f"#586 a malformed echo {triple.get('soul_digest')!r}/"
+                f"{triple.get('soul_inc')!r} is refused",
+                raises(roles.echo, {"name": NAME, **triple}, "builder") is False)
+    c.check("#586 the created job name is required",
+            raises(roles.echo, {"soul": "builder", "soul_digest": DIGEST,
+                                "soul_inc": INC}, "builder",
+                      want_text="named no created puppet") is False)
+    c.check("#586 a well-formed echo passes",
+            raises(roles.echo, {"name": NAME, "soul": "builder",
+                                "soul_digest": DIGEST, "soul_inc": INC},
+                   "builder"))
+
+
+# HYPOTHESIS: _wait_ready зовёт puppets.node_of ДО своей обработки: узел
+# не определён (нет работающей аллокации, сервис отказал) -- исключение
+# улетает без имени созданного папета и пути назад, и диспетчер печатает
+# голый traceback.
+# SOLUTION: node_of внутри ожидания: отказ узла -- та же причина в сроке
+# готовности (созданного называем, второго не создаём), а небежащий папет
+# -- ожидание до конца срока, как молчащий агент.
+def check_node_failure_586(c):
+    def node_refused(*a, **kw):
+        raise bus.Refused("the project is closed for new placements")
+
+    def node_unknown(*a, **kw):
+        raise LookupError(f"{NAME}: no allocation — node unknown")
+
+    for node_fn, word in ((node_refused, "closed for new placements"),
+                          (node_unknown, "node unknown")):
+        pool = Pool()
+        with patched(puppets, node_of=node_fn):
+            out, err, code = launch(["builder"], pool)
+        c.expect(f"#586 node resolution failure ({word}) fails", code, 1)
+        c.check(f"#586 the failure names the created puppet ({word})",
+                NAME in err, err)
+        c.check(f"#586 the failure carries the reason ({word})", word in err, err)
+        c.check(f"#586 no second add ({word})", len(pool.adds), 1)
+        c.expect(f"#586 the failure does not attach ({word})", pool.ssh, [])
 
 
 # HYPOTHESIS: неизвестность ответа регистрации (таймаут шины) повторяется
@@ -513,6 +614,8 @@ def check_attach_586(c):
 def main():
     c = Checks()
     for check in (check_catalogue_roots_586, check_readiness_shape_586,
+                  check_readiness_reasons_586, check_echo_grammar_586,
+                  check_node_failure_586,
                   check_role_dispatch_586, check_readiness_586,
                   check_failures_after_creation_586, check_request_id_586,
                   check_handshake_586, check_server_refusal_586, check_options_586, check_no_tty_586,

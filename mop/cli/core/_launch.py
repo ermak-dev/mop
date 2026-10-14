@@ -173,23 +173,30 @@ def _create(role, origin, reconciles, p):
 def _wait_ready(name, triple, p):
     """Ждать сессию роли в теле -> узел. Running-аллокация и итог
     bootstrap'а -- ещё не сессия, а голый tmux -- ещё не роль: ждём метку
-    сверенного бандла (roles.session_ready)."""
-    node = puppets.node_of(name)
-    p.step(f"{name}: waiting for the session on {node}")
+    сверенного бандла (roles.session_ready).
+
+    Узел определяется тем же ожиданием, а не до него: аллокации на подъёме
+    нет секунды-другой, и отказ резолвера -- причина в сроке готовности с
+    именем созданного, а не исключение мимо всего контекста."""
+    p.step(f"{name}: waiting for the session")
     deadline = clock() + READY_WAIT
     last = None
+    node = None
     while True:
         try:
+            node = node or puppets.node_of(name)
             answers = bus.request_many("states", {node: {"names": [name]}})
             if roles.session_ready(answers, node, name, triple):
                 return node
-        except (bus.BusError, RuntimeError) as e:
-            # Молчащий агент -- не приговор папету (AGENT SILENT): ждём до
-            # срока и называем последнюю причину.
+        except (bus.BusError, bus.Refused, RuntimeError, LookupError) as e:
+            # Молчащий агент и неопределённый узел -- не приговор папету
+            # (AGENT SILENT, аллокация на подъёме): ждём до срока и
+            # называем последнюю причину.
             last = str(e)
         if clock() >= deadline:
+            where = f" on {node}" if node else ""
             raise RuntimeError(
-                f"{name}: no session of the role on {node} after {READY_WAIT}s"
+                f"{name}: no session of the role{where} after {READY_WAIT}s"
                 + (f" ({last})" if last else "")
                 + f"; nothing is created again: mop list, mop attach {name}")
         sleep(2)

@@ -7,7 +7,7 @@
 сессия. Библиотека молчит: отказ -- исключение с причиной, печатает
 командлет.
 """
-from mop.common import busnames, soul, souldirs
+from mop.common import busnames, domain, soul, souldirs
 
 # Имена шины, которые роль не берёт (docs/SOUL.md, «CLI, имена»): роль с
 # таким именем читалась бы как служебный пользователь или принципал.
@@ -96,11 +96,24 @@ TRIPLE = ("soul", "soul_digest", "soul_inc")
 
 def echo(got, role):
     """Ответ add -> тройка роли {soul, soul_digest, soul_inc}. Чистая.
-    Неполная или чужая тройка -- ValueError: сервер не подтвердил роль."""
-    triple = {k: (got or {}).get(k) for k in TRIPLE}
+
+    Имя созданного джоба обязательно, тройка -- целиком и грамматикой
+    JobMeta (#580): правдоподобия мало, битый digest или не-UUID -- не
+    подтверждение, а сломанный сервер. Второго парсера у клиента нет:
+    грамматика одна, у JobMeta."""
+    got = got or {}
+    name = got.get("name")
+    if not (isinstance(name, str) and name):
+        raise ValueError(f"the server named no created puppet "
+                         f"(got {got.get('name')!r})")
+    triple = {k: got.get(k) for k in TRIPLE}
     if triple["soul"] != role or not all(triple.values()):
         raise ValueError(f"the server did not confirm role {role} "
                          f"(got {triple!r})")
+    try:
+        domain.JobMeta(None, **triple)
+    except ValueError as e:
+        raise ValueError(f"the server's role echo is malformed: {e}") from None
     return triple
 
 
@@ -116,15 +129,29 @@ def session_ready(answers, node, name, triple):
     got = (answers or {}).get(node)
     if isinstance(got, Exception):
         raise RuntimeError(f"agent on {node}: {got}")
-    facts = ((got or {}).get("puppets") or {}).get(name) or {}
+    if not isinstance(got, dict):
+        got = {}
+    if got.get("error"):
+        # Ответ агента целиком -- отказ: узел сказал почему, терять это --
+        # читать таймаут без причины.
+        raise RuntimeError(f"agent on {node}: {got['error']}")
+    facts = (got.get("puppets") or {}).get(name) or {}
     if facts.get("error"):
         raise RuntimeError(f"{name} on {node}: {facts['error']}")
     if not facts.get("present"):
         return False
     # Факт #584 называет роль ключом role (как маркер #590), эхо add --
     # ключом soul (#582): тройка одна, ключи у источника и читателя свои.
-    soul_fact = facts.get("soul") or {}
-    return soul_fact.get("ready") is True \
-        and soul_fact.get("role") == triple.get("soul") \
+    soul_fact = facts.get("soul")
+    if not isinstance(soul_fact, dict):
+        # Сессия жива, факта ещё нет: обёртка не доложила -- ждём, не ошибка.
+        return False
+    if soul_fact.get("ready") is not True:
+        # Узел уже проверил и не принял: это причина, а не ожидание --
+        # наверх, в текст срока готовности (#584: why у каждого отказа).
+        why = soul_fact.get("why")
+        raise RuntimeError(f"{name} on {node}: "
+                           + (str(why) if why else "the role is not verified"))
+    return soul_fact.get("role") == triple.get("soul") \
         and soul_fact.get("soul_digest") == triple.get("soul_digest") \
         and soul_fact.get("soul_inc") == triple.get("soul_inc")
