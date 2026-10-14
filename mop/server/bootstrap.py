@@ -270,14 +270,18 @@ def _soul_root():
 
 def _job_meta(name):
     """Мета джоба (#256/#265) как JobMeta: шов проверок. Читают её только
-    через JobMeta -- сырые .get по ключам расходились умолчаниями; нет
-    джоба или Nomad молчит -- пустая мета, как у cluster._meta."""
+    через JobMeta -- сырые .get по ключам расходились умолчаниями. Отказ
+    НЕ глотается (#581): пустая мета от молчащего Nomad значила бы
+    «не роль» -- и ролевое имя уезжало на легаси-путь с проектным кредом.
+    Громкая ошибка едет наружу и читается отказом (fail closed); нет
+    джоба -- пустая мета, как у cluster._meta: «ничей» -- законный ответ
+    Nomad, не сбой."""
     from ..common.domain import JobMeta
     from . import nomad
-    try:
-        return JobMeta.from_job(nomad.get_job(name))
-    except Exception:
+    job = nomad.get_job(name)
+    if not job:
         return JobMeta(None, None)
+    return JobMeta.from_job(job)
 
 
 def _assigned_node(name):
@@ -316,14 +320,22 @@ def role_gates(name, caller, reply, project, root=None, jobs=None,
          #603): кред роли не едет в глобально читаемый _INBOX и не в
          чужой префикс;
       3. джоб назначен Nomad ИМЕННО этому узлу (свежая аллокация);
-      4. инкарнация Meta джоба -- та, что в реестре: переиспользованное
-         имя (#579) держит новый грант, сверяется фактическая инкарнация.
+      4. тройка Meta джоба (#581) -- цельком и ровно привязке: роль,
+         дайджест и инкарнация совпадают все три; переиспользованное
+         имя (#579) держит новый грант, и by_job без инкарнации выбрал
+         бы любую живую привязку мимо факта Nomad.
     by_job с инкарнацией приносит запись С её состоянием -- решение о
     неживой (отозвана, не подтверждена) выносит выдающий: кред не выдают.
 
     root -- корень хранилища душ (шов проверок); jobs(name) -> Meta и
     assigned(name) -> имя узла аллокации (швы проверок, по умолчанию --
-    Nomad)."""
+    Nomad).
+
+    Тройка Meta -- требование целиком (#581): (soul, soul_digest,
+    soul_inc), и привязка обязана совпасть по ВСЕЙ тройке и проекту.
+    by_job(None) выбрал бы любую живую привязку имени -- молча, мимо
+    факта, который пишет в Nomad сам сервер; пустая Meta (Nomad молчит
+    или битый джоб) -- громкий отказ, не «не роль»."""
     from . import grants
     node = _node_of(caller)
     if node is None:
@@ -334,10 +346,20 @@ def role_gates(name, caller, reply, project, root=None, jobs=None,
         return {"error": f"role credentials ride the caller's own private "
                          f"reply subject, not {reply!r} (#603)"}
     meta = (jobs or _job_meta)(name)
-    rec = grants.by_job(project, name, soul_inc=meta.soul_inc,
-                        root=root)
-    if rec is None or rec.get("revoked_at") or not rec.get("active"):
-        return {"error": f"no live binding for {name} in project {project}"}
+    if not (meta.soul and meta.soul_digest and meta.soul_inc):
+        raise ValueError(
+            f"{name}: job Meta carries no whole role triple (soul, "
+            f"soul_digest, soul_inc) -- the server writes it at "
+            f"registration, and its absence is a broken job, not a "
+            f"legacy one")
+    rec = grants.by_job(project, name, soul_inc=meta.soul_inc, root=root)
+    if rec is None or not rec.get("active") or rec.get("revoked_at") \
+            or rec.get("role") != meta.soul \
+            or rec.get("soul_digest") != meta.soul_digest:
+        raise ValueError(
+            f"{name}: no live binding in project {project} for the Meta "
+            f"triple (role {meta.soul}, digest {meta.soul_digest[:8]}, "
+            f"incarnation {meta.soul_inc})")
     where = (assigned or _assigned_node)(name)
     if where != node:
         return {"error": f"{name} is assigned to {where or 'no node'}, "
@@ -357,15 +379,20 @@ def role_reply(rec, project, root=None):
     if not password:
         return {"error": f"{rec.get('job')}: the principal's password is "
                          f"cut (transport revocation, #579)"}
-    got = grants.bundle(rec.get("soul_digest"), root=root) or {}
+    got = grants.bundle(rec.get("soul_digest"), root=root)
+    if got is None:
+        return {"error": f"{rec.get('job')}: the pinned bundle "
+                         f"{rec.get('soul_digest') and rec.get('soul_digest')[:8]}"
+                         f" is missing from the store -- the role cannot "
+                         f"start with an empty soul"}
     return {
         "bus": creds.bus_config(config.get("MOP_SERVER_LAN"),
                                 config.get("MOP_NATS_PORT"), project,
                                 password, user=principal),
         "soul": {"role": rec.get("role"), "soul_inc": rec.get("soul_inc"),
                  "soul_digest": rec.get("soul_digest"),
-                 "manifest": got.get("manifest") or {},
-                 "prompt": base64.b64encode(got.get("prompt") or b"").decode(),
+                 "manifest": got["manifest"],
+                 "prompt": base64.b64encode(got["prompt"]).decode(),
                  "principal": principal,
                  "owner": _owner_profile(rec.get("owner"))}}
 
@@ -734,7 +761,7 @@ def owner_identity(req):
     return identity.profile(identity.server_provider(), login)
 
 
-def resolve_soul(project, req, root=None):
+def resolve_soul(project, req, root=None, assigned=None):
     """Глагол resolve (#579/#581/#584): единый wire-вердикт. Два режима:
 
     -- с принципалом -- делегированное действие {principal, service,
@@ -753,15 +780,25 @@ def resolve_soul(project, req, root=None):
     легаси server.rpc (#603), поэтому анонимный вызов -- отказ без фактов:
     вердикт о принципале едет только узловому вызывающему, которого назвал
     субъект (_caller каркаса, не тело). root -- шов проверок: реальный
-    вызов читает хранилище сервера. Отказ -- тоже ответ: fail closed."""
+    вызов читает хранилище сервера. Отказ -- тоже ответ: fail closed.
+
+    Режим только-цели сверяет НАЗНАЧЕНИЕ (#581): узел спрашивает о чужой
+    цели -- сервер смотрит узел последней аллокации джоба (assigned --
+    шов проверок) и не раскрывает состояние узлу-не-хозяину: авторитет
+    старта -- Nomad, и чужое состояние соседнему узлу не нужно."""
     from . import grants
     if not _node_caller(req):
         return {"allow": False,
                 "reason": "resolve serves node callers only: the anonymous "
                           "legacy server.rpc carries no grant facts (#603)"}
     if not req.get("principal"):
-        return grants.describe_target(project, req.get("target") or "",
-                                      soul_inc=req.get("soul_inc"), root=root)
+        out = grants.describe_target(project, req.get("target") or "",
+                                     soul_inc=req.get("soul_inc"), root=root)
+        if out.get("found") and out.get("active"):
+            where = (assigned or _assigned_node)(out.get("job"))
+            if where and _node_of(req.get("_caller") or "") != where:
+                return {"found": False}
+        return out
     return grants.resolve(req.get("principal"),
                           req.get("service") or "node",
                           req.get("verb_name") or "", target=req.get("target"),
@@ -826,13 +863,20 @@ def answer(project, req, _send=None):
             # прежним путём с проектным кредом (переход #603).
             from . import grants
             soul_root = _soul_root()
-            is_role = grants.binding_named(project, req.get("name") or "",
-                                           root=soul_root)
+            # Классификация -- по ФАКТИЧЕСКОЙ Meta джоба (#581): тройка
+            # роли в Nomad делает джоб ролевым, что бы ни держал реестр
+            # (привязка стёрта/битая -- отказ в воротах, не легаси-путь);
+            # нет тройки и нет привязки -- легаси-джоб, как прежде.
+            meta = _job_meta(req.get("name") or "")
+            is_role = bool(meta.soul and meta.soul_digest and meta.soul_inc) \
+                or grants.binding_named(project, req.get("name") or "",
+                                        root=soul_root)
             if is_role:
                 bound = role_gates(req.get("name") or "",
                                    req.get("_caller") or "",
                                    req.get("_reply"), project, root=soul_root,
-                                   jobs=_job_meta, assigned=_assigned_node)
+                                   jobs=lambda name: meta,
+                                   assigned=_assigned_node)
                 if bound.get("error"):
                     return bound
             # `put` снят (#133): workspace кладут глаголы жизненного цикла
@@ -843,7 +887,18 @@ def answer(project, req, _send=None):
             if prev.get("gave_up") and prev.get("key") == workspace_key(ROOT, req["name"]):
                 ask_give_up(req["name"])
                 return gave_up_reply(prev)
-            out = play(req, project)
+            # Роль играет с закреплённым бандлом (#592/#581): allowlist
+            # секретов -- из доверенного хранения сервера, не из тела.
+            pinned = None
+            if is_role:
+                pinned = grants.load_bundle(bound.get("soul_digest"),
+                                            root=soul_root)
+                if pinned is None:
+                    return {"error": f"{req.get('name')}: the pinned bundle "
+                                     f"is unreadable -- refusing to play "
+                                     f"the role with the whole store"}
+            out = play(req, project, bundle=pinned) if is_role \
+                else play(req, project)
             # Итог -- рядом с отправленным (#334): `mop update` ждёт его. Не
             # записался -- подсказка пропала, а прогон и кред важнее.
             try:
@@ -862,6 +917,16 @@ def answer(project, req, _send=None):
                 # ему не выдаются; причина провала сохраняется как есть.
                 if not out.get("ok"):
                     return out
+                # Прогон идёт минуты (#581): привязку проверяет и ПОСЛЕ
+                # него -- отзыв, приехавший за время ansible, не выдаёт
+                # кредов уже поднятому телу.
+                fresh = grants.binding(bound.get("principal"),
+                                       root=soul_root)
+                if not fresh or not fresh.get("active") \
+                        or fresh.get("revoked_at"):
+                    return {"error": f"{req.get('name')}: the binding was "
+                                     f"revoked while the play ran -- no "
+                                     f"credentials"}
                 role = role_reply(bound, project, root=soul_root)
                 if role.get("error"):
                     return role

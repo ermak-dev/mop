@@ -76,14 +76,29 @@ class _Writer:
     def __enter__(self):
         fsutil.make_private_dir(self.root)
         self.fd = _locked(self.root)
-        self.reg = _read(self.root)
+        try:
+            self.reg = _read(self.root)
+        except BaseException:
+            # Битый реестр роняет чтение ПОСЛЕ захвата flock (#581):
+            # без отпуска fd держал бы LOCK_EX навсегда, и следующий
+            # писатель в другом процессе (callout, сервис) висел бы.
+            self._release()
+            raise
         return self
 
-    def __exit__(self, *exc):
-        if exc[0] is None:
-            _write(self.root, self.reg)
+    def _release(self):
+        """Отпустить замок и закрыть fd -- на любом выходе."""
         fcntl.flock(self.fd, fcntl.LOCK_UN)
         self.fd.close()
+
+    def __exit__(self, *exc):
+        try:
+            if exc[0] is None:
+                _write(self.root, self.reg)
+        finally:
+            # Сбой записи -- не повод держать замок (#581): следующий
+            # писатель читает и видит причину, а не молчание.
+            self._release()
         return False
 
 
@@ -103,7 +118,11 @@ def _read(root):
     except FileNotFoundError:
         return {}
     if not raw.strip():
-        return {}
+        # Пустой ФАЙЛ -- порча, а не «нет реестра» (#581): отсутствие --
+        # единственный пустой. Тихо стёртый реестр родился бы заново,
+        # и отозванные привязки воскресли бы.
+        raise ValueError(f"grants: registry {path} is corrupted: "
+                         f"empty file")
     try:
         reg = json.loads(raw)
     except ValueError as e:
@@ -381,6 +400,25 @@ def bundle(digest, root=None):
     except (OSError, ValueError):
         return None
     return {"manifest": manifest, "prompt": prompt}
+
+
+def load_bundle(digest, root=None):
+    """Бандл хранилища как soul.Bundle (#592/#581), либо None.
+
+    Прогон роли кормит allowlist секретов из ДОВЕРЕННОГО закреплённого
+    бандла (play(bundle=...)), а словарь bundle() -- сырые manifest.json
+    и промпт без схемы. Сборка и сверка -- общий конструктор from_manifest
+    (#580): digest собранных байт обязан совпасть с запрошенным, иначе
+    хранилище держит не то, что закрепила регистрация. None -- бандла нет
+    или он не собирается: отказ, не пустая душа."""
+    got = bundle(digest, root=root)
+    if got is None:
+        return None
+    try:
+        made = soul.from_manifest(got["manifest"], got["prompt"])
+    except ValueError:
+        return None
+    return made if made.digest == digest else None
 
 
 def resolve(principal, service, verb, target=None, root=None):
