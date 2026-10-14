@@ -390,6 +390,42 @@ skills/master; внешние роли — каталог установки, з
 упавшее, Nomad перезапускает, как при отказе bootstrap (#62). Тихих
 деградаций нет: роль без бандла не стартует с пустым промптом.
 
+## Приёмка (#589)
+
+Карта приёмки: сценарий → где он уже проверен без пула (файл/функция в
+ветке ребёнка) → что остаётся живому контуру. Строки говорят только о
+том, что реально прогонялось в ветках-детях на момент подготовки; ни
+один пункт здесь не результат прогона на живом пуле. Ничего из
+перечисленного не прогонялось вместе: дети ещё не слиты в эпик.
+
+| Сценарий | Проверено без пула | Живой контур |
+|---|---|---|
+| Все три роли одним путём (`mop <роль>` → регистрация → готовность → attach) | `tests/launch.py` (#586): один и тот же конвейер для любой роли каталога, путь не зависит от имени роли | прогнать на реальном сервере #582 и узле #584 все три роли эпика |
+| Два мастера одного проекта не читают чужие отчёты | `tests/natsconf.py` `check_inbox_login_213` (эпик): подписка мастера сужена до `master.<свой логин>.>`; `tests/grants.py` «the owner stays the human despite the actor» (#581): владелец человек, актёр — принципал | два живых мастера, send от папета каждому |
+| Отправитель/владелец/адрес различимы | `tests/channel.py` «grant is its own actor», «the process inbox is transport only», «grant names itself by its job» (#585); `tests/grants.py` «prepare records the delegating actor» (#581) | видно в живом журнале кластера |
+| Отозванные/неактивные принципалы не проходят | `tests/grants.py` «a revoked binding issues nothing», «admit denies an inactive principal», «resolve fails closed on a revoked principal», «cut removes the password file» (#581) | отзыв на живом сервере, попытка входа/резолва после |
+| Bootstrap назначает узел, ответ с кредами едет приватным префиксом | `tests/run.py` «the role bootstrap ask rides the node-qualified server.rpc», «the password rides the reply only», «role credentials refuse the public inbox» (#590/#581) | на живом узле: старт роли, инспекция ACL и ответа |
+| Секреты по allowlist, отказ без выдачи | `tests/bootstrap.py` «the sibling file is not staged», «an unallowed var stays out», «a racy var read must refuse», «the refusal names the missing name» (#592) | живой bootstrap с роль-частным набором |
+| Готовность = метка настоящего бандла, клон под защитой | `tests/spec.py` «a role refuses on a prepared clone with a wrong…», «a resumed role session launches» (#583); `tests/run.py` «the delivered bundle loads to the job's digest», «the model starts after the ready mark» (#590); `tests/agent.py` `check_startup_soul_584` (#584) | живой старт, сверка ростера с телом |
+| Отсоединение/переподключение/возобновление | `tests/spec.py` «a resumed role session launches» (#583); `tests/launch.py` «attaches once», «timeout does not attach» (#586): attach — отдельный ход, состояние сессии не теряется | detach по Ctrl-b d, повторный `mop attach`, работа на месте |
+| Квоты, сведение повторов по request_id, ожидающие резервы | `tests/soul_lifecycle.py` «the quota counts role puppets against the same limit», «a replay of the same request passes the quota gate», «a refused registration leaves a pending, inactive…», «a pending reservation keeps its name» (#582) | гонка двух add на живом сервере, последний слот квоты |
+| Мета роли переживает рестарт/перерегистрацию | `tests/soul_lifecycle.py` «restart leaves the job meta untouched», «respec carries the whole triple», «restore raises the puppet with its soul and branch», «the roster carries MopSoul.receives_dispatch» (#582) | рестарт аллокации и respec на живом джобе |
+| Единый ростер в UI, легаси-совместимость | `tests/web.py` `check_unified_roster_587` (#587): один ростер без отдельной секции мастеров, стабильные id; #588: старые снимки не resurrect-ят проекции, обычный зритель не получает управление | живой дашборд над смешанным пулом |
+| Легаси-путь байт в байт | `tests/run.py` «legacy: a job without a role launches», «legacy: the bootstrap ask rides the anonymous server.rpc» (#590); `tests/soul_lifecycle.py` «respec of a legacy job stays legacy» (#582); `tests/launch.py` `mop master --local` (#586) | живой легаси-папет до и после включения ролей |
+
+Контракт раскрутки и отката (уже зафиксирован выше, здесь — рамка
+приёмки): приёмка не трогает ни один операторский артефакт — `.env`,
+креды, живых папетов не удаляет и не перезаписывает; живое тело не
+меняет роль сама; перезапуск аллокации не выдаёт себя за новую обёртку
+(метка готовности и тройка сверяются заново, #583/#584); протокол ролей
+не включается, пока агенты узлов не умеют канал role (#603). Точная CI
+и живой контур разделены: зелёный конвейер — не заявление о пуле.
+
+Живые проверки в этой таблице не прогнаны (NOTRUN): ждут оператора или
+изолированного контура. Платных ходов модели приёмка не делает — старт
+роли в живом контуре проверяется до первого хода модели (готовность
+обёртки), если оператор явно не попросит иное.
+
 ## Переход и откат
 
 Ничего автоматического. Живые локальные мастера (`mop master`), легаси-
