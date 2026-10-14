@@ -774,9 +774,10 @@ def check_tool_routes_585(c):
     c.expect("#585 slash needs alloc to route and node type to type",
              channel.HAND_TOOLS["slash"],
              {"node_verbs": ("type",), "cluster_verbs": ("alloc",)})
-    c.expect("#585 dispatch needs alloc to route, roster for its promised autopick",
+    c.expect("#585 dispatch needs alloc to route, roster and states for its promised autopick",
              channel.HAND_TOOLS["dispatch"],
-             {"cluster_verbs": ("alloc", "roster"), "dispatch": True})
+             {"cluster_verbs": ("alloc", "roster"), "node_verbs": ("states",),
+              "dispatch": True})
 
     # Пресеты пакета проходят; динамические роли без дороги -- нет.
     seen = channel.tools_for(channel.GRANT, worker, {})
@@ -796,6 +797,12 @@ def check_tool_routes_585(c):
     c.check("#585 dispatch without roster loses its promised autopick",
             "dispatch" not in channel.tools_for(
                 channel.GRANT, without(master, cluster=("roster",)), {}))
+    # Autopick зовёт puppets.puppet_rows(sizes=False) -> roster() ->
+    # request_many("states"): без глагола states «свободный клон» неоткуда
+    # взять, и предлагать автопик нельзя.
+    c.check("#585 dispatch without the states verb loses its promised autopick",
+            "dispatch" not in channel.tools_for(
+                channel.GRANT, without(master, node=("states",)), {}))
 
     # Описание send обязано говорить правду обо всех видах говорящих:
     # аренду берёт send человека, не роли.
