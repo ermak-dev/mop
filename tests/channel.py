@@ -564,6 +564,140 @@ def check_role_api_585(c):
     return True
 
 
+def check_body_binding_585(c):
+    """#585, третья часть: бандл тела -- не самообъявление, и инбокс
+    процесса роли ездит своим транспортом.
+
+    HYPOTHESIS: own_bundle верил одному MOP_SOUL_DIR -- каталог, названный
+    окружением, открывал каталог инструментов роли без подтверждения телом
+    (расписки лаунчера нет, инкарнация и джоб не сверены: чужой каталог с
+    честным собственным digest'ом -- самозванец, прошедший проверку одних
+    байтов, #583). А инбокс процесса гранта строился мастер-формы
+    (mop.<проект>.master.<grant>...inbox), на которую ACL принципала (#581)
+    подписки не даёт: только свой приватный префикс ответов _MOP_REPLY.
+    SOLUTION: own_bundle принимает бандл, когда расписка готовности у
+    корня инкарнации (driver.READY: ready/role/soul_inc/soul_digest) сходится
+    с загруженным бандлом, а корень стоит ровно там, где раскладка тела
+    держит инкарнацию этого джоба (driver.soul_dir); channel.own_inbox даёт
+    принципалу субъект под private_prefix. Фикстура -- настоящий пресет
+    пакета (soul.catalogue), не переписанный руками манифест."""
+    import json
+    import shutil
+    import tempfile
+    import uuid
+    from mop import driver
+    from mop.common import busnames, souldirs
+    from mop.common import soul as souls
+    from mop.client import channel
+
+    presets = souls.catalogue([souldirs.PACKAGE_DIR])
+    if not c.check("#585 the package catalogue holds the worker preset",
+                   "puppet" in presets, sorted(presets)):
+        return False
+    src = presets["puppet"]
+
+    tmp = tempfile.mkdtemp(prefix="mop-test-body-585-")
+    job = "pu-mop-3"
+
+    def body(inc, receipt=None, sub=driver.SOUL_BUNDLE):
+        """Каталог инкарнации под тестовым домом: бандл -- пресет пакета,
+        расписка -- словарь (None -- не писать). -> (путь бандла, Bundle)."""
+        root = driver.soul_dir(job, inc)
+        bundle = os.path.join(root, sub)
+        os.makedirs(bundle)
+        for name in os.listdir(src):
+            shutil.copy(os.path.join(src, name), os.path.join(bundle, name))
+        if receipt is not None:
+            with open(os.path.join(root, driver.READY), "w") as f:
+                json.dump(receipt, f)
+        return bundle, souls.load(bundle)
+
+    def receipt_of(inc, loaded, **over):
+        """Честная расписка этой инкарнации; over -- одна ложь."""
+        out = {"ready": True, "role": loaded.role, "soul_inc": inc,
+               "soul_digest": loaded.digest}
+        out.update(over)
+        return out
+
+    with patched(driver, HOME=tmp):
+        # Честное тело: расписка называет ровно этот бандл и инкарнацию.
+        inc = str(uuid.uuid4())
+        bundle, loaded = body(inc)
+        with open(os.path.join(driver.soul_dir(job, inc), driver.READY), "w") as f:
+            json.dump(receipt_of(inc, loaded), f)
+        got, why = channel.own_bundle({"MOP_SOUL_DIR": bundle, "MOP_PUPPET": job})
+        c.check("#585 a verified body yields its bundle",
+                got is not None and got.digest == loaded.digest, why)
+
+        # Красное ядро: каждое нарушение -- отказ с причиной, не бандл.
+        i2 = str(uuid.uuid4())
+        b, l = body(i2)                     # расписки нет: доставка не стала
+        cases = [("no ready receipt", {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                  ("ready",))]
+        i3 = str(uuid.uuid4())
+        b, l = body(i3, receipt_of(i3, l, soul_digest="0" * 64))
+        cases.append(("wrong digest", {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                      ("soul_digest",)))
+        i4 = str(uuid.uuid4())
+        b, l = body(i4, receipt_of(i4, l, role="builder"))
+        cases.append(("wrong role", {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                      ("role",)))
+        i5 = str(uuid.uuid4())
+        b, l = body(i5, receipt_of(i5, l, soul_inc=str(uuid.uuid4())))
+        cases.append(("wrong incarnation", {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                      ("soul_inc",)))
+        # Чужой корень: всё внутренне честно, но джоб этого тела там не стоит
+        elsewhere = os.path.join(tmp, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, driver.SOUL_BUNDLE))
+        for name in os.listdir(src):
+            shutil.copy(os.path.join(src, name),
+                        os.path.join(elsewhere, driver.SOUL_BUNDLE, name))
+        le = souls.load(os.path.join(elsewhere, driver.SOUL_BUNDLE))
+        with open(os.path.join(elsewhere, driver.READY), "w") as f:
+            json.dump(receipt_of("elsewhere", le), f)
+        cases.append(("self-declared foreign root",
+                      {"MOP_SOUL_DIR": os.path.join(elsewhere, driver.SOUL_BUNDLE),
+                       "MOP_PUPPET": job},
+                      ("incarnation",)))
+        # Не раскладка published: MOP_SOUL_DIR обязан звать <root>/bundle
+        i6 = str(uuid.uuid4())
+        b, l = body(i6, receipt_of(i6, l), sub="notbundle")
+        cases.append(("not the published bundle layout",
+                      {"MOP_SOUL_DIR": b, "MOP_PUPPET": job},
+                      (f"/{driver.SOUL_BUNDLE}",)))
+        # Джоб неизвестен -- телу неоткуда знать свою инкарнацию
+        b, _ = body(str(uuid.uuid4()))
+        cases.append(("no job name", {"MOP_SOUL_DIR": b}, ()))
+
+        for name, env, words in cases:
+            got, why = channel.own_bundle(env)
+            ok = got is None and all(w in (why or "") for w in words)
+            c.check(f"#585 refused: {name}", ok, (got, why))
+
+    # Инбокс процесса: роль -- приватный префикс своих ответов, человек --
+    # мастер-инбокс шины, как прежде.
+    inbox = getattr(channel, "own_inbox", None)
+    if not c.check("#585 channel.own_inbox exists", callable(inbox)):
+        return False
+    local = f"{os.uname().nodename}-{os.getpid()}"
+    mine = channel.own_inbox(GRANT, f"{GRANT}.{local}")
+    c.expect("#585 a grant's process inbox rides its private reply prefix",
+             mine, f"{busnames.private_prefix(GRANT)}.{local}")
+    c.check("#585 it lies inside the scope the grant ACL subscribes",
+            mine.startswith(busnames.private_prefix(GRANT) + "."), mine)
+    c.check("#585 no master-shaped inbox for a grant", ".master." not in mine, mine)
+    c.expect("#585 a person keeps the master inbox",
+             channel.own_inbox("anton.ermak", f"anton%2Eermak.{local}"),
+             bus.inbox(f"anton%2Eermak.{local}"))
+
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    with open(os.path.join(here, "mop", "cli", "service", "mcp.py")) as f:
+        text = f.read()
+    c.check("#585 the MCP process inbox comes from the channel helper",
+            "MY_INBOX = channel.own_inbox(" in text)
+    return True
+
+
 def main():
     c = Checks()
 
@@ -984,6 +1118,10 @@ def main():
         check_role_api_585(c)
     except Exception as e:
         c.fail("#585 role api", f"{type(e).__name__}: {e}")
+    try:
+        check_body_binding_585(c)
+    except Exception as e:
+        c.fail("#585 body binding", f"{type(e).__name__}: {e}")
     # RESULT: красный на сегодняшнем маршруте (grant -- мастер-профиль,
     # owner/force грантом, from-name инбоксом, легаси по rpc), зелёный после.
     # Решение мастера по C5 сменило одно ожидание до реализации: инбокс
