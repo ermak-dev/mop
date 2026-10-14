@@ -38,6 +38,15 @@ def main():
     c.check("#615 whitelist removes secrets and foreign socket", "secret" not in env.values() and "TMUX" not in env)
     c.expect("#615 dummy key", env["ANTHROPIC_API_KEY"], "chat-probe-dummy-key")
     c.expect("#615 SSH blocked", env["GIT_ALLOW_PROTOCOL"], "file")
+    make_server = getattr(s, "fixture_server", None)
+    c.check("#615 fixture has bounded HTTP shutdown", callable(make_server))
+    if make_server:
+        server = make_server(s.importlib.import_module("mop.cli.server.web"))
+        try:
+            c.check("#615 browser fixture close cannot wait forever on an abandoned read",
+                    server.daemon_threads is True and server.block_on_close is False)
+        finally:
+            server.server_close()
     with tempfile.TemporaryDirectory() as directory:
         p = Path(directory) / "source.py"
         p.write_text("trusted source\n")

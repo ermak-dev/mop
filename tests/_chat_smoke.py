@@ -55,6 +55,14 @@ def parser():
     p.add_argument("--keep-serving", action="store_true")
     return p
 
+def fixture_server(handler):
+    """Свой loopback HTTP не ждёт вечно прочтения после закрытия браузера."""
+    http = handler.ThreadingHTTPServer(("127.0.0.1", 0), handler.Handler)
+    http.daemon_threads = True
+    http.block_on_close = False
+    return http
+
+
 def body_history(source, work, env, cursor=None):
     argv = [sys.executable, "-I", str(source), "history", str(work)]
     if cursor is not None:
@@ -254,8 +262,7 @@ def run(args):
         manifest = {str(p): source_hash(p) for p in files if p.is_file()}
         report["code_manifest"] = manifest
         report["runner_identity"] = probe.process_identity(os.getpid())
-        http = handler.ThreadingHTTPServer(("127.0.0.1", 0), handler.Handler)
-        http.daemon_threads = False
+        http = fixture_server(handler)
         origin = f"http://127.0.0.1:{http.server_port}"
         # Только локальная фикстура, сам origin gate не отключён.
         websession.public_origin = lambda get: origin
