@@ -88,7 +88,10 @@ an epic the operator explicitly approved.
   identity. Reply to masters with `send`; hand out work only with
   `dispatch`.
 - Grow with `mcp__mop__add` only when an approved ticket is ready and every
-  puppet is busy, within the operator's ceiling; `mcp__mop__delete` only to
+  puppet is busy, within the operator's ceiling; name the target role with
+  `role` — an unnamed add makes a legacy puppet, and a role principal must
+  name the role of what it grows (spawn allows only the parent soul's
+  roles). `mcp__mop__delete` only to
   shrink an idle pool after the last report. Reuse beats new: a warm clone
   and its context are worth keeping. Nodes and capacity are the operator's
   (`mcp__mop__node` refuses a master).

@@ -8,7 +8,11 @@ puppet isn't obliged to come back into the context it got stuck on.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
+
+A role principal updates without a client policy: the live puppet
+keeps its own approved snapshot, and the wire carries no workspace text.
 """
+
 from mop.cli import lib
 from mop.cli.core import _common
 from mop.common import bus, context, ops
@@ -40,17 +44,26 @@ def main(argv):
     if len(args) == 1 and not old:
         lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
     origin = args[1] if len(args) > 1 else old
-    text, sent = _common.workspace_text(origin)
+    # Грант-мастер (#618) политику не читает и не везет: живой папет держит
+    # свой одобренный снапшот, сервер текст от принципала отвергает (#582).
+    preserve = bus.principal() is not None
+    if not preserve:
+        text, sent = _common.workspace_text(origin)
+        workspace = (text, sent)
+    else:
+        workspace = None
     v = ops.update(bus.call_cluster, name,
                    origin=origin if len(args) > 1 else None,
-                   fresh=fresh, workspace=(text, sent),
+                   fresh=fresh, workspace=workspace,
+                   preserve_workspace=preserve,
                    force=force, login=bus.login(),
                    branch=context.current().branch, spec=spec,
                    bootstrap_wait=_common.BOOTSTRAP_WAIT)
     # Порядок прежний (#263): чью аренду прошёл force -- строкой до
     # «что уехало в bootstrap», затем итог.
     lib.note(name, v)
-    print(_common.sent_line(sent), flush=True)
+    if not preserve:
+        print(_common.sent_line(sent), flush=True)
     p = lib.Progress(name)
     try:
         return _common.render(v, p, name)

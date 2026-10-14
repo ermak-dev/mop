@@ -13,13 +13,24 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [git-origin]
+create a puppet: mop add [git-origin] [--role <role>]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>; placement over the pool and the
 8 GB reservation are not chosen here. Silent when the puppet is running; on
 a terminal it shows the current step. The new puppet is in mop list.
 Use mop models to see model IDs offered by the selected proxy.
+
+--role names the new puppet's role instead of a legacy puppet: the
+creation carries a request_id, the answer is checked against the server's
+echo of the role triple (a server without the role protocol refuses before
+anything is created). A role principal (a grant master) must name the role
+and sends no bootstrap policy of its own: the child inherits the parent's
+approved snapshot.
+
+--request-id retries an earlier unknown outcome under its id (with --role):
+the server reconciles to the job it reserved instead of creating a second
+one; a changed payload under the same id is refused before any effect.
 ```
 
 #### mop attach
@@ -183,7 +194,8 @@ recreate a puppet on a clean working copy: mop recycle <name> [--force]
 Unsaved changes are wiped by restoring from git, the target directory is
 removed entirely (the first build after a recycle is slow). The clone
 itself isn't recloned. The puppet's workspace (.mop/bootstrap.yaml) comes
-from the working copy this runs in, or from the origin elsewhere.
+from the working copy this runs in, or from the origin elsewhere. A role
+principal recycles without one: the server keeps the approved policy.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
@@ -260,6 +272,9 @@ puppet isn't obliged to come back into the context it got stuck on.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
+
+A role principal updates without a client policy: the live puppet
+keeps its own approved snapshot, and the wire carries no workspace text.
 ```
 
 #### mop wipe
