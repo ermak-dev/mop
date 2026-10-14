@@ -128,6 +128,10 @@ def check_bucket_452(c):
     c.expect("#619 the public queue row keeps its diagnosis and unplaced bucket",
              (puppets_[3]["detail"], puppets_[3]["alloc_status"], puppets_[3]["bucket"]),
              ("no free slots in the pool", "pending", "down"))
+    canonical = next(r for r in web.unified_roster(rows, {}) if r.get("name") == "pu-mop-9")
+    c.expect("#619 role-aware sessions keep the same placement reason and bucket",
+             (canonical["kind"], canonical["detail"], canonical["alloc_status"], canonical["bucket"]),
+             ("queued", "no free slots in the pool", "pending", "down"))
     # Счётчики -- по корзинам, как и раньше (#210).
     c.expect("#452 counts stay by bucket", snap[0]["counts"],
              {"puppets": 4, "free": 1, "busy": 1, "sick": 1, "silent": 0, "down": 1})

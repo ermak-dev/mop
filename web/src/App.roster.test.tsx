@@ -75,6 +75,17 @@ test("#588 canonical sessions form one roster, without a separate masters sectio
   expect(roster.getAllByText("same name")).toHaveLength(2);
 });
 
+test("#619 canonical pending session displays the placement reason", async () => {
+  pool.snapshot = { ...snapshot(), sessions: [{ ...managed("pu-sample-9", "builder"),
+    node: "-", alloc_status: "pending", kind: "queued", bucket: "down",
+    state: "queued: no free slots in the pool", detail: "no free slots in the pool" }] };
+  await mount();
+  const pending = within(screen.getByTestId("pool"));
+  expect(pending.getByText("ожидает размещения")).toBeInTheDocument();
+  expect(pending.getByText("no free slots in the pool")).toBeInTheDocument();
+  expect(pending.queryByText("поднимается")).not.toBeInTheDocument();
+});
+
 test("#588 role filter changes visible entries, not capacity counters", async () => {
   await mount();
   const counts = screen.getByTestId("chips").textContent;
