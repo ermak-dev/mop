@@ -3723,10 +3723,12 @@ def check_dev_help_433(c):
     # STATUS: FIXED — see #444
     # #484: проверки и локальный просмотр веба тоже идут через диспетчер.
     # #613: отдельный интерактивный probe добавляет ещё один обязательный глагол.
-    if not c.check("#433/#613 dev subtree: 4 groups, 25 verbs including chat probe",
+    # #615: локальный integration smoke -- самостоятельный обязательный глагол.
+    if not c.check("#433/#615 dev subtree: 4 groups, 26 verbs including chat smoke",
                    len([d for d in docs if d.endswith("__init__.py")]) == 4
                    and len([d for d in docs
-                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 25
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 26
+                   and docs.get("dev/chat-smoke.py", "").startswith("mop dev chat-smoke")
                    and docs.get("dev/chat-probe.py", "").startswith("mop dev chat-probe")
                    and docs.get("dev/bug/evidence.py", "").startswith("mop dev bug evidence")
                    and docs.get("dev/web/test.py", "").startswith("mop dev web test")
