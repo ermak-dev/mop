@@ -218,7 +218,8 @@ def check_resolve_endpoint_today(c):
         mod.activate(rec["principal"], root=root.name)
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 a principal-less node resolve returns the exact "
                 "binding state, no action verdict, no password",
                 out.get("found") is True and out.get("job") == "pu-mop-9"
@@ -234,20 +235,23 @@ def check_resolve_endpoint_today(c):
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "soul_inc": incarnation("nine"),
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 soul_inc narrows the target lookup (#590)",
                 out.get("found") is True
                 and out.get("soul_inc") == incarnation("nine"), out)
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "soul_inc": incarnation("nope"),
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 an unknown incarnation misses the target",
                 out.get("found") is False, out)
         mod.revoke(rec["principal"], root=root.name)
         out = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
                                              "_caller": "node-pve1"},
-                                     root=root.name)
+                                     root=root.name,
+                                     assigned=lambda name: "pve1")
         c.check("#581 a revoked target carries its revoked_at, "
                 "the node judges",
                 out.get("found") is True and out.get("active") is False
@@ -837,10 +841,11 @@ def check_issue(c):
     reply_ok = f"{busnames.private_prefix(node)}.abc123"
     # Meta по имени: ролевая тройка -- только у связанного имени; чужое
     # имя (легаси-путь ниже) -- меты без тройки, как живой легаси-джоб.
+    # Origin -- проекта маршрута: сервер пишет его при регистрации (#581).
     jobs_ok = lambda name: (
-        JobMeta(None, None, None, "puppet", PUPPET_DIGEST,
-                incarnation("nine")) if name == "pu-mop-9"
-        else JobMeta(None, None))
+        JobMeta("git@gitlab:mop/mop.git", None, None, "puppet",
+                PUPPET_DIGEST, incarnation("nine"))
+        if name == "pu-mop-9" else JobMeta(None, None))
     assigned_ok = lambda name: "pve1"
     played = []
     ok_play = (lambda req, project, **kw: (played.append(req),
@@ -1300,8 +1305,11 @@ def check_strict_meta_581(c):
     reply_ok = f"{busnames.private_prefix(node)}.abc123"
     req = {"verb": "bootstrap", "name": "pu-mop-9", "address": "10.0.0.1",
            "_caller": node, "_reply": reply_ok}
-    # Тройка фактической Meta: та, что в реестре.
-    meta_ok = JobMeta(None, None, None, "puppet", PUPPET_DIGEST,
+    # Тройка фактической Meta: та, что в реестре. Origin -- проекта
+    # маршрута: сервер пишет его при регистрации, без него тройка --
+    # сломанная запись (#581).
+    origin = "git@gitlab:mop/mop.git"
+    meta_ok = JobMeta(origin, None, None, "puppet", PUPPET_DIGEST,
                       incarnation("nine"))
     plays = []
 
@@ -1361,13 +1369,34 @@ def check_strict_meta_581(c):
         # 5. Чужая тройка (роль/дайджест другой) -- привязка не та:
         #    совпадение (project, job, inc) без роли и дайджеста --
         #    чужая душа.
-        other = JobMeta(None, None, None, "master", MASTER_DIGEST,
+        other = JobMeta(origin, None, None, "master", MASTER_DIGEST,
                         incarnation("nine"))
         with patched(bootstrap, _job_meta=lambda name: other, **base_patch):
             alien = bootstrap.answer("mop", dict(req))
         c.check("#581 a Meta triple of another role or digest does not "
                 "match the binding",
                 bool(alien.get("error")) and "bus" not in alien, alien)
+        # 5a. HYPOTHESIS (#581, ревью проектов): ворота сверяли тройку,
+        # но не ФАКТИЧЕСКИЙ проект Meta: та же тройка на чужом origin
+        # проходит именем -- project_of(origin) иного проекта не равен
+        # проекту маршрута, а привязка выбиралась по имени джоба.
+        # SOLUTION: проект тройки обязан быть проектом маршрута И
+        # проектом привязки; тройка без origin -- сломанная запись
+        # новой роли, не «как раньше».
+        foreign = JobMeta("git@gitlab:other/other.git", None, None,
+                          "puppet", PUPPET_DIGEST, incarnation("nine"))
+        with patched(bootstrap, _job_meta=lambda name: foreign, **base_patch):
+            away = bootstrap.answer("mop", dict(req))
+        c.check("#581 a role triple on a foreign origin is refused",
+                bool(away.get("error")) and "bus" not in away
+                and "soul" not in away, away)
+        naked = JobMeta(None, None, None, "puppet", PUPPET_DIGEST,
+                        incarnation("nine"))
+        with patched(bootstrap, _job_meta=lambda name: naked, **base_patch):
+            originless = bootstrap.answer("mop", dict(req))
+        c.check("#581 a role triple without an origin is refused",
+                bool(originless.get("error")) and "bus" not in originless
+                and "soul" not in originless, originless)
         # 6. Владелец в ответе -- ровно {login, name, email}: никакие
         #    лишние поля провайдера не едут в тело.
         with patched(bootstrap, _job_meta=lambda name: meta_ok, **base_patch):
@@ -1406,7 +1435,7 @@ def check_strict_meta_581(c):
             import shutil as _sh
             _sh.rmtree(os.path.join(root2.name, "bundles"),
                        ignore_errors=True)
-            meta2 = JobMeta(None, None, None, "puppet", PUPPET_DIGEST,
+            meta2 = JobMeta(origin, None, None, "puppet", PUPPET_DIGEST,
                             incarnation("nine2"))
             with patched(bootstrap, _job_meta=lambda name: meta2,
                          play=ok_play, ROOT=root.name,
@@ -1454,6 +1483,130 @@ def check_target_node_581(c):
                 "the alien node, no state",
                 alien.get("found") is False and "role" not in alien
                 and "soul_inc" not in alien and "owner" not in alien, alien)
+        # HYPOTHESIS (#581, ревью назначения): старая калитка пускала
+        # состояние дальше, когда сверка назначения НЕ ОТВЕТИЛА -- where
+        # None обходил сравнение: «не знаем, чей джоб -- значит читай».
+        # Nomad, промолчавший про аллокацию, раскрывал чужую привязку.
+        # SOLUTION: fail closed -- назначение обязано быть известным и
+        # ровно узлу вызывающего; неизвестно или сбой -- «не найдено»,
+        # сбой -- с причиной. Гейт накрывает ВСЕ найденные состояния:
+        # отозванная/неактивная цель соседнему узлу тоже не течёт.
+        blind = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                               "_caller": "node-pve1"},
+                                       root=root.name,
+                                       assigned=lambda name: None)
+        c.check("#581 an unknown assignment hides the target even from "
+                "its likely owner",
+                blind.get("found") is False and "role" not in blind, blind)
+
+        def broken(name):
+            raise ConnectionError("Nomad unreachable")
+
+        err = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                             "_caller": "node-pve1"},
+                                     root=root.name, assigned=broken)
+        c.check("#581 a failing assignment lookup fails closed "
+                "with its reason",
+                err.get("found") is False
+                and "Nomad unreachable" in (err.get("reason") or "")
+                and "role" not in err and "owner" not in err, err)
+        mod.revoke(rec["principal"], root=root.name)
+        alien2 = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                                "_caller": "node-pve2"},
+                                        root=root.name,
+                                        assigned=lambda name: "pve1")
+        c.check("#581 a revoked target leaks no state to an alien node",
+                alien2.get("found") is False and "role" not in alien2
+                and "soul_inc" not in alien2 and "owner" not in alien2
+                and "revoked_at" not in alien2, alien2)
+        own2 = bootstrap.resolve_soul("mop", {"target": "pu-mop-9",
+                                              "_caller": "node-pve1"},
+                                      root=root.name,
+                                      assigned=lambda name: "pve1")
+        c.check("#581 the owning node still reads the revoked target state",
+                own2.get("found") is True and own2.get("active") is False
+                and own2.get("revoked_at"), own2)
+
+
+def check_bundle_integrity_581(c):
+    """HYPOTHESIS (#581, ревью авторитета): resolve/_target_flag/spawn_of/
+    permissions читают бандл сырым bundle() -- словарь manifest.json без
+    сверки digest и схемы: подмени manifest.json на диске (или промпт) под
+    СТАРЫМ digest'ом в реестре -- и вердикты глаголов, список подъёма и
+    ACL рендерятся из изменённых байтов, которых регистрация не
+    закрепляла. Проверка бандла была только на старте (load_bundle в
+    bootstrap), авторитет -- без неё.
+    SOLUTION: один валидированный путь для каждого читателя авторитета:
+    load_bundle (soul.from_manifest + сверка digest), отказ -- ValueError
+    с причиной; изменённые байты под закреплённым digest'ом режут
+    авторитет (вердикт allow:False, spawn (), ACL без субъектов роли),
+    а не расширяют его. Промпт тоже входит в digest: изменённый промпт
+    -- тот же отказ.
+    RESULT: подмена manifest.json (лишние глаголы, чужой spawn) и промпта
+    оставляет resolve отказом с причиной, spawn_of пустым, permissions
+    без ролевых субъектов; восстановленный бандл возвращает всё.
+    STATUS: RED — see #581"""
+    mod = grants(c)
+    if mod is None:
+        return
+    root, rec = prepared(c, mod, role=MASTER, request_id="req-int",
+                         soul_inc=incarnation("int"))
+    principal = rec["principal"]
+    manifest_path = os.path.join(root.name, "bundles", MASTER_DIGEST,
+                                 "manifest.json")
+    prompt_path = os.path.join(root.name, "bundles", MASTER_DIGEST, "soul.md")
+    # Расширяем роли подсунутые байты: глагол вне закреплённого списка
+    # и spawn чужой души -- то, что регистрация не подписывала.
+    altered = json.loads(json.dumps(MASTER))
+    altered["capabilities"]["cluster_verbs"] = ["roster", "add", "stop"]
+    altered["capabilities"]["spawn"] = ["puppet", "builder", "master"]
+    with root:
+        mod.activate(principal, root=root.name)
+        # Сначала -- честный вердикт: бандл на месте.
+        honest = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 authority reads the pinned bundle before tampering",
+                honest.get("allow") is True and honest.get("role") == "master",
+                honest)
+        with open(manifest_path, "w") as f:
+            json.dump(altered, f)
+        # 1. resolve: подменённый манифест не расширяет глаголы.
+        got = mod.resolve(principal, "cluster", "stop", root=root.name)
+        c.check("#581 an altered manifest does not widen resolve verbs",
+                got.get("allow") is False and "digest" in
+                (got.get("reason") or "").lower(), got)
+        # Закреплённый глагол тоже умирает: авторитет не собирается из
+        # байтов, которые не сверены, -- даже «старых» вердиктов нет.
+        got = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 an altered manifest refuses even pinned verbs",
+                got.get("allow") is False and "digest" in
+                (got.get("reason") or "").lower(), got)
+        # 2. spawn_of: чужой spawn не появляется.
+        c.check("#581 an altered manifest does not widen spawn",
+                mod.spawn_of(principal, root=root.name) == (),
+                mod.spawn_of(principal, root=root.name))
+        # 3. permissions: субъекты роли не рендерятся из изменённых байтов.
+        perms = mod.permissions(principal, rec, root=root.name)
+        c.check("#581 an altered manifest renders no role subjects",
+                (perms.get("publish") or [])
+                == [busnames.private_prefix(principal) + ".*"], perms)
+        # 4. Промпт входит в digest: изменённый промпт -- тот же отказ.
+        with open(manifest_path, "w") as f:
+            json.dump(MASTER, f)
+        with open(prompt_path, "wb") as f:
+            f.write(b"# tampered prompt\n")
+        got = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 an altered prompt refuses the same as the manifest",
+                got.get("allow") is False and "digest" in
+                (got.get("reason") or "").lower(), got)
+        c.check("#581 an altered prompt empties spawn",
+                mod.spawn_of(principal, root=root.name) == (),
+                mod.spawn_of(principal, root=root.name))
+        # 5. Восстановленный бандл возвращает авторитет.
+        with open(prompt_path, "wb") as f:
+            f.write(MASTER_PROMPT)
+        got = mod.resolve(principal, "cluster", "roster", root=root.name)
+        c.check("#581 a restored bundle restores the authority verdict",
+                got.get("allow") is True, got)
 
 
 def check_registry_liveness_581(c):
@@ -1605,7 +1758,7 @@ def main():
                check_permissions,
                check_provider, check_concurrency, check_parallel_requests,
                check_strict_meta_581, check_target_node_581,
-               check_registry_liveness_581):
+               check_bundle_integrity_581, check_registry_liveness_581):
         try:
             fn(c)
         except Exception as e:

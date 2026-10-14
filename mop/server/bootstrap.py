@@ -335,7 +335,10 @@ def role_gates(name, caller, reply, project, root=None, jobs=None,
     soul_inc), и привязка обязана совпасть по ВСЕЙ тройке и проекту.
     by_job(None) выбрал бы любую живую привязку имени -- молча, мимо
     факта, который пишет в Nomad сам сервер; пустая Meta (Nomad молчит
-    или битый джоб) -- громкий отказ, не «не роль»."""
+    или битый джоб) -- громкий отказ, не «не роль». Проект -- из origin
+    ФАКТИЧЕСКОЙ Meta: та же тройка на чужом origin -- запись чужого
+    проекта, и имени джоба мало: тройка без origin -- сломанная запись
+    новой роли. Легаси-мета (без тройки) живёт прежним путём."""
     from . import grants
     node = _node_of(caller)
     if node is None:
@@ -352,6 +355,12 @@ def role_gates(name, caller, reply, project, root=None, jobs=None,
             f"soul_digest, soul_inc) -- the server writes it at "
             f"registration, and its absence is a broken job, not a "
             f"legacy one")
+    if not meta.origin or meta.project != project:
+        raise ValueError(
+            f"{name}: the role triple rides the origin {meta.origin!r} "
+            f"of project {meta.project!r}, not {project!r} -- the server "
+            f"writes the origin at registration, and a triple without "
+            f"its project's origin is a broken job")
     rec = grants.by_job(project, name, soul_inc=meta.soul_inc, root=root)
     if rec is None or not rec.get("active") or rec.get("revoked_at") \
             or rec.get("role") != meta.soul \
@@ -785,7 +794,12 @@ def resolve_soul(project, req, root=None, assigned=None):
     Режим только-цели сверяет НАЗНАЧЕНИЕ (#581): узел спрашивает о чужой
     цели -- сервер смотрит узел последней аллокации джоба (assigned --
     шов проверок) и не раскрывает состояние узлу-не-хозяину: авторитет
-    старта -- Nomad, и чужое состояние соседнему узлу не нужно."""
+    старта -- Nomad, и чужое состояние соседнему узлу не нужно. Сверка
+    обязана ОТВЕТИТЬ именем узла (fail closed): молчаливый Nomad и сбой
+    сверки -- «не найдено», с причиной сбоя -- узел-хозяин переспросит,
+    а соседний не прочитает. Гейт накрывает ВСЕ найденные состояния:
+    отозванная или неподтверждённая цель соседнему узлу -- тоже факт
+    проекта, не «мертва -- значит можно»."""
     from . import grants
     if not _node_caller(req):
         return {"allow": False,
@@ -794,9 +808,19 @@ def resolve_soul(project, req, root=None, assigned=None):
     if not req.get("principal"):
         out = grants.describe_target(project, req.get("target") or "",
                                      soul_inc=req.get("soul_inc"), root=root)
-        if out.get("found") and out.get("active"):
-            where = (assigned or _assigned_node)(out.get("job"))
-            if where and _node_of(req.get("_caller") or "") != where:
+        if out.get("found"):
+            try:
+                where = (assigned or _assigned_node)(out.get("job"))
+            except Exception as e:
+                return {"found": False,
+                        "reason": f"{out.get('job')}: the assignment lookup "
+                                  f"failed: {e}"}
+            if not where:
+                return {"found": False,
+                        "reason": f"{out.get('job')}: Nomad names no node "
+                                  f"for the job -- the assignment decides "
+                                  f"who may read the state"}
+            if _node_of(req.get("_caller") or "") != where:
                 return {"found": False}
         return out
     return grants.resolve(req.get("principal"),
