@@ -29,7 +29,25 @@ def project_from_subject(subject):
 NOT_AN_OBJECT = "request is not a JSON object"
 
 
-async def answer(name, project, data, handler, journal, log, send, caller=None):
+def trusted(req, caller):
+    """Тело запроса без каркасных ключей, с проверенным вызывающим (#580).
+
+    Ключ с '_' -- каркасный: его ставит каркас поверх тела (сегодня это
+    _caller из субъекта #207 и _project узлового агента), и тело его не
+    пишет. Решение «какой ключ каркасный» -- одно на всех, по префиксу:
+    каждый следующий каркасный ключ (грант роли, актёр) не обязан помнить о
+    своей подделке. -> новый словарь: поданный не меняется; проверенный
+    логин кладётся ключом _caller, пустой -- не кладётся вовсе, как на
+    прежнем субъекте. Узловой агент зовёт того же помощника (#584), а не
+    свою копию рамки."""
+    body = {k: v for k, v in req.items() if not k.startswith("_")}
+    if caller:
+        body["_caller"] = caller
+    return body
+
+
+async def answer(name, project, data, handler, journal, log, send, caller=None,
+                  reply=None, subject=None):
     """Ответ на одно сообщение -> dict; строки журнала -- в log.
 
     Ответ есть всегда (#162). Раньше обработчик, бросивший вне своего try
@@ -42,9 +60,17 @@ async def answer(name, project, data, handler, journal, log, send, caller=None):
     (сборщик, bus.ask_stream) узнаёт итог только по нему -- без done причина
     ушла бы в таймаут тишины.
 
-    caller -- логин из субъекта (#207): кладётся в req["_caller"] поверх
-    тела; на прежнем субъекте ключ снимается -- тело его не подделает, а
-    запрос обработчику тот же, что до #207."""
+    caller -- логин из субъекта (#207). Тело до обработчика проходит через
+    trusted (#580): все каркасные ключи ('_') снимаются, проверенный логин
+    кладётся поверх -- тело его не подделает, и не только его.
+
+    reply/subject (#603) -- транспортные факты: настоящий reply-субъект
+    NATS и субъект запроса, как их видит подписчик. Ставятся тем же ходом,
+    что _caller, -- ПОСЛЕ trusted(), поверх снятых: тело не подделает ни
+    вызывающего, ни адрес ответа. None (прямой вызов проверок) -- прежнее
+    поведение, ключей нет. Это факты транспорта, не политики: значение --
+    как есть, решение по нему -- у обработчика (#581 отличает грант на
+    cluster.role от самовольного легаси cluster.rpc по _subject)."""
     try:
         req = json.loads(data.decode())
     except ValueError:
@@ -52,9 +78,11 @@ async def answer(name, project, data, handler, journal, log, send, caller=None):
     if not isinstance(req, dict):
         req, out = {}, {"error": NOT_AN_OBJECT, "done": True}
     else:
-        req.pop("_caller", None)
-        if caller:
-            req["_caller"] = caller
+        req = trusted(req, caller)
+        if reply is not None:
+            req["_reply"] = reply
+        if subject is not None:
+            req["_subject"] = subject
         try:
             out = await asyncio.get_running_loop().run_in_executor(
                 None, handler, project, req, send)
@@ -88,7 +116,8 @@ async def serve(name, subject, handler, log, journal, banner):
 
         out = await answer(name, project_from_subject(msg.subject), msg.data,
                            handler, journal, log, send,
-                           caller=busnames.caller(msg.subject))
+                           caller=busnames.caller(msg.subject),
+                           reply=msg.reply or None, subject=msg.subject)
         try:
             await msg.respond(json.dumps(out, ensure_ascii=False).encode())
         except Exception:

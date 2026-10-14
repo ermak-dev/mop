@@ -22,4 +22,6 @@ include = ["mop", "mop.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-mop = ["skills/master/*"]
+# Каталог ролей пакета (#580): каждый каталог роли -- soul.yaml и промпт
+# (docs/SOUL.md), не один файл скилла мастера (#351).
+mop = ["skills/*/*"]

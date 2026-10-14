@@ -14,7 +14,7 @@ import { PoolTable } from "./components/PoolTable";
 import { PuppetCard } from "./components/PuppetCard";
 import { AddBox } from "./components/AddBox";
 import { NodesPanel } from "./components/NodesPanel";
-import { Masters } from "./components/Masters";
+import { roster } from "./roster";
 import { JournalPage } from "./components/JournalPage";
 import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
@@ -108,6 +108,8 @@ export default function App() {
     }
   };
   const onJournal = page === "journal";
+  const puppetRole = snapshot ? roster(snapshot.projects, snapshot.sessions, snapshot.masters)
+    .find((entry) => entry.source === "managed" && entry.name === puppet)?.role : null;
   return (
     <Container size="xl" pt="md" pb="md">
       <Stack gap="md">
@@ -144,13 +146,12 @@ export default function App() {
           <AddBox session={session} />
           {snapshot && (
             <>
-              <PoolTable projects={snapshot.projects} session={session}
+              <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
+                         masters={snapshot.masters} session={session}
                          onOpen={session.role === "admin" ? setPuppet : undefined} />
-              <PuppetCard session={session}
+              <PuppetCard session={session} role={puppetRole}
                           target={session.role === "admin" ? puppet : null}
                           onClose={closePuppet} />
-              {/* живые мастера (#305) */}
-              <Masters masters={snapshot.masters} every={snapshot.masters_every} />
               <NodesPanel nodes={snapshot.nodes} />
               {/* расход (#299) */}
               <UsageChart days={snapshot.usage} />

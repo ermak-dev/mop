@@ -4,10 +4,13 @@
 тянуть за собой незачем."""
 import json
 import os
+import shlex
 import time
 
+from mop import driver
 from mop.cli import lib
 from mop.common import bus, busnames, config, creds, llm, manifest, ops, puppets
+from mop.common.domain import Alloc
 
 
 def workspace_text(origin):
@@ -341,3 +344,21 @@ def feedback_fd(value):
     os.lseek(fd, 0, 0)
     os.set_inheritable(fd, True)
     return f"/proc/self/fd/{fd}", fd
+
+
+def attach_argv(name):
+    """Терминал на папета -> argv ssh (#586): один на `mop attach` и
+    лаунчер ролей, чтобы вход в тело не расходился двумя копиями. Идёт по
+    ssh, а не по шине: живой терминал глаголом шины не отдают.
+    LookupError -- папет не бежит (puppets.running)."""
+    a, node_driver = puppets.running(name)
+    node = Alloc.from_dict(a).node
+    # Чем входят в тело, знает драйвер узла: у host это сразу tmux, у
+    # контейнерного -- ещё один ssh внутрь. Драйвер приезжает вместе с
+    # аллокацией (глагол `alloc`), вторым запросом за ним не ходим; узел,
+    # ничего о драйвере не сказавший, ведёт себя как раньше.
+    d = driver.module(driver.of_node({"mop_driver": node_driver}, node))
+    inside = " ".join(shlex.quote(x) for x in d.attach_argv(name))
+    # Имя узла в Nomad -- имя из инвентаря, а инвентарь берёт способ
+    # дозвона из ~/.ssh/config по тому же имени. Таблицы имён между ними нет.
+    return ["ssh", "-t", node, inside]

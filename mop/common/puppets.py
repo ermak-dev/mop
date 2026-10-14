@@ -244,6 +244,22 @@ def owner_of(facts, now):
     return owner.user if lease.live(owner, clone, now) else None
 
 
+def _mop_soul(job):
+    """Факт MopSoul джоба -> receives_dispatch | None (#603). Чистая.
+
+    Поля MopSoul пишет сервер (#582), ростер их только везёт: не словарь
+    или не-bool -- ValueError с именем поля, а не молчаливое «не цель».
+    Легаси-джоб без поля -- None, и провод не меняется вовсе."""
+    got = (job or {}).get("MopSoul")
+    if got is None:
+        return None
+    if not isinstance(got, dict) \
+            or not isinstance(got.get("receives_dispatch"), bool):
+        raise ValueError(f"job MopSoul={got!r}: a mapping with boolean "
+                         "receives_dispatch")
+    return got["receives_dispatch"]
+
+
 def rows_from(items):
     """Строки без обмера из ростера."""
     return [_row(i) for i in items]
@@ -276,6 +292,11 @@ def _row(item, disk_kb=None):
         detail, branch = item["gave_up"], None
     return PuppetRow(
         name=job["ID"],
+        # Факт сервера (#603): цель dispatch -- из поля джоба MopSoul, как
+        # его пишет регистрация ролей (#582). Форма проверяется громко --
+        # мусорное поле читалось бы ростером как «не цель», -- политика
+        # здесь не живёт: значение сервера едут как есть.
+        receives_dispatch=_mop_soul(job),
         node=alloc.node if alloc else None,
         alloc_status=status,
         state=state,
@@ -290,6 +311,11 @@ def _row(item, disk_kb=None):
         branch=branch,
         # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
         origin=meta.origin,
+        # Тройка роли (#580) -- из той же меты, целиком или никак (JobMeta):
+        # ростер (#587) и дашборд читают роль, не перечитывая Meta сам.
+        soul=meta.soul,
+        soul_digest=meta.soul_digest,
+        soul_inc=meta.soul_inc,
         disk_kb=disk_kb,
     )
 

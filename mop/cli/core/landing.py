@@ -18,7 +18,7 @@ from mop.common import bus, landing, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"args": [
+MCP = {"node_verbs": [], "cluster_verbs": ["landing"], "args": [
     {"name": "action", "type": "string", "help": "take, give or show; show by default"},
     {"name": "puppet", "type": "string", "help": "for take: the puppet that lands, pu-<project>-<n>"},
     {"name": "force", "type": "boolean", "flag": "--force",

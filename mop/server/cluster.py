@@ -34,9 +34,9 @@ import time
 import base64
 
 from .. import driver
-from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
+from . import bootstrap, grants, natsconf, nodes, nomad, proxykey, spec
 from ..common import (bus, busnames, config, creds, domain, fsutil, landing, lease, llm, paths,
-                      project_secrets, projects, puppets, service, state)
+                      project_secrets, projects, puppets, service, soul, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
 # Nomad за интерфейсом (#275): глаголы читают его через _api(), а не модуль
@@ -182,6 +182,23 @@ def task_and_reason(alloc):
     return task, reason
 
 
+def _with_soul(j):
+    """Джоб с проекцией роли (#582, для autopick #585): MopSoul.
+    receives_dispatch читается из ЗАКРЕПЛЁННОГО бандла -- не из
+    самодекларации джоба: Meta говорит, КТО это, бандл -- ЧТО ему можно.
+    Бандл потерян -- поля нет: autopick такого не выбирает (fail closed),
+    легаси-джоб -- тоже без поля."""
+    try:
+        got = spec.pinned_bundle(j["Meta"].get("soul"),
+                                 j["Meta"].get("soul_digest"))
+        if got is not None:
+            return {**j, "MopSoul": {
+                "receives_dispatch": got.manifest.runtime.receives_dispatch}}
+    except Exception:
+        pass
+    return j
+
+
 def nomad_items(project=None, stale=False):
     """Ростер из Nomad: джоб плюс его аллокация. Тоже только сервис кластера.
 
@@ -198,7 +215,8 @@ def nomad_items(project=None, stale=False):
                 task, reason = task_and_reason(got)
         except Exception as e:
             err = nomad.describe_error(e)
-        item = {"job": j, "alloc": alloc, "error": err, "task": task, "reason": reason}
+        item = {"job": _with_soul(j), "alloc": alloc, "error": err,
+                "task": task, "reason": reason}
         # Сдавшийся bootstrap (#345): джоб остановлен, аллокации может не
         # быть вовсе -- причина из записи итога на этом же сервере.
         gave_up = bootstrap.gave_up_of(bootstrap.ROOT, j["ID"])
@@ -236,9 +254,30 @@ def _placement_nodes():
     return [dict(n, meta=metas.get(n["name"], {})) for n in nomad_pool()]
 
 
-def next_name(project):
+def _reserved_names(project):
+    """Имена, занятые резервами грантов ДО Nomad (#582). -> {job}.
+
+    Nomad не видит подвисшего резерва (prepare доехал, регистрация нет),
+    и next_name по одним его джобам отдал бы это имя второй заявке:
+    ретрай первого затёр бы имя и закреплённую политику. Реестр -- та же
+    правда об имени, что и Nomad; отозванный резерв имени не держит --
+    его принципал мёртв, имя свободно. Битый реестр -- громкий отказ
+    _read: тихий пустой список здесь означал бы «Nomad единственная
+    правда» именно в тот момент, когда он правдой быть перестал."""
+    reg = grants._read(SOUL_ROOT)
+    return {rec.get("job") for rec in reg.values()
+            if rec.get("project") == project and rec.get("job")
+            and not rec.get("revoked_at")}
+
+
+def next_name(project, reserving=False):
+    """Следующее свободное имя папета проекта. reserving=True -- заявка
+    роли: имя обязано не пересекаться и с резервами грантов (#582),
+    не только с джобами Nomad."""
     prefix = puppets.JOB_PREFIX
     taken = {j["ID"] for j in _api().get_jobs(f"{prefix}{project}-")}
+    if reserving:
+        taken |= _reserved_names(project)
     n = 1
     while f"{prefix}{project}-{n}" in taken:
         n += 1
@@ -296,9 +335,15 @@ def _ping(project, req):
         cluster_ok, why = True, None
     except Exception as e:
         seen, cluster_ok, why = 0, False, nomad.describe_error(e)
-    return {"ok": True, "nomad": nomad.ADDR, "reachable": cluster_ok,
-            "nodes": seen, "error": why, "project": project,
-            "verbs": list(VERBS)}
+    out = {"ok": True, "nomad": nomad.ADDR, "reachable": cluster_ok,
+           "nodes": seen, "error": why, "project": project,
+           "verbs": list(VERBS)}
+    # Роль-протокол (#582) объявляется ТОЛЬКО включённым сервером: старый
+    # или полусобранный молчит, и клиент зовёт легаси-путь, не надеясь на
+    # request_id, которого тут нет.
+    if config.get("MOP_SOUL_ROLES"):
+        out["soul_protocol"] = {"version": soul.VERSION, "request_id": True}
+    return out
 
 
 def _live_count(target):
@@ -385,8 +430,219 @@ def _gated(fn):
     return run
 
 
+# ─── роль: завод души на сервере (#582, docs/SOUL.md #579) ────────────────
+# Корень реестра привязок -- тот же приватный каталог, что у grants (их
+# дефолты равны: grants.STORE рядом с кредами папетов); свой провод, чтобы
+# проверки подменяли одно место. Каталог ролей -- поставляемые пресеты
+# пакета: имя роли клиент называет, бандл читает сервер.
+SOUL_ROOT = os.path.join(os.path.dirname(bootstrap.PUPPET_CREDS), grants.STORE)
+SOUL_CATALOGUE = (os.path.join(config.PROJECT, "mop", "skills"),)
+
+
+
+
+class _Launch:
+    """Завод роли одним объектом: бандл (каталог свежего запуска, хранилище
+    резерва -- у ретрая, #582) плюс запись резерва ретрая."""
+
+    def __init__(self, role, bundle, request_id, record=None):
+        self.role = role
+        self.bundle = bundle
+        self.request_id = request_id
+        self.record = record
+
+    def intent(self, req):
+        """Интент резерва (#581): цель запуска, ретрай сверяет по нему
+        полезную нагрузку -- «похожий» запуск с другой веткой другой и
+        есть. Workspace -- часть интента (#582, блокатор ревью): без него
+        «тот же запрос» с другим текстом не различим вовсе, и конфликтный
+        реплей затирал закреплённые файлы до отказа prepare."""
+        ws = req.get("workspace")
+        text = "" if ws is None else str(ws)
+        return f"add {req.get('origin')}@{req.get('branch') or ''} ws={len(text)}:{self._ws_hash(text)}"
+
+    @staticmethod
+    def _ws_hash(text):
+        import hashlib
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def project_of(self, req):
+        """Проект заявки по origin -- тем же правилом, что и ворота."""
+        return puppets.project_of(req.get("origin") or "")
+
+    def triple(self, soul_inc):
+        return {"soul": self.role, "soul_digest": self.bundle.digest,
+                "soul_inc": soul_inc}
+
+
+def _delegated(project, req, ctx):
+    """Делегированный add по каналу роли (#582/#603): принципал
+    поднимает ребёнка сам, сервер выбирает всё остальное. Границы:
+
+    - авторизация -- УЖЕ швом authorize_request (#581) в _answer: субъект
+      проверен busnames.cluster, глагол -- свежим resolve, контекст шва
+      (actor/owner/job/spawn) -- единственная правда о родителе; здесь
+      своих чтений реестра НЕТ: второе чтение -- вторая правда;
+    - роль цели -- по списку spawn КОНТЕКСТА шва (fail closed);
+    - клиентский workspace/bootstrap_sent -- отказ ДО всего: грант не
+      грузит текст и не создаёт легаси-ребёнка без души (omitting soul --
+      обход роли, не легаси-путь);
+    - политика ребёнка -- унаследованный СОГЛАСОВАННЫЙ снапшот родителя
+      (bootstrap.copy_approval, хранилище по имени папета #133),
+      закреплённый резервом до Nomad: ретрай наследует то, что закрепила
+      первая попытка, а не свежую политику;
+    - происхождение -- actor в записи гранта, владелец остаётся
+      человеком-хозяином родителя: актёр не открывает путь загрузки.
+
+    -> ответ словарем; None здесь невозможен (ветка только add)."""
+    caller = ctx["actor"]
+    if req.get("verb") != "add":
+        return {"error": f"{caller}: the role channel carries the add "
+                         f"verb only in this protocol version (#582)"}
+    if "workspace" in req or "bootstrap_sent" in req:
+        return {"error": f"{caller}: a delegated add takes no client "
+                         f"workspace text: the child inherits the parent's "
+                         f"approved bootstrap (#582)"}
+    # Граница проекта -- для всех актёров (#567): легаси-путь держит её
+    # refusal(add), делегированная ветка идёт мимо -- тот же вопрос здесь.
+    why = _foreign_origin(project, req.get("origin"))
+    if why:
+        return {"error": f"{caller}: {why}"}
+    if req.get("soul") not in ctx["spawn"]:
+        return {"error": f"{caller}: the role {req.get('soul')} is not in "
+                         f"its parent's spawn allowlist "
+                         f"({', '.join(ctx['spawn']) or 'none'}); spawn is "
+                         f"the parent soul's, not the caller's to choose "
+                         f"(#582)"}
+    # Дальше -- путь _add с маркером делегирования: тот держит ворота
+    # проекта, резерв и активацию, здесь только граница источника.
+    # Родитель и хозяин -- из контекста шва: он читал реестр, мы -- нет.
+    req = {**req, "_delegated_by": caller,
+           "_parent_job": ctx["job"],
+           "_owner": ctx["owner"] or project}
+    return _add(project, req)
+
+
+def _role_launch(req):
+    """Путь роли глагола add (#582). -> None (легаси: полей роли нет) |
+    _Launch | {"error": ...}. Источник бандла -- каталог сервера: клиент
+    называет имя роли, digest и инкарнацию выбирает сервер, и попытка их
+    подложить -- отказ до ворот проекта. Выключенная настройка закрывает
+    путь роли целиком: полусобранный сервер протокол не рекламирует."""
+    if not any(k in req for k in ("soul", "soul_digest", "soul_inc")):
+        return None
+    if not config.get("MOP_SOUL_ROLES"):
+        return {"error": "soul roles are off on this server "
+                         "(MOP_SOUL_ROLES empty): the legacy add only"}
+    if "soul_digest" in req or "soul_inc" in req:
+        return {"error": "add takes a role name, not a digest or an "
+                         "incarnation: the server pins both (#579)"}
+    if not req.get("request_id"):
+        return {"error": "a role add needs a request_id: retries reconcile "
+                         "the reserved principal instead of breeding a "
+                         "second one (#579)"}
+    name = req.get("soul")
+    # Ретрай смотрит реестр ДО выбора имени/инкарнации (#581 by_request):
+    # неопределённый исход прошлой попытки поднимает сохранённые, а не
+    # заводит вторую душу. Дубль request_id в реестре -- отказ от grants.
+    try:
+        record = grants.by_request(req["request_id"], root=SOUL_ROOT)
+    except ValueError as e:
+        return {"error": f"soul add: {e}"}
+    # Бандл ретрая -- ИЗ РЕЗЕРВА (#582, блокатор ревью): роль может уже
+    # уйти из каталога, а бандл резерва живёт в хранилище write-once --
+    # ретрай поднимает то, что закрепила первая попытка. Свежий запуск
+    # бандл берёт из каталога: клиент называет имя, digest выбирает
+    # сервер, и попытка подложить digest/inc -- отказ до ворот проекта.
+    bundle = None
+    if record is not None:
+        if record.get("role") != name:
+            return {"error": f"request {req['request_id']} is already "
+                             f"prepared with a different role: "
+                             f"{record.get('role')!r} reserved, {name!r} "
+                             f"in this replay (#582)"}
+        got = grants.bundle(record.get("soul_digest"), root=SOUL_ROOT)
+        if got is not None:
+            bundle = soul.from_manifest(got["manifest"], got["prompt"])
+    if bundle is None:
+        try:
+            roles = soul.catalogue(SOUL_CATALOGUE)
+            bundle = soul.load(roles[name]) if name in roles else None
+        except ValueError as e:
+            return {"error": f"soul catalogue: {e}"}
+        if bundle is None:
+            return {"error": f"no role {name} in the catalogue; available: "
+                             f"{', '.join(sorted(roles)) or 'none'}"}
+    return _Launch(name, bundle, req["request_id"], record)
+
+
+def _replay_conflict(req, launch):
+    """Почему реплей конфликтен с резервом (#582). -> отказ | None.
+
+    Свой резерв (тот же request_id) -- та же полезная нагрузка или её
+    нет вовсе: сверяются owner/project/actor/role и интент С workspace
+    (--66: прежний интент origin@branch не связывал текст, и «тот же
+    запрос» с другим текстом проходил до файлов). Чужой резерв на этом
+    имени -- _reserved_taken. Вызов ДО side effects: конфликтный реплей
+    не должен затирать закреплённые файлы до отказа prepare."""
+    rec = launch.record
+    if not rec:
+        return None
+    who, verified = lease.caller(req)
+    delegated = req.get("_delegated_by")
+    want = {"owner": rec.get("owner"),
+            "project": rec.get("project"),
+            "actor": rec.get("actor") or None,
+            "role": rec.get("role"), "soul_digest": rec.get("soul_digest")}
+    have = {"owner": (req.get("_owner") if delegated is not None else
+                      (who if verified else None)),
+            "project": launch.project_of(req), "actor": delegated,
+            "role": launch.role, "soul_digest": launch.bundle.digest}
+    for key in want:
+        if want[key] != have[key]:
+            return (f"request {launch.request_id} is already prepared with a "
+                    f"different {key}: {want[key]!r} reserved, {have[key]!r} "
+                    f"in this replay (#582)")
+    want_intent = rec.get("intent") or ""
+    have_intent = launch.intent(req)
+    if want_intent != have_intent:
+        return (f"request {launch.request_id} is already prepared with a "
+                f"different intent: {want_intent!r} reserved, "
+                f"{have_intent!r} in this replay (#582)")
+    return None
+
+
+def _reserved_taken(name, rec):
+    """Занято ли имя резерва ЧУЖОЙ регистрацией (#582). -> отказ | None.
+    Джоб с той же инкарнацией -- своя неопределённая регистрация: ретрай
+    подтверждает её, а не отказывает; без души или с другой -- чужая."""
+    if name not in {j["ID"] for j in
+                    _api().get_jobs(f"{puppets.JOB_PREFIX}{rec.get('project')}-")}:
+        return None
+    if _kept_meta(name).soul_inc == rec.get("soul_inc"):
+        return None
+    return (f"{name}: the name reserved by {rec.get('request_id')} is taken "
+            f"by another registration; the reservation needs the operator")
+
+
+def _revoke_soul(project, name):
+    """Отозвать привязку снятого папета (#582): active:false (#581) --
+    активных кредов на несуществующий джоб нет. Пароль и бандл живут:
+    реюз имени джоба -- всё равно новый грант."""
+    rec = grants.by_job(project, name, root=SOUL_ROOT)
+    if rec is not None:
+        grants.revoke(rec["principal"], root=SOUL_ROOT)
+
+
 def _add(project, req):
     origin = req.get("origin")
+    # Роль (#582): add с душой резервирует имя, инкарнацию и принципала
+    # ДО Nomad (grants.prepare) и подтверждает после (activate): отказ
+    # Nomad оставляет резерв, ретрай того же request_id поднимает
+    # сохранённого принципала, а не второго на то же имя.
+    launch = _role_launch(req)
+    if isinstance(launch, dict):
+        return launch
     # Ворота проекта (#567): лимит → count → name → workspace → register --
     # одним куском, иначе два одновременных add выбирают одно имя, обходят
     # квоту, а смена лимита врезается между чтением и регистрацией. Имя
@@ -409,17 +665,91 @@ def _add(project, req):
         # только глагол проектов -- непредставимая пара не прячет потолок
         # действующего.
         target = Project.of(origin, projects.snapshot_limits(_view()))
-        why = over_limit(target.name, _live_count(target.name), target.limit)
-        if why:
-            return {"error": why}
-        name = next_name(target.name)
+        # Реплей сверяется и выбирается ДО квоты (#582): успешный запуск,
+        # занявший последний слот, обязан реплеиться без отказа -- квота
+        # считает НОВЫХ папетов, а не подтверждение своего резерва.
+        if launch is not None and launch.record:
+            # Ретрай: имя и инкарнация -- из резерва, не новые (#579);
+            # чужая регистрация на этом имени -- громкий отказ.
+            name, soul_inc = launch.record["job"], launch.record["soul_inc"]
+            why = _replay_conflict(req, launch)
+            if why:
+                return {"error": why}
+            why = _reserved_taken(name, launch.record)
+            if why:
+                return {"error": why}
+        else:
+            why = over_limit(target.name, _live_count(target.name), target.limit)
+            if why:
+                return {"error": why}
+            name = (next_name(target.name) if launch is None else
+                   next_name(target.name, reserving=True))
+            soul_inc = soul.incarnation() if launch is not None else None
         # workspace -- до регистрации: первый подъём обязан его увидеть.
-        marker = store_workspace(bootstrap.ROOT, name, req)
-        _api().register(spec.job_spec(name, origin, branch=req.get("branch")))
+        # Актёров различает не запрет, а путь (#582): ЧЕЛОВЕК, заводящий
+        # роль, согласовывает политику своим текстом -- метка согласования
+        # ставится тем же ходом, текст идёт в хранилище как сегодня; грант
+        # (делегированный add) текста не приносит вовсе -- его ребёнок
+        # наследует закреплённый снапшот родителя ниже, и попытка прислать
+        # YAML отклонена в _delegated ДО ворот проекта.
+        delegated = req.get("_delegated_by")
+        marker = None
+        if launch is None:
+            marker = store_workspace(bootstrap.ROOT, name, req)
+        elif delegated is None:
+            # Новый грант -- только верифицированному человеку (#582):
+            # анонимная заявка роли не заводит принципала. Легаси-add
+            # (без роли) совместимость сохраняет -- его джобы не гранты.
+            who, verified = lease.caller(req)
+            if not verified:
+                return {"error": "a role add needs a verified human caller: "
+                                 "the login comes from the request subject, "
+                                 "not the body (#582)"}
+            if "workspace" in req:
+                store_workspace(bootstrap.ROOT, name, req)
+                bootstrap.note_approval(bootstrap.ROOT, name)
+            elif "bootstrap_sent" in req:
+                return {"error": "a role add carries workspace text, not a "
+                                 "bare bootstrap_sent marker (#582)"}
+        else:
+            # Делегированный ребёнок: снапшот родителя под именем ребёнка
+            # ДО Nomad -- ретрай наследует закреплённое, не свежее: копия
+            # кладётся только когда резерва ещё не было (свежий запуск),
+            # ретрай уже держит её под своим именем.
+            if not (launch and launch.record):
+                why = bootstrap.copy_approval(
+                    bootstrap.ROOT, req.get("_parent_job") or "", name)
+                if why:
+                    return {"error": why}
+        principal = None
+        if launch is not None:
+            # Резерв ДО Nomad: что бы ни случилось с регистрацией, принципал,
+            # имя и инкарнация уже сохранены -- ретрай поднимет их. Тот же
+            # request_id с другой полезной нагрузкой (#581) откажет здесь.
+            # Владелец -- человек (делегированный: хозяин родителя из
+            # реестра), актёр -- отдельным полем: происхождение не право.
+            principal = grants.prepare(
+                project, role=launch.role, digest=launch.bundle.digest,
+                manifest=launch.bundle.manifest.to_dict(),
+                prompt=launch.bundle.prompt,
+                owner=(req.get("_owner") if delegated is not None else
+                       (lease.caller(req)[0] or project)),
+                request_id=launch.request_id, job=name, soul_inc=soul_inc,
+                intent=launch.intent(req), root=SOUL_ROOT,
+                actor=delegated)["principal"]
+        _api().register(spec.job_spec(
+            name, origin, branch=req.get("branch"),
+            **(launch.triple(soul_inc) if launch is not None else {})))
+        if principal is not None:
+            grants.activate(principal, root=SOUL_ROOT)
     # Метка (#334) -- только когда клиент прислал происхождение: без неё
-    # ответ байт в байт прежний.
-    return {"ok": True, "name": name, "origin": origin,
-            **({"bootstrap_marker": marker} if marker else {})}
+    # ответ байт в байт прежний. Роль (#582) эхом несёт тройку: клиент
+    # неполного ответа сверяется, а не пересоздаёт.
+    out = {"ok": True, "name": name, "origin": origin,
+           **({"bootstrap_marker": marker} if marker else {})}
+    if launch is not None:
+        out.update(launch.triple(soul_inc))
+    return out
 
 
 def _kept_meta(name):
@@ -437,21 +767,32 @@ def _update(project, req):
     # Спеку собирает сервер: `register(spec)` глаголом не бывает, иначе
     # проситель кладёт на узел что хочет (докстринг модуля).
     name = req["name"]
+    # Роль на месте не меняется (#582): чужое имя роли или подложенный
+    # digest -- отказ до перерегистрации, смена роли -- новый папет, у
+    # живой инкарнации свой бандл (#579). Работа при этом сохраняется --
+    # в клоне.
+    kept = _kept_meta(name)
+    why = _role_frozen(req, kept)
+    if why:
+        return {"error": why}
     marker = store_workspace(bootstrap.ROOT, name, req)
     # Спека без изменений -- Nomad не переразмещает, прогона не будет (#334):
     # клиент должен услышать это, а не ждать итога до таймаута.
     before = _version(name) if marker else None
     # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
     # doctor'а) не стирает ту, с которой папет заведён. Аренда кредита
-    # (#284) -- так же, и профиль сверяется с реестром.
-    kept = _kept_meta(name)
+    # (#284) -- так же, и профиль сверяется с реестром. Тройка роли (#582)
+    # -- тем же правилом: respec переживает её, как ветку.
     branch = req.get("branch") or kept.branch
     # Узел -- из аллокации (#289): стоящий папет перерегистрируется на своём
     # узле, где его тело с клоном; неразмещённый (нет аллокации) -- куда
     # поставит Nomad, как при подъёме.
     alloc = Alloc.from_dict(_api().latest_alloc(name))
     node = (alloc.node if alloc else None) or None
-    _api().register(spec.respec(name, JobMeta(req.get("origin"), branch),
+    _api().register(spec.respec(name, JobMeta(req.get("origin"), branch,
+                                               soul=kept.soul,
+                                               soul_digest=kept.soul_digest,
+                                               soul_inc=kept.soul_inc),
                                cont=bool(req.get("cont")), node=node))
     out = {"ok": True, "name": name, "node": node}
     if marker:
@@ -483,6 +824,27 @@ def _stop(project, req):
     return {"ok": True, "alloc": alloc.id}
 
 
+def _role_frozen(req, kept):
+    """Почему запрос update меняет роль живого папета. -> отказ | None.
+
+    Явное имя роли -- допустимо только то же (#582): это тот же папет, а
+    не перезапись души; digest и инкарнация клиенту не принадлежат вовсе
+    (#579: их выбирает сервер)."""
+    if kept.soul is None:
+        if req.get("soul") or req.get("soul_digest") or req.get("soul_inc"):
+            return ("update cannot attach a role: a soul puppet is a new "
+                    "add, the work lives on in its clone (#579)")
+        return None
+    if req.get("soul") not in (None, kept.soul):
+        return (f"update cannot change the role of a live incarnation: "
+                f"{kept.soul} -> {req.get('soul')}; a new role is a new "
+                f"puppet, and the work stays in its clone (#579)")
+    if "soul_digest" in req or "soul_inc" in req:
+        return ("update cannot rewrite the digest or the incarnation of a "
+                "live puppet: a new bundle is a new puppet (#579)")
+    return None
+
+
 def _job_stop(project, req):
     """Оператор останавливает задание, сохраняя тело и workspace (#608)."""
     name = req["name"]
@@ -501,12 +863,20 @@ def _delete(project, req):
     """Снять джоб. purge=False оставляет его в истории остановленным — так
     работает рецикл: джоб останавливается, рабочая копия сносится, и та же
     спека поднимается обратно."""
-    _api().deregister(req["name"], purge=bool(req.get("purge", True)))
+    name = req["name"]
+    _api().deregister(name, purge=bool(req.get("purge", True)))
     # Снятый насовсем папет уносит свой workspace (#133); рецикл (purge=False)
-    # его сохраняет -- update следом положит свежий.
+    # его сохраняет -- update следом положит свежий. Метка согласования
+    # уходит вместе с файлами (#582): имени без папета нет политики.
     if req.get("purge", True):
-        bootstrap.store(bootstrap.ROOT, req["name"], "")
-    return {"ok": True, "name": req["name"]}
+        bootstrap.store(bootstrap.ROOT, name, "")
+        bootstrap.drop_approval(bootstrap.ROOT, name)
+    # Душа снятого уходит с ним (#582): глагольный отзыв (#581), активных
+    # кредов на несуществующий джоб нет. Рецикл (purge=False) душу
+    # сохраняет -- папет вернётся с той же инкарнацией.
+    if req.get("purge", True):
+        _revoke_soul(project, name)
+    return {"ok": True, "name": name}
 
 
 def _alloc(project, req):
@@ -1133,6 +1503,97 @@ def _answer(project, req):
     if project is None:
         return _client_config(req) if verb == "client_config" else \
             {"error": f"no such join verb {verb}"}
+    # Ограждение #603: принципал роли не говорит по легаси-rpc человека.
+    # Его субъект -- role-канал (node.<n>.role.<grant>, cluster.role.<grant>),
+    # и глагол резолвит сервер; легаси-ветку исполнял бы без резолвера
+    # старый контроллер на смешанном роллауте. Отказ -- до таблиц глаголов.
+    caller = req.get("_caller") or ""
+    if soul.is_grant(caller):
+        # Роль выключена -- протокол не рекламируется (полусобранный
+        # сервер); сам шов флага не знает: грамматика -- не настройка.
+        if not config.get("MOP_SOUL_ROLES"):
+            return {"error": f"{caller}: grant principals speak on the role "
+                             f"channel, not the legacy rpc (#603)"}
+        # Авторизация -- шов реестра (#581 authorize_request), не своя
+        # сборка: субъект собран busnames.cluster, глагол -- свежим
+        # resolve, spawn-контекст -- тем же снимком. Отказ шва едет
+        # дословно: его формулировка -- часть контракта реестра.
+        ctx = grants.authorize_request(project, req, verb, root=SOUL_ROOT)
+        if "error" in ctx:
+            return ctx
+        # Один штамп на ВСЕ глаголы роли, сразу после шва (#582, аудит
+        # ревью): власть -- хозяин-человек, ворота аренды, токен посадки
+        # и строка журнала читают _caller (lease.caller), и после шва
+        # это человек, не принципал (как у узла актёра #584). Штамп --
+        # НА МЕСТЕ: словарь после обработчика читает журнал, копия
+        # оставила бы строку «by grant-…» (аудит -- человек). Актёр и
+        # его джоб -- отдельно (_actor/_job, provenance для journal):
+        # два актёра одного человека различимы в аудите. Поля власти из
+        # тела (force, owner, holder) срезаются: у гранта их нет, чужую
+        # аренду и токен тело снять не может; force человека не меняется.
+        for key in ("force", "owner", "holder"):
+            req.pop(key, None)
+        req.update(_caller=ctx["owner"], _actor=ctx["actor"],
+                   _job=ctx["job"])
+        # Маршрут по глаголу, не «всё в add» (#582, блокатор ревью):
+        # add -- делегированное заводение; ДРУГИЕ глаголы души -- те же
+        # ворота и обработчики, что у человека (refusal/имя/аренда):
+        # пресет рабочего (ping/roster/alloc/spec) и мастера (restart,
+        # update, ...) ими и живёт. Актёр -- принципал (шов его назвал),
+        # аренда видит человека-хозяина: изменяющий глагол роли бьёт по
+        # чужой работе -- её держит хозяйнин воротами аренды, как у людей.
+        if verb != "add":
+            # Грант не грузит текст политики (#582): workspace --
+            # человеческий путь согласования, ребёнок наследует снапшот
+            # родителя, живой -- держит свой.
+            if "workspace" in req or "bootstrap_sent" in req:
+                return {"error": f"{ctx['actor']}: a grant request carries "
+                                 f"no client workspace text: the policy is "
+                                 f"approved by its human owner (#582)"}
+            # Власть -- хозяин-человек: ворота аренды, токен посадки и
+            # журнал читают _caller (lease.caller), и после шва это
+            # человек, не принципал (#582, как у узла актёра #584).
+            # Штамп -- НА МЕСТЕ: словарь после обработчика читает журнал,
+            # копия оставила бы строку «by grant-…» (аудит -- человек).
+            # Актёр -- отдельно, для аудита. Поля власти из тела (force,
+            # owner, holder) срезаются: у гранта их нет, чужую аренду и
+            # токен тело снять не может; force человека не меняется.
+            for key in ("force", "owner", "holder"):
+                req.pop(key, None)
+            req.update(_caller=ctx["owner"], _actor=ctx["actor"])
+            name = req.get("name")
+            vrow = _row(verb)
+            origin, exists = (None, False)
+            if vrow and vrow.named and name:
+                origin, exists = _owner(name)
+            new_origin = None
+            if verb == "update" and req.get("origin") \
+                    and req.get("origin") != origin:
+                new_origin = req.get("origin")
+            why = refusal(project, verb,
+                          origin=(origin if exists else req.get("origin")),
+                          name=name, job_exists=exists,
+                          new_origin=new_origin)
+            if why:
+                return {"error": why}
+            if vrow.acting and name and not exists:
+                return {"error": f"no job {name} in the cluster"}
+            try:
+                return vrow.fn(project, req)
+            except KeyError as e:
+                return {"error": f"{verb}: missing field {e}"}
+            except ValueError as e:
+                return {"error": f"{verb}: {e}"}
+            except Exception as e:
+                return {"error": f"{verb}: {nomad.describe_error(e)}"}
+        try:
+            return _delegated(project, req, ctx)
+        except ValueError as e:
+            return {"error": f"add: {e}"}
+        except Exception as e:
+            # Причина едет с отказом: тихий «failed» убил бы диагностику
+            # на полпути (#265).
+            return {"error": f"add: {nomad.describe_error(e)}"}
     name = req.get("name")
     spec = _row(verb)
     origin, exists = (None, False)
@@ -1171,9 +1632,18 @@ def journal(project, req, out):
     what = (req.get("name") or req.get("node") or req.get("origin")
             or req.get("puppet") or "")
     # Кто просил (#207): логин из субъекта -- как есть; названный телом на
-    # прежнем субъекте -- с пометкой, пока переход не убран.
+    # прежнем субъекте -- с пометкой, пока переход не убран. Грант роли
+    # называет и актёра с его джобом (#582): власть у человека, эффект --
+    # у принципала, и аудит видит обоих; полезной нагрузки (workspace)
+    # в строке нет -- только имена.
     login, verified = lease.caller(req)
     by = "" if not login else f" by {login}" + ("" if verified else " (self-declared)")
+    actor = req.get("_actor")
+    if actor and actor != login:
+        by += f" (actor {actor}"
+        if req.get("_job"):
+            by += f" of {req['_job']}"
+        by += ")"
     return [f"{project}.{req.get('verb')} {what}{by}: {out.get('error') or 'ok'}"]
 
 

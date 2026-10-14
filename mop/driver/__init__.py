@@ -324,6 +324,24 @@ def project_creds(project):
     return paths.under(HOME, f"bus-{project}.json")
 
 
+# Раскладка роли в теле (#603, форма #590): бандл -- подкаталогом ровно из
+# soul.yaml и промпта, как его читает soul.load; рядом кред принципала и
+# метка готовности. Константы общие для узла (#584 читает метку и кред) и
+# `mop driver run` (#590 их кладёт), и живут в driver, а не в cli/node:
+# узел клиента не импортирует, и копия разъехалась бы с первой правки.
+SOUL_BUNDLE = "bundle"
+BUS_FILE, READY = "bus.json", "ready.json"
+
+
+def soul_dir(name, inc):
+    """Бандл и кред принципала роли в теле (#590): их кладёт `mop driver
+    run` на подъёме, читает обёртка (#583). Свой каталог у каждой
+    инкарнации каждого папета: у host дом общий, и две роли одного проекта
+    не делят файл, а старая инкарнация того же имени не читается новой.
+    Имя и инкарнацию проверяет звавший (valid_name, JobMeta)."""
+    return paths.under(HOME, "souls", name, inc)
+
+
 def project_secrets_dir(project):
     """Секреты проекта в теле (#127): их кладёт bootstrap при каждом старте."""
     return paths.under(HOME, "project-secrets", project)
@@ -493,6 +511,13 @@ def is_container(name):
     """Тела на узле с этим драйвером — отдельные объекты (контейнеры), а не
     сам узел. Имя -- из of_node: неизвестное туда не доходит."""
     return require(name)["is_container"]
+
+
+def container_drivers():
+    """Имена драйверов с отдельными телами, по алфавиту. Изолирующей роли
+    нужен перечень для ограничения размещения (#582): потребитель не лезет
+    в контракты драйверов, способность -- вопросом реестра."""
+    return sorted(n for n, c in drivers().items() if c["is_container"])
 
 
 def separate_bodies(mod):

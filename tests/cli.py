@@ -915,7 +915,10 @@ CONCISE_431 = {
         ("gone", "the token is kept by the cluster service"),
     ),
     "mop.cli.core.master": (
-        ("syntax", "mop master [git-origin] [claude options]"),
+        # #586: голый `mop master` -- лаунчер мастер-роли, прежний
+        # локальный запуск -- явный --local с прежним пасстру.
+        ("syntax", "mop master [git-origin]"),
+        ("syntax", "mop master --local [git-origin] [claude options]"),
         ("keeps", "resumes the master's last session"),
         ("keeps", "a master sees and reaches only its own project's puppets"),
         ("gone", "one master: a master sees"),
@@ -1492,9 +1495,122 @@ def main():
     check_node_memory_197(c)
     check_fallback_model_183(c)
     check_agent_on_node_172(c)
+    check_role_declarations_585(c)
     check_bus_import_169(c)      # последними: перезагружают модули
     check_nomad_import_187(c)
     return c.report("cli")
+
+
+def check_role_declarations_585(c):
+    """HYPOTHESIS (#585): каталог инструментов роли строится из
+    capabilities её бандла и объявлений командлетов, но объявление не
+    умеет сказать, какие глаголы командлету нужны: `MCP keys are
+    annotations, args, background` -- и роль либо получает все командлеты
+    (ложная стена наоборот), либо ни одного.
+    SOLUTION: объявление называет node_verbs/cluster_verbs (словарь
+    soul.NODE_VERBS/CLUSTER_VERBS) и dispatch (bool); чужой глагол или не
+    тот тип -- громкий отказ на старте mop mcp; молчащее объявление роли
+    не открывается (channel.tools_for). STATUS: FIXED — see #585"""
+    d = tempfile.mkdtemp(prefix="mop-test-mcp-585-")
+    p = os.path.join(d, "x.py")
+    with open(p, "w") as f:
+        f.write('MCP = {"annotations": "destructive", "node_verbs": ["wipe"], '
+                '"cluster_verbs": ["alloc", "stop"], "dispatch": False}\n')
+    try:
+        got = cli.declared(p)
+    except ValueError as e:
+        got = e
+    c.expect("#585 a declaration names the verbs it needs",
+             got, {"annotations": "destructive", "node_verbs": ["wipe"],
+                   "cluster_verbs": ["alloc", "stop"], "dispatch": False})
+    for bad in ('MCP = {"node_verbs": ["disk"]}',          # админский, не роли
+                'MCP = {"cluster_verbs": ["drain"]}',
+                'MCP = {"cluster_verbs": "roster"}',       # не список
+                'MCP = {"dispatch": "yes"}'):
+        with open(p, "w") as f:
+            f.write(bad + "\n")
+        try:
+            cli.declared(p)
+        except ValueError:
+            continue
+        c.fail(f"#585 declared must refuse: {bad}")
+
+    # HYPOTHESIS (#585, остаток): seventeen commandlets carry an MCP
+    # declaration, but none names its verbs -- so a role sees no commandlet
+    # tool at all, and the fail-closed catalogue is empty for every grant.
+    # SOLUTION: annotate each declaration with the verbs the commandlet
+    # really calls (the audit below follows the actual calls, not guessed
+    # names); a commandlet whose true verbs are admin ones the role grammar
+    # excludes (nodes/drain/up/project_add/project_limit) or that needs a
+    # human login (models, diagnose, server diagnose) stays silent -- it is
+    # human-only, and the grammar keeps it out on purpose.
+    # Глаголы -- по живым вызовам каждого командлета, не по имени команды:
+    # wipe зовёт cluster alloc (узел остановленного) и node wipe; recycle
+    # добавляет spec/delete/update/bootstrap_result; stat -- cluster pool и
+    # node usage; landing -- только landing.
+    ANNOTATED = {
+        "wipe": (["wipe"], ["alloc"]),
+        "restart": ([], ["alloc", "restart"]),
+        "delete": (["wipe"], ["alloc", "delete"]),
+        "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
+                              "bootstrap_result"]),
+        "update": ([], ["spec", "update", "bootstrap_result"]),
+        # add --role (#618): ping -- предзапрос протокола ролей до создания.
+        "add": ([], ["add", "alloc", "bootstrap_result", "ping"]),
+        "landing": ([], ["landing"]),
+        "stat": (["usage"], ["pool"]),
+        "profile": ([], []),
+        # admin verbs outside the role grammar: silent for grants on purpose
+        # stop (#608) -- job_stop, операторский глагол вне грамматики ролей
+        "stop": None,
+        "node": None, "node_drain": None, "node_up": None,
+        "project_add": None, "project_limit": None,
+        "models": None, "diagnose": None, "server_diagnose": None,
+    }
+    from mop.common import soul
+    tools = {n: cli.declared(path) for n, _, path
+             in cli.tool_commands(cli.scan(), cli.verbs())}
+    declared_names = {n: d for n, d in tools.items() if d is not None}
+    c.expect("#585 every declared commandlet is audited",
+             sorted(declared_names), sorted(ANNOTATED))
+    for name, audited in sorted(ANNOTATED.items()):
+        decl = declared_names.get(name)
+        if audited is None:
+            c.check(f"#585 {name} stays silent: its verbs are outside the role grammar "
+                    f"or need a human login",
+                    not any(k in (decl or {}) for k in
+                            ("node_verbs", "cluster_verbs", "dispatch")))
+            continue
+        node_verbs, cluster_verbs = audited
+        c.expect(f"#585 {name} names the verbs it really calls",
+                 (decl.get("node_verbs"), decl.get("cluster_verbs")),
+                 (node_verbs, cluster_verbs))
+        for verb in node_verbs:
+            c.check(f"#585 {name}: {verb} is in the role grammar",
+                    verb in soul.NODE_VERBS)
+        for verb in cluster_verbs:
+            c.check(f"#585 {name}: {verb} is in the role grammar",
+                    verb in soul.CLUSTER_VERBS)
+    # Аннотация -- не декорация: с ней рабочий пресет видит командлеты в
+    # своих правах, а не пустой каталог. Пресет -- рабочий из docs/SOUL.md
+    # плюс чтение (usage/roster/alloc/spec), выданное каналом #585: stat
+    # требует pool, которого рабочему не дают, и остаётся невидимым.
+    from mop.client import channel
+    grant_caps = soul.from_manifest({
+        "soul": "puppet", "version": 1,
+        "runtime": {"driver": "any", "receives_dispatch": True},
+        "capabilities": {"node_verbs": ["send", "tail", "state", "states",
+                                        "ping", "local", "usage"],
+                         "cluster_verbs": ["alloc", "spec", "roster"],
+                         "dispatch": False, "spawn": []},
+        "prompt": "soul.md"}, b"p").manifest.capabilities
+    seen = channel.tools_for(channel.GRANT, grant_caps,
+                             {n: d for n, d in declared_names.items()})
+    c.check("#585 a grant's catalogue is not empty once declarations name verbs",
+            "profile" in seen, seen)
+    c.check("#585 a role with no matching verbs gains nothing",
+            not ({"wipe", "add", "stat"} & seen), seen)
+    # STATUS: FIXED — see #585
 
 
 def check_mcp_declarations(c):
