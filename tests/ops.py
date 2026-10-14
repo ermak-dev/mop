@@ -830,6 +830,22 @@ def check_role_workflows_617(c):
     c.check("#617 the default update keeps sending the clearing empty text",
             fields.get("workspace") == "" and fields.get("bootstrap_sent") is None,
             fields)
+    # Позиционные колбэки прежние: sleep/clock/step/bootstrap_wait стоят в
+    # конце подписи и ДО нового параметра -- старый позиционный вызов
+    # сохраняет смысл, новое -- только ключевым.
+    import inspect
+    params = list(inspect.signature(ops.update).parameters)
+    c.check("#617 preserve_workspace is the last parameter, after the "
+            "legacy callbacks",
+            params[-1] == "preserve_workspace"
+            and params[-5:] == ["sleep", "clock", "step",
+                                "bootstrap_wait", "preserve_workspace"],
+            params[-6:])
+    ops.update(fake, "pu-x-1", nosleep, stuck_clock, None,
+               lambda s: None, 0)
+    c.check("#617 legacy positional callbacks keep their meaning",
+            fake.calls[-1][0] == "update"
+            and fake.calls[-1][1].get("workspace") == "", fake.calls[-1])
 
 
 

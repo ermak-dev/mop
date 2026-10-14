@@ -126,6 +126,165 @@ set -e
 : "${PU_PROJECT_CREDS:?no PU_PROJECT_CREDS in the task environment}"
 : "${PU_SECRETS_DIR:?no PU_SECRETS_DIR in the task environment}"
 d="$PU_CLONE"
+# --- role startup (#583) ---
+# Джоб с тройкой души в Meta стартует как РОЛЬ, а не как простой папет:
+# бандл, кред принципала и расписку готовности доставил лаунчер (#590),
+# и врата сверяют их с ожиданием самого джоба ДО того, как что-либо тронет
+# тело: неверная, неполная или подменённая роль не имеет права откатиться
+# на легаси-путь и подняться бездушным папетом на креде проекта (в этом
+# весь смысл #579: роль без своего бандла не стартует). Проверка стоит до
+# стадии клона нарочно: CLONE_SH убивает сессии и освобождает каталог, и
+# отказавший старт ничего не должен телу.
+#
+# Ветка выбирается по ЛЮБОМУ непустому ключу транспорта PU_SOUL*, а не по
+# одному имени роли: транспорт (#582) везёт все четыре ключа на обоих путях
+# -- легаси-джобы везут их ПУСТЫМИ, -- поэтому один непустой ключ с пустыми
+# спутниками -- не легаси-джоб, а сломанная запись. Честных раскладок две:
+# «все четыре пустые» (легаси) и «все четыре на месте» (роль); всё прочее --
+# громкий отказ: наполовину доставленная тройка не должна молча поднимать
+# легаси.
+#
+# Расписка говорит, что лаунчер закончил; байты говорят, ЧТО закончил. Бандл
+# перечитывается тем же правилом, что и регистрация (soul.load: ровно
+# soul.yaml и промпт, без симлинков наружу и лишних файлов), пересчитывается
+# digest'ом из Meta джоба, и МЕТКА роли бандла сверяется с меткой джоба:
+# digest закрепляет байты, а самозваный манифест со своим честно посчитанным
+# digest'ом и согласованно лгущей распиской прошёл бы проверку одного
+# digest'а. Кред обязан быть принципала (grant-<id> по soul.is_grant -- одна
+# грамматика, не копия), никогда проектный: агент видит, кого спрашивают,
+# а не кто спрашивает, и чужой кред здесь был бы тихой подменой личности.
+#
+# Стадия клона ниже (CLONE_SH) РАЗРУШИТЕЛЬНА: убивает сессии и переклонирует
+# при чужом origin. К моменту этого врапера #590 клон уже подготовил --
+# bootstrap сыгран, identity хозяина поставлена, расписка написана. Поэтому
+# ролевой старт ВАЛИДИРУЕТ готовый клон и на расхождении отказывает, а не
+# готовит заново: переклон здесь стёр бы поставленную identity и охранные
+# маркеры, пока расписка ready.json вне клона продолжала бы говорить «готово»
+# -- до первого хода модели роль после такого второго прогона не доезжает.
+#
+# Питон едет цитированным heredoc: одинарный доллар, без подстановки -- та
+# же дисциплина, что у поездки base64 (см. блок над WRAPPER).
+# PYTHONDONTWRITEBYTECODE не оставляет __pycache__ в теле.
+role_env=()
+case "${PU_SOUL:-}${PU_SOUL_DIGEST:-}${PU_SOUL_INC:-}${PU_SOUL_DIR:-}" in
+"")
+    # Легаси-конвенция: все четыре ключа транспорта пусты (#582).
+    is_role=0
+    ;;
+*)
+    # Всё прочее -- либо роль, либо сломанная запись: неполный набор в
+    # любом направлении (имя без digest, digest без имени, путь без
+    # инкарнации) -- громкий отказ, а не молчаливый легаси-подъём.
+    if [ -z "${PU_SOUL:-}" ] || [ -z "${PU_SOUL_DIGEST:-}" ] \
+        || [ -z "${PU_SOUL_INC:-}" ] || [ -z "${PU_SOUL_DIR:-}" ]; then
+        echo "role transport is partial: PU_SOUL='${PU_SOUL:-}', PU_SOUL_DIGEST='${PU_SOUL_DIGEST:-}', PU_SOUL_INC='${PU_SOUL_INC:-}', PU_SOUL_DIR='${PU_SOUL_DIR:-}' -- a role job carries all four, a legacy job none" >&2
+        exit 1
+    fi
+    # Имя узла -- из собственных поверенных кредов лаунчера (#590 его
+    # везёт; hostname контейнера называет тело, а не узел). Ролевой старт
+    # без него -- отказ, а не догадка: MOP_NODE -- это КТО в сессии, и
+    # угаданное имя -- ложь.
+    : "${PU_NODE:?no PU_NODE for a role job -- the launcher carries the node name}"
+    for f in "$PU_SOUL_DIR/ready.json" "$PU_SOUL_DIR/bus.json"; do
+        [ -f "$f" ] || { echo "role $PU_SOUL: $f is missing -- the delivery did not finish" >&2; exit 1; }
+    done
+    is_role=1
+    ;;
+esac
+# Готовый клон #590 -- валидация, а не подготовка заново: bootstrap уже
+# сыгран, identity хозяина уже поставлена, и вторая разрушительная
+# подготовка стёрла бы их до первого хода модели. Чужой origin или
+# отсутствие .git у РОЛЕВОГО старта -- отказ; легаси-путь CLONE_SH ниже
+# не тронут -- там клон переживает папетов и врапер готовит его сам.
+if [ "$is_role" = 1 ]; then
+    if [ ! -d "$d/.git" ]; then
+        echo "role $PU_SOUL: $d has no .git -- the prepared clone is gone; the launcher (#590) prepares it, the wrapper does not re-clone a role" >&2
+        exit 1
+    fi
+    clone_origin="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
+    if [ "$clone_origin" != "$PU_ORIGIN" ]; then
+        echo "role $PU_SOUL: the prepared clone tracks '$clone_origin', the job pins '$PU_ORIGIN' -- a role startup validates the clone, it does not re-prepare it" >&2
+        exit 1
+    fi
+fi
+role_gate() {
+    PYTHONDONTWRITEBYTECODE=1 python3 - "$PU_SOUL_DIR" "$PU_SOUL" \
+        "$PU_SOUL_DIGEST" "$PU_SOUL_INC" <<'PY'
+import json, os, sys
+
+root, role, want_digest, inc = sys.argv[1:5]
+def die(why):
+    sys.stderr.write(f"role {role}: {why}\n")
+    raise SystemExit(1)
+
+# Расписка: доказательство лаунчера, написанное последним, называет именно
+# эту тройку.
+try:
+    with open(os.path.join(root, "ready.json")) as f:
+        receipt = json.load(f)
+except (OSError, ValueError) as e:
+    die(f"the ready receipt does not read: {e}")
+for key, want in (("ready", True), ("role", role), ("soul_inc", inc),
+                  ("soul_digest", want_digest)):
+    if receipt.get(key) != want:
+        die(f"the ready receipt {key} is {receipt.get(key)!r}, the job pins {want!r}")
+
+# Бандл: ровно soul.yaml и промпт, перечитан и пересчитан правилом
+# регистрации. Импорт идёт через копию пакета в теле ($HOME/mop) -- то же
+# дерево, на котором работает агент узла.
+bundle = os.path.join(root, "bundle")
+sys.path.insert(0, os.path.join(os.environ.get("HOME", ""), "mop"))
+try:
+    from mop.common import soul
+except Exception as e:  # noqa: BLE001 -- любая причина -- отказ старта
+    die(f"the body has no mop package for the bundle gate: {e}")
+try:
+    loaded = soul.load(bundle)
+except ValueError as e:
+    die(f"the bundle does not verify: {e}")
+# И метка тоже, а не только digest: digest закрепляет байты, а бандл-
+# самозванец со своим digest'ом и лгущей распиской проходит проверку
+# одного digest'а. Роль, названная джобом, -- та, что обязана загрузиться.
+if loaded.role != role:
+    die(f"the bundle is role {loaded.role!r}, the job pins {role!r}")
+if loaded.digest != want_digest:
+    die(f"the bundle hashes to {loaded.digest[:12]}, the job pins {want_digest[:12]}")
+
+# Кред -- самого принципала. Грамматика grant'а живёт в soul.is_grant --
+# одно место, не копия здесь.
+try:
+    with open(os.path.join(root, "bus.json")) as f:
+        creds = json.load(f)
+except (OSError, ValueError) as e:
+    die(f"the principal credential does not read: {e}")
+if not soul.is_grant(creds.get("user")):
+    die(f"the credential user {creds.get('user')!r} is not grant-<id>")
+for key in ("url", "password"):
+    if not (isinstance(creds.get(key), str) and creds[key]):
+        die(f"the credential has no {key}")
+print(os.path.join(bundle, loaded.manifest.prompt))
+PY
+}
+role_prompt=""
+# Кред сессии выбирается ЗДЕСЬ один раз: легаси -- проекта, роль --
+# принципала. Строка запуска ниже передаёт его одним -e дословно, и второй
+# записи MOP_BUS_CONFIG в врапере нет (#583: дубль -e у tmux молча
+# перетирал бы первый, а выбранным должен быть не «последний», а тот,
+# что выбран явно).
+session_bus_config="$PU_PROJECT_CREDS"
+if [ "$is_role" = 1 ]; then
+    role_prompt="$(role_gate)" || exit 1
+    [ -n "$role_prompt" ] || { echo "role $PU_SOUL: the gate named no prompt" >&2; exit 1; }
+    # Окружение ролевой сессии: каталог бандла (MCP читает роль через
+    # soul.load ровно по bundle/), имя папета, имя узла. MOP_SOUL_DIR
+    # называет bundle/, а не корень инкарнации: bus.json/ready.json --
+    # дело лаунчера и узла, а не модели.
+    role_env+=(-e "MOP_SOUL_DIR=$PU_SOUL_DIR/bundle" \
+               -e "MOP_PUPPET=$PU_NAME" \
+               -e "MOP_NODE=$PU_NODE")
+    session_bus_config="$PU_SOUL_DIR/bus.json"
+fi
+# --- end of role startup (#583) ---
 """
 # --- подготовка клона: одна константа на врапер и на `mop driver run` (#247) ---
 WRAPPER = WRAPPER + driver.CLONE_SH + r"""# Отказ копирования -- отказ, а не тишина (#62): семя, которое не доехало,
@@ -227,7 +386,20 @@ hooks="$HOME/.config/mop/claude-hooks.json"
 # Гасятся stderr и код выхода: старый session.py без глагола печатает usage
 # и выходит 2, отсутствующий -- ненулевой; без охраны строка гасла бы на
 # каждом ходу до раскатки пакета по узлам.
+# Роль (#583) пишет настройки в СВОЙ каталог .config/mop/claude/<папет>/
+# (ролевой старт выше), легаси -- в общий файл: содержимое одно и тот же
+# jq, разница только в пути и цене ошибки. Путь выбирается ЗДЕСЬ, один
+# jq-блок на обе ветки: копия блока расходилась бы с первой правкой хука,
+# а ролевый старт не должен читать «could not write» об общем файле,
+# который он и не собирался трогать.
 settings=""
+role_mcp_config=""
+if [ "$is_role" = 1 ]; then
+    hooks="$HOME/.config/mop/claude/$PU_NAME/settings.json"
+    role_mcp_config="$HOME/.config/mop/claude/$PU_NAME/mcp.json"
+else
+    hooks="$HOME/.config/mop/claude-hooks.json"
+fi
 if mkdir -p "$(dirname "$hooks")" \
     && jq -n --arg cmd "python3 $mop_root/mop/session.py hook >/dev/null 2>&1 || true" \
            --arg status "python3 $mop_root/mop/session.py statusline 2>/dev/null || true" '
@@ -239,8 +411,24 @@ if mkdir -p "$(dirname "$hooks")" \
          statusLine: {type: "command", command: $status}}' > "$hooks.$PU_NAME.tmp" \
     && mv "$hooks.$PU_NAME.tmp" "$hooks"; then
     settings="--settings $hooks"
+    if [ "$is_role" = 1 ]; then
+        # Свой MCP-конфиг роли: та же пара (mop, mcp), но своим файлом --
+        # пользовательский регист ~/.claude.json узла ролевая сессия не
+        # трогает. Запись не удалась -- отказ: роль без своих настроек --
+        # не «папет без хуков», а чужая сессия без наблюдения.
+        if printf '%s' "{\"mcpServers\": {\"mop\": {\"command\": \"$mop_root/bin/mop\", \"args\": [\"mcp\"]}}}" > "$role_mcp_config"; then
+            :
+        else
+            echo "role $PU_SOUL: could not write $role_mcp_config -- refusing to start the role" >&2
+            exit 1
+        fi
+    fi
 else
     rm -f "$hooks.$PU_NAME.tmp"
+    if [ "$is_role" = 1 ]; then
+        echo "role $PU_SOUL: could not write $hooks -- refusing to start the role" >&2
+        exit 1
+    fi
     echo "claude hooks: could not write $hooks -- $PU_NAME starts without them" >&2
 fi
 # --- end of claude hooks ---
@@ -249,7 +437,11 @@ fi
 # устраивает: в записи нет секретов, наличие означает правильность, полную
 # сходимость (если сменился путь) делает deploy. Чужие сервера -- дело
 # установки (sandbox.yaml), врапер о них не знает.
-claude mcp add --scope user mop -- "$mop_root/bin/mop" mcp >/dev/null 2>&1 || true
+# Только легаси-путь (#583): ролевая сессия едет со своим --mcp-config и
+# пользовательского регистра не трогает.
+if [ "$is_role" = 0 ]; then
+    claude mcp add --scope user mop -- "$mop_root/bin/mop" mcp >/dev/null 2>&1 || true
+fi
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every puppet boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
@@ -361,8 +553,10 @@ fi
 # кто спрашивает, и такую подмену не поймал бы. Файл раскатывает deploy/setup.yml
 # по одному на проект; если его нет -- валимся громко, потому что папет без шины
 # читается мастером как живой, но молчащий.
+# Легаси-путь только (#583): ролевой старт выше уже потребовал кред
+# принципала и в сессию едет он -- проекта в ролевом теле не будет вовсе.
 project_creds="$PU_PROJECT_CREDS"
-if [ ! -f "$project_creds" ]; then
+if [ "$is_role" = 0 ] && [ ! -f "$project_creds" ]; then
     echo "no credentials for project $PU_PROJECT in $project_creds -- set it up: mop project add $PU_ORIGIN" >&2
     exit 1
 fi
@@ -373,7 +567,21 @@ fi
 # env must go through -e: a plain env prefix only reaches the tmux SERVER when
 # this wrapper happens to start it, and every later session inherits the first
 # wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
-claude_args="--dangerously-skip-permissions${settings:+ $settings}"
+#
+# Аргументы claude собираются МАССИВОМ, а не склейкой строк (#583): имя файла
+# промпта из бандла может нести пробелы и метасимволы (грамматика soul его
+# этому не препятствует), и склеенный argv либо рвался бы на пробеле, либо
+# выполнял бы подстановку шелла. Каждый путь -- отдельный элемент, а в
+# командную строку панели (tmux принимает одну строку) массив уезжает через
+# printf %q: один элемент argv -- одно закавыченное слово.
+claude_argv=(--dangerously-skip-permissions)
+[ -n "$settings" ] && claude_argv+=("--settings" "$hooks")
+[ -n "$role_mcp_config" ] && claude_argv+=("--mcp-config" "$role_mcp_config")
+# Промпт роли -- на КАЖДЫЙ старт, включая --continue (#583): флаг живёт в
+# командной строке, не в сессии, и рестарт без него поднял бы роль без её
+# души -- тихо, на прежнем месте. Путь дал врат-скрипт из проверенного
+# бандла, байты за ним уже сверены digest'ом.
+[ -n "${role_prompt:-}" ] && claude_argv+=("--append-system-prompt-file" "$role_prompt")
 # Продолжение истории каталога -- ровно один подъём на перерегистрацию спеки.
 # Одноразовость здесь не прихоть: рестарт аллокации спеку не перечитывает, а
 # лечение залипшего папета -- это именно рестарт. Липкий --continue возвращал
@@ -387,7 +595,7 @@ marker="$d/.git/mop-continue"
 if [ -n "${PU_CONTINUE:-}" ] \
     && [ "$(cat "$marker" 2>/dev/null)" != "$PU_CONTINUE" ]; then
     printf '%s' "$PU_CONTINUE" > "$marker"
-    claude_args="$claude_args --continue"
+    claude_argv+=("--continue")
 fi
 # Сколько заданий сборки телу положено: MOP_CORES (#44). На host-узле он
 # лежит в node.env; в pve-теле node.env нет, и nproc тела РОВНО то, что
@@ -414,9 +622,10 @@ tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$PU_TARGET" \
     -e CARGO_BUILD_JOBS="$cores" \
     -e MOP_PROJECT="$PU_PROJECT" \
-    -e MOP_BUS_CONFIG="$project_creds" \
+    -e MOP_BUS_CONFIG="$session_bus_config" \
+    "${role_env[@]}" \
     "${llm_env[@]}" \
-    "PATH=$d/bin:$PATH $HOME/.local/bin/claude $claude_args"
+    "PATH=$d/bin:$PATH $HOME/.local/bin/claude $(printf ' %q' "${claude_argv[@]}")"
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
@@ -448,7 +657,10 @@ def task_env(name, origin, cont=False, mem=0, soul=None, soul_digest=None,
              soul_inc=None):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
     шаблона. mem -- потолок памяти папета, МБ (spec.memory). Тройка роли
-    (#582) -- несекретный транспорт для тела: пустые значения без роли."""
+    (#582) -- несекретный транспорт для тела: пустые значения без роли.
+    Половина тройки -- сломанная запись, а не «роль без digest» (тот же
+    договор, что у JobMeta), и врапер на ней обязан отказать, не откатиться
+    на легаси-путь (#583)."""
     env_llm = "".join(f"{k}={v}\n" for k, v in gateway_env().items())
     project = driver.project_of(origin)
     env = {
@@ -491,6 +703,13 @@ def task_env(name, origin, cont=False, mem=0, soul=None, soul_digest=None,
         "PU_SOUL_INC": soul_inc or "",
         "PU_SOUL_DIR": driver.soul_dir(name, soul_inc) if soul else "",
     }
+    triple = (soul, soul_digest, soul_inc)
+    if any(v is not None for v in triple) and not all(v is not None for v in triple):
+        # Половина тройки -- сломанная запись, а не «роль без digest»
+        # (договор JobMeta): такой папет не поднимать, и врапер на ней
+        # обязан отказать, не откатиться на легаси-путь (#583).
+        raise ValueError("the role triple comes whole (soul, soul_digest, "
+                         "soul_inc) or not at all")
     # Что `mop driver run` переливает в тело: всё окружение спеки, кроме
     # самого врапера. Списком здесь, а не копией там (#155).
     env["PU_CARRY"] = ",".join(env)
@@ -512,7 +731,8 @@ def job_spec(name, origin, cont=False, branch=None, node=None,
     грамматику, здесь она едет Meta как есть, а бандл закреплён в хранилище
     сервера — isolating-роль добавляет ограничение размещения по
     способности драйвера (isolate_constraint), роли «any» размещение не
-    меняют: имя роли -- не привилегия (#579).
+    меняют: имя роли -- не привилегия (#579). В окружение задачи тройку
+    кладёт task_env (#582): врапер читает её оттуда (#583).
 
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
@@ -573,7 +793,9 @@ def respec(name, meta, cont=False, node=None):
     Пока дорог было несколько, одна из них теряла ветку мастера (#256):
     после сборки образа папет поднимался на origin/HEAD. Тройка роли --
     та же мета (#582): respec переживает её, как ветку, имя и digest
-    не пересобирает -- у живой инкарнации свой бандл (#579).
+    не пересобирает -- у живой инкарнации свой бандл (#579). И в окружении
+    задачи тоже (task_env): иначе перерегистрация молча превратила бы
+    роль в легаси-папета, а врапер обязан на этом отказать (#583).
 
     node — узел стоящего папета (#289): update держит его на месте. Сборка
     образа узла не называет: тела снесены, держать некого."""
@@ -746,10 +968,13 @@ def template_version(env):
     иначе устаревшим читался бы каждый второй. Окружение LLM -- значением, а
     не набором ключей (#449): оно едет в PU_LLM_ENV, и правка его значения без
     смены версии оставила бы стоящих папетов на старом окружении навсегда
-    свежими -- та же тихая ошибка, что и #174."""
+    свежими -- та же тихая ошибка, что и #174.
+    Ролевые ключи (#583) в набор НЕ входят: роль -- данные конкретного
+    папета, как имя и origin, и ролевой папет не «свежее» легаси соседом."""
     c = project_constraint("x")
     m = memory_constraint(0)
-    shape = {"wrapper": WRAPPER, "outer": OUTER, "env": sorted(env),
+    shape = {"wrapper": WRAPPER, "outer": OUTER,
+             "env": sorted(k for k in env if not k.startswith("PU_SOUL")),
              "llm": gateway_env(),
              "group": GROUP, "task": TASK,
              "constraint": [c["LTarget"], c["Operand"]],

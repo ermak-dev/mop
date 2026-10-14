@@ -123,8 +123,11 @@ def add(transport, origin, workspace, branch=None, ctx=None, soul=None,
     progress = []
     note = progress.append
     note("registering")
-    policy = {} if workspace is None else (
-        lambda t, s: {"workspace": t, "bootstrap_sent": s})(*workspace)
+    if workspace is None:
+        policy = {}
+    else:
+        text, sent = workspace
+        policy = {"workspace": text, "bootstrap_sent": sent}
     role = {} if soul is None and request_id is None else \
         {k: v for k, v in (("soul", soul), ("request_id", request_id))
          if v is not None}
@@ -198,9 +201,8 @@ def _bootstrap_error(record):
 
 def update(transport, name, origin=None, fresh=False, workspace=None,
            branch=None, force=False, login=None, ctx=None, spec=None,
-           preserve_workspace=False,
            sleep=time.sleep, clock=time.time, step=lambda s: None,
-           bootstrap_wait=BOOTSTRAP_WAIT):
+           bootstrap_wait=BOOTSTRAP_WAIT, preserve_workspace=False):
     """Перевести папета: смена origin, fresh/resume, перерегистрация.
 
     origin=None -- прежний репозиторий. fresh при смене origin вынужден:
@@ -211,7 +213,7 @@ def update(transport, name, origin=None, fresh=False, workspace=None,
 
     workspace/preserve_workspace (#617): по умолчанию -- прежний провод,
     пустой текст (воркер веба стирает политику сознательно, байт в байт).
-    preserve_workspace=True -- оба поля политики ОТПУЩЕНЫ: папет-роль
+    preserve_workspace=True -- оба поля политики отпущены: папет-роль
     (#582) текст грузить не вправе, сервер такой глагол отказывает, а
     живой держит свой одобренный снапшот. Одновременно и то и другое --
     конфликт высказываний: отказ ДО любых эффектов, молча выбрать одно
@@ -229,8 +231,11 @@ def update(transport, name, origin=None, fresh=False, workspace=None,
         return _refused(name, "no origin in the spec — not a pool puppet")
     new_origin = origin or old
     cont = not fresh and new_origin == old
-    policy = {} if preserve_workspace else (lambda t, s: {
-        "workspace": t, "bootstrap_sent": s})(*(workspace or ("", None)))
+    if preserve_workspace:
+        policy = {}
+    else:
+        text, sent = workspace or ("", None)
+        policy = {"workspace": text, "bootstrap_sent": sent}
     try:
         got = transport("update", name=name, origin=new_origin,
                         cont=cont, new_origin=new_origin if new_origin != old else None,
