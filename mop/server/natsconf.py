@@ -73,6 +73,11 @@ def _user(name, password, perms, extra=""):
 
 # Сервисы сервера (#104): машина, а не человек. Права пока как у admin.
 SERVICE_PERMISSIONS = [busnames.everything(), busnames.join_config(busnames.ANY),
+                       # Приватные ответы машинам (#603): публикация В них
+                       # -- глобальной маской (вне mop.> и _INBOX.>), без
+                       # строки сервис не отвечает машинам вовсе. Это НЕ
+                       # подписка: чужие приватные скоупы сервис не читает.
+                       busnames.private_publish(),
                        busnames.INBOX]
 # ...кроме субъектов с логином человека (#207): машина его не называет, а
 # сервис с mop.> иначе опубликовал бы запрос от чьего угодно имени.
@@ -83,7 +88,34 @@ SERVICE_PERMISSIONS = [busnames.everything(), busnames.join_config(busnames.ANY)
 # Nomad и креды оператора: ничего сверх этого service не получает.
 SERVICE_PUBLISH_DENY = [busnames.node(busnames.ANY, "*", "rpc", login=busnames.ANY),
                         busnames.cluster(busnames.ANY, login=busnames.ANY),
-                        busnames.join_config(busnames.ANY)]
+                        busnames.join_config(busnames.ANY),
+                        # Каналы ролей (#581): deny по каналу, а не по списку
+                        # личностей -- грамматика принципала знает код, а не
+                        # ACL, и сервис не публикует маршрут роли ни под чьим
+                        # именем: узловой агент (#584) слушает ...node.<имя>.>
+                        # и принял бы запрос за живой принципал. Каждому
+                        # каналу -- пара «голый канал + хвост >»: `>` в NATS
+                        # значит один и больше токенов, и одного хвоста на
+                        # голый субъект не хватает. Маски канальные,
+                        # кодирование токена принципала им безразлично.
+                        # Проверка tests/natsconf.py пришпиливает их к точным
+                        # субъектам busnames, как #144 подписки.
+                        busnames.node(busnames.ANY, "*", busnames.ROLE_CHANNEL),
+                        f"{busnames.node(busnames.ANY, '*', busnames.ROLE_CHANNEL)}.>",
+                        busnames.node(busnames.ANY, "*", busnames.DISPATCH_CHANNEL),
+                        f"{busnames.node(busnames.ANY, '*', busnames.DISPATCH_CHANNEL)}.>",
+                        f"{busnames.ROOT}.*.{busnames.CLUSTER_CHANNEL}.{busnames.ROLE_CHANNEL}",
+                        f"{busnames.ROOT}.*.{busnames.CLUSTER_CHANNEL}.{busnames.ROLE_CHANNEL}.>",
+                        # Свой канал узла (#603): первую identity-роль просит
+                        # только сам узел; человек и сервис туда не пишут.
+                        busnames.startup_subject(busnames.ANY, "*"),
+                        # Квалифицированный server.rpc.node-<узел> (#603):
+                        # токен называет просителя-узла, и по нему решает
+                        # резолвер (#581), а не право публикации. `node-*`
+                        # внутри токена -- литерал, не маска: дикий хвост
+                        # целиком, анонимный server.rpc без хвоста открыт
+                        # как прежде.
+                        f"{busnames.server(busnames.ANY)}.>"]
 
 
 def puppet_permissions(project):
@@ -97,18 +129,39 @@ def puppet_permissions(project):
 
 def node_permissions(node):
     """Агент узла: пересекает проекты сознательно (он их и разделяет), но
-    слушает только свой узел -- подписка в NATS не эксклюзивна."""
+    слушает только свой узел -- подписка в NATS не эксклюзивна.
+
+    #603/#581: агент публикует свой квалифицированный server.rpc.node-<имя>
+    (resolve #584 ходит им) и просит первую identity-роль на своём startup;
+    ответы машин едут приватным префиксом -- на свой скоуп он и подписан
+    (публичный _INBOX остаётся до конца перехода). Каналы роли и dispatch --
+    только принципалам: их у узла нет, и маршрута в publish у него нет."""
     any_ = busnames.ANY
     return {"publish": [busnames.masters(any_), busnames.events(any_),
                         busnames.node(any_, node, "msg"), busnames.server(any_),
+                        busnames.server(any_, caller=busnames.node_user(node)),
+                        busnames.startup_subject(any_, node),
+                        # Ответы машинам (#603): агент узла -- тоже
+                        # доверенный отвечающий (resolve/startup просят
+                        # принципалы и сервисы); глобальная маска, своя
+                        # подписка -- только свой скоуп ниже.
+                        busnames.private_publish(),
                         busnames.INBOX],
             "subscribe": [busnames.node(any_, node, ">"), busnames.broadcast(any_),
+                          busnames.private_scope(busnames.node_user(node)),
                           busnames.INBOX]}
 
 
 # Пользователь callout (#206): отвечает на запросы авторизации и больше ничего
 # -- ответ сервер ждёт на $SYS._INBOX (стенд #206).
 CALLOUT_PERMISSIONS = {"publish": ["$SYS._INBOX.>"], "subscribe": ["$SYS.REQ.USER.AUTH"]}
+
+
+# Подписка сервиса (#603): БЕЗ private_publish() -- та строка даёт
+# публикацию в приватные ответы, а подписка на _MOP_REPLY.> читала бы
+# чужие ответы; сервис слушает свои subjects и _INBOX, как прежде.
+SERVICE_SUBSCRIBE = [busnames.everything(), busnames.join_config(busnames.ANY),
+                     busnames.INBOX]
 
 
 def _machines(base):
@@ -124,7 +177,7 @@ def _machines(base):
                 CALLOUT_PERMISSIONS["publish"], sub_allow=CALLOUT_PERMISSIONS["subscribe"]))),
             (busnames.SERVICE, _user(busnames.SERVICE, base[busnames.SERVICE],
                                      _perms(SERVICE_PERMISSIONS, SERVICE_PUBLISH_DENY,
-                                            sub_allow=SERVICE_PERMISSIONS)))]
+                                            sub_allow=SERVICE_SUBSCRIBE)))]
 
 
 def _nodes(base):
