@@ -137,6 +137,9 @@ def main():
                     not any(v in ("stop", "job_stop", "restart", "type") for _, v, _ in calls), calls)
             c.expect("#600 another browser cannot reuse terminal control",
                      http("POST", f"/api/puppet/{NAME}/term/{tid}/input", {"seq": 2, "data": "YWJj"}, cookie="browser-b")[0], 403)
+            mixed = f"invalid; {app.websession.COOKIE}=browser-a"
+            c.expect("#600 handle binding uses the accepted cookie, not the first token",
+                     http("POST", f"/api/puppet/{NAME}/term/{tid}/input", {"seq": 2, "data": "YWJj"}, cookie=mixed)[0], 200)
             status, got, _ = http("GET", f"/api/puppet/{NAME}/term/{tid}/read?cursor=0&wait=15")
             c.expect("#600 PTY reads preserve ANSI bytes", (status, got.get("data")), (200, "G1tIaGVsbG8="))
             c.expect("#600 explicit close detaches only client",

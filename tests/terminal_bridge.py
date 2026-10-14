@@ -262,6 +262,16 @@ def main():
     c.check("#599 only one writer survives concurrent opens",
             len(results) == 1 and sum(v == "term_open" for _, v, _ in r.calls) == 1, r.calls)
     r = Rig()
+    r.answer = {"tid": "timed-terminal", "epoch": "epoch-a", "cursor": 0,
+                "mode": "rw", "cols": 100, "rows": 30, "interrupt_delay_ms": 600}
+    c.expect("#599 actual node escape timing reaches the UI",
+             r.open().get("interrupt_delay_ms"), 600)
+    r = Rig()
+    r.answer = {"tid": "untimed-terminal", "epoch": "epoch-a", "cursor": 0,
+                "mode": "rw", "cols": 100, "rows": 30, "interrupt_delay_ms": "600"}
+    c.check("#599 invalid optional timing does not invent a capability",
+            "interrupt_delay_ms" not in r.open())
+    r = Rig()
     tid = r.open()["tid"]
     r.bridge.revoke("browser-a")
     refused("#599 logout removes private handles",
