@@ -242,6 +242,43 @@ def sandbox_bakes_test_deps_543(c):
             not (names & set(deps.PIP)), sorted(names & set(deps.PIP)))
 
 
+# HYPOTHESIS: манифест клонирует только default HEAD, ветку образа задать нельзя.
+# SOLUTION: явная remote-ветка и SHA проходят одним источником до зеркала.
+# RESULT: default HEAD не подменяет выбранные исходники прогрева.
+# STATUS: FIXED — see #593
+def check_image_branch_593(c):
+    src = tree({manifest.SANDBOX: "- vars: {PROJECT_KIND: default}\n"})
+    run("git", "init", "-q", "-b", "main", cwd=src)
+    run("git", "add", "-A", cwd=src)
+    run("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main", cwd=src)
+    run("git", "checkout", "-qb", "swarm", cwd=src)
+    with open(os.path.join(src, manifest.SANDBOX), "w") as f:
+        f.write("- vars: {PROJECT_KIND: swarm}\n")
+    run("git", "add", "-A", cwd=src)
+    run("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "swarm", cwd=src)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=src, text=True).strip()
+    run("git", "tag", "tag-only", cwd=src)
+    run("git", "checkout", "-q", "main", cwd=src)
+    try:
+        got = manifest.fetch(f"file://{src}", branch="swarm")
+    except TypeError as e:
+        c.fail("#593 manifest fetch accepts a selected branch", str(e))
+        return
+    c.expect("#593 manifest comes from swarm", open(got["sandbox_vars"]).read().strip(),
+             "PROJECT_KIND: swarm")
+    c.expect("#593 manifest records its exact commit", got.get("commit"), sha)
+    c.expect("#593 manifest records its remote branch", got.get("branch"), "swarm")
+    default = manifest.fetch(f"file://{src}")
+    c.expect("#593 no branch retains default HEAD", open(default["sandbox_vars"]).read().strip(),
+             "PROJECT_KIND: default")
+    for name in ("missing", "tag-only", "../main", "--upload-pack=bad", "refs/heads/main", "@{-1}"):
+        try:
+            manifest.fetch(f"file://{src}", branch=name)
+            c.fail(f"#593 missing/invalid branch {name!r} must refuse")
+        except RuntimeError as e:
+            c.check(f"#593 branch {name!r} failure names the branch problem", "branch" in str(e), e)
+
+
 def main():
     c = Checks()
     sandbox_bakes_test_deps_543(c)
@@ -290,6 +327,7 @@ def main():
     clone_env_accepts_new_host_keys(c)
     clone_failure_is_safe_436(c)
     fetch_is_shallow_and_blobless(c)
+    check_image_branch_593(c)
     return c.report("manifest")
 
 

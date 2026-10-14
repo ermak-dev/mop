@@ -171,7 +171,10 @@ def check_snapshot(c):
     # per_user -- расход по людям (#245).
     # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors", "masters", "masters_every", "load"}
+            "journal", "errors", "masters", "masters_every", "load",
+            # Канонический ростер сессий (#587): аддитивный ключ, прежние --
+            # проекция.
+            "sessions"}
     # masters -- живые мастера по опросу who (#305); masters_every -- период
     # этого опроса (#325): страница его не выдумывает. load -- места пула и
     # полоса аллокаций (#378).
@@ -1309,7 +1312,7 @@ def check_no_replay_519(c):
             # после первого вычитания, до второго.
             if self.rounds >= 2:
                 for frame in self.later:
-                    webcli._OP_FRAMES.append(frame)
+                    webcli._on_operation(json.loads(frame))
             return self.version, {"n": self.version}
 
         def current(self):
@@ -1321,7 +1324,9 @@ def check_no_replay_519(c):
     def _subscribe(before, later):
         """Кадры before лежат в буфере ДО подписчика; later приходят после
         его первого круга. -> что подписчик успел получить в wfile."""
-        with patched(webcli, COLLECTOR=_Col(later), _OP_FRAMES=list(before)):
+        with patched(webcli, COLLECTOR=_Col(later), _OP_FRAMES=[], _OP_SEQUENCE=0):
+            for frame in before:
+                webcli._on_operation(json.loads(frame))
             h = webcli.Handler.__new__(webcli.Handler)
             h.path = "/events"
             h.headers = {}
@@ -2704,20 +2709,402 @@ def readers_stub():
                    node_of=lambda name, running=True: "mate")
 
 
+def check_unified_roster_587(c):
+    """HYPOTHESIS (#587): снимок держит два несвязанных списка -- строки
+    ростера (папеты) и секцию «Мастера» (живые локальные сессии по опросу
+    who), -- единого ростера сессий нет: роль папета не читается из меты
+    как данные, локальные легаси-сессии не помечены как неуправляемые и
+    не считаются, а единица сессии (#421) живёт только в секции
+    мастеров, не в общем списке.
+    SOLUTION: аддитивный ключ «sessions» снимка -- канонический ростер
+    сессий всего пула (форма согласована с мастером и заморожена):
+    discriminator -- source: 'managed' | 'local'; kind остаётся прежним
+    перечислением состояний (free/busy/...) только у managed. id
+    стабильный у каждой строки: managed -- джоб+инкарнация (легаси --
+    джоб), local -- непрозрачный публичный id, сырой sessionId остаётся
+    на сервере. conversation -- человекочитаемое имя или null, не файл и
+    не UUID. Роль -- только из тройки JobMeta (role_source: 'meta' у
+    managed, 'legacy' у local). Локальные -- unmanaged: без
+    Nomad-действий и без счёта в ёмкости/квотах. Прежние ключи --
+    проекция, байт в байт.
+    RESULT: STATUS: RED — see #587"""
+    import dataclasses
+
+    # ── управляемые строки: роль из JobMeta, не самозванная ──
+    def role_row(name, origin, soul=None, digest=None, inc=None, owner=None, **kw):
+        return dataclasses.replace(row(name, origin, **kw),
+                                   soul=soul, soul_digest=digest, soul_inc=inc,
+                                   **({"owner": owner} if owner is not None else {}))
+
+    HEX64A = "ab" * 32
+    HEX64B = "cd" * 32
+    INC1 = "123e4567-e89b-42d3-a456-426614174001"
+    managed = [
+        # Джоб с ролью: тройка едет целиком из меты (#580).
+        role_row("pu-mop-1", MOP, soul="builder", digest=HEX64A, inc=INC1,
+                 state=State("busy", branch="feat/x"), owner="ermak"),
+        # Легаси-джоб без роли -- управляем, роли нет.
+        role_row("pu-mop-2", MOP, state=FREE, owner="ermak"),
+        # Джоб без живой аренды: user -- null, не прочерк (#274).
+        role_row("pu-mop-3", MOP, state=FREE),
+        # Сирота без origin: легальный «ничей» джоб, мету без origin не
+        # ломает и снимок не роняет (ревью 0b56374: origin or "" делал из
+        # None пустую строку, и from_meta ронял весь снимок).
+        role_row("pu-mop-4", None, state=FREE),
+    ]
+    answers = {"mop": [
+        # Одна живая сессия, два who-адреса: две страницы MCP, одна сессия.
+        {"master": "ermak.mate-7", "user": "ermak", "session": "mop-ab",
+         "sessionId": "0f1e-2d3c", "cwd": "/h/ermak/mop"},
+        {"master": "ermak.mate-7-all", "user": "ermak", "session": "mop-ab",
+         "sessionId": "0f1e-2d3c", "cwd": "/h/ermak/mop"},
+        # Разговор с тем же ИМЕНЕМ файла у другого логина: имя выводится из
+        # каталога и не уникально (#421), sessionId -- личности -- разные.
+        {"master": "ivan.box-2", "user": "ivan", "session": "mop-ab",
+         "sessionId": "5a4b-3c2d", "cwd": "/h/ivan/mop"},
+        # Разговор с другим sessionId у того же логина: отдельная сессия.
+        {"master": "ermak.box-9", "user": "ermak", "session": "mop-cd",
+         "sessionId": "9b8a-7c6d", "cwd": "/h/ermak/other"},
+    ]}
+    fn = getattr(web, "unified_roster", None)
+    if not c.check("#587 web.unified_roster exists", fn is not None):
+        return
+    got = fn(managed, answers)
+    # (1) Discriminator -- source; kind у managed остаётся перечислением
+    #     состояний, у local его нет вовсе.
+    c.expect("#587 managed and local rows in one roster",
+             sorted(r["source"] for r in got),
+             ["local", "local", "local", "managed", "managed", "managed",
+              "managed"])
+    m1 = next(r for r in got if r.get("name") == "pu-mop-1")
+    c.check("#587 source is the discriminator, kind stays the state enum",
+            m1["kind"] in ("free", "busy", "sick", "silent", "down"), m1["kind"])
+    loc = next(r for r in got if r["source"] == "local"
+               and r.get("user") == "ermak" and r.get("conversation") == "mop-ab")
+    c.check("#587 a local row has no state kind at all", "kind" not in loc, loc)
+    # (2) Стабильный id и проект у КАЖДОЙ строки; managed id -- джоб+
+    #     инкарнация, легаси-джоб -- сам джоб; разговоры в managed-строке
+    #     не плодят строк: личность -- джоб+инкарнация, не разговор.
+    c.check("#587 every row carries a stable id and project",
+            all(r.get("id") and r.get("project") for r in got), got)
+    c.expect("#587 a managed id is job@incarnation",
+             m1["id"], "pu-mop-1@123e4567-e89b-42d3-a456-426614174001")
+    m2 = next(r for r in got if r.get("name") == "pu-mop-2")
+    c.expect("#587 a legacy managed job falls back to the job id",
+             m2["id"], "pu-mop-2")
+    ids = [r["id"] for r in got]
+    c.check("#587 ids are unique", len(ids) == len(set(ids)), ids)
+    c.check("#587 a local id is opaque, not the raw sessionId",
+            all("0f1e" not in str(r["id"]) and "9b8a" not in str(r["id"])
+                for r in got if r["source"] == "local"), ids)
+    c.expect("#587 managed rows carry their project",
+             sorted({r["project"] for r in got if r["source"] == "managed"}),
+             ["?", "mop"])
+    # (3) Роль -- из меты джоба, не самозванная: источник помечен; local --
+    #     role: null, role_source: 'legacy'.
+    c.expect("#587 the role comes from the job meta", m1["role"], "builder")
+    c.expect("#587 the role source is the trusted meta",
+             m1["role_source"], "meta")
+    c.expect("#587 a legacy managed job carries no role", m2["role"], None)
+    c.expect("#587 a local row declares the legacy source",
+             loc["role_source"], "legacy")
+    c.expect("#587 a local row has no role", loc["role"], None)
+    c.expect("#587 a local row is unmanaged", loc["unmanaged"], True)
+    # (4) Четыре имени различны: джоб, инкарнация, разговор (человекочитаемое
+    #     имя или null), адрес доставки. Сырой sessionId -- на сервере.
+    c.expect("#587 the managed row carries job, incarnation and role digest",
+             (m1["name"], m1["incarnation"], m1["soul_digest"]),
+             ("pu-mop-1", INC1, HEX64A))
+    c.expect("#587 conversation is the readable session name",
+             loc["conversation"], "mop-ab")
+    c.check("#587 no raw sessionId rides the public rows",
+            all("sessionId" not in r for r in got), got)
+    c.check("#587 a local row has no Nomad identity",
+            not ("incarnation" in loc or "soul_digest" in loc or "name" in loc), loc)
+    c.expect("#587 a local row carries its delivery addresses",
+             sorted(loc["addresses"]), ["ermak.mate-7", "ermak.mate-7-all"])
+    c.expect("#587 a local row carries a display name",
+             loc["display"], "mop-ab")
+    # (5) Два endpoint'а одной сессии -- одна строка; одинаковые имена
+    #     разговоров разных сессий -- разные строки (ключ сессии с личностью).
+    ab_rows = [r for r in got if r["source"] == "local"
+               and r.get("conversation") == "mop-ab"]
+    c.expect("#587 identical conversation names of different sessions stay apart",
+             sorted(r["user"] for r in ab_rows), ["ermak", "ivan"])
+    c.check("#587 two MCP endpoints of one conversation are one row",
+            not any(len(r["addresses"]) > 1 and r["user"] == "ivan" for r in ab_rows),
+            ab_rows)
+    cd = next(r for r in got if r["source"] == "local"
+              and r.get("user") == "ermak" and r.get("conversation") == "mop-cd")
+    c.expect("#587 a conversation of the same login is its own row",
+             cd["addresses"], ["ermak.box-9"])
+    # (6) Хозяин-человек: user -- известный владелец аренды (managed) или
+    #     логин сессии (local); нет аренды -- null; дублей owner/user под
+    #     одним фактом нет.
+    c.expect("#587 a managed row names its human owner", m1["user"], "ermak")
+    c.expect("#587 a local row names its human owner", loc["user"], "ermak")
+    m3 = next(r for r in got if r.get("name") == "pu-mop-3")
+    c.expect("#587 no lease reads as null, not a dash", m3["user"], None)
+    c.check("#587 no redundant owner field beside user",
+            all("owner" not in r for r in got), got)
+    # (7) Снимок несёт канонический список аддитивно, прежние ключи --
+    #     проекция: старая страница не меняется; счётчики -- только про
+    #     аллокации, локальные сессии в них не входят.
+    snap = web.snapshot(rows=managed, nodes=[], usage=[], per_puppet=[],
+                        per_user=[], journal=[], errors=[], at=1.0,
+                        masters=web.master_rows(answers, managed))
+    snap_ids = sorted(r["id"] for r in snap["sessions"])
+    c.check("#587 the snapshot carries the same unified roster",
+            snap_ids == sorted(ids), snap_ids)
+    c.check("#587 the old snapshot keys stay a projection",
+            {"masters", "projects", "counts"} <= set(snap), sorted(snap))
+    c.expect("#587 pool counts stay about allocations only",
+             snap["counts"]["puppets"], 4)
+    # (9) Сирота без origin: строка живёт, проект -- «?», снимок цел.
+    m4 = next(r for r in got if r.get("name") == "pu-mop-4")
+    c.expect("#587 an orphan job reads the unknown project", m4["project"], "?")
+    # (10) Managed-строка адресуема: адрес доставки -- имя джоба.
+    c.expect("#587 a managed row is addressable by its job name",
+             m1["addresses"], ["pu-mop-1"])
+    # (11) Прежнее поле detail (#452) едет дальше: короткая причина
+    #      вердикта, nullable; UI не разбирает строку состояния.
+    c.check("#587 managed rows keep the verdict detail",
+            all("detail" in r for r in got if r["source"] == "managed"), got)
+    # (12) kind и bucket -- раздельно, как в строке puppets (#452/#210):
+    #      kind -- вид вердикта (слово статуса), bucket -- корзина
+    #      classify (цвет). «sick»/«down»/«silent» -- корзины: вид вердикта
+    #      у больного -- «hung»/«error»/..., и смешение их рендерило бы
+    #      неверное слово или дыру (ревью 1cee7c7: kind был classify(r)).
+    sick = role_row("pu-mop-5", MOP, state=State("hung", "not responding"),
+                    owner="ermak")
+    silent_row = role_row("pu-mop-6", MOP, state=silent("no responders"),
+                          owner="ermak")
+    got2 = fn([sick, silent_row], {"mop": []})
+    s1 = next(r for r in got2 if r.get("name") == "pu-mop-5")
+    s2 = next(r for r in got2 if r.get("name") == "pu-mop-6")
+    c.expect("#587 a hung row keeps its verdict kind", s1["kind"], "hung")
+    c.expect("#587 a hung row carries the sick bucket", s1["bucket"], "sick")
+    c.expect("#587 a silent row keeps its verdict kind", s2["kind"], "silent")
+    c.expect("#587 a silent row carries the silent bucket", s2["bucket"], "silent")
+    c.check("#587 every managed row carries both kind and bucket",
+            all(("kind" in r and "bucket" in r) for r in got2
+                if r["source"] == "managed"), got2)
+    # Счастливое совпадение free/busy -- не довод: и там оба ключа на месте
+    # и согласованы с classify (проверка ниже -- та же таблица CLASSIFY).
+    c.expect("#587 the busy row's kind and bucket coincide by verdict",
+             (m1["kind"], m1.get("bucket")), ("busy", "busy"))
+
+    # (8) Битая половина тройки в мете -- громкий отказ с причиной, не
+    #     молчаливая потеря строки: сценарии #421/#423 ниже остаются на месте.
+    broken = [role_row("pu-mop-4", MOP, soul="builder", digest=HEX64B, inc=None)]
+    try:
+        fn(broken, {"mop": []})
+        c.fail("#587 a broken role triple must refuse, not vanish", None)
+    except ValueError as e:
+        c.check("#587 the refusal names the reason",
+                "soul" in str(e).lower(), str(e))
+
+
+# HYPOTHESIS: индекс в обрезаемом списке замирает на 100, и следующие
+# терминалы не доходят до существующего SSE-подписчика.
+# SOLUTION: курсор -- монотонный номер; смещение в кольце считается от
+# текущего номера и числа сохранённых кадров под тем же замком.
+# RESULT: кадры после 100 доезжают, replay при новом соединении отсутствует.
+# STATUS: FIXED — see #604
+# HYPOTHESIS (#616): completion соседней проверки дописывает в общий буфер.
+# SOLUTION: отдельный экземпляр реального HTTP-модуля, не фильтрация кадров.
+# RESULT: подставленный чужой callback давал два RED, теперь полный список
+# 115 кадров и отсутствие replay проверяются без ослабления утверждений.
+# STATUS: FIXED — see #616
+def check_operation_stream_capacity_604(c):
+    from mop.cli.server import web as shared_web
+    import importlib.util
+    foreign_completion = shared_web._on_operation
+    spec = importlib.util.spec_from_file_location("mop.cli.server._capacity_616", shared_web.__file__)
+    webcli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(webcli)
+
+    class Collector:
+        def __init__(self, batches):
+            self.batches = iter(batches)
+            self.version = 0
+
+        def wait(self, version, timeout):
+            try:
+                batch = next(self.batches)
+            except StopIteration:
+                raise BrokenPipeError()
+            if self.version == 0:
+                foreign_completion({"id": "foreign-completion-616", "action": "send",
+                                    "target": "pu-other-1", "status": "refused"})
+            for number in batch:
+                webcli._on_operation({"id": f"op-{number}", "action": "add",
+                                      "target": f"pu-demo-{number}", "status": "done"})
+            self.version += 1
+            return self.version, {"version": self.version}
+
+        def kick(self):
+            pass
+
+    def stream(before, batches):
+        collector = Collector(batches)
+        with patched(webcli, COLLECTOR=collector, _OP_FRAMES=[], _OP_SEQUENCE=0):
+            for number in before:
+                webcli._on_operation({"id": f"old-{number}", "action": "add",
+                                      "target": f"pu-old-{number}", "status": "done"})
+            handler = webcli.Handler.__new__(webcli.Handler)
+            handler.wfile = BytesIO()
+            handler.send_response = lambda *args: None
+            handler.send_header = lambda *args: None
+            handler.end_headers = lambda: None
+            handler.stream()
+            wire = handler.wfile.getvalue().decode()
+            frames = [json.loads(part.split("data: ", 1)[1]) for part in wire.split("\n\n")
+                      if part.startswith("event: operation\n")]
+            return frames, len(webcli._OP_FRAMES)
+
+    continuous, size = stream([], [[number] for number in range(115)])
+    c.expect("#604 an existing subscriber receives all 115 consecutive terminals",
+             [frame["id"] for frame in continuous], [f"op-{number}" for number in range(115)])
+    c.expect("#604 the operation history remains bounded", size, 100)
+    fresh, _ = stream(range(140), [[140], [141]])
+    c.expect("#604 a new subscriber skips the capped old history but receives new terminals",
+             [frame["id"] for frame in fresh], ["op-140", "op-141"])
+    delayed, _ = stream([], [list(range(125)), [125]])
+    c.expect("#604 a lagging subscriber receives retained terminals and continues afterwards",
+             [frame["id"] for frame in delayed], [f"op-{number}" for number in range(25, 126)])
+# HYPOTHESIS: GET результата кодирует admin-гейт как status="403"
+# внутри HTTP 200, и клиент принимает отказ доступа за исход операции.
+# SOLUTION: отказ -- типизированный Refused, HTTP-handler сохраняет его
+# код и безопасную причину, а не упаковывает отказ как статус операции.
+# RESULT: 401/403/503 проверены на настоящем GET-handler.
+# STATUS: FIXED — see #610
+def check_operation_result_http_gate_610(c):
+    from mop.cli.server import web as webcli
+    from mop.server import adminapi
+
+    def unavailable():
+        raise RuntimeError("PRIVATE-TOKEN /private/provider.env")
+
+    cases = (((None, None), None, 401, "login required"),
+             (("viewer", "user"), None, 403, "admin only"),
+             (("admin", "admin"), unavailable, 503, "login provider unavailable"))
+    for who, provider, expected, reason in cases:
+        api = adminapi.Api(adminapi.Operations(), origin="https://pool.example", provider=provider)
+        with patched(webcli, ADMINAPI=api), patched(webcli.Handler, _who=lambda self, p=who: p):
+            headers, body = _fake_handler(webcli, "GET", "/api/admin/ops/private-operation-id")
+        c.expect(f"#610 HTTP result gate {expected}", headers[0][1], expected)
+        c.expect(f"#610 result gate {expected} gives only its public reason",
+                 json.loads(body), {"error": reason})
+        c.check(f"#610 result gate {expected} leaks no operation or provider details",
+                all(secret not in body.decode() for secret in
+                    ("private-operation-id", "PRIVATE-TOKEN", "provider.env", '"target"')), body)
+    api = adminapi.Api(adminapi.Operations(), origin="https://pool.example")
+    with patched(webcli, ADMINAPI=api), patched(webcli.Handler, _who=lambda self: ("admin", "admin")):
+        headers, body = _fake_handler(webcli, "GET", "/api/admin/ops/unknown-id")
+    c.expect("#610 admin can still read an unknown result", headers[0][1], 200)
+    c.expect("#610 unknown is an operation status, not an auth failure", json.loads(body)["status"], "unknown")
+
+
+# STATUS: FIXED — see #612
+def check_startup_screen_612(c):
+    import dataclasses
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    from mop.common import bus, puppets
+    store = websession.SessionStore(now=lambda: 1000.0)
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    user = store.open(identity.Identity("olga", "user", ()))
+    row = dataclasses.replace(CARD_ROW, kind="starting", state="starting")
+    calls = []
+    mode = {"pane": False, "broken": False, "refused": False, "malformed": False}
+
+    def pane(node, name):
+        calls.append(("pane", node, name))
+        if not mode["pane"]:
+            raise RuntimeError("no tmux session")
+        return ["Claude ready"]
+
+    def startup(name):
+        calls.append(("startup", name))
+        if mode["malformed"]:
+            return {"lines": ["safe stage"], "note": {"password": "PRIVATE-NOTE"}}
+        if mode["refused"]:
+            raise bus.Refused("initialization log unavailable: Nomad client is unreachable")
+        if mode["broken"]:
+            raise RuntimeError("PRIVATE-TOKEN /private/error.env")
+        return {"lines": ["body ready", "TASK [Configure database]", "MOP_PROXY_KEY=hush-hush"],
+                "truncated": False, "note": None}
+
+    def get(name="pu-mop-1", token=admin):
+        return _fake_handler(webcli, "GET", f"/api/puppet/{name}/tail",
+            headers={"Cookie": f"mop_session={token}"} if token else None)
+
+    with patched(webcli, SESSIONS=store, COLLECTOR=_card_collector([row])), \
+         patched(websession, provider=lambda: FakeProvider()), \
+         patched(webcli.config, get=lambda key, default=None: {
+             "MOP_SERVER_LAN": "10.0.0.1", "MOP_HTTPS_PORT": "443"}.get(key, default)), \
+         patched(puppets, pane_lines=pane, node_of=lambda name: "mate", startup_lines=startup):
+        headers, raw = get()
+        data = json.loads(raw)
+        c.expect("#612 starting screen returns its initialization log, not 502", headers[0][1], 200)
+        c.expect("#612 startup source is explicit", data.get("source"), "initialization")
+        c.check("#612 actual initialization stages reach the screen",
+                "TASK [Configure database]" in data.get("lines", []), data)
+        c.check("#612 startup secrets do not reach browser", "hush-hush" not in raw.decode(), raw)
+        c.check("#612 initialization read carries no-store",
+                ("Cache-Control", "no-store") in headers, headers)
+        with patched(webcli, COLLECTOR=_card_collector([
+                dataclasses.replace(row, kind="failing", alloc_status="failing")])):
+            headers, raw = get()
+            c.expect("#612 initialization failures keep their process log visible",
+                     (headers[0][1], json.loads(raw).get("source")), (200, "initialization"))
+        mode["pane"] = True
+        calls.clear()
+        headers, raw = get()
+        data = json.loads(raw)
+        c.expect("#612 next poll prefers a newly available live screen", data.get("source"), "screen")
+        c.expect("#612 live screen lines replace initialization", data.get("lines"), ["Claude ready"])
+        c.check("#612 live screen needs no startup log lookup", not any(x[0] == "startup" for x in calls), calls)
+        mode["pane"] = False
+        mode["broken"] = True
+        headers, raw = get()
+        c.expect("#612 a genuinely failed initialization reader is an error", headers[0][1], 502)
+        c.check("#612 raw reader exceptions are not published", "PRIVATE-TOKEN" not in raw.decode(), raw)
+        mode["refused"] = True
+        headers, raw = get()
+        c.expect("#612 an already safe library refusal keeps its reason",
+                 json.loads(raw).get("error"), "initialization log unavailable: Nomad client is unreachable")
+        c.expect("#612 a private log refusal names its source", json.loads(raw).get("source"), "initialization")
+        mode["malformed"] = True
+        headers, raw = get()
+        c.expect("#612 unexpected note structure is not published as process data", headers[0][1], 502)
+        c.check("#612 credentials in a malformed note stay private", "PRIVATE-NOTE" not in raw.decode(), raw)
+        for label, token, code in (("guest", None, 401), ("user", user, 403)):
+            calls.clear()
+            headers, raw = get(token=token)
+            c.expect(f"#612 {label} cannot read process log", headers[0][1], code)
+            c.expect(f"#612 {label} touches no process reader", calls, [])
+        calls.clear()
+        headers, raw = get("../../private")
+        c.expect("#612 unknown target is refused before any reader", (headers[0][1], calls), (404, []))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_masters_305, check_dist_297,
+               check_unified_roster_587,
                check_bucket_452,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_master_sessions_421, check_who_answer_421,
                check_session_store_415, check_login_api_415,
                check_session_survives_restart_485,
-               check_admin_routes_486,
+               check_admin_routes_486, check_operation_result_http_gate_610,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
-               check_no_replay_519,
+               check_no_replay_519, check_operation_stream_capacity_604,
                check_login_bounds_415, check_guard_417,
                check_guard_placeholder_417, check_breaker_417,
                check_gateway_417, check_breaker_singleflight_417,
@@ -2726,7 +3113,8 @@ def main():
                check_gateway_key_path_425,
                check_hash_echo_523, check_panel_routes_523,
                check_section_array_523, check_hotfix_unwrap_523,
-               check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462):
+               check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462,
+               check_startup_screen_612):
         fn(c)
     return c.report("web")
 

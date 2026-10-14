@@ -947,6 +947,59 @@ def check_english_562(c):
                 not re.search("[\u0400-\u04ff]", shown), shown)
 
 
+# HYPOTHESIS: running обёртки стирает прошлый отказ, хотя сессия ещё не появилась.
+# SOLUTION: явное отсутствие сессии удерживает ненулевой исход и его причину;
+# диагностика использует тот же признак и не рестартит незавершённую попытку.
+# RESULT: три проверки причины были красными; отдельно воспроизведены потеря
+# после окна 300 с и ошибочное автолечение медленной попытки. Теперь зелёные.
+# STATUS: FIXED — see #606
+def check_restart_failure_606(c):
+    now = 1_000_000
+    task = {"state": "running", "restarts": 4, "exit": 1,
+            "next_s": None, "failed": False, "started_at": now - 30}
+
+    def row(given, summary=task, reason="no MOP_PROXY_KEY in secrets.env"):
+        item = {"job": {"ID": "pu-x-1", "Status": "running", "Meta": {}},
+                "alloc": {"NodeName": "n1", "ClientStatus": "running"},
+                "error": None, "state": None, "kind": None, "owner": None,
+                "llm": None, "task": summary, "reason": reason}
+        puppets._judge(item, verdict({**given, "task": summary}, now=now))
+        return puppets._row(item)
+
+    r = row({"present": False})
+    c.expect("#606 a repeated initialization keeps the last failure",
+             (r.kind, r.detail),
+             ("failing", "no MOP_PROXY_KEY in secrets.env (4 restarts, retrying initialization)"))
+    c.expect("#606 the failed retry is not reported as a healthy running session",
+             r.alloc_status, "failing")
+    r = row({"present": False}, {**task, "started_at": now - 600})
+    c.expect("#606 a slow retry does not lose its prior failure after the grace window",
+             r.kind, "failing")
+    r = row({"present": False}, reason=None)
+    c.expect("#606 missing stderr still exposes the previous nonzero exit",
+             r.detail, "exit 1 (4 restarts, retrying initialization)")
+    for what, changed in (("first attempt", {"restarts": 0, "exit": None}),
+                          ("normal session restart", {"exit": 0}),
+                          ("unknown prior exit", {"exit": None})):
+        r = row({"present": False}, {**task, **changed})
+        c.expect(f"#606 {what} remains ordinary initialization", r.kind, "starting")
+    r = row(facts("idle 1 1"))
+    c.expect("#606 a confirmed live session clears a historical startup failure",
+             (r.kind, r.detail), ("free", None))
+    r = row({"error": "node probe failed"})
+    c.expect("#606 a failed probe is not proof of missing session", r.kind, "hung")
+    item = {"job": {"ID": "pu-x-1", "Status": "running", "Meta": {}},
+            "alloc": {"NodeName": "n1", "ClientStatus": "running"},
+            "task": {**task, "started_at": now - 600},
+            "reason": "no MOP_PROXY_KEY in secrets.env"}
+    puppets._judge(item, verdict({"present": False, "task": item["task"]}, now=now))
+    with patched(puppets, roster=lambda **kw: [item]):
+        issues = puppets.diagnose()
+    c.expect("#606 diagnostics keep the failure rather than automatically restart its retry",
+             [(i["action"], i["diagnosis"]) for i in issues],
+             [(None, "FAILED: no MOP_PROXY_KEY in secrets.env (4 restarts, retrying initialization)")])
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -967,6 +1020,7 @@ def main():
     check_invariants_273(c)
     check_alloc_377(c)
     check_starting_510(c)
+    check_restart_failure_606(c)
     check_english_562(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)

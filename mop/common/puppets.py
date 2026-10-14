@@ -265,6 +265,11 @@ def rows_from(items):
     return [_row(i) for i in items]
 
 
+def _initializing(item):
+    return (item.get("kind") == "starting"
+            or item.get("kind") == "hung" and item.get("detail") == "no tmux session")
+
+
 def _row(item, disk_kb=None):
     job, alloc = item["job"], Alloc.from_dict(item["alloc"])
     meta = JobMeta.from_job(job)
@@ -272,7 +277,8 @@ def _row(item, disk_kb=None):
     state, kind = item["state"] or None, item.get("kind")
     detail, branch = item.get("detail"), item.get("branch")
     # Падающий на старте -- failing с причиной, а не pending (#126).
-    failing = failing_row(status, item.get("task"), item.get("reason"))
+    failing = failing_row(status, item.get("task"), item.get("reason"),
+                          initializing=_initializing(item))
     if failing and not item["error"]:
         # Причина -- detail вердикта, показ собирает «FAILED: ...» из неё.
         status, verdict_state = failing
@@ -468,7 +474,7 @@ def diagnose():
         # заново; лечится причина, поэтому без автолечения и с ней в диагнозе.
         status = Alloc.from_dict(alloc)
         failing = failing_row(status and status.client_status, item.get("task"),
-                              item.get("reason"))
+                              item.get("reason"), initializing=_initializing(item))
         if failing:
             issues.append({"name": job["ID"], "alloc": alloc,
                            "diagnosis": str(failing[1]), "action": None})
@@ -854,6 +860,11 @@ def switch_model(node, name, model, force=False):
         out = press_enter(node, name, force)
     if "switch model?" in out.lower():
         raise RuntimeError("model switch dialog did not close")
+
+
+def startup_lines(name, lines=500):
+    """Ограниченный ход инициализации, только оператору; библиотека молчит."""
+    return _cluster("startup", project=bus.ADMIN, name=name, lines=lines)
 
 
 def alloc_stderr(name, lines):

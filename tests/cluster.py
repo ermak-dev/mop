@@ -578,9 +578,11 @@ def check_update_keeps_branch_257(c):
     job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
                                       "branch": "swarm"}}
     with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
-        # cred и node -- та же сигнатура, что у настоящей job_spec (#284, #289).
+        # cred и node -- та же сигнатура, что у настоящей job_spec (#284,
+        # #289), тройка роли -- с #582.
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
-            cred=None, node=None: calls.append(branch) or {"Job": {"ID": name}}
+            cred=None, node=None, soul=None, soul_digest=None, soul_inc=None: \
+            calls.append(branch) or {"Job": {"ID": name}}
         cluster.store_workspace = lambda root, name, req: None
         # register фейка кладёт пустой джоб на место прежнего: мету каждый
         # вызов берёт из своего фейка.
@@ -2733,8 +2735,37 @@ def check_alloc_error_stops_delete_572(c):
                 f"raised: {stopped}, polls: {polled}")
 
 
+# HYPOTHESIS: сервер не читает прошлую причину, если повторная обёртка running.
+# SOLUTION: ненулевой предыдущий исход допускает чтение stderr; ростер
+# использует причину только до подтверждённого появления сессии.
+# RESULT: две проверки источника причины были красными, после правки зелёные.
+# STATUS: FIXED — see #606
+def check_retry_reason_606(c):
+    import types
+    reads = []
+    api = types.SimpleNamespace(alloc_stderr=lambda aid, task: (
+        reads.append((aid, task)) or "no MOP_PROXY_KEY in secrets.env\n"))
+    alloc = {"ID": "a1", "NodeName": "n1", "ClientStatus": "running",
+             "TaskStates": {"puppet": {"State": "running", "Restarts": 4,
+                "Events": [{"Type": "Terminated", "ExitCode": 1},
+                           {"Type": "Started", "Time": 100_000_000_000}]}}}
+    with patched(cluster, _api=lambda: api):
+        task, reason = cluster.task_and_reason(alloc)
+    c.expect("#606 running retry retains actual failure reason from Nomad stderr",
+             reason, "no MOP_PROXY_KEY in secrets.env")
+    c.expect("#606 reason is read from the actual allocation and task",
+             reads, [("a1", "puppet")])
+    reads.clear()
+    alloc["TaskStates"]["puppet"]["Restarts"] = 0
+    alloc["TaskStates"]["puppet"]["Events"] = [{"Type": "Started", "Time": 100_000_000_000}]
+    with patched(cluster, _api=lambda: api):
+        task, reason = cluster.task_and_reason(alloc)
+    c.expect("#606 healthy first start does not read error logs", (reason, reads), (None, []))
+
+
 def main():
     c = Checks()
+    check_retry_reason_606(c)
     check_join_config_404(c)
     check_client_config_origin_547(c)
     check_give_up_345(c)

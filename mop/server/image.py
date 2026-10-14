@@ -20,12 +20,14 @@ from . import nomad, playvars, spec
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
 
-def prepare(origin, root=None):
+def prepare(origin, root=None, branch=None):
     """Манифесты проекта: из рабочей копии root, если она названа, иначе из
     origin (дефолтная ветка). -> словарь manifest.fetch плюс 'origin'.
+    branch выбирает remote-ветку и имеет приоритет над root.
     Отказ — RuntimeError, как у manifest."""
     project = puppets.project_of(origin)
-    got = manifest.fetch_tree(root, project) if root else manifest.fetch(origin)
+    got = (manifest.fetch(origin, branch=branch) if branch is not None
+           else manifest.fetch_tree(root, project) if root else manifest.fetch(origin))
     got["origin"] = origin
     return got
 
@@ -37,6 +39,12 @@ def extra_vars(origin, got):
     живой сборкой (#26), держится tests/image.py."""
     extra = {"mop_project": got["project"], "mop_origin": origin,
              "mop_project_asks": got["asks"]}
+    if "branch" in got:
+        branch, commit = got["branch"], got.get("commit")
+        if commit is None:
+            raise RuntimeError("image branch has no verified commit")
+        manifest.image_source(branch, commit)
+        extra.update(mop_image_branch=branch, mop_image_commit=commit)
     # В образ едет только песочница (#61): bootstrap играется при старте.
     if got["sandbox_vars"]:
         extra["mop_project_vars"] = got["sandbox_vars"]
@@ -161,8 +169,12 @@ def clear(project, force=False, api=None, node=None, account=None):
         # после сборки поднимался на origin/HEAD, а не на своей ветке.
         # Запись -- до первого шага снятия (#570): половина снятого папета
         # всё равно требует подъёма.
-        gone.append({"name": name, "origin": m.origin,
-                     "branch": m.branch, "node": node})
+        # Тройка роли (#582) -- той же метой, что ветка (#265): без неё
+        # снятый поднялся бы легаси, и душа потерялась бы в сборке образа.
+        row = {"name": name, "origin": m.origin, "branch": m.branch,
+               "node": node, "soul": m.soul, "soul_digest": m.soul_digest,
+               "soul_inc": m.soul_inc}
+        gone.append(row)
         api.deregister(name, purge=False)
         puppets._wait_stopped(name)
         puppets.wipe(node, name)
@@ -180,9 +192,13 @@ def restore(gone, api=None):
     говорил, кого из снятых не подняли."""
     failed = []
     for p in gone:
+        # Душа снятого едет с ним (#582): строка журнала без тройки --
+        # легаси (сборка до #582 и её журналы), JobMeta тройку не требует.
+        meta = JobMeta(p["origin"], p.get("branch"), soul=p.get("soul"),
+                       soul_digest=p.get("soul_digest"),
+                       soul_inc=p.get("soul_inc"))
         try:
-            (api or nomad).register(spec.respec(p["name"], JobMeta(p["origin"],
-                                                          p.get("branch"))))
+            (api or nomad).register(spec.respec(p["name"], meta))
         except Exception as e:
             failed.append(f"{p['name']} on {p.get('node') or '?'}: "
                           f"not raised again: {e}")

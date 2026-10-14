@@ -43,9 +43,9 @@ test("a section per project: one status word, the branch in its own column", () 
   expect(within(rows[1]).getByText("#12")).toBeInTheDocument();
 });
 
-test("no projects: a plain note", () => {
+test("#588 no roster entries: a plain note", () => {
   renderUi(<PoolTable projects={[]} />);
-  expect(screen.getByText("папетов нет")).toBeInTheDocument();
+  expect(screen.getByText("No sessions")).toBeInTheDocument();
 });
 
 // #452: одна колонка «статус» -- слово по виду вердикта, цвет по корзине;
@@ -79,12 +79,12 @@ test("#452 the branch is a chip of its own, no state-string parsing", () => {
   const rows = screen.getAllByRole("row").slice(1);
   // Ветка -- из поля branch, а не разобранный «busy: feat/452».
   expect(within(rows[0]).getByText("feat/452")).toBeInTheDocument();
-  // Нет ветки -- прочерк в ячейке ветки (четвёртая колонка): слово не
-  // изображает ветку. Прочерк в ней один: owner «-» и llm «-» в этой
-  // строке -- другие колонки, у каждой свой.
+  // Колонка роли (#588) не меняет смысл ветки: прочерк остаётся именно
+  // в её ячейке, а не берётся из соседнего пользователя или модели.
   const cells = within(rows[1]).getAllByRole("cell");
-  expect(cells[3]).toHaveTextContent("-");
-  expect(within(cells[3]).getByText("-")).toBeInTheDocument();
+  const branch = cells[Object.keys(COLS).indexOf("branch")];
+  expect(branch).toHaveTextContent("-");
+  expect(within(branch).getByText("-")).toBeInTheDocument();
 });
 
 test("#478 the repository is the section header, not a column", () => {

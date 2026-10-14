@@ -355,7 +355,7 @@
     # контейнеров вышел из игры до stage_name -- его и пропускаем.
     - name: Take the body into the inventory for the rest of the run
       ansible.builtin.add_host:
-        name: "{{ hostvars[item].stage_name }}"
+        name: "{{ hostvars[item].stage_name }}-{{ item }}"
         groups: mop_building
         ansible_host: "{{ hostvars[item].stage_ip }}"
         ansible_user: "{{ MOP_USER }}"
@@ -476,6 +476,11 @@
         set -e
         rm -rf {{ mirror_tmp }} {{ mirror_tgz }}
         git clone --mirror -q {{ mop_origin | quote }} {{ mirror_tmp }}
+        {% if mop_image_branch is defined %}
+        git -C {{ mirror_tmp }} fetch -q origin {{ mop_image_commit | quote }}
+        git -C {{ mirror_tmp }} update-ref {{ ('refs/heads/' ~ mop_image_branch) | quote }} {{ mop_image_commit | quote }}
+        git -C {{ mirror_tmp }} symbolic-ref HEAD {{ ('refs/heads/' ~ mop_image_branch) | quote }}
+        {% endif %}
         tar czf {{ mirror_tgz }} -C {{ mirror_tmp }} .
       delegate_to: localhost
       become: no

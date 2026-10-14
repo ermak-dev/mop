@@ -1,4 +1,4 @@
-"""mop driver build [project|origin] [--fresh] [--force] [--node NAME]: bake the project's image
+"""mop driver build [project|origin] [--fresh] [--force] [--node NAME] [--branch NAME]: bake the project's image
 
 On the hypervisors, from the control machine. No argument: this working
 copy, .mop as it lies. Incremental by default: a copy of the image
@@ -7,6 +7,10 @@ puppets on container nodes are stopped, their bodies destroyed and raised
 again from the new image; a busy puppet refuses unless --force.
 --node NAME: on that node only — its puppets alone are stopped, the others'
 image and work are left as they are.
+--branch NAME: read .mop from that remote branch, not the local tree;
+pin the source mirror to the same commit for cache warm-up. It replaces
+the project's image on the selected nodes, not a separate branch image.
+Without --branch the local-tree/default-branch behavior is unchanged.
 """
 import sys
 
@@ -26,11 +30,13 @@ def main(argv):
     лежат, без коммита и без push (#46): правку манифеста пробуют образом, а
     не влитием в master. Зеркало в образ по-прежнему снимается с origin —
     тела клонируют репозиторий, не копию. С аргументом — дефолтная ветка
-    origin, как в deploy: там нет рабочей копии, которая сказала бы иначе."""
+    origin, как в deploy: там нет рабочей копии, которая сказала бы иначе.
+    --branch явно выбирает remote-ветку вместо обоих умолчаний."""
     fresh, force = "--fresh" in argv, "--force" in argv
     argv = [a for a in argv if a not in ("--fresh", "--force")]
     try:
         node, argv = lib.parse_value(argv, "--node", once=True)
+        branch, argv = lib.parse_value(argv, "--branch", once=True)
     except RuntimeError:
         # Пустое или флаг вместо имени узла -- usage, а не сборка на всех
         # узлах (#340); повтор -- usage, как было.
@@ -41,10 +47,10 @@ def main(argv):
         origin, root = origin_of(argv[0]), None
     else:
         origin = lib.origin(None, __doc__)
-        root = lib.git("rev-parse", "--show-toplevel")
+        root = None if branch is not None else lib.git("rev-parse", "--show-toplevel")
     # Дорога сборки живёт в библиотеке (mop/server/image.py): у неё двое
     # вызывающих, этот командлет и инструмент build в MCP. Здесь печать.
-    got = image.prepare(origin, root)
+    got = image.prepare(origin, root, **({"branch": branch} if branch is not None else {}))
     project = got["project"]
     # Ход сборки -- шагами (#182): эхо манифеста и отчёт о телах были выводом
     # того, что и так известно; на терминале это строка шага, не на

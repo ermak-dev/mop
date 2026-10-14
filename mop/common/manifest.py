@@ -28,6 +28,7 @@ bootstrap'у, а config -- нижний слой (#156). Молчит и
 структура, и пусть её кладёт yaml, а не json в командной строке.
 """
 import os
+import re
 import subprocess
 
 from . import config, puppets
@@ -114,6 +115,8 @@ def clone_failure(stderr):
         return "host identity could not be verified"
     if "authentication failed" in text or "permission denied" in text:
         return "access denied"
+    if "remote branch" in text and "not found" in text:
+        return "branch not found"
     if "repository" in text and "not found" in text:
         return "repository not found"
     if "could not resolve host" in text:
@@ -123,7 +126,21 @@ def clone_failure(stderr):
     return "clone failed; check the origin and access"
 
 
-def fetch(origin):
+def image_source(branch, commit=None):
+    """Явная ветка образа и её pin: отказ до клона или очистки тел."""
+    if not isinstance(branch, str) or not branch or branch.startswith(("-", "refs/")) \
+            or branch == "@{-1}":
+        raise RuntimeError("invalid image branch; use a branch name")
+    checked = subprocess.run(["git", "check-ref-format", f"refs/heads/{branch}"],
+                             capture_output=True, text=True)
+    if checked.returncode:
+        raise RuntimeError("invalid image branch; use a branch name")
+    if commit is not None and (not isinstance(commit, str)
+                              or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit)):
+        raise RuntimeError("image branch has no verified commit")
+
+
+def fetch(origin, branch=None):
     """origin -> словарь манифестов проекта: {'project', 'asks', 'alien',
     'legacy', 'sandbox_vars', 'sandbox_tasks', 'bootstrap_vars',
     'bootstrap_tasks'} (пути или None).
@@ -134,23 +151,35 @@ def fetch(origin):
 
     Клон origin, а не рабочая копия: манифест принадлежит репозиторию, и
     origin — единственная его правда для deploy, у которого рабочей копии
-    чужого проекта нет вовсе. Читается HEAD клона, то есть дефолтная ветка.
+    чужого проекта нет вовсе. Без branch читается default HEAD; с branch —
+    явно названная удалённая ветка. Её имя и SHA доезжают сборке зеркала.
 
     Голый, глубины 1 и без блобов (#139): нужны два файла HEAD, а зеркало
     всей истории стоило rudesktop 77 с и 451 МБ -- `mop project add` висел
     на «reading .mop». `git show` догружает свой блоб сам.
     """
+    if branch is not None:
+        image_source(branch)
     project = puppets.project_of(origin)
     import tempfile
     with_dir = tempfile.mkdtemp(prefix=f"mop-mirror-{project}-")
     tmp = os.path.join(with_dir, "head.git")
     try:
         r = subprocess.run(["git", "clone", "--bare", "--depth", "1",
-                            "--filter=blob:none", "-q", origin, tmp],
+                            "--filter=blob:none", "-q",
+                            *(["--branch", branch, "--single-branch"] if branch is not None else []),
+                            origin, tmp],
                            capture_output=True, text=True, env=clone_env(os.environ))
         if r.returncode != 0:
             raise RuntimeError(f"cannot read {project}: "
                                f"{clone_failure(r.stderr or r.stdout)}")
+
+        if branch is not None:
+            selected = subprocess.run(["git", "-C", tmp, "rev-parse", "--verify",
+                                       f"refs/heads/{branch}"], capture_output=True, text=True,
+                                      env=clone_env(os.environ))
+            if selected.returncode:
+                raise RuntimeError(f"cannot read {project}: branch not found")
 
         def show(path):
             got = subprocess.run(["git", "-C", tmp, "show", f"HEAD:{path}"],
@@ -163,6 +192,11 @@ def fetch(origin):
         head = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
                               capture_output=True, text=True, env=clone_env(os.environ))
         out["commit"] = head.stdout.strip() if head.returncode == 0 else None
+        if branch is not None:
+            if out["commit"] is None:
+                raise RuntimeError("image branch has no verified commit")
+            image_source(branch, out["commit"])
+            out["branch"] = branch
         return out
     finally:
         subprocess.run(["rm", "-rf", with_dir], capture_output=True)

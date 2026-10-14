@@ -181,9 +181,12 @@ def describe(path):
 #                    "flag": "--x" (без него -- позиционный),
 #                    "repeatable": True (только строковый флаг -> список строк),
 #                    "required": bool, "help": "..."}]}
+# Роль (#585) видит командлет, только если он назвал, что ему от неё
+# нужно: "node_verbs"/"cluster_verbs" -- глаголы из словаря soul,
+# "dispatch": bool. Молчащее объявление роли не открывается.
 # Таблицы команд нет: объявление живёт рядом с разбором argv, который оно
 # описывает, и расходиться им негде.
-DECL_KEYS = {"annotations", "background", "args"}
+DECL_KEYS = {"annotations", "background", "args", "node_verbs", "cluster_verbs", "dispatch"}
 ARG_KEYS = {"name", "type", "flag", "required", "help", "repeatable"}
 ARG_TYPES = ("string", "integer", "boolean")
 ANNOTATIONS = ("readonly", "destructive")
@@ -207,6 +210,13 @@ def declared(path):
         raise ValueError(f"MCP keys are {', '.join(sorted(DECL_KEYS))}")
     if decl.get("annotations") not in (None, *ANNOTATIONS):
         raise ValueError(f"MCP annotations: one of {', '.join(ANNOTATIONS)}")
+    from mop.common import soul  # здесь, а не наверху: пакет cli грузит каждая команда
+    for key, vocab in (("node_verbs", soul.NODE_VERBS), ("cluster_verbs", soul.CLUSTER_VERBS)):
+        verbs = decl.get(key, [])
+        if not isinstance(verbs, list) or set(verbs) - set(vocab):
+            raise ValueError(f"MCP {key}: a list of {', '.join(vocab)}")
+    if not isinstance(decl.get("dispatch", False), bool):
+        raise ValueError("MCP dispatch: true or false")
     optional_seen = False
     for a in decl.get("args", []):
         if set(a) - ARG_KEYS or not str(a.get("name", "")).isidentifier():
@@ -398,6 +408,34 @@ def reference():
 
 
 # ─── запуск ──────────────────────────────────────────────────────────────
+# `mop <роль>` (#586, docs/SOUL.md): имя, которого нет среди команд, но
+# годное именем роли, идёт в общий лаунчер ролей -- он и решает по
+# каталогу, роль это или опечатка. Встроенная команда всегда старше роли:
+# сюда доходят только имена, которых диспетчер не знает.
+ROLE_LAUNCHER = "mop.cli.core._launch"
+
+
+def role_route(argv):
+    """argv незнакомой команды -> (лаунчер ролей, argv целиком) либо None,
+    если имя не годится в роли. Чистая функция: каталог не читается --
+    его читает лаунчер, и опечатка там же получает unknown()."""
+    from ..common import soul
+    return (ROLE_LAUNCHER, list(argv)) if soul.NAME.match(argv[0]) else None
+
+
+def unknown(name):
+    """Отказ на незнакомое имя -- одна строка stderr, одна на диспетчер и
+    лаунчер ролей."""
+    print(f"mop: unknown command {name!r}; run 'mop help'", file=sys.stderr)
+
+
+def command_names():
+    """Имена, которые роль не может взять (#586): команды секций, группы,
+    прежние алиасы и help. Коллизия с ними -- отказ каталога ролей."""
+    names = set(catalog(scan())) | {k for k in LEGACY if isinstance(k, str)}
+    return names | {"help"}
+
+
 def client_command(modname):
     """Операторские команды, включая дочерний MCP, без .env установки."""
     return modname.startswith(("mop.cli.core.", "mop.cli.pool.", "mop.cli.node.",
@@ -421,7 +459,9 @@ def main(argv):
     except RuntimeError as e:
         sys.exit(f"mop: {e}")
     if found is None:
-        print(f"mop: unknown command {argv[0]!r}; run 'mop help'", file=sys.stderr)
+        found = role_route(argv)
+    if found is None:
+        unknown(argv[0])
         return 1
     modname, rest = found
     # Контекст -- до environment(): тот читает настройки, и сервер в них

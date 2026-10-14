@@ -376,6 +376,10 @@ class FakeNomad:
         self._call("alloc_stderr", alloc_id, task)
         return ""
 
+    def alloc_stdout(self, alloc_id, task, tail=8000):
+        self._call("alloc_stdout", alloc_id, task)
+        return ""
+
     def alloc_stop(self, alloc_id):
         self._call("alloc_stop", alloc_id)
 
@@ -420,3 +424,93 @@ class FakeNomad:
     def set_node_meta(self, node_name, updates):
         self._call("set_node_meta", node_name, dict(updates))
         self.meta.setdefault(node_name, {}).update(updates)
+
+
+# ─── роль: среда и семья для проверок глаголов души (#582/#617) ─────────
+# Общее для soul_lifecycle и ops: поднятие окружения роли (снимок проекта,
+# настройка, корни реестра/каталога/bootstrap) и семья «родитель-мастер +
+# ребёнок-актёр» с настоящим cluster.answer. Живут в _lib, потому что
+# проверка не импортирует проверку (tests_lib: imports no other check).
+
+ALPHA = "git@h:g/alpha.git"
+PACKAGED_ROLES = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+    "mop", "skills")
+
+
+def _soul_env_body(api, limit, roles, root, catalogue):
+    """Среда глаголов add/update/delete/ping: снимок реестра с одним
+    alpha (limit -- потолок), настройка роли сервера, корень реестра
+    привязок, каталог ролей и корень bootstrap -- швы #582, Nomad --
+    параметром. Корень bootstrap свой: делегированный add читает
+    согласованный снапшот родителя из реального хранилища, и проверка
+    обязана держать его под контролем, а не в чужом HOME."""
+    from mop.common import projects
+    from mop.server import bootstrap, cluster, spec
+    d = tempfile.mkdtemp(prefix="mop-test-582r-")
+    g = root or tempfile.mkdtemp(prefix="mop-test-582g-")
+    b = tempfile.mkdtemp(prefix="mop-test-582b-")
+    try:
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            json.dump({"version": 1,
+                        "projects": [{"origin": ALPHA, "limit": limit}
+                                     if limit is not None else
+                                     {"origin": ALPHA}]}, f)
+
+        real_get = cluster.config.get
+
+        def setting(name, default=None):
+            # Шов -- только роль; остальное решает настоящая настройка:
+            # подсунув сюда свой дефолт, проверка сломала бы чужие пути
+            # (MOP_SERVER_LAN у кредов и т.п.).
+            if name == "MOP_SOUL_ROLES":
+                return "1" if roles else ""
+            return real_get(name, default)
+        with patched(projects, SNAPSHOT_DIR=d), \
+                patched(cluster.config, get=setting), \
+                patched(cluster, SOUL_ROOT=g), \
+                patched(cluster, SOUL_CATALOGUE=list(catalogue)), \
+                patched(spec, SOUL_STORE=g), \
+                patched(bootstrap, ROOT=b):
+            yield g
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        if root is None:
+            shutil.rmtree(g, ignore_errors=True)
+        shutil.rmtree(b, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def soul_env(api, limit=None, roles=True, root=None,
+             catalogue=(PACKAGED_ROLES,)):
+    """(см. _soul_env_body)"""
+    yield from _soul_env_body(api, limit, roles, root, catalogue)
+
+
+def soul_answer(api, project, req):
+    """Глагол через cluster.answer с явным Nomad: сеть не нужна."""
+    from mop.server import cluster
+    return cluster.answer(project, req, api=api)
+
+
+def soul_parent(api, g, request_id="parent-1", workspace=None):
+    """Живой родитель-мастер со согласованной политикой: add ЧЕЛОВЕКОМ --
+    аутентифицированное создание роли сохраняет путь согласования
+    workspace (мастер-ревью #582): текст человека и есть одобрение.
+    workspace -- текст политики; "" -- явно согласованное пусто (mop без
+    .mop/bootstrap.yaml); None (здесь по умолчанию) -- согласование не
+    нужно этому вызову. -> (принципал, имя, ответ); отказ -- принципал
+    None, ответ объяснит."""
+    from mop.server import grants
+    fields = {"verb": "add", "origin": ALPHA, "soul": "master",
+              "request_id": request_id, "_caller": "anton"}
+    if workspace is not None:
+        fields["workspace"] = workspace
+    got = soul_answer(api, "alpha", fields)
+    if not got.get("ok"):
+        return None, None, got
+    rec = grants.by_job("alpha", got["name"], root=g)
+    if not rec or not rec.get("active"):
+        return None, got["name"], {"error": "parent grant is not active",
+                                   "got": got}
+    return rec["principal"], got["name"], got

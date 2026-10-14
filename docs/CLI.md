@@ -13,13 +13,24 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [git-origin]
+create a puppet: mop add [git-origin] [--role <role>]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>; placement over the pool and the
 8 GB reservation are not chosen here. Silent when the puppet is running; on
 a terminal it shows the current step. The new puppet is in mop list.
 Use mop models to see model IDs offered by the selected proxy.
+
+--role names the new puppet's role instead of a legacy puppet: the
+creation carries a request_id, the answer is checked against the server's
+echo of the role triple (a server without the role protocol refuses before
+anything is created). A role principal (a grant master) must name the role
+and sends no bootstrap policy of its own: the child inherits the parent's
+approved snapshot.
+
+--request-id retries an earlier unknown outcome under its id (with --role):
+the server reconciles to the job it reserved instead of creating a second
+one; a changed payload under the same id is refused before any effect.
 ```
 
 #### mop attach
@@ -27,8 +38,10 @@ Use mop models to see model IDs offered by the selected proxy.
 ```text
 open a terminal on a puppet: mop attach <name>
 
-Goes over ssh, not the bus: a live terminal is not something a bus verb
-hands over.
+Reconnects to a running puppet and creates nothing: a new one is
+`mop add` or `mop <role>`. Detaching (or a dropped connection) leaves the
+puppet running. Goes over ssh, not the bus: a live terminal is not
+something a bus verb hands over.
 ```
 
 #### mop code
@@ -122,29 +135,34 @@ the dispatch decision rests on this.
 #### mop master
 
 ```text
-launch claude as a project's master: mop master [git-origin] [claude options]
+launch the master role as a new pooled puppet: mop master [git-origin]
 
-Without an argument, the origin of the current working copy is used. A
-master sees and reaches only its own project's puppets; anyone else's don't
-exist for it.
+The same launcher as `mop <role>` for the role master, and the command
+says so: a new puppet of the project is registered with the role, waits
+for its bootstrap and the role's session, and the terminal attaches to it
+over ssh. Detaching leaves the puppet running; reconnect with
+`mop attach <name>`, which never creates one. Only origin belongs to a
+role launch: the role owns its prompt, settings and permissions, and any
+flag is refused before anything is allocated. A failure after
+registration names the created puppet and does not create another.
 
-Only origin belongs to this command; everything else goes to claude as-is
-(`mop master --continue` resumes the master's last session). A flag that
-takes a VALUE goes after `--` (`mop master -- --model opus`): otherwise the
-value is indistinguishable from origin. Several masters of one project are
-fine: inboxes are addressed per master.
+Any other role of the catalogue launches the same way: `mop <role>`. A
+role whose name is a mop command or a reserved bus name is refused before
+anything is allocated.
 
-No ansible on this machine: bus and proxy credentials arrive with
-`mop login --server ADDRESS LOGIN`, started automatically if either record
-is missing; without a terminal or an unambiguous server it refuses before
-launching claude.
-
-The master runs in the same permission class as its pool: it can push,
-manage the project's puppets and talk to the tracker without asking on
-every step. The Nomad token stays on the server. The session uses the
-selected server's LLM proxy; its URL and key come from the server
-profile, connection.json written by mop login (the legacy
-operator/client pair is still read for compatibility).
+The legacy local session stays an explicit choice:
+mop master --local [git-origin] [claude options]
+launches claude on this machine as before. Only origin belongs to it;
+everything else goes to claude as-is (`mop master --local --continue`
+resumes the master's last session), and a flag that takes a VALUE goes
+after `--` (`mop master --local -- --model opus`). As before, a master
+sees and reaches only its own project's puppets. Bus and proxy
+credentials arrive with `mop login --server ADDRESS LOGIN`, started
+automatically if either record is missing; without a terminal or an
+unambiguous server it refuses before launching claude. The Nomad token
+stays on the server; the session uses the selected server's LLM proxy
+from connection.json written by mop login (the legacy operator/client
+pair is still read for compatibility).
 ```
 
 #### mop models
@@ -164,6 +182,8 @@ mop profile: show the pool role, project and integration branch
 
 The role comes from bus credentials, not the presence of MCP tools. An unset
 integration branch is reported as unset; it is not inferred from origin/HEAD.
+A role principal is profiled by its bundle's role name — a grant is a puppet,
+not a master of anything.
 ```
 
 #### mop recycle
@@ -174,7 +194,8 @@ recreate a puppet on a clean working copy: mop recycle <name> [--force]
 Unsaved changes are wiped by restoring from git, the target directory is
 removed entirely (the first build after a recycle is slow). The clone
 itself isn't recloned. The puppet's workspace (.mop/bootstrap.yaml) comes
-from the working copy this runs in, or from the origin elsewhere.
+from the working copy this runs in, or from the origin elsewhere. A role
+principal recycles without one: the server keeps the approved policy.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
@@ -229,13 +250,26 @@ own transcripts, so a puppet whose clone was removed no longer counts. In a
 master shell the picture is the project's, not the pool's.
 ```
 
+#### mop stop
+
+```text
+stop a puppet job: mop stop <name>
+
+Operator only. Stops initialization, the current session and automatic
+restarts. The container, clone and bootstrap workspace are kept.
+Use mop update <name> to start the job again. This is not Escape for
+interrupting a Claude turn, and it does not delete the puppet.
+```
+
 #### mop tail
 
 ```text
-tail of a puppet's screen: mop tail <name> [-n N] [-f]
+tail of a puppet's screen: mop tail <name> [-n N] [-f] [--startup]
 
--n N   how many lines (default 10)
--f     keep following until Ctrl-C
+-n N       how many lines (default 10)
+-f         keep following until Ctrl-C
+--startup  operator-only initialization log before the session; wrapper stages
+           and bootstrap tasks, not project command output
 ```
 
 #### mop update
@@ -251,6 +285,9 @@ puppet isn't obliged to come back into the context it got stuck on.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
+
+A role principal updates without a client policy: the live puppet
+keeps its own approved snapshot, and the wire carries no workspace text.
 ```
 
 #### mop wipe
@@ -637,7 +674,7 @@ happens on the node that owns it, in whatever that node's driver is.
 #### mop driver build
 
 ```text
-mop driver build [project|origin] [--fresh] [--force] [--node NAME]: bake the project's image
+mop driver build [project|origin] [--fresh] [--force] [--node NAME] [--branch NAME]: bake the project's image
 
 On the hypervisors, from the control machine. No argument: this working
 copy, .mop as it lies. Incremental by default: a copy of the image
@@ -646,6 +683,10 @@ puppets on container nodes are stopped, their bodies destroyed and raised
 again from the new image; a busy puppet refuses unless --force.
 --node NAME: on that node only — its puppets alone are stopped, the others'
 image and work are left as they are.
+--branch NAME: read .mop from that remote branch, not the local tree;
+pin the source mirror to the same commit for cache warm-up. It replaces
+the project's image on the selected nodes, not a separate branch image.
+Without --branch the local-tree/default-branch behavior is unchanged.
 ```
 
 #### mop driver clone-work
@@ -759,7 +800,7 @@ basename of its origin, and puppet names are built from it.
 #### mop project add
 
 ```text
-make a project ready: mop project add [--update|--rebuild] [--node NAME] [-v] [git-origin]
+make a project ready: mop project add [--update|--rebuild] [--node NAME] [--branch NAME] [-v] [git-origin]
 
 Without origin, the origin of the current working copy is used.
 
@@ -771,9 +812,15 @@ any of them. Afterwards `mop add` can place a puppet right away.
   --rebuild   build it from the base image
   --node NAME build on this node only: its puppets alone are stopped and
               raised again, the other nodes keep their image and their work
+  --branch NAME read .mop and warm-up sources from that remote branch,
+                pinned to one commit; update even an existing image
   -v          print every line of the build's output, not only on a terminal
 
-Idempotent: run it again after changing the project's .mop. Silent when all
+One image per project and node: --branch replaces it, not a new image
+name. It does not set the puppet's working or landing branch.
+Without --branch, the default remote branch is used.
+
+Idempotent without --branch: run it again after changing the project's .mop. Silent when all
 goes well; on a terminal it shows the current step under the last lines of
 the build's output, and erases both when done.
 ```

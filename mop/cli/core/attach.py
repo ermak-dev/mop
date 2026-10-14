@@ -1,15 +1,14 @@
 """open a terminal on a puppet: mop attach <name>
 
-Goes over ssh, not the bus: a live terminal is not something a bus verb
-hands over.
+Reconnects to a running puppet and creates nothing: a new one is
+`mop add` or `mop <role>`. Detaching (or a dropped connection) leaves the
+puppet running. Goes over ssh, not the bus: a live terminal is not
+something a bus verb hands over.
 """
 import os
-import shlex
 
 from mop.cli import lib
-from mop import driver
-from mop.common import puppets
-from mop.common.domain import Alloc
+from mop.cli.core import _common
 
 
 def main(argv):
@@ -17,17 +16,8 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    a, node_driver = puppets.running(name)
-    node = Alloc.from_dict(a).node
-    # Чем входят в тело, знает драйвер узла: у host это сразу tmux, у
-    # контейнерного — ещё один ssh внутрь. Драйвер приезжает вместе с
-    # аллокацией (глагол `alloc`), вторым запросом за ним не ходим; узел,
-    # ничего о драйвере не сказавший, ведёт себя как раньше.
-    d = driver.module(driver.of_node({"mop_driver": node_driver}, node))
-    inside = " ".join(shlex.quote(x) for x in d.attach_argv(name))
-    # Имя узла в Nomad — имя из инвентаря, а инвентарь берёт способ дозвона
-    # из ~/.ssh/config по тому же имени. Таблицы имён между ними нет и не нужно.
-    os.execvp("ssh", ["ssh", "-t", node, inside])
+    argv = _common.attach_argv(name)
+    os.execvp(argv[0], argv)
 
 
 

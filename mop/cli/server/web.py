@@ -274,6 +274,7 @@ def audit_context(verdict, audit):
 # потока операции, SSE-читатель забирает своим темпом.
 _OP_LOCK = threading.Lock()
 _OP_FRAMES = []
+_OP_SEQUENCE = 0
 
 
 class _LiveApi(adminapi.Api):
@@ -295,9 +296,11 @@ ADMINAPI = _LiveApi(OPS, origin=None, executor=_execute)
 # Терминал операции (#499): SSE-кадр operation в /events. Публичный кадр
 # узкий {id, action, target, status, error?}: ни login, ни проекта.
 def _on_operation(frame):
+    global _OP_SEQUENCE
     payload = json.dumps(frame, ensure_ascii=False)
     with _OP_LOCK:
         _OP_FRAMES.append(payload)
+        _OP_SEQUENCE += 1
         del _OP_FRAMES[:-100]
     COLLECTOR.kick()
 
@@ -716,7 +719,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/projects":
             return ADMINAPI.projects(self, _registry_projects)
         if path.startswith("/api/admin/ops/"):
-            return self._json(200, ADMINAPI.result(path.rsplit("/", 1)[-1], self.who))
+            try:
+                result = ADMINAPI.result(path.rsplit("/", 1)[-1], self.who)
+            except adminapi.Refused as e:
+                return self._json(e.code, {"error": e.error})
+            return self._json(200, result)
         if path == "/llm/management.html":
             return self.llm_shim()
         if path.startswith("/llm/raw/"):
@@ -780,10 +787,14 @@ class Handler(BaseHTTPRequestHandler):
         if not sub:
             return self._json(200, {"puppet": row.to_dict()})
         if sub == "tail":
-            lines, note = web.puppet_tail(name, puppets.pane_lines, puppets.node_of)
-            if lines is None:
-                return self._json(502, {"error": note})
-            return self._json(200, {"lines": lines, "truncated": note})
+            output, error = web.puppet_output(row, puppets.pane_lines, puppets.node_of,
+                                              puppets.startup_lines)
+            if output is None:
+                body = {"error": error}
+                if row.kind in ("starting", "failing") or row.alloc_status == "pending":
+                    body["source"] = "initialization"
+                return self._json(502, body)
+            return self._json(200, output)
         # #507: маршрута stderr больше нет -- кнопка «лог» ушла из GUI;
         # неизвестный подсубъект по-прежнему 404.
         return self._json(404, {"error": "no such puppet"})
@@ -798,13 +809,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         version = 0
-        # Курсор кадров -- с текущей длины буфера (#519): подписчик получает
-        # только терминалы, пришедшие после его подключения, а не хвост,
-        # накопившийся до него (иначе каждое F5 перерисовывает старые балуны).
-        # Сам буфер остаётся: терминал приходит из потока операции между
-        # пробуждениями читателя, и живому соединению без него кадр теряется.
+        # Курсор -- номер, не индекс: ограниченная история сдвигается при
+        # каждом вытеснении. Новый подписчик начинает после её хвоста.
         with _OP_LOCK:
-            sent = len(_OP_FRAMES)
+            sent = _OP_SEQUENCE
         try:
             while True:
                 got, snap = COLLECTOR.wait(version, PING_EVERY)
@@ -817,8 +825,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Кадры operation (#499): терминалы операций, накопившиеся
                 # с прошлого круга; payload в них нет (#461).
                 with _OP_LOCK:
-                    frames = _OP_FRAMES[sent:]
-                    sent = len(_OP_FRAMES)
+                    first = _OP_SEQUENCE - len(_OP_FRAMES)
+                    frames = _OP_FRAMES[max(0, sent - first):]
+                    sent = _OP_SEQUENCE
                 for frame in frames:
                     self.wfile.write(f"event: operation\ndata: {frame}\n\n".encode())
                 self.wfile.flush()

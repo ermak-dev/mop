@@ -4,8 +4,10 @@
 // её по-прежнему несут). #478: ветка -- своя колонка (чип ветки внутри
 // статуса ломал чтение колонки скопом), репозиторий уехал из таблицы в
 // заголовок секции: секция и есть проект, у всех строк один origin.
-import { Badge, Box, Code, Group, Stack, Table, Text, Tooltip } from "@mantine/core";
-import type { Counts, Project, Puppet } from "../types";
+import { Badge, Box, Code, Group, NativeSelect, Stack, Table, Text, Tooltip } from "@mantine/core";
+import { useState } from "react";
+import type { Counts, LocalSession, Master, Project, Puppet, RosterSession } from "../types";
+import { roleKey, roleLabel, roster } from "../roster";
 import type { Session } from "../useSession";
 import { PuppetActions } from "./PuppetActions";
 import { gb, KIND_WORD, presentKinds, verdictColor, verdictWord } from "./format";
@@ -13,7 +15,7 @@ import { EmptyNote, SectionTitle } from "./Section";
 import { align, TableHead } from "./TableHead";
 
 export const COLS = {
-  name: { label: "папет" }, node: { label: "узел" },
+  name: { label: "папет" }, role: { label: "Role" }, node: { label: "узел" },
   state: { label: "статус" }, branch: { label: "ветка" },
   owner: { label: "пользователь" }, llm: { label: "модель" },
   disk: { label: "место", right: true },
@@ -30,15 +32,15 @@ const statusTip = (p: Puppet): string => `${p.state} · ${p.alloc_status}`;
 // Репозитории секции (#478): по одному на каждую строку, без повторов.
 // Группировка сервера даёт один; список, а не первое значение, -- чтобы
 // перемену контракта было видно, а не молча потерять второй origin.
-const origins = (sh: Project): string[] =>
-  [...new Set(sh.puppets.map((p) => p.origin).filter(Boolean))];
+const origins = (entries: RosterSession[]): string[] =>
+  [...new Set(entries.flatMap((entry) => entry.source === "managed" && entry.origin ? [entry.origin] : []))];
 
-function Row({ p, onOpen, session }: {
-  p: Puppet; onOpen?: (name: string) => void; session?: Session;
+function Row({ p, role, onOpen, session }: {
+  p: Puppet; role: string | null; onOpen?: (name: string) => void; session?: Session;
 }) {
   const color = verdictColor(p.kind, p.bucket);
   return (
-    <Table.Tr data-kind={p.bucket || p.kind}>
+    <Table.Tr data-kind={p.bucket || p.kind} data-source="managed">
       <Table.Td>
         {/* точка корзины перед именем, в одну строку: узкая колонка иначе
             переносила имя под точку. Имя -- кнопка при наличии карточки
@@ -55,6 +57,7 @@ function Row({ p, onOpen, session }: {
           )}
         </Group>
       </Table.Td>
+      <Table.Td><Text size="sm" c={role ? undefined : "dimmed"}>{role || "Unassigned"}</Text></Table.Td>
       <Table.Td>{p.node}</Table.Td>
       <Table.Td>
         <Tooltip label={statusTip(p)} disabled={p.state.length <= 60} multiline w={420}>
@@ -82,34 +85,77 @@ function Row({ p, onOpen, session }: {
   );
 }
 
-export function PoolTable({ projects, onOpen, session }: {
+function LocalRow({ entry, admin }: { entry: LocalSession; admin: boolean }) {
+  return <Table.Tr data-source="local">
+    <Table.Td>
+      <Text size="sm">{entry.display}</Text>
+      {entry.cwd && <Text size="xs" c="dimmed" maw={260} truncate title={entry.cwd}>{entry.cwd}</Text>}
+    </Table.Td>
+    <Table.Td><Text size="sm" c="dimmed">Legacy local</Text></Table.Td>
+    <Table.Td>-</Table.Td>
+    <Table.Td>
+      <Text size="sm" c="dimmed">{entry.identified ? "Local session" : "MCP endpoint"}</Text>
+      {entry.addresses.map((address) => <div key={address}><Code>{address}</Code></div>)}
+    </Table.Td>
+    <Table.Td>-</Table.Td>
+    <Table.Td>{entry.user || "-"}</Table.Td>
+    <Table.Td>-</Table.Td>
+    <Table.Td ta="right">-</Table.Td>
+    {admin && <Table.Td />}
+  </Table.Tr>;
+}
+
+export function PoolTable({ projects, sessions, masters, onOpen, session }: {
   projects: Project[];
+  sessions?: RosterSession[];
+  masters?: Master[];
   session?: Session;
-  /** Открыть карточку папета по имени (#463); нет -- имя строкой, гостю
-   *  карточка недоступна и опенер не рисуется. */
+  /** Открыть можно только управляемую строку; локальные сессии не имеют
+   *  Nomad-цели, даже когда зритель — администратор. */
   onOpen?: (name: string) => void;
 }) {
-  if (!projects.length) return <EmptyNote>папетов нет</EmptyNote>;
+  const [role, setRole] = useState("");
+  const entries = roster(projects, sessions, masters);
+  const keys = [...new Set(entries.map(roleKey))].sort();
+  if (role && !keys.includes(role)) keys.push(role);
+  const visible = entries.filter((entry) => !role || roleKey(entry) === role);
+  const groups = new Map<string, RosterSession[]>();
+  for (const entry of visible) {
+    const group = groups.get(entry.project) ?? [];
+    group.push(entry);
+    groups.set(entry.project, group);
+  }
+  const admin = session?.role === "admin";
   return (
     <Stack gap="md" data-testid="pool">
-      {projects.map((sh) => (
-        <div key={sh.name}>
-          {/* Репозиторий -- в заголовке (#478): секция сгруппирована по
-              project_of(origin), у всех строк он один, колонка повторяла
-              бы его в каждой строке. Разные origin внутри секции не
-              допускаются группировкой; на всякий случай показываем все. */}
-          <SectionTitle title={sh.name} note={projectNote(sh.counts)} />
-          {origins(sh).map((o) => (
-            <Text key={o} size="sm" c="dimmed"><Code>{o}</Code></Text>
+      <Group justify="space-between" align="end">
+        <NativeSelect label="Role" w="100%" maw={260} value={role}
+          data={[{ value: "", label: "All roles" }, ...keys.map((key) => ({ value: key, label: roleLabel(key) }))]}
+          onChange={(event) => setRole(event.currentTarget.value)} />
+        <Text size="sm" c="dimmed">{visible.length} entries</Text>
+      </Group>
+      {!visible.length && <EmptyNote>{entries.length ? "No sessions match this role" : "No sessions"}</EmptyNote>}
+      {[...groups].map(([name, group]) => {
+        const counts = projects.find((project) => project.name === name)?.counts;
+        const locals = group.filter((entry) => entry.source === "local").length;
+        const note = role ? `${group.length} entries` :
+          [counts ? projectNote(counts) : "", locals ? `${locals} local entries` : ""].filter(Boolean).join(", ");
+        return <div key={name}>
+          <SectionTitle title={name} note={note} />
+          {origins(group).map((origin) => (
+            <Text key={origin} size="sm" c="dimmed"><Code>{origin}</Code></Text>
           ))}
-          <Table.ScrollContainer minWidth={session?.role === "admin" ? 1080 : 800}>
+          <Table.ScrollContainer minWidth={admin ? 1160 : 900}>
             <Table striped highlightOnHover withTableBorder>
-              <TableHead cols={[...Object.values(COLS), ...(session?.role === "admin" ? [{ label: "действия", right: true, compact: true }] : [])]} />
-              <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} session={session} />)}</Table.Tbody>
+              <TableHead cols={[...Object.values(COLS), ...(admin ? [{ label: "действия", right: true, compact: true }] : [])]} />
+              <Table.Tbody>{group.map((entry) => entry.source === "local"
+                ? <LocalRow key={entry.id} entry={entry} admin={admin} />
+                : <Row key={entry.id} p={{ ...entry, owner: entry.user || "", origin: entry.origin || "?" }}
+                    role={entry.role} onOpen={onOpen} session={session} />)}</Table.Tbody>
             </Table>
           </Table.ScrollContainer>
-        </div>
-      ))}
+        </div>;
+      })}
     </Stack>
   );
 }
