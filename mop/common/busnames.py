@@ -10,6 +10,8 @@
 тем, кто nats не импортирует (natsconf, operators), и агенту узла. Карта субъектов и прав --
 в docs/BUS.md.
 """
+import re
+
 from . import paths
 
 ROOT = "mop"             # проектные субъекты; личный join живёт вне этой маски
@@ -34,22 +36,130 @@ def everything(project=None):
 
 
 DISPATCH_CHANNEL = "dispatch"  # канал dispatch (#579): операция, не «send с флагом»
+# Канал принципалов роли (#603): грант не ездит по человеческому rpc. Старый
+# агент, подписанный на `...rpc.*`, получил бы запрос гранта и прочитал бы
+# его как человеческий без резолвера -- смешанная раскатка. Своего канала --
+# и агента (#584), и ACL (#581) подписывают только на новый шаблон.
+ROLE_CHANNEL = "role"
+# Канал старта своего узла (#603): первую identity роль запрашивает у своего
+# же агента до входа принципала; человек и чужой узел туда не пишут.
+STARTUP_CHANNEL = "startup"
+
+
+# Приватные ответы машин нового мира (#603): _MOP_REPLY.<user>.<NUID>.
+# Публичный _INBOX.> унаследован от легаси и обслуживает всех подряд; ответ
+# узла и принципала несёт служебные данные (креды роли), и приватный
+# префикс с собственной ACL-строкой (#581) отделяет его от человеческих
+# ответов. Люди на _INBOX и остаются.
+REPLY_PREFIX = "_MOP_REPLY"
+
+
+def private_prefix(user):
+    """Префикс приватных ответов машины: _MOP_REPLY.<токен>. user -- полное
+    машинное имя (узел node-<имя> или принципал grant-<id>), и оно едет
+    ОДНИМ токеном субъекта -- login_token, как логин человека: точка в
+    имени (dhcp-хост «node-a.b») иначе резала бы префикс на два токена, и
+    разбор startswith читал бы ответ node-a.b как ответ node-a. Человек
+    приватного префикса не имеет."""
+    return f"{REPLY_PREFIX}.{login_token(user)}"
+
+
+def private_scope(user):
+    """Маска подписки на свои приватные ответы: _MOP_REPLY.<токен>.>."""
+    return f"{private_prefix(user)}.>"
+
+
+def private_publish():
+    """Глобальная маска ПУБЛИКАЦИИ в приватные ответы (#603): её даёт #581
+    отвечающему машинам -- агенту узла и сервисам сервера, -- и это НЕ
+    чья-то private_scope: подписка на свои ответы и публикация в чужие --
+    разные строки ACL у разных сторон, и маска накрывает все закодированные
+    токены разом."""
+    return f"{REPLY_PREFIX}.>"
+
+
+def valid_private_reply(subject, user):
+    """Это -- приватный ответ ИМЕННО этому пользователю? Чистая. Свой
+    закодированный префикс (один токен -- чужой видимый префикс не
+    совпадает с целым токеном) и хвост-NUID без масок, пустых сегментов и
+    пробельных/управляющих хвостов: хвост с маской ловил бы чужие ответы
+    подпиской, с пустым сегментом -- расползался бы вглубь. Всё остальное
+    -- нет: чужой приватный префикс и публичный _INBOX не читаются как
+    свои (#581 проверяет то же ACL-строкой, здесь -- разбором)."""
+    if not isinstance(subject, str):
+        return False
+    parts = subject.split(".")
+    if len(parts) < 3 or parts[0] != REPLY_PREFIX:
+        return False
+    if parts[1] != login_token(user or ""):
+        return False
+    return all(seg and not any(
+        ch.isspace() or ord(ch) < 32 or 127 <= ord(ch) < 160 or ch in "*>"
+        for ch in seg) for seg in parts[2:])
+
+
+def is_grant(user):
+    """Это имя -- делегированный принципал роли (grant-<32 hex>)? Грамматика
+    живёт здесь, у префикса (#603): busnames не может импортировать soul
+    (soul импортирует busnames), а субъекту роль опознаёт наравне с логином
+    человека. soul.is_grant -- тот же ответ делегированием: грамматика одна."""
+    return isinstance(user, str) \
+        and user.startswith(GRANT_PREFIX) \
+        and bool(_GRANT_ID.match(user[len(GRANT_PREFIX):]))
 
 
 def node(project, name, channel="rpc", login=None):
-    """Агент узла. login -- токен вызывающего (#207), только в rpc --
-    человека (#207) или принципала роли (grant-id, #579): caller() читает
-    оба, канал dispatch -- тем же токеном (#584)."""
+    """Агент узла. login -- токен вызывающего: человек в rpc (#207),
+    принципал роли -- в своём канале role, диспетчер -- полным принципалом
+    в dispatch (#579). Грант в rpc переводится на role сам: вызывающий
+    говорит «обычный запрос» (bus.request без канала), а по какому субъекту
+    он едет -- решает имя, не вызывающий (#603). Публичный msg для гранта
+    -- ValueError: это забор протокола, а не неудобство."""
     subj = f"{ROOT}.{project}.node.{name}.{channel}"
-    return f"{subj}.{_token(login)}" if login and channel == CALLER_CHANNEL else subj
+    if not login:
+        return subj
+    if channel == DISPATCH_CHANNEL:
+        return dispatch_subject(project, name, login)
+    if is_grant(login):
+        if channel in (CALLER_CHANNEL, ROLE_CHANNEL):
+            return node_role(project, name, principal=login)
+        raise ValueError(
+            f"a delegated principal rides only the {ROLE_CHANNEL} and "
+            f"{DISPATCH_CHANNEL} channels, not {channel}")
+    # Человек своё имя возит только в rpc (#207); прочие каналы публичны, и
+    # токен там молча не ставился и раньше.
+    return f"{subj}.{_token(login)}" if channel == CALLER_CHANNEL else subj
 
 
-def dispatch_subject(project, name, grant_id):
-    """Субъект dispatch (#579): node.<p>.<узел>.dispatch.<grant-id>.
-    Токен -- id принципала (grant_user без префикса): hex без точек и
-    масок, кодировать нечего. Узел (#584) решает по каналу, что это
-    диспетчер, а не соседское сообщение, и зовёт резолвер сервера."""
-    return f"{ROOT}.{project}.node.{name}.{DISPATCH_CHANNEL}.{grant_id}"
+def node_role(project, node, principal=None):
+    """Маска канала роли на узле (#603): mop.<p>.node.<узел>.role.> -- для
+    ACL ответа (#581) и подписок (#584); без principal -- маска всех
+    принципалов (хвостовой >), полный grant-<id> -- точный субъект. Одна
+    таблица с node(): субъект гранта строится здесь же, и расхождение
+    подписки с правами (молчит до пула -- отказ прав едет в error_cb)
+    ловится проверкой маски на точный субъект."""
+    tail = principal if principal is not None else ">"
+    return f"{ROOT}.{project}.node.{node}.{ROLE_CHANNEL}.{tail}"
+
+
+def cluster_role(project, principal=None):
+    """Маска канала роли у сервиса кластера (#603): mop.<p>.cluster.role.>
+    -- тот же договор, что у node_role: одна таблица с cluster()."""
+    tail = principal if principal is not None else ">"
+    return f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{ROLE_CHANNEL}.{tail}"
+
+
+def dispatch_subject(project, name, user):
+    """Субъект dispatch (#579): node.<p>.<узел>.dispatch.<принципал>.
+
+    Токен -- полный принципал grant-<id> (#603): голый hex на проводе не
+    появляется, и субъект узла (#584) опознаёт диспетчера одним правилом с
+    каналом role. Не принципал -- ValueError: человек канал dispatch не
+    получает, режим определяет резолвер, а не роль отправителя."""
+    if not is_grant(user):
+        raise ValueError(f"dispatch carries the full principal "
+                         f"{GRANT_PREFIX}<id>, got {user!r}")
+    return f"{ROOT}.{project}.node.{name}.{DISPATCH_CHANNEL}.{user}"
 
 
 def broadcast(project):
@@ -89,9 +199,22 @@ def events(project):
 
 
 def cluster(project, login=None):
-    """Сервис кластера. login -- токен вызывающего (#207)."""
+    """Сервис кластера. login -- токен вызывающего: человек в rpc (#207),
+    принципал роли -- в своём канале role (#603): тот же забор, что у агента
+    узла (node)."""
+    if is_grant(login):
+        return cluster_role(project, principal=login)
     subj = f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{CALLER_CHANNEL}"
     return f"{subj}.{_token(login)}" if login else subj
+
+
+def startup_subject(project, node):
+    """Канал старта своего узла (#603): mop.<p>.node.<узел>.startup.
+
+    Первую identity роль запрашивает у своего же агента до входа
+    принципала: узел отвечает здесь на старт тела, человек и чужой узел не
+    пишут (проверяет bus.request, ACL -- #581)."""
+    return f"{ROOT}.{project}.node.{node}.{STARTUP_CHANNEL}"
 
 
 def join_config(login):
@@ -148,30 +271,53 @@ def _token(login):
 
 
 def caller(subject):
-    """Логин вызывающего из субъекта, либо None: прежний субъект без логина,
-    публичный канал или не наш субъект."""
+    """Вызывающий из субъекта, либо None: прежний субъект без токена,
+    публичный канал или не наш субъект.
+
+    Человек -- в rpc (#207), принципал роли -- в role и dispatch (#603),
+    узел -- в квалифицированном server.rpc (#603). Забор с обеих сторон
+    (#603): грант, проехавший по человеческому каналу, вызывающим не
+    читается -- старый агент принимает его без резолвера за человека, --
+    и наоборот, не-принципал в каналах роли не читается вовсе."""
     parts = (subject or "").split(".")
-    if len(parts) == 6 and parts[0] == ROOT and parts[2] == "node" \
-            and parts[4] == CALLER_CHANNEL:
-        login = parts[5]
-    elif len(parts) == 5 and parts[0] == ROOT and parts[2] == CLUSTER_CHANNEL \
+    if len(parts) == 6 and parts[0] == ROOT and parts[2] == "node" and parts[5]:
+        if parts[4] in (ROLE_CHANNEL, DISPATCH_CHANNEL):
+            return parts[5] if is_grant(parts[5]) else None
+        if parts[4] == CALLER_CHANNEL:
+            login = login_of(parts[5])
+            return None if is_grant(login) else login
+    elif len(parts) == 5 and parts[0] == ROOT and parts[2] == CLUSTER_CHANNEL:
+        if parts[3] == ROLE_CHANNEL:
+            return parts[4] if is_grant(parts[4]) else None
+        if parts[3] == CALLER_CHANNEL:
+            login = login_of(parts[4])
+            return None if is_grant(login) else login
+    elif len(parts) == 5 and parts[0] == ROOT and parts[2] == "server" \
             and parts[3] == CALLER_CHANNEL:
-        login = parts[4]
+        # Квалифицированный server.rpc -- узловой (#603): токен -- машинное
+        # имя узла (узел с точкой -- одним закодированным токеном,
+        # login_of), человек там не вызывающий.
+        node = login_of(parts[4])
+        return node if node and node.startswith(NODE_PREFIX) else None
     elif len(parts) == 3 and parts[0] == JOIN_ROOT and parts[2] == CALLER_CHANNEL:
-        login = parts[1]
-    else:
-        return None
-    return login_of(login)
+        return login_of(parts[1])
+    return None
 
 
 def without_caller(subject):
-    """Тот же адрес без логина: прежний субъект, на который отвечает агент
-    или сервис до #207 (переход)."""
+    """Тот же адрес без вызывающего: прежний субъект, на который отвечает
+    агент или сервис до #207 (переход)."""
     return subject.rsplit(".", 1)[0] if caller(subject) else subject
 
 
-def server(project):
-    return f"{ROOT}.{project}.server.rpc"
+def server(project, caller=None):
+    """Сервер как адресат (#62). caller -- машинное имя узла (#603):
+    квалифицированный субъект mop.<p>.server.rpc.node-<узел> отличает
+    запрос узла от анонимного легаси-пути; человек и сервис остаются на
+    прежнем субъектe. Имя узла с точкой -- одним токеном (login_token),
+    чтобы адрес резался обратно на то же имя."""
+    subj = f"{ROOT}.{project}.server.rpc"
+    return f"{subj}.{login_token(caller)}" if caller else subj
 
 
 def build():
@@ -203,6 +349,10 @@ MASTER_PREFIX, PUPPET_PREFIX, NODE_PREFIX = "master-", "puppet-", "node-"
 # легаси-пользователем puppet-<проект> не сталкивается. Кодировки id --
 # mop/common/soul.py (grant_user/grant_id), здесь только имя префикса.
 GRANT_PREFIX = "grant-"
+# Ид той же грамматики, что у soul.HEX32 (#580): busnames не импортирует
+# soul (обратный импорт), а субъекту грант опознавать надо. Расхождение
+# ловит tests/soul.py и tests/transport.py -- грамматика одна.
+_GRANT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 def master_user(project):

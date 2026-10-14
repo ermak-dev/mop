@@ -546,14 +546,17 @@ def check_row_none_274(c):
     old = {**old, "detail": None, "branch": None}
     # #580: тройка роли -- новые поля строки, None без роли.
     old = {**old, "soul": None, "soul_digest": None, "soul_inc": None}
+    # #603: цель dispatch -- тем же правилом (None в render, нет на проводе).
+    old = {**old, "receives_dispatch": None}
     render = getattr(empty, "render", None)
     c.expect("#274 None renders as the old strings", render and render(), old)
     # #580: без роли провод прежний байт в байт (to_dict снимает пустую
-    # тройку), render показывает поля значением None.
+    # тройку); #603 снимает и отсутствующую цель dispatch тем же правилом.
     got = empty.to_dict()
     c.check("#274 to_dict is the rendered wire form",
             got == {k: v for k, v in old.items()
-                    if k not in ("soul", "soul_digest", "soul_inc")}, got)
+                    if k not in ("soul", "soul_digest", "soul_inc",
+                                 "receives_dispatch")}, got)
     c.expect("#274 mop list line: None as before",
              cli_list.line(empty), cli_list.line(PuppetRow(**{**old})))
     # Сборка: без аллокации, владельца и origin -- None, не строки.
@@ -762,11 +765,13 @@ def check_model_454(c):
                                    "disk_kb": None})
     c.expect("#454 an old snapshot row reads back", old_row.llm, None)
     rendered = old_row.render()
-    # #580: тот же порядок плюс тройка роли в конце.
+    # #580: тот же порядок плюс тройка роли в конце; #603 добавил цель
+    # dispatch тем же правилом -- None в render, ключа нет на проводе.
     c.check("#454 render keeps the old key set",
             list(rendered) == ["name", "node", "alloc_status", "state", "kind",
                                "owner", "llm", "detail", "branch", "origin",
-                               "disk_kb", "soul", "soul_digest", "soul_inc"],
+                               "disk_kb", "soul", "soul_digest", "soul_inc",
+                               "receives_dispatch"],
             list(rendered))
     c.expect("#454 None model renders as the dash", rendered["llm"], "-")
 
