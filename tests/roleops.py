@@ -30,7 +30,7 @@ from mop.cli.core import add as cli_add  # noqa: E402
 from mop.cli.core import recycle as cli_recycle  # noqa: E402
 from mop.cli.core import update as cli_update  # noqa: E402
 from mop.client import roles  # noqa: E402
-from mop.common import bus, context, ops  # noqa: E402
+from mop.common import bus, context, ops, soul  # noqa: E402
 
 # Среда сервера 582 без пула: общие швы soul_env/soul_parent/soul_answer
 # (#617 вынес их в _lib) -- те же реальные обработчики, что проверяет #582.
@@ -393,6 +393,43 @@ def main():
     finally:
         g.__exit__(None, None, None)
 
+    # ── 5d. Нестрогое ok: подтверждение роли -- только ok=True ──────────
+    # Отзыв ревью (финал), случай 1: транспорт звал эхо по ЛЮБОМУ truthy
+    # ok -- ответ {name: ...} без ok, ok=1 или ok="x" обходил эхо, и
+    # ops.add ждал аллокаций «успеха», которого не подтверждал никто.
+    # Решение -- strict is True: не-true ok с битой тройкой (или без неё)
+    # -- отказ «исход неизвестен» с request_id, БЕЗ alloc/wait и без
+    # второго add; ok=True с честной тройкой -- прежний успех.
+    for lie in (None, False, 1, "yes"):
+        api, g, principal, parent = grant_env()
+        try:
+            patched_call = Wire.__call__
+
+            def lying(self, verb, _lie=lie, **fields):
+                got = patched_call(self, verb, **fields)
+                if verb == "add":
+                    if _lie is None:
+                        got.pop("ok", None)
+                    else:
+                        got["ok"] = _lie
+                    for k in ("soul", "soul_digest", "soul_inc"):
+                        got.pop(k, None)
+                return got
+
+            with patched(Wire, __call__=lying):
+                w = drive(cli_add, ["--role", "puppet"], api, principal,
+                          grant=True)
+            adds = [f for v, f in w.seen if v == "add"]
+            c.check(f"#618 a non-true ok ({lie!r}) is no role confirmation",
+                    w.code != 0 and len(adds) == 1
+                    and adds[0].get("request_id", "") in w.err
+                    and "unknown" in w.err
+                    and not [v for v, _ in w.seen if v == "alloc"]
+                    and len(child_of(api, parent)) == 1,
+                    (lie, w.code, [v for v, _ in w.seen], w.err))
+        finally:
+            g.__exit__(None, None, None)
+
     # ── 5c. Смерть провода ПОСЛЕ ответа регистрации: имя + первопричина ──
     # Отзыв ревью 2, вторая половина: alloc/bootstrap_result молчат, когда
     # джоб УЖЕ создан -- это не «эха нет» и не «исход неизвестен»: отказ
@@ -479,6 +516,74 @@ def main():
                 w.code == 0 and api.jobs.get(parent, {}).get("Meta", {}).get("origin") == ORIGIN
                 and "answer" in _snapshot_of(parent),
                 (w.code, list(api.jobs), w.err))
+    finally:
+        g.__exit__(None, None, None)
+
+    # ── 10. --request-id: ручной повтор тем же идентификатором ──────────
+    # Отзыв ревью (финал), случай 2: отказ неизвестности учит «повтори тем
+    # же request_id», а флага не было -- командлет всегда заводил новый
+    # UUID, и выполнить инструкцию было нельзя. Решение: --request-id
+    # (только с --role, грамматика soul.HEX32 -- «Reuse RoleSource known
+    # schema»), MCP-аргумент request_id; по умолчанию -- прежний свежий
+    # UUID. Проверки -- против реального сервера 582: ретрай тем же id
+    # поднимает СОХДАННЫЙ джоб, смена полезной нагрузки -- отказ до
+    # эффекта, легаси-add с id без роли -- ранний usage.
+    api, g, principal, parent = grant_env()
+    try:
+        rid = uuid.uuid4().hex
+        w = drive(cli_add, ["--role", "puppet", "--request-id", rid], api,
+                  principal, grant=True)
+        add = w.sent("add")
+        kids = child_of(api, parent)
+        c.check("#618 --request-id rides the registration as given",
+                add.get("request_id") == rid and len(kids) == 1
+                and api.jobs[kids[0]]["Meta"].get("soul") == "puppet",
+                (add, list(api.jobs)))
+
+        # 10b. Ретрай тем же id после «неизвестности»: сервер сводит к
+        # СОХДАННОМУ джобу (тот же принципал/имя), второго нет.
+        w = drive(cli_add, ["--role", "puppet", "--request-id", rid], api,
+                  principal, grant=True)
+        c.check("#618 a retry with the same request_id reconciles to the same job",
+                w.code == 0 and child_of(api, parent) == kids
+                and len(child_of(api, parent)) == 1,
+                (w.code, w.out, w.err, list(api.jobs)))
+
+        # 10c. Тот же id с ДРУГОЙ полезной нагрузкой (другая роль) --
+        # отказ сервера ДО эффекта: подготовленный резерв не даёт завести
+        # вторую душу, джобы не прибавилось.
+        w = drive(cli_add, ["--role", "builder", "--request-id", rid], api,
+                  principal, grant=True)
+        c.check("#618 a changed payload under the same request_id refuses",
+                w.code != 0 and "request" in w.err
+                and child_of(api, parent) == kids,
+                (w.code, w.err, list(api.jobs)))
+
+        # 10d. Мусорный id -- ранний отказ до первого вызова.
+        w = drive(cli_add, ["--role", "puppet", "--request-id", "nope"], api,
+                  principal, grant=True)
+        c.check("#618 a malformed request_id refuses before any call",
+                w.seen == [] and w.code not in (0, None)
+                and "request-id" in w.err, (w.code, w.seen, w.err))
+
+        # 10e. Легаси-add: id без роли -- ранний usage, на провод ничего.
+        w = drive(cli_add, ["--request-id", rid], api, "anton")
+        c.check("#618 a request_id without a role is an early usage refusal",
+                w.seen == [] and w.code not in (0, None), (w.code, w.seen))
+
+        # 10f. Без флага -- свежий UUID, как прежде.
+        w = drive(cli_add, ["--role", "puppet"], api, principal, grant=True)
+        got_id = w.sent("add").get("request_id")
+        c.check("#618 without the flag the request_id is a fresh UUID",
+                isinstance(got_id, str) and soul.HEX32.match(got_id)
+                and got_id != rid, got_id)
+
+        # 10g. MCP-объявление: аргумент request_id, только с role.
+        decl = cli_add.MCP
+        args = {a["name"]: a for a in decl.get("args", [])}
+        c.check("#618 the MCP add declares the request_id argument",
+                args.get("request_id", {}).get("flag") == "--request-id",
+                decl)
     finally:
         g.__exit__(None, None, None)
 

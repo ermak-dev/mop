@@ -27,6 +27,10 @@ echo of the role triple (a server without the role protocol refuses before
 anything is created). A role principal (a grant master) must name the role
 and sends no bootstrap policy of its own: the child inherits the parent's
 approved snapshot.
+
+--request-id retries an earlier unknown outcome under its id (with --role):
+the server reconciles to the job it reserved instead of creating a second
+one; a changed payload under the same id is refused before any effect.
 ```
 
 #### mop attach

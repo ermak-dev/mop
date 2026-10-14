@@ -12,6 +12,10 @@ echo of the role triple (a server without the role protocol refuses before
 anything is created). A role principal (a grant master) must name the role
 and sends no bootstrap policy of its own: the child inherits the parent's
 approved snapshot.
+
+--request-id retries an earlier unknown outcome under its id (with --role):
+the server reconciles to the job it reserved instead of creating a second
+one; a changed payload under the same id is refused before any effect.
 """
 
 import uuid
@@ -19,7 +23,7 @@ import uuid
 from mop.cli import lib
 from mop.cli.core import _common
 from mop.client import roles
-from mop.common import bus, context, ops, puppets
+from mop.common import bus, context, ops, puppets, soul
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -27,13 +31,22 @@ MCP = {"annotations": "destructive", "node_verbs": [], "cluster_verbs": ['add', 
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
     {"name": "role", "type": "string", "flag": "--role",
      "help": "role of the new puppet (soul name); required for a role principal"},
+    {"name": "request_id", "type": "string", "flag": "--request-id",
+     "help": "id of an earlier unknown-outcome creation; the retry reconciles to the reserved job (with --role)"},
     ]}
 
 
 def main(argv):
     role, argv = lib.parse_value(argv, "--role", once=True)
+    rid, argv = lib.parse_value(argv, "--request-id", once=True)
     if len(argv) > 1:
         lib.usage(__doc__)
+    if rid and not role:
+        lib.usage("a request_id retries a role creation: "
+                  "mop add [git-origin] --role <role> --request-id <id>")
+    if rid and not soul.HEX32.match(rid):
+        raise RuntimeError(f"--request-id {rid!r}: 32 lower-case hex "
+                           "characters (the id an unknown outcome printed)")
     grant = bus.principal()
     if grant and not role:
         lib.usage("a role principal names the role of the puppet it adds: "
@@ -48,12 +61,12 @@ def main(argv):
                   f"Register it on the server: mop project add {origin}")
     p = lib.Progress(project)
     try:
-        return _add(origin, project, bool(argv), p, role)
+        return _add(origin, project, bool(argv), p, role, rid)
     finally:
         p.clear()
 
 
-def _add(origin, project, named, p, role=None):
+def _add(origin, project, named, p, role=None, rid=None):
     """Долгая команда (#124): на терминале -- текущий шаг, при успехе --
     ничего; отказ и не вставший папет -- ошибкой. Workflow -- общая
     операция (#459): командлет строит вход и рисует итог.
@@ -67,7 +80,7 @@ def _add(origin, project, named, p, role=None):
             reconciles = roles.protocol(bus.call_cluster("ping"))
         except ValueError as e:
             raise RuntimeError(f"mop add --role {role}: {e}") from None
-        request_id = uuid.uuid4().hex
+        request_id = rid or uuid.uuid4().hex
         return _role_add(origin, role, request_id, reconciles, p)
     p.step("registering")
     text, sent = _common.workspace_text(origin)
@@ -99,7 +112,17 @@ def _role_add(origin, role, request_id, reconciles, p):
 
     def transport(verb, **kw):
         got = bus.call_cluster(verb, **kw)
-        if verb == "add" and got.get("ok"):
+        if verb == "add":
+            # Подтверждение -- строго ok=True (ревью #618): ответ без ok
+            # или с ok «почти как правда» (1, "yes") -- не подтверждение,
+            # а битый провод: исход неизвестен, эхо не сверяется, alloc
+            # не ждётся. Второй add не заводится -- повтор тем же id.
+            if got.get("ok") is not True:
+                raise RuntimeError(
+                    f"add {role}: the service confirmed nothing "
+                    f"(ok={got.get('ok')!r}); outcome unknown — retry with "
+                    f"the same request_id {request_id} (--request-id) to "
+                    f"reconcile, and check mop list first") from None
             try:
                 triple = roles.echo(got, role)
             except ValueError as e:
