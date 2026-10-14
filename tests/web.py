@@ -2868,6 +2868,29 @@ def check_unified_roster_587(c):
     #      вердикта, nullable; UI не разбирает строку состояния.
     c.check("#587 managed rows keep the verdict detail",
             all("detail" in r for r in got if r["source"] == "managed"), got)
+    # (12) kind и bucket -- раздельно, как в строке puppets (#452/#210):
+    #      kind -- вид вердикта (слово статуса), bucket -- корзина
+    #      classify (цвет). «sick»/«down»/«silent» -- корзины: вид вердикта
+    #      у больного -- «hung»/«error»/..., и смешение их рендерило бы
+    #      неверное слово или дыру (ревью 1cee7c7: kind был classify(r)).
+    sick = role_row("pu-mop-5", MOP, state=State("hung", "not responding"),
+                    owner="ermak")
+    silent_row = role_row("pu-mop-6", MOP, state=silent("no responders"),
+                          owner="ermak")
+    got2 = fn([sick, silent_row], {"mop": []})
+    s1 = next(r for r in got2 if r.get("name") == "pu-mop-5")
+    s2 = next(r for r in got2 if r.get("name") == "pu-mop-6")
+    c.expect("#587 a hung row keeps its verdict kind", s1["kind"], "hung")
+    c.expect("#587 a hung row carries the sick bucket", s1["bucket"], "sick")
+    c.expect("#587 a silent row keeps its verdict kind", s2["kind"], "silent")
+    c.expect("#587 a silent row carries the silent bucket", s2["bucket"], "silent")
+    c.check("#587 every managed row carries both kind and bucket",
+            all(("kind" in r and "bucket" in r) for r in got2
+                if r["source"] == "managed"), got2)
+    # Счастливое совпадение free/busy -- не довод: и там оба ключа на месте
+    # и согласованы с classify (проверка ниже -- та же таблица CLASSIFY).
+    c.expect("#587 the busy row's kind and bucket coincide by verdict",
+             (m1["kind"], m1.get("bucket")), ("busy", "busy"))
 
     # (8) Битая половина тройки в мете -- громкий отказ с причиной, не
     #     молчаливая потеря строки: сценарии #421/#423 ниже остаются на месте.
