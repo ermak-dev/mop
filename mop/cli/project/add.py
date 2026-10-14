@@ -1,4 +1,4 @@
-"""make a project ready: mop project add [--update|--rebuild] [--node NAME] [-v] [git-origin]
+"""make a project ready: mop project add [--update|--rebuild] [--node NAME] [--branch NAME] [-v] [git-origin]
 
 Without origin, the origin of the current working copy is used.
 
@@ -10,9 +10,15 @@ any of them. Afterwards `mop add` can place a puppet right away.
   --rebuild   build it from the base image
   --node NAME build on this node only: its puppets alone are stopped and
               raised again, the other nodes keep their image and their work
+  --branch NAME read .mop and warm-up sources from that remote branch,
+                pinned to one commit; update even an existing image
   -v          print every line of the build's output, not only on a terminal
 
-Idempotent: run it again after changing the project's .mop. Silent when all
+One image per project and node: --branch replaces it, not a new image
+name. It does not set the puppet's working or landing branch.
+Without --branch, the default remote branch is used.
+
+Idempotent without --branch: run it again after changing the project's .mop. Silent when all
 goes well; on a terminal it shows the current step under the last lines of
 the build's output, and erases both when done.
 """
@@ -27,7 +33,8 @@ MCP = {"annotations": "destructive", "background": True, "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
     {"name": "update", "type": "boolean", "flag": "--update", "help": "build the image even if it exists, incrementally"},
     {"name": "rebuild", "type": "boolean", "flag": "--rebuild", "help": "build the image from the base image"},
-    {"name": "node", "type": "string", "flag": "--node", "help": "build on this node only"}]}
+    {"name": "node", "type": "string", "flag": "--node", "help": "build on this node only"},
+    {"name": "branch", "type": "string", "flag": "--branch", "help": "build from this remote branch"}]}
 
 
 def main(argv):
@@ -36,6 +43,7 @@ def main(argv):
     args = []
     try:
         node, rest = lib.parse_value(argv, "--node", once=True)
+        branch, rest = lib.parse_value(rest, "--branch", once=True)
     except RuntimeError:
         # Пустое или флаг вместо имени узла -- usage, а не сборка на всех
         # узлах (#340); повтор -- usage, как было.
@@ -58,16 +66,17 @@ def main(argv):
     name = puppets.project_of(origin)
     p = lib.Progress(name, verbose)
     try:
-        return _add(origin, name, mode, p, node)
+        return _add(origin, name, mode, p, node,
+                    **({"branch": branch} if branch is not None else {}))
     finally:
         p.clear()
 
 
-def _add(origin, name, mode, p, node=None):
+def _add(origin, name, mode, p, node=None, branch=None):
     # Недоступный origin валит команду до сервера: заведённый проект обязан
     # существовать. Читает его машина оператора -- у неё и есть доступ.
     p.step("reading .mop")
-    got = manifest.fetch(origin)
+    got = manifest.fetch(origin, **({"branch": branch} if branch is not None else {}))
 
     p.step("registering on the bus")
     try:
@@ -77,7 +86,8 @@ def _add(origin, name, mode, p, node=None):
 
     p.step("image")
     for ev in bus.ask_stream(bus.build_subject(), "image builder", "build",
-                             origin=origin, mode=mode, **({"node": node} if node else {})):
+                             origin=origin, mode=mode, **({"node": node} if node else {}),
+                             **({"branch": branch} if branch is not None else {})):
         if ev.get("done"):
             if ev.get("error") or not ev.get("ok"):
                 p.clear()

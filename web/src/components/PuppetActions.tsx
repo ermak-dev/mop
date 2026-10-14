@@ -20,6 +20,7 @@ import type { Session } from "../useSession";
 import { IconButton } from "./IconButton";
 import { ModelBox } from "./ModelBox";
 import { RestartBox } from "./RestartBox";
+import { StopBox } from "./StopBox";
 import { UpdateBox } from "./UpdateBox";
 import { DestructiveBox } from "./DestructiveBox";
 import { ControlWindow, type ControlEntry, type Signal, type EngineState } from "./ControlWindow";
@@ -66,6 +67,8 @@ export function PuppetActions({ row, session }: { row: Puppet; session: Session 
                onState={engineOf("update")} />
     <RestartBox session={session} row={row} order={order} forget={forget}
                 onState={engineOf("restart")} />
+    <StopBox session={session} row={row} order={order} forget={forget}
+             onState={engineOf("stop")} />
     <DestructiveBox session={session} row={row} order={order} forget={forget}
                     onState={engineOf("destructive")} />
     <ControlWindow opened={win} onClose={() => { setWin(false); setReopen(null); }}

@@ -864,6 +864,110 @@ def check_add_host_loop_278(c):
           "build_key" in body and f"hostvars[{var}].build_key" not in body, body)
 
 
+
+# HYPOTHESIS: одинаковое stage_name перезаписывает inventory-host следующего
+# узла; цикл add_host не доказывает, что игры настройки увидят каждое тело.
+# SOLUTION: ключ inventory-host включает узел; hostname контейнера не меняется.
+# RESULT: три тела сохраняют адрес, VMID и SSH-прыжок до игр настройки.
+# STATUS: FIXED — see #577
+def check_distinct_build_inventory_577(c, can_render):
+    if not can_render:
+        return
+    from jinja2 import Environment, StrictUndefined
+    env = Environment(undefined=StrictUndefined)
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
+    task = next(t for p in plays for t in p.get("tasks", [])
+                if "ansible.builtin.add_host" in t)
+    hosts = {
+        "node-a": {"stage_name": "pu-tmpl-proj-build", "stage_ip": "10.77.1.2",
+                   "stage_vmid": 10999, "ansible_host": "a.example", "ansible_user": "root"},
+        "node-b": {"stage_name": "pu-tmpl-proj-build", "stage_ip": "10.77.2.2",
+                   "stage_vmid": 11999, "ansible_host": "b.example", "ansible_user": "pool",
+                   "ansible_port": 2222},
+        "node-c": {"stage_name": "pu-tmpl-proj-build", "stage_ip": "10.77.3.2",
+                   "stage_vmid": 12999},
+    }
+    variables = {"hostvars": hosts, "ansible_play_hosts_all": list(hosts),
+                 "MOP_USER": "pool", "build_key": "/tmp/build-key",
+                 "lookup": lambda kind, name: "/home/control"}
+    inventory = {}
+    for item in hosts:
+        context = dict(variables, item=item)
+        for key, value in task.get("vars", {}).items():
+            context[key] = env.from_string(value).render(**context)
+        body = {key: env.from_string(value).render(**context) if isinstance(value, str)
+                else value for key, value in task["ansible.builtin.add_host"].items()}
+        inventory[body.pop("name")] = body
+    c.expect("#577 all three build guests remain in the inventory", len(inventory), 3)
+    actual = {body["mop_body_of"]: body for body in inventory.values()}
+    c.expect("#577 configuration reaches each node's guest", sorted(actual), sorted(hosts))
+    for node, hop in (("node-a", "root@a.example"),
+                      ("node-b", "pool@b.example:2222"), ("node-c", "node-c")):
+        if node not in actual:
+            continue
+        body = actual[node]
+        c.expect(f"#577 {node} keeps its own guest address", body["ansible_host"],
+                 hosts[node]["stage_ip"])
+        c.expect(f"#577 {node} keeps its own VMID", str(body["mop_body_vmid"]),
+                 str(hosts[node]["stage_vmid"]))
+        c.check(f"#577 {node} keeps its own SSH hop",
+                f"-o ProxyJump={hop}" in body["ansible_ssh_common_args"], body)
+        c.expect(f"#577 {node} joins the configuration play", body["groups"], "mop_building")
+
+
+# HYPOTHESIS: зеркало клонирует новый default HEAD, не pin манифеста ветки.
+# SOLUTION: явная remote-ветка и SHA проходят одним источником до зеркала.
+# RESULT: default HEAD не подменяет выбранные исходники прогрева.
+# STATUS: FIXED — see #593
+def check_branch_mirror_593(c, can_render):
+    if not can_render:
+        return
+    import tempfile
+    import subprocess
+    from jinja2 import Environment, StrictUndefined
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
+    task = next(t for p in plays for t in p.get("tasks", [])
+                if t.get("name") == "Take a fresh mirror of the project")
+    env = Environment(undefined=StrictUndefined)
+    env.filters["quote"] = shlex.quote
+    with tempfile.TemporaryDirectory(prefix="mop-branch-mirror-") as tmp:
+        src = os.path.join(tmp, "source")
+        os.mkdir(src)
+        def git(*args, cwd=src):
+            return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        with open(os.path.join(src, "version"), "w") as f:
+            f.write("main")
+        git("add", "-A")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main")
+        git("checkout", "-qb", "swarm")
+        with open(os.path.join(src, "version"), "w") as f:
+            f.write("manifest-sha")
+        git("add", "-A")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "swarm")
+        pin = git("rev-parse", "HEAD")
+        with open(os.path.join(src, "version"), "w") as f:
+            f.write("later-origin-sha")
+        git("add", "-A")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "later")
+        git("checkout", "-q", "main")
+        values = {"mop_origin": src, "mirror_tmp": os.path.join(tmp, "mirror.git"),
+                  "mirror_tgz": os.path.join(tmp, "mirror.tgz"),
+                  "mop_image_branch": "swarm", "mop_image_commit": pin}
+        script = env.from_string(task["ansible.builtin.shell"]).render(**values)
+        result = subprocess.run(["bash", "-c", script], cwd=tmp, capture_output=True, text=True)
+        c.expect("#593 selected branch mirror prepares successfully", result.returncode, 0)
+        if result.returncode:
+            c.fail("#593 mirror preparation reason", result.stderr)
+            return
+        mirror = values["mirror_tmp"]
+        c.expect("#593 mirror HEAD is the requested branch", git("symbolic-ref", "HEAD", cwd=mirror), "refs/heads/swarm")
+        c.expect("#593 mirror HEAD pins the manifest commit despite origin drift", git("rev-parse", "HEAD", cwd=mirror), pin)
+        clone = os.path.join(tmp, "warm")
+        git("clone", "-q", mirror, clone, cwd=tmp)
+        c.expect("#593 plain warm-up clone reads selected sources", open(os.path.join(clone, "version")).read(), "manifest-sha")
+
+
 def check_users_reload_199(c):
     """users.conf менялся -- nats перезагружается; решает контрольная сумма."""
     # Кто ещё читает вывод командлета: список закреплён. pve-facts печатает
@@ -3088,6 +3192,10 @@ def main():
     check_routes_gateway_wait_502(c, can_render)
     check_include_loop_var(c)
     check_add_host_loop_278(c)
+    check_distinct_build_inventory_577(c, can_render)
+
+
+    check_branch_mirror_593(c, can_render)
     check_users_reload_199(c)
     check_one_node_280(c)
 

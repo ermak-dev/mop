@@ -19,6 +19,7 @@ export const LABELS = {
   update: "Обновление",
   model: "Модель",
   restart: "Рестарт",
+  stop: "Остановить",
   recycle: "Пересоздать",
   delete: "Удалить",
   wipe: "Сбросить",

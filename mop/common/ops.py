@@ -64,6 +64,14 @@ REGISTERED, ACCEPTED, REFUSED, PARTIAL, UNKNOWN = (
     "registered", "accepted", "refused", "partial", "unknown")
 
 
+class PublicError(str):
+    """Закрытая library-фраза для фронтенда, не exception/stdout проекта.
+
+    Маркер живёт только внутри процесса; строка из RPC/HTTP не становится
+    доверенной, даже если совпадает с его формулировкой.
+    """
+
+
 def outcome(kind, name=None, progress=(), error=None, **facts):
     """Вердикт операции одним словарём: {outcome, name, progress, error,
     факты}. Ровно эта форма -- и в CLI, и в вебе."""
@@ -93,6 +101,23 @@ def bootstrap_result(transport, name, marker, timeout, sleep, clock, step):
 
 
 # ─── операции ────────────────────────────────────────────────────────────
+def stop(transport, name, login=None):
+    """Остановить само задание без удаления клона и без повтора (#608)."""
+    try:
+        got = transport("job_stop", name=name, owner=login) or {}
+    except bus.Refused as e:
+        return _refused(name, str(e))
+    except Exception:
+        return outcome(UNKNOWN, name, error="job stop could not be confirmed")
+    if not isinstance(got, dict):
+        return outcome(UNKNOWN, name, error="job stop could not be confirmed")
+    if got.get("error"):
+        return _refused(name, got["error"])
+    if got.get("stopped") is not True:
+        return outcome(UNKNOWN, name, error="job stop could not be confirmed")
+    return outcome(REGISTERED, name, stopped=True, project=got.get("project"))
+
+
 def add(transport, origin, workspace, branch=None, ctx=None, soul=None,
         request_id=None, sleep=time.sleep, clock=time.time,
         step=lambda s: None, place_wait=PLACE_WAIT,
@@ -138,7 +163,7 @@ def add(transport, origin, workspace, branch=None, ctx=None, soul=None,
         return _refused(None, str(e), progress)
     name = got.get("name")
     if not name:
-        return _refused(name, "the service named no puppet", progress)
+        return _refused(name, PublicError("the service named no puppet"), progress)
     if context is not None and name:
         context["name"] = name
     note(f"{name}: waiting for a node")
@@ -154,15 +179,19 @@ def add(transport, origin, workspace, branch=None, ctx=None, soul=None,
                                   bootstrap_wait, sleep, clock, step)
             if a.client_status == "failed" or puppets.failing(raw):
                 why = puppets.failing(raw) or "failed to start"
+                public = ("LLM proxy key is missing on the puppet; the cluster service must deliver it"
+                          if "no MOP_PROXY_KEY in " in why else
+                          f"{name} failed to start; inspect the puppet status")
                 return outcome(UNKNOWN, name, progress,
-                               error=f"{name} on {node}: {why}")
+                               error=f"{name} on {node}: {why}",
+                               public_error=PublicError(public))
             note(f"{name}: starting on {node}")
         sleep(1)
     return outcome(UNKNOWN, name, progress,
-                   error=f"{name} is "
+                   error=PublicError(f"{name} is "
                          + (f"still starting on {node}" if node
                             else "not placed on any node")
-                         + " after 2 minutes: mop server doctor")
+                         + " after 2 minutes: mop server doctor"))
 
 
 def _bootstrap(transport, name, got, progress, wait, sleep, clock, step):
@@ -176,16 +205,20 @@ def _bootstrap(transport, name, got, progress, wait, sleep, clock, step):
     record = bootstrap_result(transport, name, marker, wait, sleep, clock, step)
     if record is None:
         return outcome(PARTIAL, name, progress,
-                       marker=marker, bootstrap=None, waited=wait)
+                       marker=marker, bootstrap=None, waited=wait,
+                       public_error=PublicError("project bootstrap did not finish within the observation deadline"))
     # Прогона не было (played False) -- не провал: новый прогон просто не
     # состоялся, и это не отказ сервиса.
     if not record.get("played"):
         return outcome(ACCEPTED, name, progress,
-                       marker=marker, bootstrap=record)
+                       marker=marker, bootstrap=record,
+                       public_error=PublicError("project bootstrap has not run; inspect the puppet status before retrying"))
     ok = bool(record.get("ok"))
     return outcome(REGISTERED if ok else REFUSED, name, progress,
                    marker=marker, bootstrap=record,
-                   error=None if ok else _bootstrap_error(record))
+                   error=None if ok else _bootstrap_error(record),
+                   **({"public_error": PublicError("project bootstrap failed; inspect the puppet status for the failing task")}
+                      if not ok else {}))
 
 
 def _bootstrap_error(record):

@@ -167,12 +167,13 @@ def nomad_jobs(project=None):
 
 
 def task_and_reason(alloc):
-    """Сводка задачи и, у падающей, причина из stderr (#126). Только сервис
-    кластера: у него Nomad. stderr читается лишь у падающих -- это запрос к
-    клиенту Nomad на узле, и платить его за здоровых незачем."""
+    """Сводка задачи и причина последнего отказа из stderr. Повторная running
+    обёртка ещё не доказывает подъём сессии: ростер сверяет это с агентом.
+    Без ненулевого исхода stderr не читается."""
     task = state.task_summary(alloc)
     reason = None
-    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None):
+    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None,
+                         initializing=True):
         try:
             reason = state.failure_reason(
                 _api().alloc_stderr(Alloc.from_dict(alloc).id, state.task_name(alloc)))
@@ -844,6 +845,20 @@ def _role_frozen(req, kept):
     return None
 
 
+def _job_stop(project, req):
+    """Оператор останавливает задание, сохраняя тело и workspace (#608)."""
+    name = req["name"]
+    job = _api().get_job(name)
+    if not job:
+        return {"error": f"no job {name}"}
+    origin = JobMeta.from_job(job).origin
+    if not origin:
+        return {"error": f"{name} carries no origin: not a pool puppet"}
+    _api().deregister(name, purge=False)
+    return {"ok": True, "name": name, "stopped": True,
+            "project": puppets.project_of(origin)}
+
+
 def _delete(project, req):
     """Снять джоб. purge=False оставляет его в истории остановленным — так
     работает рецикл: джоб останавливается, рабочая копия сносится, и та же
@@ -929,6 +944,59 @@ def _stderr(project, req):
     text = _api().alloc_stderr(a.id, state.task_name(alloc))
     return {"ok": True, "alloc": a.id, "status": a.client_status,
             "lines": (text or "").splitlines()[-n:]}
+
+
+def _startup_failure(stage, error):
+    code = getattr(getattr(error, "response", None), "status_code", None)
+    reason = f"HTTP {code}" if isinstance(code, int) and 100 <= code <= 599 else type(error).__name__
+    return {"error": f"initialization log unavailable: {stage} ({reason})"}
+
+
+def _startup(project, req):
+    """Приватный ход текущей инициализации: стадии обёртки и задачи bootstrap.
+    Произвольные exception/stdout результата Ansible не становятся логом UI."""
+    from .web import _redact_text, _valid_at
+    try:
+        n = min(max(int(req.get("lines", STDERR_MAX)), 1), STDERR_MAX)
+    except (TypeError, ValueError):
+        return {"error": "lines must be an integer"}
+    try:
+        alloc = _api().latest_alloc(req["name"])
+    except Exception as e:
+        return _startup_failure("allocation lookup failed", e)
+    if not alloc:
+        return {"ok": True, "lines": [], "truncated": False, "note": "Waiting for placement"}
+    a = Alloc.from_dict(alloc)
+    task = state.task_name(alloc)
+    if not task:
+        return {"ok": True, "lines": [], "truncated": False, "note": "Waiting for task setup"}
+    logs = []
+    for reader in (_api().alloc_stdout, _api().alloc_stderr):
+        try:
+            logs.append(reader(a.id, task))
+        except Exception as e:
+            if getattr(getattr(e, "response", None), "status_code", None) != 404:
+                return _startup_failure("wrapper log read failed", e)
+            logs.append("")
+    stdout, stderr = logs
+    try:
+        progress = bootstrap.read_progress(bootstrap.ROOT, req["name"], a.id)
+    except Exception as e:
+        return _startup_failure("bootstrap progress read failed", e)
+    started = (state.task_summary(alloc) or {}).get("started_at")
+    at = _valid_at(progress.get("at"))
+    if started is None or at is None or at < started:
+        progress = {"lines": [], "truncated": False}
+    lines = [_redact_text(line) for line in stdout.splitlines()
+             if line.startswith(f"{req['name']}: ")]
+    lines += [_redact_text(line) for line in progress["lines"]]
+    if stderr.strip():
+        lines.append("LLM proxy key is missing on the puppet" if "no MOP_PROXY_KEY in " in stderr
+                     else "Wrapper diagnostic output received; inspect the puppet status for details")
+    return {"ok": True, "lines": lines[-n:],
+            "truncated": len(lines) > n or progress["truncated"]
+                         or any(len(text.encode()) >= 8000 for text in logs),
+            "note": None if lines else "Waiting for initialization output"}
 
 
 def _spec(project, req):
@@ -1379,9 +1447,11 @@ VERBS = {
     "update":         Verb(_gated(_update), PROJECT, True,  True),
     "restart":        Verb(_gated(_restart), PROJECT, True,  True),
     "stop":           Verb(_gated(_stop), PROJECT, True,  True),
+    "job_stop":       Verb(_job_stop,       ADMIN,   True,  True),
     "delete":         Verb(_gated(_delete), PROJECT, True,  True),
     "alloc":          Verb(_alloc,          PROJECT, True,  False),
     "stderr":         Verb(_stderr,         PROJECT, True,  False),
+    "startup":        Verb(_startup,        ADMIN,   True,  False),
     "spec":           Verb(_spec,           PROJECT, True,  True),
     "secret_put":     Verb(_secret_put,     SECRET,  False, False),
     "secret_list":    Verb(_secret_list,    SECRET,  False, False),

@@ -7,8 +7,8 @@ import { IconButton } from "./IconButton";
 import { SendForm } from "./SendForm";
 import { LABELS } from "./labels";
 
-// #507: единственный источник -- экран (tail); ветка stderr ушла вместе с
-// кнопкой «лог»: у задачи он пуст, причина падающей -- в вердикте строки.
+// Один tail-опрос: до tmux -- ход инициализации, после -- живой экран.
+// Не готовой сессии нельзя отправлять ввод.
 function PuppetOutput({ session, target }: {
   session: Session; target: string;
 }) {
@@ -80,6 +80,7 @@ function PuppetOutput({ session, target }: {
           onClick={() => changeZoom(0.25)}><IconZoomIn size={18} /></IconButton>
       </Group>
       <Group gap="xs" wrap="nowrap">
+        {tail.mode === "initialization" && <Text size="xs" c="dimmed">инициализация</Text>}
         {!loading && tail.truncated && <Text size="xs" c="dimmed">обрезано: показан конец</Text>}
         <IconButton label={LABELS.refresh} variant="subtle" size="lg" disabled={loading}
           onClick={() => { void refresh(); }}><IconRefresh size={18} /></IconButton>
@@ -88,6 +89,8 @@ function PuppetOutput({ session, target }: {
     {tail.error && <Text role="alert" c="red" size="xs" px="md" pt="xs" style={{ flexShrink: 0 }}>
       {tail.error}{tail.lines.length ? "; показан последний снимок" : ""}
     </Text>}
+    {tail.note && !tail.blocked && <Text size="xs" c="dimmed" px="md" pt="xs"
+      style={{ flexShrink: 0 }}>{tail.note}</Text>}
     <Box p="md" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
       <Box ref={viewport} data-testid="output-scroll" role="region"
         aria-label="вывод экрана" tabIndex={0}
@@ -112,12 +115,12 @@ function PuppetOutput({ session, target }: {
                 transformOrigin: "top left", transform: `scale(${scale})`,
               }}>{tail.lines.map((line, i) => <span key={i}>{line}{i < tail.lines.length - 1 ? "\n" : ""}</span>)}</Box>
             </Box>
-            {!tail.lines.length && !tail.error && <Text size="sm" c="dimmed" ta="center" mt="xl">вывод пуст</Text>}
+            {!tail.lines.length && !tail.error && !tail.note && <Text size="sm" c="dimmed" ta="center" mt="xl">вывод пуст</Text>}
           </>
         )}
       </Box>
     </Box>
-    {!tail.blocked && <Box px="md" py="sm" data-testid="screen-composer"
+    {tail.loaded && !tail.blocked && tail.mode === "screen" && <Box px="md" py="sm" data-testid="screen-composer"
       style={{ flexShrink: 0, backgroundColor: "var(--mantine-color-gray-0)", borderTop: "1px solid var(--mantine-color-default-border)" }}>
       <SendForm session={session} target={target} />
     </Box>}

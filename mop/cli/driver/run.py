@@ -181,13 +181,14 @@ def initial_identity(name, soul_inc):
                        name=name, soul_inc=soul_inc)
 
 
-def role_bootstrap_ask(project, name, address):
+def role_bootstrap_ask(project, name, address, **marks):
     """Спрос bootstrap ролевого джоба: квалифицированный server.rpc узла
     (#603/#581), не анонимный (его зовут и люди проекта, а личный кред
-    принципала выдаёт только хозяину узла). -> ответ сервера."""
+    принципала выдаёт только хозяину узла). marks -- отметки #612
+    (alloc/started_at), они одинаковы у обоих маршрутов. -> ответ сервера."""
     return bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
                           project=project, node_auth=True,
-                          name=name, address=address)
+                          name=name, address=address, **marks)
 
 
 def use_node_credentials():
@@ -237,12 +238,16 @@ def bootstrap_sandbox(d, name, project, node_qualified=False):
         if r.get("error"):
             raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
+        # Отметки #612 (alloc/started_at) едут обоими маршрутами:
+        # квалификация канала (#590) меняет субъект, а не полезную нагрузку.
         if node_qualified:
             use_node_credentials()
-            out = role_bootstrap_ask(project, name, address)
+            out = role_bootstrap_ask(project, name, address, alloc=os.environ.get("NOMAD_ALLOC_ID"),
+                                     started_at=time.time())
         else:
-            out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
-                                 project=project, name=name, address=address)
+            out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT, project=project,
+                                 name=name, address=address, alloc=os.environ.get("NOMAD_ALLOC_ID"),
+                                 started_at=time.time())
     finally:
         # Закрыть -- и после неудачного впуска: стоп мог прийти посреди него.
         asyncio.run(d.admit(name, False))

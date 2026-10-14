@@ -539,22 +539,24 @@ def _human(seconds):
     return f"{seconds}s"
 
 
-def failing_row(alloc_status, task, reason):
+def failing_row(alloc_status, task, reason, initializing=False):
     """(колонка аллокации, вердикт State) падающего папета | None.
 
-    Падающий -- задача не работает, уже падала ненулём или сдалась. Работающую
-    задачу с прошлыми падениями не трогаем: она поднялась.
+    initializing -- обёртка работает, но сессия ещё не появилась: предыдущий
+    ненулевой выход остаётся причиной до подтверждённого подъёма сессии.
+    Живую сессию с прошлыми падениями не трогаем.
 
     Вердикт -- State, а не строка (#452): _row кладёт его detail в строку
     ростера порознь, показ собирает str()."""
-    if not task or task["state"] == "running":
+    if not task or (task["state"] == "running" and not initializing):
         return None
     gave_up = task["failed"] or task["state"] == "dead"
     if not gave_up and not (task["restarts"] and task["exit"] not in (None, 0)):
         return None
     why = reason or f"exit {task['exit']}"
-    when = "gave up" if gave_up else (f"next in {_human(task['next_s'])}"
-                                      if task["next_s"] else "restarting")
+    when = ("retrying initialization" if initializing and task["state"] == "running"
+            else "gave up" if gave_up else (f"next in {_human(task['next_s'])}"
+                                            if task["next_s"] else "restarting"))
     return "failing", State("failing", f"{why} ({task['restarts']} restarts, {when})")
 
 

@@ -154,6 +154,7 @@ def run(req, send, api=None):
     origin = req.get("origin") or ""
     mode = req.get("mode") or "missing"
     node = req.get("node") or None
+    branch = req.get("branch")
     if not puppets.looks_like_origin(origin):
         return {"error": f"{origin!r} doesn't look like a git-origin"}
     project = puppets.project_of(origin)
@@ -166,7 +167,9 @@ def run(req, send, api=None):
         _one_at_a_time.acquire()
     try:
         send(step="reading the project's .mop")
-        got = image.prepare(origin)
+        got = image.prepare(origin, **({"branch": branch} if branch is not None else {}))
+        if branch is not None and mode == "missing":
+            mode = "update"
         refused = []
         serving = serving_now(refused, api=api)
         for why in refused:

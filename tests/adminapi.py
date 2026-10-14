@@ -120,6 +120,55 @@ def wait_frames(frames, timeout=10):
     return frames
 
 
+# HYPOTHESIS: add уже получил имя на шине, но public target остаётся
+# исходным None и во время ожидания, и после конечного вердикта.
+# SOLUTION: public target дополняется доверенным name контекста add;
+# ключ ожидания и дедупликации остаётся прежним origin.
+# RESULT: имя видно до конца placement и сохраняется в GET/SSE.
+# STATUS: FIXED — see #609
+def check_add_public_identity_609(c):
+    entered, release = threading.Event(), threading.Event()
+    frames = []
+    api = adminapi.Api(adminapi.Operations(), origin="https://pool.example")
+
+    def execute(action, target, params, who):
+        context = {}
+        api.audit_context(api.current_op(), context)
+
+        def effect():
+            context["name"] = "pu-demo-17"
+            context["project"] = "demo"
+            entered.set()
+            release.wait(5)
+            return {"outcome": "registered", "name": "pu-demo-17"}
+        return effect
+
+    api.executor = execute
+    api.on_terminal(frames.append)
+    rec = api.submit("add", None, {"origin": "git@example.test:g/demo.git",
+                                    "bootstrap": "PRIVATE-BOOTSTRAP"}, ADMIN)
+    try:
+        c.check("#609 registration reached the placement barrier", entered.wait(5))
+        running = api.result(rec["id"], ADMIN)
+        c.expect("#609 running add exposes the assigned name", running.get("target"), "pu-demo-17")
+        c.check("#609 running public result contains no workspace or origin",
+                all(secret not in json.dumps(running) for secret in
+                    ("PRIVATE-BOOTSTRAP", "git@example.test", '"project"', '"params"')), running)
+    finally:
+        release.set()
+    done = wait_terminal(api, rec["id"])
+    wait_frames(frames)
+    c.expect("#609 terminal GET retains the assigned name", done.get("target"), "pu-demo-17")
+    c.expect("#609 terminal SSE identifies the created puppet", frames[0].get("target"), "pu-demo-17")
+    c.check("#609 SSE still excludes private context",
+            all(key not in frames[0] for key in ("login", "project", "params", "origin")), frames)
+    refused = adminapi.Api(adminapi.Operations(), origin="https://pool.example",
+                          executor=lambda *args: {"outcome": "refused", "error": "no project demo"})
+    r = refused.submit("add", None, {"origin": "git@example.test:g/demo.git"}, ADMIN)
+    c.expect("#609 an add refused before registration invents no target",
+             wait_terminal(refused, r["id"]).get("target"), None)
+
+
 def main():
     c = Checks()
     ops = adminapi.Operations()
@@ -414,8 +463,12 @@ def main():
     c.check("#461 own result is readable", got.get("id") == first["id"], got)
     c.check("#461 a result of an unknown id reads unknown with the journal pointer",
             api.result("no-such-id", ADMIN).get("status") == "unknown", None)
-    c.check("#461 a result is admin-only",
-            api.result(first["id"], USER).get("status") in ("401", "403", "refused"))
+    try:
+        api.result(first["id"], USER)
+        c.check("#461 a result is admin-only", False)
+    except adminapi.Refused as refused:
+        c.expect("#461 a result is admin-only", (refused.code, refused.error),
+                 (403, "admin only"))
     c.check("#461 the result carries no message payload",
             "message" not in json.dumps(got), got)
     c.check("#461 results never ride the public snapshot",
@@ -617,6 +670,7 @@ def main():
             and json.dumps(h.sent[0][1])
             == '{"error": "model catalog is unavailable"}', h.sent)
 
+    check_add_public_identity_609(c)
     return c.report("adminapi")
 
 

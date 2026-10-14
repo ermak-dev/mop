@@ -1485,6 +1485,7 @@ def main():
     check_output_rules(c)
     check_empty_value(c)
     check_node_flag_320(c)
+    check_image_branch_cli_593(c)
     check_one_parser_320(c)
     check_node_flag_340(c)
     check_deploy_check(c)
@@ -1560,6 +1561,8 @@ def check_role_declarations_585(c):
         "stat": (["usage"], ["pool"]),
         "profile": ([], []),
         # admin verbs outside the role grammar: silent for grants on purpose
+        # stop (#608) -- job_stop, операторский глагол вне грамматики ролей
+        "stop": None,
         "node": None, "node_drain": None, "node_up": None,
         "project_add": None, "project_limit": None,
         "models": None, "diagnose": None, "server_diagnose": None,
@@ -2623,6 +2626,57 @@ def check_empty_value(c):
     c.expect("parse_value without the flag must leave the value unset",
              lib.parse_value(["pu-mop-1", "--fresh"], "--cred"),
              (None, ["pu-mop-1", "--fresh"]))
+
+
+# HYPOTHESIS: CLI и запрос сборщику не имеют общего явного выбора ветки.
+# SOLUTION: явная remote-ветка и SHA проходят одним источником до зеркала.
+# RESULT: default HEAD не подменяет выбранные исходники прогрева.
+# STATUS: FIXED — see #593
+def check_image_branch_cli_593(c):
+    from mop.cli.driver import build
+    from mop.cli.project import add
+    from mop.common import bus, manifest
+    from mop.server import image
+    got = {"project": "p", "asks": {}, "alien": [], "legacy": []}
+    seen = []
+    def prepare(origin, root=None, **kw):
+        seen.append((origin, root, kw))
+        return got
+    with patched(lib, origin=lambda *a: "git@h:g/p.git", git=lambda *a: "/local"), \
+            patched(image, prepare=prepare,
+                    build=lambda *a, **kw: {"announced": [], "rc": 0}):
+        out, err, code = run_command(build.main, ["--branch", "swarm", "--node", "n1"])
+    c.expect("#593 driver build accepts --branch", (out, err, code), ("", "", 0))
+    c.expect("#593 driver branch reaches prepare, not local tree",
+             seen, [("git@h:g/p.git", None, {"branch": "swarm"})])
+    seen.clear()
+    def fetch(origin, **kw):
+        seen.append(("fetch", kw))
+        return got
+    def stream(*a, **kw):
+        seen.append(("request", kw))
+        return iter([{"done": True, "ok": True}])
+    with patched(lib, cluster_check=lambda: None, origin=lambda *a: "git@h:g/p.git"), \
+            patched(manifest, fetch=fetch), \
+            patched(bus, call_cluster=lambda *a, **kw: {"ok": True},
+                    ask_stream=stream, build_subject=lambda: "build"):
+        out, err, code = run_command(add.main, ["--branch=swarm", "--node", "n1", "git@h:g/p.git"])
+    c.expect("#593 project add accepts --branch", (out, err, code), ("", "", 0))
+    c.expect("#593 project preflight selects the branch", seen[:1], [("fetch", {"branch": "swarm"})])
+    requests = [value for kind, value in seen if kind == "request"]
+    c.check("#593 build request retains branch and node", len(requests) == 1
+            and requests[0].get("branch") == "swarm" and requests[0].get("node") == "n1", requests)
+    flags = {arg["name"]: arg.get("flag") for arg in add.MCP["args"]}
+    c.expect("#593 MCP exposes the same branch option", flags.get("branch"), "--branch")
+    for command in (build.main, add.main):
+        for argv in (["--branch"], ["--branch="], ["--branch", ""],
+                     ["--branch", "--node", "n1"], ["--branch", "a", "--branch", "b"]):
+            with patched(build, origin_of=lambda a: "git@h:g/p.git"), \
+                    patched(lib, origin=lambda *a: "git@h:g/p.git", git=lambda *a: "/local"), \
+                    patched(image, prepare=prepare, build=lambda *a, **kw: {"announced": [], "rc": 0}), \
+                    patched(add, _add=lambda *a, **kw: 0):
+                out, err, code = run_command(command, argv)
+            c.check(f"#593 empty/repeated branch refuses {argv}", bool(code), (out, err, code))
 
 
 def node_flag_sites():

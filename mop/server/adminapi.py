@@ -83,7 +83,7 @@ import threading
 import time
 import uuid
 
-from ..common import config, puppets
+from ..common import config, ops, puppets
 from . import opworker
 from .opworker import TERMINAL, status_of
 
@@ -115,10 +115,10 @@ def sanitize(error):
 
 
 def result_error(status, error):
-    """Публичная причина — закрытая фраза, подробности остаются в журнале.
+    """Доверенная workflow-фраза сохраняется, raw error -- закрытая причина.
 
-    Фильтрации пунктуации недостаточно: ключ или текст сообщения могут
-    состоять из обычных букв. Ни один фрагмент сырой ошибки не копируется.
+    Маркер PublicError не приходит из HTTP/RPC. Фильтрации пунктуации
+    недостаточно: ключ или payload могут состоять из обычных букв.
     """
     fallback = {
         "refused": "operation refused",
@@ -128,6 +128,8 @@ def result_error(status, error):
     }.get(status)
     if fallback is None:
         return None
+    if isinstance(error, ops.PublicError):
+        return str(error)
     text = str(error or "")
     reasons = (
         ("work in the clone", "target has unfinished work"),
@@ -422,11 +424,18 @@ class Api:
         finally:
             gate.release()
         with self._lock:
+            ctx = self._audit_context.pop(record["id"], None) or {}
             rec = self._records.get(record["id"])
             if rec is not None:
                 rec["status"] = status
+                if rec["action"] == "add" and rec["target"] is None:
+                    name = ctx.get("name")
+                    if isinstance(name, str) and name:
+                        rec["target"] = name
                 if isinstance(verdict, dict) and verdict.get("error"):
                     rec["error"] = verdict["error"]
+                if isinstance(verdict, dict) and isinstance(verdict.get("public_error"), ops.PublicError):
+                    rec["public_error"] = verdict["public_error"]
                 if self._by_key.get(key) == record["id"]:
                     self._by_key.pop(key, None)
         # Одно внутреннее completion-событие (#575): запись приёма +
@@ -436,7 +445,6 @@ class Api:
         # -- факт в момент подтверждения; вердикт доопределяет пустое
         # (add называет созданного). Никаких сетевых lookup после
         # эффекта: не подтвердился -- честный None.
-        ctx = self._audit_context.pop(record["id"], None) or {}
         name = ctx.get("name") or record["target"]
         audit = {"id": record["id"], "action": record["action"],
                  "status": status, "login": record["login"],
@@ -446,7 +454,7 @@ class Api:
         # закрытая фраза, без payload; login и проект в него не идут.
         frame = {"id": audit["id"], "action": audit["action"],
                  "target": record["target"], "status": audit["status"]}
-        reason = result_error(status, rec.get("error") if rec else None)
+        reason = result_error(status, rec.get("public_error", rec.get("error")) if rec else None)
         if reason:
             frame["error"] = reason
         # Сырая причина неуспеха -- в журнал службы (#506): после #499
@@ -504,10 +512,14 @@ class Api:
         эффекте -- /api/journal и аудит пула, не память адаптера."""
         why = self._admin(who, asked=True)
         if why:
-            return {"status": str(why[0])}
+            raise Refused(why[0], why[1])
         with self._lock:
             stored = self._records.get(op_id)
             got = dict(stored) if stored is not None else None
+            if got is not None and got["action"] == "add" and got["target"] is None:
+                name = (self._audit_context.get(op_id) or {}).get("name")
+                if isinstance(name, str) and name:
+                    got["target"] = name
         if got is None:
             return {"status": "unknown",
                     "error": "operation outcome is unknown; "
@@ -515,7 +527,7 @@ class Api:
         # Публичного в результате нет: ни params, ни текста сообщения.
         result = {k: v for k, v in got.items() if k in ("id", "action", "target",
                                                        "status", "login", "at")}
-        reason = result_error(got["status"], got.get("error"))
+        reason = result_error(got["status"], got.get("public_error", got.get("error")))
         if reason:
             result["error"] = reason
         return result

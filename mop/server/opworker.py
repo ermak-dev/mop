@@ -102,8 +102,8 @@ def default_transport(resolver=None):
     словами сервиса, но правильный вход -- резолвер воркера (#460)."""
 
     def call(verb, name=None, **fields):
-        project = None
-        if resolver is not None:
+        project = bus.ADMIN if verb == "job_stop" else None
+        if resolver is not None and verb != "job_stop":
             project = (resolver(fields.get("origin"))
                        if verb == "add" and fields.get("origin")
                        else resolver(name) if name else None)
@@ -125,6 +125,7 @@ def register(registry):
     # но глагол обязан быть зарегистрирован -- иначе POST из GUI отвечает
     # unsupported (#489: пропуск #464, эффект был, регистрации не было).
     registry.register("restart", ())
+    registry.register("stop", ())
     registry.register("add", ADD_PARAMS, target=False)
     registry.register("update", UPDATE_PARAMS)
     registry.register("recycle", RUIN_PARAMS)
@@ -673,7 +674,8 @@ class Worker:
                 # Реестр ОТВЕРГ просьбу (ревью 2 #575): projectName из
                 # незарегистрированного origin -- выдумка, его в аудите
                 # нет; тема публикации -- нейтральная admin.
-                return ops.outcome(ops.REFUSED, None, error=why)
+                return ops.outcome(ops.REFUSED, None, error=why,
+                                   public_error=ops.PublicError("project is not registered in the pool; use mop project add"))
             target = origin
             # Проект решает реестр: он УЖЕ подтвердил origin (#575),
             # чистая функция без сети. Факт -- В МОМЕНТ подтверждения,
@@ -699,6 +701,10 @@ class Worker:
                               fresh=bool(fields.get("fresh")),
                               workspace=(text, sent), force=False,
                               login=login, spec=spec)
+        if verb == "stop":
+            if params:
+                raise ValueError("stop takes no parameters")
+            return ops.stop(transport, target, login=login)
         if verb == "restart":
             return ops.restart(transport, target, login=login,
                                force=False, observe=True,
