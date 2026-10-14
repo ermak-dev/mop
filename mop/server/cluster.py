@@ -36,7 +36,7 @@ import base64
 from .. import driver
 from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
 from ..common import (bus, busnames, config, creds, domain, fsutil, landing, lease, llm, paths,
-                      project_secrets, projects, puppets, service, state)
+                      project_secrets, projects, puppets, service, soul, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
 # Nomad за интерфейсом (#275): глаголы читают его через _api(), а не модуль
@@ -1063,6 +1063,14 @@ def _answer(project, req):
     if project is None:
         return _client_config(req) if verb == "client_config" else \
             {"error": f"no such join verb {verb}"}
+    # Ограждение #603: принципал роли не говорит по легаси-rpc человека.
+    # Его субъект -- role-канал (node.<n>.role.<grant>, cluster.role.<grant>),
+    # и глагол резолвит сервер; легаси-ветку исполнял бы без резолвера
+    # старый контроллер на смешанном роллауте. Отказ -- до таблиц глаголов.
+    caller = req.get("_caller") or ""
+    if soul.is_grant(caller):
+        return {"error": f"{caller}: grant principals speak on the role "
+                         f"channel, not the legacy rpc (#603)"}
     name = req.get("name")
     spec = _row(verb)
     origin, exists = (None, False)

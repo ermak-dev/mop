@@ -285,10 +285,155 @@ def check_trusted_body_580(c):
              {"verb": "x"})
 
 
+# ─── подписки bootstrap: квалифицированный server.rpc (#603/#581) ───────
+# Узловой резолвер (#584) просит bootstrap со своего субъектного токена
+# (mop.<p>.server.rpc.node-<узел>), а serve() до #581 подписывалась ТОЛЬКО
+# на анонимный mop.*.server.rpc: у квалифицированного запроса не было
+# слушателя. Проверяется настоящая serve() под фальшивым nats -- подписки,
+# которые она ставит, и путь её собственного колбэка (кто ставит _caller),
+# -- а не прямой вызов answer() с подложенными полями.
+class FakeNats_581:
+    """Минимальный nats для serve(): подключение и подписки без шины.
+
+    Событие останова вместо вечного await: serve() живёт, пока жив процесс,
+    и проверка не должна висеть. Колбэк подписки хранится -- проверка зовёт
+    его сама, путь от подписки до обработчика без подложенных полей."""
+
+    def __init__(self):
+        self.subscribed = []       # [(субъект, колбэк)] в порядке подписки
+        self.published = []
+
+    async def connect(self, **opts):
+        return self
+
+    async def subscribe(self, subject, cb=None):
+        self.subscribed.append((subject, cb))
+
+    async def publish(self, subject, data):
+        self.published.append((subject, data))
+
+
+def check_serve_subscriptions_581(c):
+    """HYPOTHESIS (#581): bootstrap.serve подписана только на анонимный
+    mop.*.server.rpc, и квалифицированный запрос узла (resolve #584 ходит
+    mop.<p>.server.rpc.node-<имя>) остаётся без подписчика: проситель ждёт
+    таймаут молчания, и его читают как «агент молчит» (docs/BUS.md).
+    SOLUTION: serve() берёт семейство субъектов из busnames.server_family()
+    -- анонимный легаси плюс хвост квалифицированных токенов; одно
+    определение с ACL (#144: расхождение подписки и прав молчит до пула),
+    и каркас service.serve подписывает список как есть.
+    RESULT: serve() подписана и на анонимный server.rpc, и на маску
+    server.rpc.> (квалифицированные узловые); колбэк собственной подписки
+    ставит _caller/_reply/_subject из фактов транспорта -- квалифицированный
+    субъект читается узлом, анонимный -- без вызывающего, -- и тело их не
+    подделывает. Мутации (одна маска без анонимной легаси, подписка мимо
+    family()) ловятся.
+    STATUS: FIXED — see #581"""
+    import asyncio
+    import json
+    from unittest import mock
+
+    from mop.common import busnames, service
+    from mop.server import bootstrap
+
+    # ── подписки настоящей serve() под фальшивым nats ──────────────────
+    # Баннер печатается после подписок -- по нему и останавливаем, не вися
+    # на вечном await serve().
+    fake = FakeNats_581()
+    lines = []
+    auth = {"servers": ["nats://x"]}
+    with mock.patch("nats.connect", fake.connect), \
+            mock.patch.object(service.bus, "auth", return_value=auth), \
+            mock.patch.object(service.bus, "config", return_value={"url": "nats://x"}):
+        try:
+            async def run():
+                task = asyncio.create_task(bootstrap.serve(lines.append))
+                for _ in range(200):
+                    if lines:            # баннер напечатан -- подписки стоят
+                        task.cancel()
+                        return
+                    await asyncio.sleep(0)
+                task.cancel()
+                raise AssertionError("serve() never printed its banner")
+            asyncio.run(run())
+        except asyncio.CancelledError:
+            pass
+    family = busnames.server_family()
+    c.check("#581 the family must keep the anonymous legacy server.rpc",
+            not (busnames.server(busnames.ANY) not in family), family)
+    c.check("#581 the family must cover the qualified tail",
+            not (f"{busnames.server(busnames.ANY)}.>" not in family), family)
+    got = sorted(s for s, _ in fake.subscribed)
+    c.check("#581 serve() must subscribe via the shared family, not the bare subject",
+            not (got != sorted(family)),
+            f"subscribed={got}, family={sorted(family)}")
+    # Одна подписка на каждого: дубль -- лишний поток на каждый запрос.
+    c.check("#581 each subject is subscribed exactly once",
+            not (len(got) != len(set(got))), got)
+
+    # ── каркас: колбэк собственной подписки, не прямой answer() ────────
+    # До #581 прямой answer(caller=...) был зелёным при молчащей подписке:
+    # каркас умел ставить _caller, а квалифицированный запрос узла не имел
+    # подписчика вовсе. Здесь проверяется путь от подписки до обработчика:
+    # служебные ключи ставит колбэк serve() из фактов транспорта (узел --
+    # из субъектного токена), тело их не подделывает. Анонимный легаси-субъект
+    # -- без вызывающего, как прежде (#207).
+    seen = []
+    qualified = busnames.server("mop", caller=busnames.node_user("pve1"))
+    body = json.dumps({"verb": "ping", "_caller": "mallory",
+                       "_reply": "forged", "_subject": "forged"}).encode()
+
+    class Msg:
+        subject = qualified
+        data = body
+        reply = "_MOP_REPLY.node-pve1.ab12"
+
+        async def respond(self, data):
+            pass
+
+    def fake_answer(project, req, send):
+        seen.append((project, req))
+        return {"ok": True}
+
+    # Свой фальшивый nats: подписки этого прогона, не прошлого.
+    fake2 = FakeNats_581()
+    lines2 = []
+    with mock.patch("nats.connect", fake2.connect), \
+            mock.patch.object(service.bus, "auth", return_value=auth), \
+            mock.patch.object(service.bus, "config", return_value={"url": "nats://x"}), \
+            mock.patch.object(bootstrap, "answer", fake_answer):
+        try:
+            async def run2():
+                task = asyncio.create_task(bootstrap.serve(lines2.append))
+                for _ in range(200):
+                    if fake2.subscribed:   # подписки стоят -- колбэк можно звать
+                        break
+                    await asyncio.sleep(0)
+                # on_msg -> handle: колбэк настоящей подписки, и он же зовёт
+                # answer с фактом сообщения; у всех подписок колбэк один.
+                cb = fake2.subscribed[0][1]
+                await cb(Msg())
+                task.cancel()
+            asyncio.run(run2())
+        except asyncio.CancelledError:
+            pass
+    req = seen[0][1] if seen else {}
+    c.check("#581 the qualified subject must reach the handler with its project",
+            not (not seen or seen[0][0] != "mop"), seen)
+    c.check("#581 the framework stamps the node caller from the qualified subject",
+            not (not seen or req.get("_caller") != busnames.node_user("pve1")),
+            seen)
+    c.check("#581 the framework stamps transport facts, the body cannot forge them",
+            not (not seen or req.get("_reply") != "_MOP_REPLY.node-pve1.ab12"
+                 or req.get("_subject") != qualified), seen)
+    c.check("#581 facts aside, the handler sees the honest body",
+            not (not seen or req.get("verb") != "ping"), seen)
+
+
 def main():
     c = Checks()
     for fn in (check_project, check_journal, check_banner, check_silent,
-               check_errors, check_trusted_body_580):
+               check_errors, check_trusted_body_580, check_serve_subscriptions_581):
         try:
             fn(c)
         except Exception as e:

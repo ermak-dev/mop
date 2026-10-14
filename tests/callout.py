@@ -209,6 +209,77 @@ def main():
                 request(machine, "x", "nats"), [machine, "auth_users"])
     refused("no login at all", request("", "", "nats"), ["no login"])
 
+    # ── решение: принципал роли (#581) ───────────────────────────────────
+    # HYPOTHESIS: у callout есть ветка гранта (rights(souls=...) и
+    # grants.Provider), но проверен только её обрывок «отказан без
+    # провайдера»: провайдер никто не прокидывает от run() до rights(),
+    # и на живом сервисе ЛЮБОЙ вход принципала падает в отказ -- душа
+    # есть, пароль верен, а на шину принципал не входит. Вторая таблица
+    # прав у callout (свой список вместо grants.permissions) разъехалась
+    # бы так же молча.
+    # SOLUTION: провайдер -- сам grants во временном корне, снятым ЧЕРЕЗ
+    # цепочку run-службы (respond/handle), как её видит живой сервис:
+    # вход живым паролем, обе стороны JWT -- ровно то, что рендерит
+    # grants.permissions тем же корнем, каким пароль проверялся; без
+    # провайдера -- отказ с причиной, отозванный -- отказ.
+    # STATUS: FIXED — see #581
+    from mop.common import soul as soulsoul
+    from mop.server import grants
+    gmanifest = {"soul": "puppet", "version": 1,
+                 "runtime": {"driver": "any", "receives_dispatch": True},
+                 "capabilities": {"node_verbs": ["send", "tail", "state",
+                                                 "states", "ping", "local"],
+                                  "cluster_verbs": [], "dispatch": False,
+                                  "spawn": []},
+                 "prompt": "soul.md"}
+    grealm = tempfile.TemporaryDirectory()
+    import uuid as _uuid
+    grec = grants.prepare(project="mop", role="puppet",
+                          digest=soulsoul.digest(gmanifest, b"# p\n"),
+                          manifest=gmanifest,
+                          prompt=b"# p\n", owner="anton", request_id="req-c1",
+                          job="pu-mop-5",
+                          soul_inc=str(_uuid.uuid5(_uuid.NAMESPACE_DNS, "c1")),
+                          intent="i", root=grealm.name)
+    guser = grec["principal"]
+    gpass = grants.password_of(guser, root=grealm.name) or ""
+    grants.activate(guser, root=grealm.name)
+    souls = grants.Provider(root=grealm.name)
+
+    def right(user, ctype, password, humans, puppets, provider):
+        """Вердикт ЧЕРЕЗ respond(), как его видит живой сервис: JWT-ответ
+        -> (имя, права) либо текст отказа. Провайдер прокидывается той же
+        цепочкой, что на сервисе (respond(humans, puppets, souls))."""
+        req = {"nats": {"type": "authorization_request", "user_nkey": "UAK",
+                        "server_id": {"id": "SRV"},
+                        "client_info": {"type": ctype, "user": user},
+                        "connect_opts": {"user": user, "pass": password}}}
+        token = callout.respond(req, humans, puppets, keys, souls=provider)
+        out = body(token)["nats"]
+        if out.get("error"):
+            return out["error"]
+        user = nkjwt.decode(out["jwt"])
+        return user["name"], {"pub": user["nats"]["pub"], "sub": user["nats"]["sub"]}
+
+    got = right(guser, "nats", gpass, Humans(), puppets, souls)
+    want = grants.permissions(guser, root=grealm.name)
+    c.check("grant: responds through respond() with grants.permissions' both sides",
+            isinstance(got, tuple) and got[0] == guser
+            and got[1] == {"pub": {"allow": want["publish"]},
+                           "sub": {"allow": want["subscribe"]}},
+            got)
+    refused_g = lambda what, pw, provider, words: c.check(
+        f"grant: {what} is refused naming {words}",
+        isinstance((r := right(guser, "nats", pw, Humans(), puppets,
+                               provider)), str)
+        and all(w in r for w in words), r)
+    refused_g("wrong password", "nope", souls, [guser, "wrong password"])
+    refused_g("no provider", gpass, None, ["grant principals are not served"])
+    grants.revoke(guser, root=grealm.name)
+    refused_g("revoked grant", gpass, souls, [guser])
+    grealm.cleanup()
+
+
     # ── круг сервиса: запечатанный запрос -> запечатанный ответ ──────────
     server_seed, server_pub = nkjwt.new_xkey()
     sealed = nkjwt.xkey_seal(server_seed, V["xkey"], V["request"].encode())

@@ -135,13 +135,16 @@ def check_result_334(c):
 
     # Прогон по запросу узла пишет итог сам -- и когда кред не нашёлся:
     # прогон уже был.
+    from mop.common.domain import JobMeta
     with patched(bootstrap, ROOT=root, play=lambda req, project: dict(failed),
-                 puppet_creds=lambda project: None):
+                 puppet_creds=lambda project: None,
+                 _job_meta=lambda n: JobMeta(None, None)):
         bootstrap.answer("proj", {"verb": "bootstrap", "name": name})
     c.expect("#334 answer(bootstrap) writes the result of its play",
              (bootstrap.read_result(root, name) or {}).get("task"), "env file")
     with patched(bootstrap, ROOT=root, play=lambda req, project: dict(ok),
-                 puppet_creds=lambda project: None):
+                 puppet_creds=lambda project: None,
+                 _job_meta=lambda n: JobMeta(None, None)):
         bootstrap.answer("other", {"verb": "bootstrap", "name": name})
     c.expect("#334 a refused request (foreign project) plays nothing and writes nothing",
              (bootstrap.read_result(root, name) or {}).get("task"), "env file")
@@ -289,8 +292,10 @@ def check_give_up_345(c):
     def play(req, project):
         plays.append(req["name"])
         return dict(failed)
+    from mop.common.domain import JobMeta
     with patched(bootstrap, ROOT=root, play=play, puppet_creds=lambda project: None,
-                 _later=lambda delay, fn: later.append((delay, fn))):
+                 _later=lambda delay, fn: later.append((delay, fn)),
+                 _job_meta=lambda n: JobMeta(None, None)):
         replies = [bootstrap.answer("proj", {"verb": "bootstrap", "name": name}) for _ in range(4)]
     c.expect("#345 three plays, the fourth request plays nothing", len(plays), 3)
     c.expect("#345 replies: gave_up only from the third on",
@@ -424,11 +429,442 @@ def check_journal_no_secrets_349(c):
             all(s in lines["ok"] for s in ("ok", "12.3s")), lines["ok"])
 
 
+def check_role_secrets_592(c):
+    """HYPOTHESIS (#592): bootstrap раздаёт каталог секретов проекта целиком
+    всем ролям (bootstrap.play -> mop_secrets_dir = project_dir), и роль
+    без права на секрет всё равно его получает: allowlist схемы soul
+    (SOUL.md, «секреты») -- объявление без принуждения. SOLUTION: селекция
+    на сервере -- по allowlist из доверенного бандла роли собирается
+    приватный временный каталог в том же формате files/+vars.env и подаётся
+    существующему плейбуку как mop_secrets_dir; пустой allowlist --
+    пустой каталог (прогон всё равно играется, вычищая старое в теле);
+    allow None -- легаси-джоб без роли, каталог целиком, как сегодня;
+    запрошенного секрета нет в хранилище -- отказ до прогона, модель не
+    стартует. Статус: STATUS: RED — see #592"""
+    fn = getattr(bootstrap, "secrets_of", None)
+    if fn is None:
+        c.fail("#592 no bootstrap.secrets_of: the role allowlist selects nothing")
+        return
+    root = tempfile.mkdtemp(prefix="mop-test-secrets-592-")
+    from mop.common import project_secrets
+    # Хранилище проекта: два файла (один в подкаталоге) и две переменные.
+    project_secrets.put_file(root, "proj", "gitlab-token", b"TOKEN")
+    project_secrets.put_file(root, "proj", "ci/runner.key", b"RUN")
+    project_secrets.set_var(root, "proj", "CI_JOB_TOKEN", "ci-tok")
+    project_secrets.set_var(root, "proj", "DEPLOY_KEY", "dep")
+
+    # (1) Точный выбор: в staging попадает ровно allowlist, формат тот же.
+    try:
+        with bootstrap.role_staging(root, "proj", {"files": ["gitlab-token"],
+                                                   "vars": ["CI_JOB_TOKEN"]}) as stage:
+            with open(os.path.join(stage, "files", "gitlab-token"), "rb") as f:
+                got = f.read()
+            c.expect("#592 the allowed file is staged", got, b"TOKEN")
+            c.check("#592 the sibling file is not staged",
+                    not os.path.exists(os.path.join(stage, "files", "ci"))), None
+            with open(os.path.join(stage, "vars.env")) as f:
+                c.expect("#592 the allowed var is staged, byte for byte",
+                         f.read(), "CI_JOB_TOKEN=ci-tok\n")
+            c.check("#592 the staging dir is 0700",
+                    not (oct(os.stat(stage).st_mode & 0o777) != oct(0o700)),
+                    oct(os.stat(stage).st_mode & 0o777))
+        c.check("#592 the staging dir is removed after the play",
+                not os.path.exists(stage), stage)
+    except AttributeError as e:
+        c.fail("#592 no role_staging context manager", e)
+
+    # (2) Пустой allowlist -- пустой каталог, не None: прогон обязан
+    # сыграть и вычистить прежнее в теле, а не оставить старый staging.
+    try:
+        with bootstrap.role_staging(root, "proj", {"files": [], "vars": []}) as stage:
+            c.check("#592 an empty allowlist stages an empty dir, not None",
+                    not (stage is None or os.path.exists(os.path.join(stage, "files"))
+                         or os.path.exists(os.path.join(stage, "vars.env"))), stage)
+    except AttributeError as e:
+        c.fail("#592 role_staging of an empty allowlist", e)
+
+    # (3) Запрошенного нет в хранилище -- отказ до прогона: имя названо,
+    #    значение не приезжает, модель не стартует.
+    for allow in ({"files": ["no-such-token"], "vars": []},
+                  {"files": [], "vars": ["NO_SUCH_VAR"]}):
+        try:
+            with bootstrap.role_staging(root, "proj", allow):
+                c.fail("#592 a missing secret must fail before the play", allow)
+        except ValueError as e:
+            c.check("#592 the refusal names the missing name, not a value",
+                    not ((allow["files"] or allow["vars"])[0] not in str(e)), e)
+
+    # (4) Побег из клона и маски -- отказ селекции ещё до хранилища.
+    for bad in ("../escape", "/etc/passwd", "a/../b"):
+        try:
+            with bootstrap.role_staging(root, "proj", {"files": [bad], "vars": []}):
+                c.fail("#592 a path escape must be refused", bad)
+        except ValueError:
+            pass
+    for bad in ("not a var", "1BAD", ""):
+        try:
+            with bootstrap.role_staging(root, "proj", {"files": [], "vars": [bad]}):
+                c.fail("#592 a wild var name must be refused", bad)
+        except ValueError:
+            pass
+
+    # (5) Разные роли -- разные каталоги: одновременные старты не делят
+    #     один staging и не мутируют хранилище-источник.
+    before = sorted(os.listdir(project_secrets.project_dir(root, "proj")))
+    try:
+        with bootstrap.role_staging(root, "proj", {"files": ["gitlab-token"], "vars": []}) as a, \
+                bootstrap.role_staging(root, "proj", {"files": ["gitlab-token"], "vars": []}) as b:
+            c.check("#592 concurrent roles stage in separate dirs", a != b, (a, b))
+    except AttributeError as e:
+        c.fail("#592 concurrent role staging", e)
+    c.check("#592 the source store is not mutated",
+            not (sorted(os.listdir(project_secrets.project_dir(root, "proj"))) != before),
+            sorted(os.listdir(project_secrets.project_dir(root, "proj"))))
+
+    # (6) play() с ролью подменяет mop_secrets_dir staged-каталогом:
+    #     argv прогона несёт staging, а не каталог хранилища.
+    played = {}
+    def fake_run(cmd, **kw):
+        played["argv"] = cmd
+        class R:
+            returncode = 0
+            stdout = "PLAY RECAP ***\nh : ok=1 failed=0\n"
+            stderr = ""
+        return R()
+    import subprocess as _sp
+    from _lib import patched as _patched
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(root, "no-workspace")), \
+                _patched(project_secrets, ROOT=root), \
+                _patched(bootstrap, TIMEOUT=120), \
+                _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""}, "proj",
+                                 role={"files": ["gitlab-token"], "vars": []})
+        extra = json.loads(played["argv"][played["argv"].index("-e",
+                          played["argv"].index("-e") + 1) + 1])
+        staged = extra.get("mop_secrets_dir")
+        c.check("#592 play must feed the staging dir, not the store",
+                not (not staged or staged == project_secrets.project_dir(root, "proj")), extra)
+        c.check("#592 the play of a role with an empty allowlist still runs",
+                not (not got.get("played") or not got.get("ok")), got)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 play with a role allowlist", e)
+
+    # (7) Легаси-джоб без роли -- каталог целиком, как сегодня.
+    played.clear()
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(root, "no-workspace")), \
+                _patched(project_secrets, ROOT=root), \
+                _patched(bootstrap, TIMEOUT=120), \
+                _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""}, "proj", role=None)
+        extra = json.loads(played["argv"][played["argv"].index("-e",
+                          played["argv"].index("-e") + 1) + 1])
+        c.expect("#592 a legacy job gets the whole store dir",
+                 extra.get("mop_secrets_dir"), project_secrets.project_dir(root, "proj"))
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 legacy play must stay today's", e)
+
+
+def check_role_secrets_hard_592(c):
+    """HYPOTHESIS (#592, ревью 84a1fae): четыре поведенческих провала,
+    воспроизведённых независимо на живом коде. (1) Пустой allowlist без
+    хранилища и задач не играет прогон -- прежний staging тела живёт:
+    «на сервере нет» не доказывает «в теле чисто». (2) Симлинк: vars.env
+    читается по ссылке, каталог проекта -- ссылка наружу -- и листовая
+    проверка её не видит: проверять надо каждую ступень от корня
+    хранилища. (3) 'a/../b' нормализуется valid_name и проходит при
+    существующем b: каноничность -- до поиска. (4) Гонка чтения:
+    list_vars проверяет одним чтением, _vars перечитывает другим --
+    рассинхрон отдаёт пустой успех: один слепок на прогон. (5) rmtree(
+    ignore_errors=True) глотал сбой уборки вопреки контракту ошибок.
+    SOLUTION: режим роли играет прогон всегда; имя канонично и без
+    масок до хранилища; ни одной ссылки по пути; vars читаются одним
+    слепком и материализуются из него; уборка строгая -- сбой виден.
+    STATUS: RED — see #592"""
+    from mop.common import project_secrets
+    import subprocess as _sp
+    import shutil as _sh
+    from _lib import patched as _patched
+
+    def fake_run(cmd, **kw):
+        played = fake_run.played = getattr(fake_run, "played", {})
+        played["argv"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "PLAY RECAP ***\nh : ok=1 failed=0\n"
+            stderr = ""
+        return R()
+
+    # (1) Нет хранилища и задач, allowlist пуст: прогон всё равно нужен --
+    #     чистить прежнее тело; «no bootstrap» в режиме роли -- ложный.
+    bare = tempfile.mkdtemp(prefix="mop-test-bare-592-")
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(bare, "no-ws")), \
+                _patched(project_secrets, ROOT=bare), \
+                _patched(bootstrap, TIMEOUT=120), _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""}, "proj",
+                                 role={"files": [], "vars": []})
+        c.check("#592 an empty allowlist with no store must still play to clear the body",
+                not (not got.get("played") or not got.get("ok")), got)
+        argv = getattr(fake_run, "played", {}).get("argv") or []
+        extra = json.loads(argv[argv.index("-e", argv.index("-e") + 1) + 1]) if argv else {}
+        c.check("#592 ... and the empty play must carry a staging dir",
+                not (not extra.get("mop_secrets_dir")), extra)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 the empty role play with no store", e)
+
+    # (2а) vars.env -- симлинк наружу: значения по ссылке не выдаются.
+    sroot = tempfile.mkdtemp(prefix="mop-test-link-592-")
+    pdir = os.path.join(sroot, "proj")
+    os.makedirs(os.path.join(pdir, "files"))
+    outside = os.path.join(sroot, "outside.env")
+    with open(outside, "w") as f:
+        f.write("KEY=fixture\n")
+    os.symlink(outside, os.path.join(pdir, "vars.env"))
+    try:
+        with bootstrap.role_staging(sroot, "proj", {"files": [], "vars": ["KEY"]}):
+            c.fail("#592 a symlinked vars.env must be refused", None)
+    except ValueError:
+        pass
+
+    # (2б) Каталог проекта -- симлинк наружу: хранилище читается по ссылке
+    #      целиком, листовая проверка файла её не видит. Проверяется каждая
+    #      ступень от корня хранилища.
+    r2 = tempfile.mkdtemp(prefix="mop-test-link2-592-")
+    real = os.path.join(r2, "real")
+    os.makedirs(os.path.join(real, "files"))
+    with open(os.path.join(real, "files", "b"), "w") as f:
+        f.write("THROUGH-LINK")
+    os.symlink(real, os.path.join(r2, "proj"))
+    try:
+        with bootstrap.role_staging(r2, "proj", {"files": ["b"], "vars": []}):
+            c.fail("#592 a symlinked project dir must be refused", None)
+    except ValueError:
+        pass
+
+    # (2в) Предок выбранного файла -- симлинк-каталог: путь к листу тоже
+    #      не должен идти по ссылкам. ci здесь -- ссылка на соседний
+    #      каталог с настоящим файлом: листовая проверка прошла бы.
+    r3 = tempfile.mkdtemp(prefix="mop-test-link3-592-")
+    p3 = os.path.join(r3, "proj", "files")
+    os.makedirs(p3)
+    realci = os.path.join(r3, "elsewhere")
+    os.makedirs(realci)
+    with open(os.path.join(realci, "runner.key"), "w") as f:
+        f.write("REAL")
+    os.symlink(realci, os.path.join(p3, "ci"))
+    try:
+        with bootstrap.role_staging(r3, "proj",
+                                    {"files": ["ci/runner.key"], "vars": []}):
+            c.check("#592 a file through an ancestor symlink must not stage", False, None)
+    except ValueError:
+        pass
+
+    # (3) Неканоническое имя при существующей цели: отказ до хранилища.
+    nroot = tempfile.mkdtemp(prefix="mop-test-canon-592-")
+    project_secrets.put_file(nroot, "proj", "b", b"REAL")
+    for bad in ("a/../b", "./b", "b/", "*"):
+        try:
+            with bootstrap.role_staging(nroot, "proj", {"files": [bad], "vars": []}):
+                c.fail(f"#592 a noncanonical name {bad!r} must be refused", bad)
+        except ValueError:
+            pass
+
+    # (3б) Ревью ac0fe15: хранилище само стрипит и нормализует имя
+    #      (valid_name), и написание с пробелом (' b') выбирало чужой
+    #      секрет ('b'): валидатор имена лишь проверял, а разницу между
+    #      «названо» и «лежит» не ловил. Любое написание, которое
+    #      хранилище канонизирует в другое, -- отказ: селекция выбирает
+    #      ровно названное, никогда молча другое имя.
+    for bad in (" b", "b ", " b ", "\tb", "b\n"):
+        try:
+            with bootstrap.role_staging(nroot, "proj", {"files": [bad], "vars": []}):
+                c.fail(f"#592 a storage-canonicalized name {bad!r} must be refused",
+                       bad)
+        except ValueError:
+            pass
+
+    # (4) Гонка чтения vars: первое чтение видит ключ, второе -- нет.
+    #     Либо отказ, либо материализовано запрошенное: пустой успех --
+    #     тихая утечка права.
+    root4 = tempfile.mkdtemp(prefix="mop-test-race-592-")
+    project_secrets.set_var(root4, "proj", "KEY", "fixture")
+    calls = {"n": 0}
+
+    def racing(root, project):
+        calls["n"] += 1
+        return {"KEY": "fixture"} if calls["n"] == 1 else {}
+
+    with _patched(project_secrets, _vars=racing):
+        try:
+            with bootstrap.role_staging(root4, "proj", {"files": [], "vars": ["KEY"]}) as stage:
+                with open(os.path.join(stage, "vars.env")) as f:
+                    text = f.read()
+                c.check("#592 the staged snapshot must carry the requested var",
+                        "KEY=fixture" in text, text)
+        except ValueError:
+            c.check("#592 a racy var read must refuse rather than deliver empty",
+                    False, "delivered an empty staging")
+
+    # (5) Сбой уборки не глотается: ignore_errors -- не способ убрать
+    #     каталог секретов, отказ уборки обязан быть слышен (без значений).
+    root5 = tempfile.mkdtemp(prefix="mop-test-clean-592-")
+
+    def picky_rmtree(path, ignore_errors=False, *a, **kw):
+        if not ignore_errors:
+            raise OSError("staging cleanup refused")
+
+    try:
+        with _patched(_sh, rmtree=picky_rmtree):
+            with bootstrap.role_staging(root5, "proj", {"files": [], "vars": []}):
+                pass
+        c.fail("#592 a cleanup failure must surface, not be swallowed", None)
+    except OSError:
+        pass
+
+    # (6) Исключение в теле: staging убирается и там (закрепление
+    #     заявления отчёта, которого прежде не было в проверках).
+    stage_of = {}
+    try:
+        with bootstrap.role_staging(root5, "proj", {"files": [], "vars": []}) as st:
+            stage_of["p"] = st
+            raise RuntimeError("body boom")
+    except RuntimeError:
+        pass
+    c.check("#592 an exception in the body must still clean the staging",
+            not (stage_of.get("p") and os.path.exists(stage_of["p"])), stage_of)
+
+
+def check_bundle_seam_592(c):
+    """HYPOTHESIS (#592, интеграция с #580): play() принимает роль голым
+    словарём {"files","vars"} -- у сервера нет шва, куда пришить реальный
+    бандл из общего API: allowlist нельзя получить из soul.Bundle, и
+    селекцию секрeтов остаётся кормить самодельным словарём, каким его
+    соберёт будущий резолвер #581 из мета джоба.
+    SOLUTION: play()/role_staging() принимают бандл soul.Bundle из
+    доверенного хранения (#581): allowlist -- bundle.manifest.secrets,
+    никакого второго разбора soul.yaml на сервере; словарь остаётся
+    внутренним переходным входом (его переведёт сам шов), а грамматика
+    имён и весь харденинг d68117d (ссылки, канонические имена, один
+    слепок, громкая уборка) -- без изменений.
+    RESULT: STATUS: RED — see #592"""
+    from mop.common import project_secrets, soul
+    import subprocess as _sp
+    from _lib import patched as _patched
+
+    def fake_run(cmd, **kw):
+        played = fake_run.played = getattr(fake_run, "played", {})
+        played["argv"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "PLAY RECAP ***\nh : ok=1 failed=0\n"
+            stderr = ""
+        return R()
+
+    # Настоящий бандл из общего API #580: каталог роли с блоком secrets.
+    base = tempfile.mkdtemp(prefix="mop-test-bundle-592-")
+    role_dir = os.path.join(base, "deployer")
+    os.makedirs(role_dir)
+    manifest = """soul: deployer
+version: 1
+runtime: {driver: any, receives_dispatch: false}
+capabilities:
+  node_verbs: [ping]
+  cluster_verbs: []
+  dispatch: false
+  spawn: []
+secrets:
+  files: [gitlab-token]
+  vars: [DEPLOY_KEY]
+prompt: soul.md
+"""
+    with open(os.path.join(role_dir, "soul.yaml"), "w") as f:
+        f.write(manifest)
+    with open(os.path.join(role_dir, "soul.md"), "wb") as f:
+        f.write(b"You deploy.\n")
+    bundle = soul.load(role_dir)
+    c.check("#592 the fixture bundle carries the secret allowlist",
+            (list(bundle.manifest.secrets.files),
+             list(bundle.manifest.secrets.vars)) == (["gitlab-token"],
+                                                     ["DEPLOY_KEY"]),
+            bundle.manifest.secrets)
+
+    # Хранилище с именованными секретами.
+    root = tempfile.mkdtemp(prefix="mop-test-store-592-")
+    project_secrets.put_file(root, "proj", "gitlab-token", b"TOKEN")
+    project_secrets.set_var(root, "proj", "DEPLOY_KEY", "dep")
+    project_secrets.set_var(root, "proj", "OTHER", "alien")
+
+    # (1) role_staging принимает бандл: в staging -- ровно allowlist роли.
+    try:
+        with bootstrap.role_staging(root, "proj", bundle) as stage:
+            with open(os.path.join(stage, "files", "gitlab-token"), "rb") as f:
+                c.expect("#592 the bundle stages its allowed file",
+                         f.read(), b"TOKEN")
+            with open(os.path.join(stage, "vars.env")) as f:
+                c.expect("#592 the bundle stages its allowed var",
+                         f.read(), "DEPLOY_KEY=dep\n")
+            c.check("#592 an unallowed var stays out of the staging",
+                    not os.path.exists(os.path.join(stage, "files", "other")))
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 role_staging must accept a soul.Bundle", e)
+
+    # (2) play() с бандлом кормит плейбук staging'ом бандла; словарь из
+    #     тела запроса путь не проходит: бандл -- доверенный вход, словарь
+    #     остаётся внутренним переходом шва.
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(root, "no-ws")), \
+                _patched(project_secrets, ROOT=root), \
+                _patched(bootstrap, TIMEOUT=120), \
+                _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""},
+                                 "proj", bundle=bundle)
+        c.check("#592 play with a bundle runs and succeeds",
+                not (not got.get("played") or not got.get("ok")), got)
+        argv = getattr(fake_run, "played", {}).get("argv") or []
+        extra = json.loads(argv[argv.index("-e", argv.index("-e") + 1) + 1])
+        staged = extra.get("mop_secrets_dir")
+        c.check("#592 play feeds the bundle's staging, not the store",
+                not (not staged
+                     or staged == project_secrets.project_dir(root, "proj")),
+                extra)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 play must accept a soul.Bundle", e)
+
+    # (3) Бандл без блока secrets -- пустой allowlist: прогон всё равно
+    #     играется и вычищает прежнее тело (d68117d #1).
+    plain_dir = os.path.join(base, "plain")
+    os.makedirs(plain_dir)
+    with open(os.path.join(plain_dir, "soul.yaml"), "w") as f:
+        f.write(manifest.replace(
+            "secrets:\n  files: [gitlab-token]\n  vars: [DEPLOY_KEY]\n", ""))
+    with open(os.path.join(plain_dir, "soul.md"), "wb") as f:
+        f.write(b"Plain.\n")
+    plain = soul.load(plain_dir)
+    try:
+        with _patched(bootstrap, ROOT=os.path.join(root, "no-ws")), \
+                _patched(project_secrets, ROOT=root), \
+                _patched(bootstrap, TIMEOUT=120), \
+                _patched(_sp, run=fake_run):
+            got = bootstrap.play({"name": "pu-proj-1", "address": ""},
+                                 "proj", bundle=plain)
+        c.check("#592 a secrets-less bundle still plays to clear the body",
+                not (not got.get("played") or not got.get("ok")), got)
+    except (AttributeError, TypeError) as e:
+        c.fail("#592 a secrets-less bundle must still play", e)
+
+
 def main():
     c = Checks()
     check_journal_no_secrets_349(c)
     check_give_up_345(c)
     check_result_334(c)
+    check_role_secrets_592(c)
+    check_role_secrets_hard_592(c)
+    check_bundle_seam_592(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 
     # HYPOTHESIS: механизма нет вовсе — ничто не играет манифест при старте.
