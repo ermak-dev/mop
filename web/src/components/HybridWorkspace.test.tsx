@@ -25,9 +25,11 @@ const history = { epoch: 'h1-digest', session_id: 's', cursor: 'c', reset: false
 ] };
 const open = () => renderUi(<HybridWorkspace session={admin} target="p" fallback={<div>legacy tail</div>} />);
 afterEach(() => { vi.unstubAllGlobals(); terminals.length = 0; });
-test('legacy screen initially unchanged; chat renders safe text, tool errors and honest partial/unknown notices without external images', async () => {
+test('chat opens first; legacy screen remains available and history renders safely', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => ok(history)));
   open();
+  expect(screen.getByRole('tab', { name: 'Чат' })).toHaveAttribute('aria-selected', 'true');
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
   expect(screen.getByText('legacy tail')).toBeVisible();
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   expect(await screen.findByText('<img src="https://evil.test/i">')).toBeVisible();
@@ -175,6 +177,7 @@ test('switching tabs preserves legacy draft rather than silently clearing it', a
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   function LegacyDraft() { return <input aria-label="Legacy draft" defaultValue="half typed" />; }
   renderUi(<HybridWorkspace session={admin} target="p" fallback={<LegacyDraft />} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
   const input = screen.getByRole('textbox', { name: 'Legacy draft' });
   fireEvent.change(input, { target: { value: 'keep this unsent text' } });
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));

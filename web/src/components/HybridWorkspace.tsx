@@ -14,8 +14,7 @@ import './hybridWorkspace.css';
 export function HybridWorkspace({ session, target, fallback }: { session: Session; target: string; fallback: ReactNode }) {
   const workspaceId = useId();
   const small = useMediaQuery('(max-width: 700px)');
-  // До интеграции #600/#612 первый экран сохраняет старый tail-контракт.
-  const [tab, setTab] = useState<string | null>('screen');
+  const [tab, setTab] = useState<string | null>('chat');
   const [split, setSplit] = useState(false);
   const [intent, setIntent] = useState<{ mode: 'ro' | 'rw'; number: number } | null>(null);
   const [draft, setDraft] = useState('');

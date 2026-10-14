@@ -14,8 +14,15 @@ import { renderUi } from "../test-utils";
 const ADMIN = { login: "anton", role: "admin" as const };
 const tailOk = (lines: string[], truncated = false) =>
   ({ ok: true, status: 200, json: async () => ({ lines, truncated }) }) as Response;
-const open = () => renderUi(
-  <PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
+const open = () => {
+  const fetchTail = vi.mocked(fetch);
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
+    : fetchTail(url, init));
+  const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
+  return view;
+};
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -30,7 +37,7 @@ test("#487 opening the screen immediately loads only that endpoint", async () =>
   expect(screen.getByText(/обрезано/)).toBeInTheDocument();
   for (const label of ["узел", "ветка", "владелец", "модель", "репозиторий", "место клона", "state-строка"])
     expect(screen.queryByText(label, { exact: true })).toBeNull();
-  // #601: старый экран остаётся первым, новые источники открываются явно.
+  // #601: чат открывается первым; старый экран явно доступен своей вкладкой.
   expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Чат", "Терминал", "Экран"]);
   expect(screen.getByRole("tab", { name: "Экран" })).toHaveAttribute("aria-selected", "true");
   fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
@@ -41,6 +48,7 @@ test("viewer has an accessible close button", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => tailOk([])));
   const onClose = vi.fn();
   renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={onClose} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Экран' }));
   const closer = screen.getByRole("button", { name: "Закрыть" });
   closer.focus();
   expect(document.activeElement).toBe(closer);
