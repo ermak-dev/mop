@@ -33,9 +33,9 @@ export function HybridWorkspace({ session, target, fallback }: { session: Sessio
   const historySession = useRef<string | null>(null);
   useEffect(() => {
     const changed = history.session_id !== null && historySession.current !== null && history.session_id !== historySession.current;
-    terminal.invalidate(history.epoch, changed);
+    terminal.invalidate(changed);
     if (history.session_id !== null) historySession.current = history.session_id;
-  }, [history.epoch, history.session_id, terminal.invalidate]);
+  }, [history.session_id, terminal.invalidate]);
   useEffect(() => {
     if (history.denied) { setAuthLost(true); terminal.revoke(); }
   }, [history.denied, terminal.revoke]);
@@ -51,9 +51,9 @@ export function HybridWorkspace({ session, target, fallback }: { session: Sessio
     if (!draft.trim() || !terminal.canInput || terminal.busy) return;
     const sent = draft;
     let parts: string[];
-    try { parts = humanInput(sent, interrupt); }
+    try { parts = humanInput(sent); }
     catch { setNotice('Управляющие символы недопустимы в чате. Для клавиш используйте терминал. Черновик сохранён.'); return; }
-    const accepted = await terminal.send(parts);
+    const accepted = await terminal.send(parts, interrupt);
     if (accepted) {
       setDraft(current => current === sent ? '' : current);
       setNotice('Байты записаны в CLI. Выполнение команды не подтверждено.');
@@ -93,7 +93,9 @@ export function HybridWorkspace({ session, target, fallback }: { session: Sessio
           <details key={small ? 'mobile' : 'desktop'} open={!small} className="hybrid-composer-extra">
             <summary>Команды и ввод CLI</summary>
             <Text size="xs" c="dimmed" my="xs">Вставка добавляется к текущему вводу CLI, затем отправляется Enter. Для меню, разрешений и вопросов откройте терминал.</Text>
-            <Button size="compact-sm" variant="default" disabled={!terminal.canInput || terminal.busy || !draft.trim()} onClick={() => void submit(true)}>Escape, затем добавить и отправить</Button>
+            <Button size="compact-sm" variant="default" disabled={!terminal.canInput || !terminal.canInterruptSend || terminal.busy || !draft.trim()} onClick={() => void submit(true)}>Escape, затем добавить и отправить</Button>
+            {!terminal.canInterruptSend && <Text size="xs" c="dimmed">Задержка Escape неизвестна: используйте отдельные Stop и отправку.</Text>}
+            {terminal.canInterruptSend && <Text size="xs" c="dimmed">Пауза разделяет Escape и вставку, но не подтверждает завершение хода или инструмента.</Text>}
             <Group gap={4} mt="xs" aria-label="Команды CLI">
               {['/help', '/model', '/compact', '/status'].map(command => <Button key={command} size="compact-xs" variant="subtle" aria-label={`Добавить ${command} в черновик`} onClick={() => setDraft(current => current + command)}>{command}</Button>)}
             </Group>

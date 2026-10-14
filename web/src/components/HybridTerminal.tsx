@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { encodeInput } from '../hybridProtocol';
+import { clipboardInput, encodeInput } from '../hybridProtocol';
 import './hybridWorkspace.css';
 
 export function HybridTerminal({ visible, writable, bind, send, resize }: {
@@ -22,7 +22,18 @@ export function HybridTerminal({ visible, writable, bind, send, resize }: {
       theme: { background: '#1a1b1e', foreground: '#f1f3f5', cursor: '#74c0fc' },
     });
     const addon = new FitAddon(); term.loadAddon(addon);
-    term.open(container.current!);
+    const element = container.current!;
+    const paste = (event: ClipboardEvent) => {
+      // Capture до xterm: clipboard не равен намеренным keyboard controls.
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (!actions.current.writable || !event.clipboardData) return;
+      const text = event.clipboardData.getData('text/plain');
+      if (!text) return;
+      try { void actions.current.send(clipboardInput(text)); }
+      catch { element.setAttribute('aria-description', 'Вставка отклонена: управляющие символы недопустимы.'); }
+    };
+    element.addEventListener('paste', paste, true);
+    term.open(element);
     terminal.current = term; fit.current = addon; bind(term);
     // OSC 52 не получает доступ к clipboard; windowOptions остаются запрещены.
     const clipboard = term.parser.registerOscHandler(52, () => true);
@@ -32,6 +43,7 @@ export function HybridTerminal({ visible, writable, bind, send, resize }: {
     const observer = new ResizeObserver(() => { if (container.current?.clientWidth) addon.fit(); });
     observer.observe(container.current!);
     return () => {
+      element.removeEventListener('paste', paste, true);
       observer.disconnect(); input.dispose(); binary.dispose(); size.dispose(); clipboard.dispose();
       bind(null); terminal.current = null; fit.current = null; term.dispose();
     };

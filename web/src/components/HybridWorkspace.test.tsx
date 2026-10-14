@@ -6,6 +6,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { renderUi } from '../test-utils';
 import { HybridWorkspace } from './HybridWorkspace';
+import wire from '../../tests/fixtures/hybrid-wire.json';
 const terminals = vi.hoisted(() => [] as Array<{ options: Record<string, unknown>; write: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>);
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   options: Record<string, unknown>; cols = 80; rows = 24;
@@ -17,7 +18,7 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} dispose() {} } }));
 const admin = { login: 'anton', role: 'admin' as const };
 const ok = (data: unknown) => ({ ok: true, status: 200, json: async () => data }) as Response;
-const history = { epoch: 'e', session_id: 's', cursor: 'c', reset: false, partial: true, has_more: false, records: [
+const history = { epoch: 'h1-digest', session_id: 's', cursor: 'c', reset: false, partial: true, has_more: false, records: [
   { type: 'assistant', uuid: 'a', message: { content: [{ type: 'text', text: '<img src="https://evil.test/i">' }, { type: 'tool_use', id: 't', name: 'Bash', input: { command: 'pwd' } }], model: 'actual-model' } },
   { type: 'user', origin: 'peer', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: 'denied', is_error: true }] } },
   { type: 'future', data: 'kept' },
@@ -48,7 +49,7 @@ test('reader opens only on terminal tab; rw explicitly closes reader, human slas
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.endsWith('/history')) return Promise.resolve(ok(history));
     if (url.endsWith('/input')) return Promise.resolve(ok({ seq: body.seq, written: atob(body.data).length, outcome, error: outcome === 'unknown' ? 'uncertain' : undefined }));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: body.mode, epoch: 'e', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: body.mode, epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
   }));
   const view = open();
   expect(posts).toHaveLength(0);
@@ -85,7 +86,7 @@ test('history session identity change disconnects even when epoch is unchanged, 
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.includes('/history')) return Promise.resolve(ok({ ...history, session_id: sessionId }));
     const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 'e', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
   }));
   open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   await screen.findByText('<img src="https://evil.test/i">');
@@ -103,7 +104,7 @@ test('desktop optional terminal is visible alongside chat and remains mounted ac
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.includes('/history')) return Promise.resolve(ok(history));
     const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'ro', epoch: 'e', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'ro', epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
   }));
   open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
@@ -120,7 +121,7 @@ test('history authorization loss also disables human control and clears terminal
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.includes('/history')) return Promise.resolve(denied ? { ok: false, status: 403, json: async () => ({ error: 'session revoked' }) } as Response : ok(history));
     const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 'e', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
   }));
   open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   await screen.findByText('<img src="https://evil.test/i">');
@@ -134,6 +135,41 @@ test('history authorization loss also disables human control and clears terminal
   await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeDisabled());
   expect(terminals[0].reset.mock.calls.length).toBeGreaterThan(resets);
   expect(screen.queryByText('<img src="https://evil.test/i">')).toBeNull();
+});
+// HYPOTHESIS: digest истории и случайный terminal epoch независимы;
+// первое появление SID и скрытие чата не являются сменой сессии.
+// STATUS: FIXED — see #601
+test('different wire epochs preserve writer across Chat, Terminal and split without close', async () => {
+  const mock = vi.fn((url: string, init?: RequestInit) => {
+    if (url.includes('/read?')) return new Promise(() => {});
+    if (url.includes('/history')) return Promise.resolve(ok(wire.history));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { ...wire.open, mode: JSON.parse(String(init?.body)).mode }));
+  });
+  vi.stubGlobal('fetch', mock);
+  open(); fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Взять управление' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
+  const closes = mock.mock.calls.filter(([url]) => url.endsWith('/close')).length;
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  await act(async () => {});
+  expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled();
+  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  await act(async () => {});
+  expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled();
+  expect(mock.mock.calls.filter(([url]) => url.endsWith('/close'))).toHaveLength(closes);
+});
+test('missing timing metadata disables only combined action with reason', async () => {
+  vi.stubGlobal('fetch', vi.fn((url: string) => url.includes('/read?') ? new Promise(() => {}) : Promise.resolve(ok(url.includes('/history') ? history : { ...wire.open, interrupt_delay_ms: undefined }))));
+  open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ввод человека в CLI' }), { target: { value: 'hello' } });
+  expect(screen.getByRole('button', { name: 'Escape, затем добавить и отправить' })).toBeDisabled();
+  expect(screen.getByText(/задержка Escape неизвестна/i)).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' })).toBeEnabled();
 });
 test('switching tabs preserves legacy draft rather than silently clearing it', async () => {
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
@@ -153,7 +189,7 @@ test('Stop sends Escape only while read is pending; shortcut only appends draft 
     if (url.includes('/read?')) return new Promise(() => {});
     if (url.includes('/history')) return Promise.resolve(ok(history));
     if (url.endsWith('/input')) { inputs.push(atob(body.data)); return Promise.resolve(ok({ seq: body.seq, written: 1, outcome: 'written' })); }
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 'e', cursor: 0, mode: 'rw', cols: 80, rows: 24 }));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: 'rw', cols: 80, rows: 24 }));
   }));
   open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));

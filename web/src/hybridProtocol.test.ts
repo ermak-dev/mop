@@ -44,7 +44,9 @@ test('orphan results, partial messages and non-text blocks remain visible not fa
 test('human path is bracketed UTF-8 paste plus Enter, slash identical and Stop Escape only', () => {
   expect(decode(humanInput('Привет 𝄞'))).toBe('\x1b[200~Привет 𝄞\x1b[201~\r');
   expect(decode(humanInput('/model'))).toBe('\x1b[200~/model\x1b[201~\r');
-  expect(decode(humanInput('next', true))).toBe('\x1b\x1b[200~next\x1b[201~\r');
+  // Изменённый контракт: Escape отправляет транспорт отдельно с задержкой,
+  // кодировщик текста больше не объединяет его с paste.
+  expect(decode(humanInput('next'))).toBe('\x1b[200~next\x1b[201~\r');
   expect(STOP).toBe('\x1b');
 });
 test('string messages and correlated tool result metadata remain honest and inspectable', () => {

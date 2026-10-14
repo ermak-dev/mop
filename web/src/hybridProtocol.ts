@@ -62,14 +62,16 @@ export function encodeInput(text: string): string[] {
   return parts;
 }
 export const STOP = '\u001b';
-export function humanInput(text: string, interrupt = false): string[] {
+function safePaste(text: string): string {
   // Вставка добавляется к текущей строке CLI, не стирает чужой черновик.
   for (const char of text) {
     const code = char.charCodeAt(0);
     if ((code < 32 && ![9, 10, 13].includes(code)) || code === 127) throw new Error('terminal control characters are not allowed in chat text');
   }
-  return encodeInput(`${interrupt ? STOP : ''}\u001b[200~${text}\u001b[201~\r`);
+  return `\u001b[200~${text}\u001b[201~`;
 }
+export const clipboardInput = (text: string): string[] => encodeInput(safePaste(text));
+export const humanInput = (text: string): string[] => encodeInput(safePaste(text) + '\r');
 export function decodeOutput(data: string): Uint8Array {
   return Uint8Array.from(atob(data), c => c.charCodeAt(0));
 }
