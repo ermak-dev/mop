@@ -67,6 +67,31 @@ def _inner_script():
     return _prelude(os.environ) + base64.b64decode(blob).decode()
 
 
+def role_env(role, node, root, bundle):
+    """Экспорт ролевых полей в прелюдию врапера (#590, имена согласованы с
+    #583): явные значения -- в тело, обёртка читает их из окружения, а не
+    из файла конфигурации. MOP_SOUL_DIR -- корень/бандл, не корень:
+    обёртке нужен сам бандл. Чистая. -> строки export."""
+    fields = {"PU_SOUL": role.soul, "PU_SOUL_DIGEST": role.soul_digest,
+              "PU_SOUL_INC": role.soul_inc, "PU_SOUL_DIR": root,
+              "MOP_SOUL_DIR": bundle, "PU_NODE": node}
+    return [f"export {k}={shlex.quote(v)}\n" for k, v in fields.items()]
+
+
+def _inner_script_role(role, node, root):
+    """Внутренний врапер ролевого джоба: прелюдия спеки + явные ролевые
+    поля (#583), затем blob. Без PU_WRAPPER -- тот же отказ, что и у
+    врапера без роли."""
+    blob = os.environ.get("PU_WRAPPER") or ""
+    if not blob:
+        sys.exit("no PU_WRAPPER in the task environment — this job spec predates "
+                 "the wrapper split; re-register the puppet: mop recycle <name>")
+    return (_prelude(os.environ)
+            + "".join(role_env(role, node, root,
+                               os.path.join(root, driver.SOUL_BUNDLE)))
+            + base64.b64decode(blob).decode())
+
+
 def _prelude(environ):
     """Экспорт окружения задачи для скрипта в теле: переменные спеки живут
     в процессе задачи на узле, а скрипт исполняется в теле."""
@@ -141,21 +166,50 @@ def refusal(name, error):
     return f"bootstrap of {name} failed: {error}"
 
 
-async def initial_identity(name, soul_inc, login, profile):
+def initial_identity(name, soul_inc):
     """Начальная identity хозяина в клоне -- глагол живого агента узла
     (#584/#603), не локальная запись: замок #573/#574 живёт в агенте, и
-    лаунчер -- другой процесс. Профиль -- из ответа сервера (провайдер
-    личностей), не из тела запроса. Шов до появления транспорта; ответ и
-    отказ -- словарь глагола. -> dict."""
-    raise RuntimeError("initial identity is not wired to the node agent yet")
+    лаунчер -- другой процесс. Канал startup -- только своему узлу
+    (bus.request строит субъект сам и откажет чужому имени). Тело запроса
+    несёт только цель: verb, имя и инкарнацию; хозяина агент решает сам по
+    доверенному биндингу, профиль из ответа -- не разрешение. -> расписка
+    {identity_ready, role, soul_inc, soul_digest} | {error}."""
+    project = driver.project_of_name(name)
+    node = node_of_credentials()
+    return bus.request(node, "initial_identity", timeout=busnames.BOOTSTRAP_TIMEOUT,
+                       channel=busnames.STARTUP_CHANNEL, project=project,
+                       name=name, soul_inc=soul_inc)
 
 
-async def role_bootstrap_ask(project, name, address):
-    """Спрос bootstrap ролевого джоба: именованный канал узла (#603/#581),
-    не анонимный server.rpc (его зовут и люди проекта, а личный кред
-    принципала выдаёт только хозяину узла). Шов до появления транспорта.
-    -> ответ сервера."""
-    raise RuntimeError("role bootstrap is not wired to the node channel yet")
+def role_bootstrap_ask(project, name, address):
+    """Спрос bootstrap ролевого джоба: квалифицированный server.rpc узла
+    (#603/#581), не анонимный (его зовут и люди проекта, а личный кред
+    принципала выдаёт только хозяину узла). -> ответ сервера."""
+    return bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
+                          project=project, node_auth=True,
+                          name=name, address=address)
+
+
+def use_node_credentials():
+    """Соединение процесса -- узловым файлом (#603): соединение несёт
+    снимок кредов (conn.creds), и node_name() (ask_server node_auth,
+    канал startup) читает снимок, а не дефолтный config(). От бывшей
+    подмены bus.FILE ушли: глобаль меняла ВСЕ последующие config() без
+    аргумента, а не только узловой путь лаунчера."""
+    bus.connect(bus.NODE_FILE)
+
+
+def node_of_credentials():
+    """Имя узла из его собственного кред-файла (NODE_FILE), не из
+    bus.node_name(): тот читает дефолтный config(), а процесс задачи
+    подключается узловым файлом (#603, дефект у pu8). -> имя | None."""
+    try:
+        user = bus.config(bus.NODE_FILE).get("user") or ""
+    except Exception:
+        return None
+    if user.startswith(busnames.NODE_PREFIX):
+        return user[len(busnames.NODE_PREFIX):]
+    return None
 
 
 def bootstrap_sandbox(d, name, project, node_qualified=False):
@@ -184,7 +238,8 @@ def bootstrap_sandbox(d, name, project, node_qualified=False):
             raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
         if node_qualified:
-            out = asyncio.run(role_bootstrap_ask(project, name, address))
+            use_node_credentials()
+            out = role_bootstrap_ask(project, name, address)
         else:
             out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT,
                                  project=project, name=name, address=address)
@@ -221,17 +276,67 @@ BUS_FILE, READY = "bus.json", "ready.json"
 
 
 def expected_role(environ):
-    """Тройка роли из Meta джоба -> JobMeta | None (легаси-джоб). Чистая.
+    """Тройка роли окружения джоба -> JobMeta | None (легаси-джоб). Чистая.
 
-    Nomad отдаёт Meta задаче как NOMAD_META_<ключ>, а Meta пишет сервер при
-    регистрации (#582) -- это доверенное ожидание, с которым сверяется
-    ответ. Половина тройки или битое значение -- ValueError тем же
-    договором JobMeta: битый джоб не поднимается ни ролью, ни легаси."""
-    triple = {k: environ.get(f"NOMAD_META_{k}") or None
-              for k in ("soul", "soul_digest", "soul_inc")}
+    Первоисточник -- явные PU_SOUL/PU_SOUL_DIGEST/PU_SOUL_INC из task_env
+    (#582): сервер кладёт тройку сам, не полагаясь на автореку Nomad по
+    Meta (NOMAD_META_<ключ>), чей регистр не обещан. Авторека читается
+    тоже -- переходный период: джоб, поднятый по старой спеке, видит
+    тройку только в ней. Источник выбирается ЦЕЛИКОМ: тройка берётся из
+    PU_*-ключей, если хоть один из них ОБЪЯВЛЕН (есть в env -- непустой
+    или пустой), иначе -- из автореки; сшивание полей из двух мест --
+    не выбор, а отказ. Объявлены оба и тройки их расходятся -- ValueError,
+    молчаливого «авто не совпало -- беру PU_*» нет; явные пустые PU-ключи
+    при непустой автореке -- то же противоречие окружений, не откат.
+    Origin -- тем же правилом из одного источника с выбранной тройкой.
+    Половина тройки или битое значение -- ValueError тем же договором
+    JobMeta: битый джоб не поднимается ни ролью, ни легаси."""
+    KEYS = ("soul", "soul_digest", "soul_inc")
+
+    def declared(names):
+        # «Объявлен» -- ключ есть в env вовсе: task_env #582 пишет тройку
+        # всегда, пустыми значениями для легаси; авторека Nomad появляется
+        # только вместе с Meta-тройкой.
+        return {k: (environ[names[k]] if names[k] in environ else None)
+                for k in KEYS}
+
+    def whole(names, where):
+        # Тройка из одного места, целиком: None -- ключ не объявлен,
+        # пустая строка -- объявлен пустым; и то и то не «значение».
+        got = {k: (environ.get(names[k]) or None) for k in KEYS}
+        if got != {k: None for k in KEYS} and any(
+                v is None for v in got.values()):
+            raise ValueError(f"the role triple from {where} comes whole "
+                             f"({'/'.join(names[k] for k in KEYS)}) or not at all")
+        return got
+
+    pu_names = {k: f"PU_{k.upper()}" for k in KEYS}
+    meta_names = {k: f"NOMAD_META_{k}" for k in KEYS}
+    pu_here = [k for k in KEYS if pu_names[k] in environ]
+    meta_here = [k for k in KEYS if meta_names[k] in environ]
+    if not pu_here and not meta_here:
+        return None
+    triple = None
+    source = None
+    if pu_here:
+        # Явные PU-ключи объявлены -- источник PU_*: и когда тройка полна,
+        # и когда явно пуста (легаси новой спеки). Пустая при непустой
+        # автореке -- противоречие, не откат к автореке.
+        triple = whole(pu_names, "the job's PU_* environment")
+        if meta_here:
+            other = whole(meta_names, "NOMAD_META")
+            if triple != other:
+                raise ValueError("the job's environment declares the role "
+                                 "triple both in PU_* and NOMAD_META and "
+                                 "they disagree")
+    elif meta_here:
+        triple = whole(meta_names, "NOMAD_META")
     if not any(triple.values()):
         return None
-    return JobMeta(environ.get("NOMAD_META_origin") or None, **triple)
+    # Origin -- из источника тройки: PU_ORIGIN у новой спеки,
+    # NOMAD_META_origin у старой; не сшивать.
+    origin = environ.get("PU_ORIGIN" if pu_here else "NOMAD_META_origin") or None
+    return JobMeta(origin, **{k: triple[k] for k in KEYS})
 
 
 def _short(value):
@@ -360,11 +465,10 @@ def deliver_role(d, name, role, b, inside):
             and isinstance(owner.get("email"), str) and owner["email"]):
         sys.exit(f"role delivery of {name} refused: the payload has no owner "
                  f"with a login, name and email")
-    profile = {"name": owner["name"], "email": owner["email"]}
+    use_node_credentials()
     try:
-        r = asyncio.run(initial_identity(name, role.soul_inc, owner["login"],
-                                         profile))
-    except (RuntimeError, bus.BusError) as e:
+        r = initial_identity(name, role.soul_inc)
+    except (RuntimeError, bus.BusError, ValueError) as e:
         sys.exit(f"role delivery of {name} refused: the owner identity did "
                  f"not settle: {e}")
     # Расписка -- доказательство глагола, а не «ok»: identity_ready и вся
@@ -413,6 +517,14 @@ def main(argv):
         role = expected_role(os.environ)
     except ValueError as e:
         sys.exit(f"role delivery of {name} refused: {e}")
+    # Имя узла -- из авторизованного креда узла, не из hostname тела
+    # (#583): контейнер PVE не знает имени узла, на котором стоит. Кред не
+    # узловой -- не узел: отказ до тела, без выдумывания имени. Легаси без
+    # узлового креда поднимается как раньше.
+    node = node_of_credentials()
+    if role is not None and node is None:
+        sys.exit(f"role delivery of {name} refused: no node credential to "
+                 f"name the node — PU_NODE is never a container hostname")
     d = driver.current()
 
     r = asyncio.run(d.ensure(name, ensure_params(name, os.environ)))
@@ -482,7 +594,9 @@ def main(argv):
         deliver_legacy(d, name, b)
 
     inner = os.path.join(config.get("MOP_HOME"), INNER)
-    w = asyncio.run(d.push(name, inner, _inner_script().encode()))
+    script = (_inner_script_role(role, node, driver.soul_dir(name, role.soul_inc))
+              if role is not None else _inner_script())
+    w = asyncio.run(d.push(name, inner, script.encode()))
     if w.get("error"):
         sys.exit(f"the wrapper did not reach the body of {name}: {w['error']}")
 
