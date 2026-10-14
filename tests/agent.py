@@ -3004,6 +3004,15 @@ def ready_584(root, role="puppet", inc=INC_1, digest=None):
          "soul_digest": digest or DIGEST_1}))
 
 
+class NodeConn:
+    """Соединение узла, как его держит агент: creds-снимок открытого
+    соединения (#603) -- из него строится узловой квалифицированный
+    субъект резолвера (#581)."""
+
+    creds = {"user": "node-hyper", "password": "node-pass",
+             "url": "nats://10.0.0.1:4222"}
+
+
 TARGETS_584 = {
     "pu-mop-1": {"found": True, "job": "pu-mop-1", "project": "mop",
                  "role": "puppet", "owner": "anton", "soul_inc": INC_1,
@@ -3182,7 +3191,7 @@ def check_role_node_gates_584(c):
 
     def ask(subject, body):
         m = Msg(subject, body=body)
-        asyncio.run(agent.handle(None, m, public=subject.endswith(".msg")))
+        asyncio.run(agent.handle(NodeConn(), m, public=subject.endswith(".msg")))
         return m.replies[-1] if m.replies else None
 
     def reset(*names):
@@ -3239,7 +3248,7 @@ def check_role_node_gates_584(c):
                  for r in resolves()] == [(W, "send", "pu-mop-1")], asks)
         c.check("584 the resolver request carries exactly the decided envelope",
                 [(s, sorted(r)) for s, r in asks if r.get("verb") == "resolve"]
-                == [("mop.mop.server.rpc",
+                == [(busnames.server("mop", caller=busnames.node_user("hyper")),
                      ["principal", "service", "target", "verb", "verb_name"])], asks)
         c.check("584 grant send is delivered", bool(got and got.get("msg_id")), got)
         c.check("584 grant send takes no lease", holder("pu-mop-1") is None,
@@ -3595,7 +3604,7 @@ def check_startup_soul_584(c):
     def ask(subject, body, startup=False):
         m = Msg(subject, body=body)
         try:
-            asyncio.run(agent.handle(None, m, public=subject.endswith(".msg"),
+            asyncio.run(agent.handle(NodeConn(), m, public=subject.endswith(".msg"),
                                      startup=startup))
         except TypeError:
             asyncio.run(agent.handle(None, m, public=subject.endswith(".msg")))
@@ -3624,7 +3633,8 @@ def check_startup_soul_584(c):
     with restored(agent, "bsh", "clone_facts", "clone_dir", "target_dir", "soul_dir",
                   "_event", "puppet_project", "_owner_locks", "_lease_generations",
                   "_lease_claims", "_lease_holder", "IDENTITY_WAIT",
-                  "SOUL_FACT_TTL", "_soul_cache", "facts"), restored(bus, "arequest"):
+                  "SOUL_FACT_TTL", "_soul_cache", "facts", "local_puppet",
+                  "clone_present"), restored(bus, "arequest"):
         agent.bsh, agent.clone_facts = bash, clonefacts
         agent.clone_dir = lambda name: clones[name]
         agent.target_dir = lambda name: targets[name]
@@ -3635,6 +3645,10 @@ def check_startup_soul_584(c):
         agent.facts = facts_of
         agent._event, agent.puppet_project = no_event, project
         agent.local_puppet = local
+        # Свежий старт ещё НЕ в списках драйвера/tmux: подъём роли
+        # происходит до первого процесса в теле, членство -- не по живому
+        # телу, а по клональному факту (клон уже стоит -- #247, до identity).
+        agent.clone_present = clonefacts
         agent.IDENTITY_WAIT, agent.SOUL_FACT_TTL = 0.1, 0
         bus.arequest = arequest
 
@@ -3719,10 +3733,15 @@ def check_startup_soul_584(c):
         ready_584(os.path.join(soul_root("pu-mop-1"), INC_1))
         asks.clear()
         ask(role(W), {"verb": "states", "names": ["pu-mop-1"]})
-        c.check("584 the binding lookup envelope is exactly target-shaped",
+        # #581: узел спрашивает резолвер квалифицированным субъектом
+        # server.rpc.node-<узел> -- анонимный server.rpc сервисный маршрут
+        # НЕ пускает. Узел -- из кредов ОТКРЫТОГО соединения (conn.creds),
+        # не из дефолтного конфига и не из hostname.
+        c.check("584 the binding lookup rides the node-qualified server subject",
                 [(s, sorted(r)) for s, r in asks
                  if r.get("verb") == "resolve" and "principal" not in r]
-                == [("mop.mop.server.rpc", ["service", "target", "verb"])], asks)
+                == [(busnames.server("mop", caller=busnames.node_user("hyper")),
+                     ["service", "target", "verb"])], asks)
         got = ask(role(W), {"verb": "state", "name": "pu-mop-1"})
         c.check("584 state carries the soul fact too",
                 (got or {}).get("soul", {}).get("ready") is True, got)
@@ -3766,8 +3785,16 @@ def check_startup_soul_584(c):
                   startup=True)
         c.check("584 startup initializes the body for the binding's owner",
                 not (got or {}).get("error") and holder("pu-mop-1") == "anton", (got, holder("pu-mop-1")))
-        c.check("584 startup returns the role triple for the wrapper",
-                (got or {}).get("soul", {}).get("soul_digest") == DIGEST_1, got)
+        # #590: расписка успеха -- ВЕРХНЕГО УРОВНЯ identity_ready + тройка
+        # роли (роль/инкарнация/digest), НЕ вложенный soul.ready -- тот
+        # публикует отдельный факт узла после живого доказательства.
+        # owner_note (git-подпись хозяина) ездит рядом -- обёртке; сверяем
+        # обязательные поля расписки, не запрет соседних.
+        c.check("584 startup returns the top-level identity receipt",
+                isinstance(got, dict) and got.get("identity_ready") is True
+                and got.get("role") == "puppet" and got.get("soul_inc") == INC_1
+                and got.get("soul_digest") == DIGEST_1
+                and "soul" not in got, got)
         c.check("584 startup records the incarnation marker inside .git",
                 marker_584(clones["pu-mop-1"]) == {"inc": INC_1}, marker_584(clones["pu-mop-1"]))
         # Resume доказан маркером инкарнации: ничего не пишет.
@@ -3775,7 +3802,10 @@ def check_startup_soul_584(c):
                   {"verb": "initial_identity", "name": "pu-mop-1", "soul_inc": INC_1},
                   startup=True)
         c.check("584 startup resume of the same incarnation writes nothing",
-                (got or {}).get("resumed") is True
+                isinstance(got, dict) and got.get("identity_ready") is True
+                and got.get("resumed") is True and got.get("role") == "puppet"
+                and got.get("soul_inc") == INC_1
+                and got.get("soul_digest") == DIGEST_1 and "soul" not in got
                 and marker_584(clones["pu-mop-1"]) == {"inc": INC_1},
                 (got, marker_584(clones["pu-mop-1"])))
         # Свежее тело того же хозяина без маркера -- полный путь.
@@ -3892,6 +3922,33 @@ def check_startup_soul_584(c):
         c.check("584 a legacy target without a binding fails closed for a grant",
                 bool((got or {}).get("error"))
                 and "binding" in ((got or {}).get("error") or ""), got)
+
+    # Членство канала подъёма: свежая роль ещё не в DRIVER.bodies/tmux --
+    # клон стоит (его поднял лаунчер ДО identity), сокетов сессии нет.
+    # local_puppet обязан признать такой джоб своим по клону, а не по
+    # живому телу; тело без клона -- чужое.
+    with restored(agent, "DRIVER", "clone_dir", "local_puppet"):
+        class NoBodies:
+            async def bodies(self):
+                return []          # свежий старт: живых тел нет вовсе
+
+            def argv(self, name):
+                return []          # host: без префикса, шелл локален
+        real = tempfile.mkdtemp(prefix="mop-test-584-member-")
+        subprocess.run(["git", "-C", real, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", real, "remote", "add", "origin",
+                        "git@example:mop.git"], check=True)
+        class CloneDir:
+            def __call__(self, name):
+                return real if name == "pu-mop-1" else \
+                    os.path.join("/nonexistent", name)
+        agent.DRIVER, agent.clone_dir = NoBodies(), CloneDir()
+        c.check("584 a fresh startup with a clone but no body is this node's job",
+                asyncio.run(agent.local_puppet("pu-mop-1")) is True,
+                "local_puppet derives membership from live bodies")
+        c.check("584 a body without a clone is not this node's job",
+                asyncio.run(agent.local_puppet("pu-mop-9")) is False,
+                "local_puppet admits clones-less names")
 
     subs = asyncio.run(_subjects_584())
     c.check("584 the agent listens on its startup subject",

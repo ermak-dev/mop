@@ -1869,6 +1869,21 @@ def actor_verdict(got, principal, project, verb, target=None):
     return None
 
 
+def resolver_subject(conn, project):
+    """Субъект вопроса к резолверу сервера -- узловой квалифицированный
+    (#581): анонимный server.rpc сервисный маршрут не пускает. Узел --
+    из кредов ОТКРЫТОГО соединения (conn.creds, #603): тот же снимок, что
+    рукопожатию; дефолтный config() на узле пуст или чужой. -> субъект
+    | None (кред не узловой -- спрашивать нечем)."""
+    creds = getattr(conn, "creds", None)
+    user = creds().get("user") if callable(creds) else \
+        (creds or {}).get("user") if isinstance(creds, dict) else None
+    if isinstance(user, str) and user.startswith(busnames.NODE_PREFIX):
+        return busnames.server(project, caller=busnames.node_user(
+            user[len(busnames.NODE_PREFIX):]))
+    return None
+
+
 async def resolve_actor(conn, project, principal, verb, target=None):
     """Принципал, глагол, цель -> (ответ резолвера | None, отказ | None).
 
@@ -1879,8 +1894,11 @@ async def resolve_actor(conn, project, principal, verb, target=None):
     fields = {"principal": principal, "service": "node", "verb_name": verb}
     if target is not None:
         fields["target"] = target
+    subj = resolver_subject(conn, project)
+    if subj is None:
+        return None, "no node credentials to ask the resolver"
     try:
-        msg = await bus.arequest(conn, busnames.server(project),
+        msg = await bus.arequest(conn, subj,
                                  bus.envelope("resolve", **fields), RESOLVE_WAIT)
         got = json.loads(msg.data.decode())
     except Exception as e:
@@ -1902,8 +1920,11 @@ async def target_binding(conn, project, name, soul_inc=None):
     fields = {"service": "node", "target": name}
     if soul_inc is not None:
         fields["soul_inc"] = soul_inc
+    subj = resolver_subject(conn, project)
+    if subj is None:
+        return None, "no node credentials to ask the resolver"
     try:
-        msg = await bus.arequest(conn, busnames.server(project),
+        msg = await bus.arequest(conn, subj,
                                  bus.envelope("resolve", **fields), RESOLVE_WAIT)
         got = json.loads(msg.data.decode())
     except Exception as e:
@@ -2095,14 +2116,24 @@ async def v_startup(conn, req):
                          f"the request names {req.get('soul_inc')!r}"}
     out = await initial_identity(conn, name, got["owner"], got["soul_inc"])
     if not out.get("error"):
-        out["soul"] = {"ready": True, "role": got["role"], "soul_inc": got["soul_inc"],
-                       "soul_digest": got["soul_digest"]}
+        # Расписка identity -- ВЕРХНЕГО УРОВНЯ (#590): identity_ready +
+        # тройка роли, не вложенный soul.ready (тот публикует отдельный
+        # факт узла после живого доказательства, _soul_fact). Лаунчер
+        # сверяет её с Meta до метки готовности.
+        out.update(identity_ready=True, role=got["role"],
+                   soul_inc=got["soul_inc"], soul_digest=got["soul_digest"])
     return out
 
 
 async def local_puppet(name):
-    """Джоб этого узла? По сокетам драйвера, как v_local: канал подъёма --
-    факт того же узла, и соседние тела не его дело."""
+    """Джоб этого узла? Канал подъёма -- факт того же узла, и соседние
+    тела не его дело. Но свежая роль ещё НЕ в списках драйвера/tmux:
+    подъём происходит до первого процесса в теле, и по сокетам свежий
+    старт выглядел бы чужим. Членство -- по клональному факту: клон
+    поднял лаунчер ДО identity (#247); нет клона -- нет и джоба."""
+    clone = await clone_facts(name)
+    if clone and clone.get("origin"):
+        return True
     return name in [n for n in await DRIVER.bodies() if n == name]
 
 
