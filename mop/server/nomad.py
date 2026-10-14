@@ -84,10 +84,18 @@ def alloc_restart(alloc_id):
 
 
 def alloc_stderr(alloc_id, task, tail=8000):
-    """Хвост stderr задачи аллокации (#126): причина падения на старте живёт
-    только там. python-nomad отдаёт логи потоком, здесь нужен один хвост."""
+    """Хвост stderr задачи аллокации: причина падения на старте."""
+    return _alloc_log(alloc_id, task, "stderr", tail)
+
+
+def alloc_stdout(alloc_id, task, tail=8000):
+    """Хвост stdout задачи аллокации: стадии внешней обёртки."""
+    return _alloc_log(alloc_id, task, "stdout", tail)
+
+
+def _alloc_log(alloc_id, task, stream, tail):
     r = _raw("GET", f"/v1/client/fs/logs/{alloc_id}",
-             params={"task": task, "type": "stderr", "origin": "end",
+             params={"task": task, "type": stream, "origin": "end",
                      "offset": tail, "plain": "true"})
     # Байты, не r.text (#343): plain-логи Nomad идут без charset, и requests
     # читал их как ISO-8859-1 -- «» приходили «Â«…Â»», и failure_reason не
@@ -293,6 +301,7 @@ class NomadApi(typing.Protocol):
     def latest_alloc(self, job_id): ...
     def alloc_restart(self, alloc_id): ...
     def alloc_stderr(self, alloc_id, task, tail=8000): ...
+    def alloc_stdout(self, alloc_id, task, tail=8000): ...
     def alloc_stop(self, alloc_id): ...
     def get_nodes(self): ...
     def node_capacity(self, node_summary): ...

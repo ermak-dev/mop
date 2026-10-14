@@ -243,10 +243,12 @@ interrupting a Claude turn, and it does not delete the puppet.
 #### mop tail
 
 ```text
-tail of a puppet's screen: mop tail <name> [-n N] [-f]
+tail of a puppet's screen: mop tail <name> [-n N] [-f] [--startup]
 
--n N   how many lines (default 10)
--f     keep following until Ctrl-C
+-n N       how many lines (default 10)
+-f         keep following until Ctrl-C
+--startup  operator-only initialization log before the session; wrapper stages
+           and bootstrap tasks, not project command output
 ```
 
 #### mop update
