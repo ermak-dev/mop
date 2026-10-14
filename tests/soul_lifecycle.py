@@ -1149,6 +1149,99 @@ def check_role_channel_lease_582(c):
             shutil.rmtree(d, ignore_errors=True)
 
 
+def check_role_channel_journal_582(c):
+    """Аудит-консистентность ревью 8d6b348: журнал называет ОБЕИХ --
+    человека-хозяина (by ...) и грант-актёра с его джобом (provenance).
+    Штамп доверенного _caller/_actor/_job ставится на исходный запрос
+    РОВНО ОДИН раз -- сразу после authorize_request, для ВСЕХ глаголов
+    роли, включая делегированный add (раньше add журналился принципалом:
+    человек стирался). Легаси-журнал человека/сервиса -- байт в байт
+    прежний; тело не подделает _actor (каркас срезает '_'-ключи), и
+    полезная нагрузка (workspace) в строку не попадает.
+    HYPOTHESIS: сегодня add-ветка журналирует «by grant-…» без человека,
+    management -- «by anton» без актёра: два актёра одного человека
+    неразличимы в аудите. SOLUTION: единый штамп после шва + provenance
+    в journal(). STATUS: pending — RED first."""
+    from mop.common import busnames as bn, service
+
+    def served_req(principal, fields):
+        return {**fields, "_caller": principal,
+                "_subject": bn.cluster("alpha", login=principal)}
+
+    # Подделка из тела: каркас срезает '_'-ключи ДО обработчика --
+    # _actor журнал видит только от штампа шва, не от просителя.
+    stripped = service.trusted({"verb": "ping", "_actor": "grant-spoof",
+                                "_job": "pu-x"}, "anton")
+    c.check("#582 the framework strips a body _actor before any handler",
+            "_actor" not in stripped and "_job" not in stripped, stripped)
+
+    # Делегированный add: ДВА принципала одного человека -- журнал
+    # различает актёров, называя обоих: человека и грант (+его джоб).
+    api = FakeNomad()
+    with soul_env(api) as g:
+        lines = []
+        humans = []
+        for n in ("p-a", "p-b"):
+            fields = {"verb": "add", "origin": ALPHA, "soul": "master",
+                      "request_id": f"jrn-{n}", "_caller": "anton",
+                      "workspace": PLAY_A}
+            parent_req = dict(fields)
+            got = answer(api, "alpha", fields)
+            assert got.get("ok"), got
+            principal = grants.by_job("alpha", got["name"], root=g)["principal"]
+            humans.append((principal, got["name"]))
+            served = served_req(principal, {"verb": "add", "origin": ALPHA,
+                                            "soul": "puppet",
+                                            "request_id": f"kid-{n}"})
+            kid = answer(api, "alpha", served)
+            assert kid.get("ok"), kid
+            lines.append(" ".join(cluster.journal("alpha", served, kid)))
+        (pa, ja), (pb, jb) = humans
+        c.check("#582 a delegated add journals the human owner, not the "
+                "principal alone",
+                all(f"by anton" in ln for ln in lines), lines)
+        c.check("#582 two actors of the same human stay distinguishable "
+                "in the journal",
+                any(pa in ln for ln in lines)
+                and any(pb in ln for ln in lines)
+                and pa != pb, lines)
+        c.check("#582 the delegated add names the acting grant's source job",
+                any(ja in ln or jb in ln for ln in lines), (lines, ja, jb))
+
+    # Управление: тот же штамп, та же пара имён. Легаси-строка -- без
+    # provenance и без payload: человек и сервис байт в байт прежние.
+    api = FakeNomad()
+    with soul_env(api) as g:
+        principal, parent, _p = soul_parent(api, g)
+        api.allocs[parent] = {"ID": "a1", "NodeName": "hyper",
+                              "JobID": parent, "ClientStatus": "running",
+                              "TaskStates": {}}
+        served = served_req(principal, {"verb": "restart",
+                                        "name": parent})
+        with patched(cluster, _clone_of=lambda name: None):
+            got = answer(api, "alpha", served)
+        assert got.get("ok"), got
+        line = " ".join(cluster.journal("alpha", served, got))
+        c.check("#582 a management verb journals both the human and the "
+                "actor with its job",
+                "by anton" in line and principal in line and parent in line,
+                line)
+        human_line = " ".join(cluster.journal("alpha",
+                                              {"verb": "restart",
+                                               "name": "pu-alpha-1",
+                                               "_caller": "anton"},
+                                              {"ok": True}))
+        c.check("#582 the human journal line is unchanged, no provenance",
+                "by anton" in human_line and "actor" not in human_line,
+                human_line)
+        body_line = " ".join(cluster.journal(
+            "alpha", {"verb": "add", "origin": ALPHA, "name": "pu-alpha-1",
+                      "_caller": "anton", "workspace": PLAY_A},
+            {"ok": True}))
+        c.check("#582 the journal line carries no workspace payload",
+                "answer" not in body_line and "42" not in body_line, body_line)
+
+
 def check_bootstrap_snapshot_coherence_582(c):
     """Блокатор 6: согласованный снапшот -- одни байты на чтение, хеш и
     запись. Хеш сверяется с прочитанными байтами, копируются они же;
@@ -1465,6 +1558,7 @@ def main():
                check_seam_adoption_582,
                check_role_channel_verbs_582,
                check_role_channel_lease_582,
+               check_role_channel_journal_582,
                check_bootstrap_snapshot_coherence_582,
                check_add_workspace_boundary_582,
                check_add_quota_counts_roles_582,

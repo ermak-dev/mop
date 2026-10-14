@@ -1451,6 +1451,20 @@ def _answer(project, req):
         ctx = grants.authorize_request(project, req, verb, root=SOUL_ROOT)
         if "error" in ctx:
             return ctx
+        # Один штамп на ВСЕ глаголы роли, сразу после шва (#582, аудит
+        # ревью): власть -- хозяин-человек, ворота аренды, токен посадки
+        # и строка журнала читают _caller (lease.caller), и после шва
+        # это человек, не принципал (как у узла актёра #584). Штамп --
+        # НА МЕСТЕ: словарь после обработчика читает журнал, копия
+        # оставила бы строку «by grant-…» (аудит -- человек). Актёр и
+        # его джоб -- отдельно (_actor/_job, provenance для journal):
+        # два актёра одного человека различимы в аудите. Поля власти из
+        # тела (force, owner, holder) срезаются: у гранта их нет, чужую
+        # аренду и токен тело снять не может; force человека не меняется.
+        for key in ("force", "owner", "holder"):
+            req.pop(key, None)
+        req.update(_caller=ctx["owner"], _actor=ctx["actor"],
+                   _job=ctx["job"])
         # Маршрут по глаголу, не «всё в add» (#582, блокатор ревью):
         # add -- делегированное заводение; ДРУГИЕ глаголы души -- те же
         # ворота и обработчики, что у человека (refusal/имя/аренда):
@@ -1548,9 +1562,18 @@ def journal(project, req, out):
     what = (req.get("name") or req.get("node") or req.get("origin")
             or req.get("puppet") or "")
     # Кто просил (#207): логин из субъекта -- как есть; названный телом на
-    # прежнем субъекте -- с пометкой, пока переход не убран.
+    # прежнем субъекте -- с пометкой, пока переход не убран. Грант роли
+    # называет и актёра с его джобом (#582): власть у человека, эффект --
+    # у принципала, и аудит видит обоих; полезной нагрузки (workspace)
+    # в строке нет -- только имена.
     login, verified = lease.caller(req)
     by = "" if not login else f" by {login}" + ("" if verified else " (self-declared)")
+    actor = req.get("_actor")
+    if actor and actor != login:
+        by += f" (actor {actor}"
+        if req.get("_job"):
+            by += f" of {req['_job']}"
+        by += ")"
     return [f"{project}.{req.get('verb')} {what}{by}: {out.get('error') or 'ok'}"]
 
 
