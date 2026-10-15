@@ -215,6 +215,131 @@ def reveal(provider, envelope, aad):
     return result
 
 
+@dataclass(frozen=True)
+class RetentionScope:
+    """Адрес одного внутреннего агрегата; не право пользователя на secret management."""
+    project_id: uuid.UUID
+    owner_id: int
+    subject_id: uuid.UUID
+    purpose: str
+
+    def __post_init__(self):
+        if (type(self.project_id) is not uuid.UUID or type(self.subject_id) is not uuid.UUID
+                or type(self.owner_id) is not int or self.owner_id < 1
+                or self.purpose not in ('policy', 'grant')):
+            raise Refused('invalid retained secret scope')
+
+    @property
+    def name(self):
+        return f'retained.{self.purpose}.{self.owner_id}.{self.subject_id.hex}'
+
+
+@dataclass(frozen=True)
+class PreparedRetention:
+    """Только ciphertext и точные AAD inputs; plaintext здесь не удерживается."""
+    scope: RetentionScope
+    secret_id: uuid.UUID
+    version_id: uuid.UUID
+    size: int
+    envelope: Envelope = field(repr=False)
+    installation_identity: str
+
+
+class RetentionAuthority(Protocol):
+    def check(self, actor, scope: RetentionScope): ...
+
+
+class _DenyRetention:
+    def check(self, actor, scope):
+        raise PermissionError('retained secret authority is not bound')
+
+
+class RetainedSecrets:
+    """Публичный narrow port prepare/commit/read для связанного агрегата.
+
+    Root связывает authority конкретного владельца use case. Это не callback
+    из JSON и не global admin. prepare/read вызываются вне SQL/provider waits;
+    commit повторяет authority и пишет только ранее подготовленный ciphertext
+    внутри транзакции вызывающего агрегата. Secrets не импортирует Access.
+    """
+    def __init__(self, *, provider: CryptoProvider, authority: RetentionAuthority | None = None):
+        self.provider = provider
+        self.authority = authority if authority is not None else _DenyRetention()
+
+    def _secret(self, scope, secret_id):
+        if type(scope) is not RetentionScope:
+            raise Refused('trusted retention scope required')
+        return m.Secret(id=secret_id, installation_id=1, project_id=scope.project_id,
+                        name=scope.name, kind='credential', purpose=scope.purpose)
+
+    @storage_errors
+    def prepare(self, actor, scope, value):
+        outside_transaction()
+        value_bytes(value)
+        self.authority.check(actor, scope)
+        row = self._secret(scope, uuid.uuid4())
+        row.project
+        version = m.SecretVersion(secret=row, number=1, size=len(value))
+        aad = context(row, version)
+        encrypted = seal(self.provider, value, aad)
+        return PreparedRetention(scope, row.id, version.id, len(value), encrypted, row.installation.identity)
+
+    @storage_errors
+    def commit(self, actor, prepared):
+        if not connections['default'].in_atomic_block or type(prepared) is not PreparedRetention:
+            raise TransactionBoundary('retained secret commit requires aggregate transaction')
+        self.authority.check(actor, prepared.scope)
+        row = self._secret(prepared.scope, prepared.secret_id)
+        if row.installation.identity != prepared.installation_identity:
+            raise Conflict('retained secret installation changed')
+        row.save(force_insert=True)
+        env = prepared.envelope
+        version = m.SecretVersion(id=prepared.version_id, secret=row, number=1, size=prepared.size,
+                                  envelope=env.to_bytes(), key_id=env.key_id, nonce=env.nonce)
+        version.save()
+        row.active_version, row.last_number = version, 1
+        row.save(update_fields=['active_version', 'last_number'])
+        audit(actor, 'create', row)
+        return version.id
+
+    def _reference(self, scope, version_id):
+        """Проверка exact reference без plaintext/provider; годится внутри SQL."""
+        if type(scope) is not RetentionScope:
+            raise Refused('trusted retention scope required')
+        version = m.SecretVersion.objects.select_related('secret__installation').get(pk=version_id)
+        row = version.secret
+        if (row.project_id, row.kind, row.name, row.purpose) != (scope.project_id, 'credential', scope.name, scope.purpose):
+            raise Refused('retained secret target mismatch')
+        available(row)
+        return version
+
+    @storage_errors
+    def check_reference(self, scope, version_id):
+        self._reference(scope, version_id)
+
+    @storage_errors
+    def validate_policy_reference(self, version_id, *, project_id):
+        version = m.SecretVersion.objects.select_related('secret').get(pk=version_id)
+        if version.secret.project_id != project_id or version.secret.purpose != 'policy':
+            raise Refused('approved policy secret reference mismatch')
+        available(version.secret)
+
+    @storage_errors
+    def read(self, actor, scope, version_id):
+        outside_transaction()
+        self.authority.check(actor, scope)
+        version = self._reference(scope, version_id)
+        envelope = Envelope.from_bytes(bytes(version.envelope))
+        if envelope.key_id != version.key_id or envelope.nonce != bytes(version.nonce):
+            raise SecretCryptoError('secret envelope metadata mismatch')
+        value = reveal(self.provider, envelope, context(version.secret, version))
+        if len(value) != version.size:
+            raise SecretCryptoError('secret envelope size mismatch')
+        self.authority.check(actor, scope)
+        self._reference(scope, version_id)
+        return value
+
+
 class SecretStore:
     def __init__(self, *, provider: CryptoProvider, authorizer: Authorizer | None = None,
                  delivery_gate: DeliveryGate | None = None):

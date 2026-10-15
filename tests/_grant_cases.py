@@ -23,8 +23,12 @@ from mop.server.secrets.crypto import Keyring, XChaCha20Provider
 
 # HYPOTHESIS: файловый registry не защищает ORM request/CAS и live Django authority.
 # SOLUTION: immutable bundle + creation intent + отдельные lifecycle/approval/binding ports.
-# RESULT: сначала собственный behavioral red на изолированном PostgreSQL, без старого пула.
-# STATUS: pending — see #635.
+# RED: pipeline 5467, jobs 29470/29471 — отсутствуют собственные RoleBundle/retention.
+# Дополнительный red: отзыв target token, ciphertext activation, shared prompt read,
+# ошибка commit с key в сообщении и отзыв source во время provider wait.
+# RESULT: все 33 собственных cases проходят на изолированных PG16/17; из 131 cases
+# остаётся только прежний Foundation restore/root failure. Пул не использовался.
+# STATUS: FIXED — see #635; late approval/runtime/executor bindings ещё не приёмка.
 
 
 def manifest(role='worker', *, spawn=(), dispatch=False, receives=True):
@@ -38,13 +42,13 @@ class ApprovalFixture:
     def __init__(self, proof):
         self.proof, self.calls, self.enabled = proof, 0, True
 
-    def pin(self, *, owner_id, project_id, parent_id, target_id, incarnation):
+    def pin(self, binding):
         self.calls += 1
-        self.validate(self.proof, owner_id=owner_id, project_id=project_id, parent_id=parent_id)
+        self.validate(self.proof, binding)
         return self.proof
 
-    def validate(self, proof, *, owner_id, project_id, parent_id):
-        if not self.enabled or (proof.owner_id, proof.project_id) != (owner_id, project_id):
+    def validate(self, proof, binding):
+        if not self.enabled or (proof.owner_id, proof.project_id) != (binding.owner_id, binding.project_id):
             raise PermissionError('approved policy is unavailable')
 
 
@@ -366,7 +370,7 @@ class GrantCases(TransactionTestCase):
 
     def test_false_boolean_is_not_an_approval_proof(self):
         class BooleanApproval:
-            def pin(self, **refs):
+            def pin(self, binding):
                 return True
         api = self.g.Grants(provider=self.provider, approvals=BooleanApproval(), bindings=self.bindings)
         with self.assertRaises(PermissionError):
@@ -431,10 +435,139 @@ class GrantCases(TransactionTestCase):
         binding = row.binding
         self.bindings.bindings[(self.project.pk, row.target_id)] = binding
         self.bindings.receipts[row.id] = binding
-        access.RoleBundle._base_manager.filter(pk=self.bundle.id).update(digest='b' * 64)
+        from mop.server.secrets.models import SecretVersion
+        version_id = access.RoleBundle.objects.get(pk=self.bundle.id).content_version_id
+        version = SecretVersion.objects.get(pk=version_id)
+        encrypted = bytes(version.envelope)
+        SecretVersion._base_manager.filter(pk=version_id).update(envelope=encrypted[:-1] + bytes([encrypted[-1] ^ 1]))
         with self.assertRaises(PermissionError):
             self.api.activate(row.id, expected_revision=row.revision)
         self.assertEqual(access.Grant.objects.get(pk=row.id).state, 'reserved')
+
+    def test_prepared_credential_roundtrip_and_plaintext_free_real_pg_dump(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        token = Token.objects.get(user__principal__grant__id=row.id).key
+        from mop.server.secrets.services import RetentionScope
+        self.assertEqual(self.api.secrets.read(self.actor, RetentionScope(self.project.pk, self.user.pk,
+            row.id, 'grant'), provisioned.credential_version_id), token.encode())
+        import tempfile
+        from mop.server.controller.backup import _tool
+        with tempfile.TemporaryFile() as raw:
+            db = connections['default']
+            _tool('pg_dump', db.settings_dict, major=db.pg_version // 10000,
+                  output=raw, extra=('--data-only', '--table=access_*', '--table=secrets_*'))
+            raw.seek(0)
+            data = raw.read()
+        self.assertNotIn(token.encode(), data)
+        self.assertNotIn(b'private role prompt', data)
+        self.assertNotIn(token, serializers.serialize('json', access.GrantEvent.objects.all()))
+
+    def test_transport_retirement_is_separate_and_unknown_does_not_restore_access(self):
+        row, actor = self.active()
+        revoked = self.api.revoke(self.actor, row.id, expected_revision=row.revision)
+        class ReceiptBindings(BindingFixture):
+            def retirement(inner, grant_id, revision):
+                return self.g.RetirementReceipt(row.binding, revision, 'unknown')
+        self.api.bindings = ReceiptBindings()
+        result = self.api.record_retirement(row.id, expected_revision=revoked.revision)
+        self.assertEqual((result.state, result.retirement), ('revoked', 'unknown'))
+        self.assertTrue(Token.objects.filter(user_id=actor.user_id).exists())
+        with self.assertRaises(PermissionError):
+            self.api.resolve_actor(actor)
+
+    def test_provision_database_failure_is_atomic_and_does_not_leak_key(self):
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        row = self.reserve()
+        with patch.object(access.CredentialBinding.objects, 'create', side_effect=IntegrityError('private-generated-key')):
+            try:
+                self.api.provision(self.actor, row.id, expected_revision=row.revision)
+            except Exception as error:
+                self.assertNotIn('private-generated-key', str(error))
+            else:
+                self.fail('failed credential binding must refuse provisioning')
+        self.assertFalse(Token.objects.filter(user__principal__grant__id=row.id).exists())
+        self.assertIsNone(access.Grant.objects.get(pk=row.id).credential_version_id)
+
+    def test_bundle_read_of_revoked_descendant_is_not_a_shared_read_bypass(self):
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        child, child_actor = self.active(actor=parent_actor)
+        self.api.revoke(self.actor, parent.id, expected_revision=parent.revision)
+        with self.assertRaises(PermissionError):
+            self.api.read_bundle(child_actor, self.bundle.id)
+
+    def test_approval_port_receives_exact_stored_intent_binding(self):
+        class BoundApproval:
+            def __init__(inner):
+                inner.pins, inner.validations = [], []
+            def pin(inner, binding):
+                inner.pins.append(binding)
+                return self.proof
+            def validate(inner, proof, binding):
+                inner.validations.append((proof, binding))
+        approved = BoundApproval()
+        self.api.approvals = approved
+        row = self.reserve()
+        intent = access.CreationIntent.objects.get(grant__id=row.id)
+        binding = approved.pins[0]
+        self.assertEqual((binding.intent_id, binding.target_id, binding.incarnation, binding.bundle_id,
+                          binding.owner_id, binding.actor_id, binding.project_id),
+                         (intent.id, row.target_id, row.incarnation, self.bundle.id,
+                          self.user.pk, self.actor.principal_id, self.project.pk))
+        self.assertEqual(approved.validations[-1], (row.policy, binding))
+
+    def test_http_auth_injection_is_explicit_and_no_request_owner_is_used(self):
+        row, actor = self.active()
+        from types import SimpleNamespace
+        from mop.server.controller.authentication import actor_for_request
+        request = SimpleNamespace(user=get_user_model().objects.get(pk=actor.user_id),
+            auth=Token.objects.get(user_id=actor.user_id), data={'owner': 'forged', 'force': True})
+        self.assertEqual(actor_for_request(request, grants=self.api), actor)
+        with self.assertRaises(PermissionError):
+            actor_for_request(request)
+
+    def test_revoke_during_target_provider_wait_denies_before_delivery_effect(self):
+        source, actor = self.active()
+        target, _ = self.active(bundle=self.publish('target-role'))
+        target_version = access.RoleBundle.objects.get(pk=target.bundle_id).content_version_id
+        provider = self.provider
+        class RevokeDuringDecrypt:
+            fired = False
+            def encrypt(inner, value, context):
+                return provider.encrypt(value, context)
+            def decrypt(inner, envelope, context):
+                value = provider.decrypt(envelope, context)
+                if context.record == target_version.bytes and not inner.fired:
+                    inner.fired = True
+                    self.api.revoke(self.actor, source.id, expected_revision=source.revision)
+                return value
+        class Delivery:
+            calls = []
+            def send(inner, decision, message):
+                inner.calls.append(decision)
+        self.api.secrets.provider = RevokeDuringDecrypt()
+        self.api.messages = Delivery()
+        with self.assertRaises(PermissionError):
+            self.api.send(actor, target_id=target.target_id, message=b'not delivered')
+        self.assertEqual(self.api.messages.calls, [])
+
+    def test_grant_cannot_read_an_unrelated_owner_bundle_prompt(self):
+        row, actor = self.active()
+        private = self.publish('not-delegated')
+        with self.assertRaises(PermissionError):
+            self.api.read_bundle(actor, private.id)
+        self.assertEqual(self.api.read_bundle(actor, row.bundle_id).digest, row.digest)
+
+    def test_child_bundle_cannot_expand_parent_secret_allowlist(self):
+        parent, actor = self.active(bundle=self.publish('parent', spawn=('sensitive',)))
+        doc = manifest('sensitive')
+        doc['secrets'] = {'files': ['not-approved-for-parent'], 'vars': []}
+        bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+            manifest=json.dumps(doc).encode(), prompt=b'prompt', provenance='test')
+        self.api.approve_bundle(self.actor, bundle.id)
+        with self.assertRaises(PermissionError):
+            self.reserve(actor=actor, bundle=bundle)
 
     def test_crypto_provider_never_runs_in_sql_and_no_unsupported_effect_port(self):
         with transaction.atomic():
