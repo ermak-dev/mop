@@ -61,6 +61,14 @@ def protection_reauthorizes_after_external_wait():
             pass
         else:
             raise AssertionError('private policy disclosed after scope revocation during protection I/O')
+        authority.revoked = False
+        with patch.object(connection, 'in_atomic_block', True):
+            try:
+                api.get_policy('trusted-actor', row.id)
+            except RuntimeError as error:
+                assert 'outside' in str(error)
+            else:
+                raise AssertionError('protection provider was allowed under an outer SQL transaction')
 
 
 if __name__ == '__main__':

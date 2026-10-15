@@ -5,7 +5,7 @@ import re
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from . import models as m
@@ -361,6 +361,8 @@ class Catalog:
         reference = ''
         # Protection может обращаться к внешнему key provider: вне SQL/locks.
         if confidential:
+            if connection.in_atomic_block:
+                raise RuntimeError('policy protection requires execution outside SQL transactions')
             self.get_project(actor, project_id)
             self._authorize(actor, 'catalog.pin_project_policy', projects=(project_id,))
             if self._protection is None:
@@ -387,6 +389,8 @@ class Catalog:
             return result
         if self._protection is None:
             raise ProtectionUnavailable('confidential policy protection is not bound')
+        if connection.in_atomic_block:
+            raise RuntimeError('policy protection requires execution outside SQL transactions')
         content = self._protection.reveal(result.content, project_id=result.project_id,
             digest=result.digest, reference=result.protection_reference)
         if type(content) is not bytes or hashlib.sha256(content).hexdigest() != result.digest:
