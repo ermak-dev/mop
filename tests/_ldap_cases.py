@@ -182,6 +182,7 @@ class DirectoryIdentityContracts(TransactionTestCase):
         self.assertFalse(identity.authorized)
         self.assertTrue(self.m.ProjectMembership.objects.filter(pk=grant.pk, user=user).exists())
         self.assertTrue(self.m.ClientOwnership.objects.filter(pk=owner.pk, user=user).exists())
+        self.assertTrue(get_user_model().objects.get(pk=user.pk).user_permissions.filter(pk=permission.pk).exists())
         self.assertEqual(get_user_model().objects.count(), 1)
         self.assertFalse(self.m.ProjectMembership.objects.filter(user=user, source=self.source).exists())
 
@@ -206,9 +207,10 @@ class DirectoryIdentityContracts(TransactionTestCase):
         with patch('mop.server.controller.authbackend.LdapDirectory', return_value=self.router.provider):
             for code in (51, 52, 53):
                 self.wire.code = code
-                with self.subTest(code=code), self.assertRaises(AuthenticationUnavailable) as raised:
-                    authenticate(username='person', password='test-password')
-                self.assertNotIn('private-context', str(raised.exception))
+                with self.subTest(code=code):
+                    with self.assertRaises(AuthenticationUnavailable) as raised:
+                        authenticate(username='person', password='test-password')
+                    self.assertNotIn('private-context', str(raised.exception))
             self.wire.failure = TimeoutError('private-context test-password')
             with self.assertRaises(AuthenticationUnavailable) as raised:
                 authenticate(username='person', password='test-password')
@@ -223,10 +225,11 @@ class DirectoryIdentityContracts(TransactionTestCase):
         for change in ('revision', 'configuration', 'inactive'):
             with self.subTest(change=change):
                 user = self.login()
+                subject = self.m.LoginIdentity.objects.get(user=user).external_subject
                 pending, release = Event(), Event()
                 class Blocked:
                     def lookup(inner, cfg, username):
-                        return (DirectoryAccount(UID_A, username, (GROUP,), bind_dn=DN),)
+                        return (DirectoryAccount(subject, username, (GROUP,), bind_dn=DN),)
                     def check_password(inner, cfg, subject, password):
                         pending.set()
                         if not release.wait(10):
