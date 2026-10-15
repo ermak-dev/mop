@@ -86,9 +86,9 @@ def main():
     for state in ALLOWED:
         c.expect(f"{state} cannot release a possibly live effect",
                  lifecycle.may_release_resources(state, effect_quiescent=False), False)
-        c.expect(f"{state} releases only after a settled outcome and quiescence",
+        c.expect(f"{state} releases only after a releasable state and quiescence",
                  lifecycle.may_release_resources(state, effect_quiescent=True),
-                 state in {"succeeded", "refused", "failed", "partial", "expired", "cancelled"})
+                 state in {"succeeded", "refused", "failed", "partial", "expired", "cancelled", "unknown"})
     for bad in (None, 0, 1, "false"):
         rejects(c, f"ambiguous effect quiescence {bad!r}",
                 lambda bad=bad: lifecycle.may_release_resources("succeeded", effect_quiescent=bad),
@@ -100,6 +100,12 @@ def main():
              lifecycle.may_release_resources("running", effect_quiescent=False), False)
     c.expect("a settled unknown response cannot release an unresolved lane",
              lifecycle.may_release_resources("unknown", effect_quiescent=False), False)
+    # HYPOTHESIS: требование известного исхода держит ресурс навсегда,
+    # даже когда отдельная сверка доказала окончание физического эффекта.
+    # SOLUTION: unknown сохраняет честный исход, но не запрещает release
+    # при подтверждённой quiescence; таймаут по-прежнему не доказательство.
+    c.expect("confirmed quiescence releases without fabricating a known outcome",
+             lifecycle.may_release_resources("unknown", effect_quiescent=True), True)
 
     return c.report("operation_lifecycle")
 

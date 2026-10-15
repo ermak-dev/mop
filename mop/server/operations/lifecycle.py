@@ -23,8 +23,8 @@ _NEXT = {
     State.RECONCILING: frozenset({State.SUCCEEDED, State.FAILED, State.PARTIAL, State.UNKNOWN}),
     State.UNKNOWN: frozenset({State.RECONCILING}),
 }
-_SETTLED = frozenset({State.SUCCEEDED, State.REFUSED, State.FAILED,
-                      State.PARTIAL, State.EXPIRED, State.CANCELLED})
+_RELEASABLE = frozenset({State.SUCCEEDED, State.REFUSED, State.FAILED,
+                         State.PARTIAL, State.EXPIRED, State.CANCELLED, State.UNKNOWN})
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,8 @@ def transition(before, after, *, revision, expected_revision):
 
 
 def may_release_resources(state, *, effect_quiescent):
+    """Quiescence — подтверждённое окончание эффекта, не истечение claim."""
     state = _state(state)
     if type(effect_quiescent) is not bool:
         raise ValueError("effect_quiescent must be a boolean")
-    return state in _SETTLED and effect_quiescent
+    return state in _RELEASABLE and effect_quiescent
