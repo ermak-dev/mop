@@ -15,6 +15,12 @@ from mop.server.access.ldap import LdapDirectory
 
 # BUG: DN повторно используется другой записью, bind outage выглядит неверным паролем.
 # HYPOTHESIS: adapter не читает immutable attribute и игнорирует result code bind.
+# RED: DN вместо UUID; replacement принят; 51/52/53 не поднимают unavailable.
+# RED: configuration edit за blocked bind принят; unbind timeout вышел наружу.
+# SOLUTION: явный immutable attribute, UUID byte order, uniqueness search, bound CAS;
+# snapshot configuration под lock и только result 49 как credential rejection.
+# RESULT: 11 LDAP contracts зелёные на изолированных PostgreSQL 16 и 17.
+# STATUS: FIXED — see #633
 UID_A = '00112233-4455-6677-8899-aabbccddeeff'
 UID_B = '11223344-5566-7788-99aa-bbccddeeff00'
 DN = 'uid=person,dc=example'
