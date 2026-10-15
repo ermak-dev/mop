@@ -440,10 +440,13 @@ def client_command(modname):
     """Операторские команды, включая дочерний MCP, без .env установки."""
     return modname.startswith(("mop.cli.core.", "mop.cli.pool.", "mop.cli.node.",
                                "mop.cli.project.", "mop.cli.secret.", "mop.cli.session.")) or \
-        modname in ("mop.cli.service.mcp", "mop.cli.session")
+        modname in ("mop.cli.service.mcp", "mop.cli.session", "mop.cli.server.controller")
 
 
 def main(argv):
+    # Новый bootstrap не читает context/.env даже до загрузки командлета.
+    if argv[:2] == ["server", "controller"]:
+        return run(command("mop.cli.server.controller"), argv[2:])
     # Глобальная опция (#131): сервер для любой команды, с любого места argv.
     from mop.common import context
     try:

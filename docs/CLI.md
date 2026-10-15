@@ -1208,6 +1208,34 @@ services: apply the installation through the normal deployment gate.
 MOP_SOUL_ROLES accepts 1 to enable or an empty value to disable.
 ```
 
+#### mop server controller
+
+```text
+mop server controller <action>: isolated Django controller maintenance
+
+Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
+
+  setup --venv PATH             install the declared server extra in a new venv
+  check                         Django system checks and schema readiness
+  migrate                       apply standard Django migrations
+  migrations-check              refuse uncommitted model changes
+  initialize                    bind the empty schema to protected trust roots
+  admin --username NAME         create initial admin; password is read privately
+  serve --host host --port N    production ASGI server (one process)
+    --hostname name             allowed public hostname (repeatable)
+    --tls-cert PATH --tls-key PATH  native HTTPS; required for non-loopback bind
+  worker                        run the bounded worker lifecycle
+  backup --file PATH            protected PostgreSQL custom-format dump
+  restore --file PATH           restore into an empty DB, reset epoch, disable effects
+
+Every action except setup requires an explicit absolute MOP_CONTROLLER_BOOTSTRAP
+file. Maintenance uses its own DB principal with schema/backup rights. Web and
+workers use distinct runtime principals without DDL/role/database creation rights;
+only maintenance can read the encryption root. Django signing material is a
+separate protected file. Supply secrets in these files, never in CLI arguments.
+Restore requires stopped services and an empty target; no legacy import exists.
+```
+
 #### mop server deploy
 
 ```text

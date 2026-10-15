@@ -1,0 +1,376 @@
+"""Composition root: короткие sync-транзакции и отдельно async effects."""
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import fields, is_dataclass, replace
+from datetime import date, datetime
+from decimal import Decimal
+from functools import partial
+import io
+import os
+import signal
+import time
+from uuid import UUID
+
+from channels.db import database_sync_to_async
+from django.db import connections, transaction
+
+SETTINGS_MODULE = 'mop.server.controller.settings'
+
+
+def configure():
+    """Framework включается явно, без старых config/context/.env."""
+    if os.environ.get('DJANGO_SETTINGS_MODULE', SETTINGS_MODULE) != SETTINGS_MODULE:
+        raise RuntimeError('controller requires its protected Django settings')
+    if 'DJANGO_ALLOW_ASYNC_UNSAFE' in os.environ:
+        raise RuntimeError('DJANGO_ALLOW_ASYNC_UNSAFE is forbidden')
+    os.environ['DJANGO_SETTINGS_MODULE'] = SETTINGS_MODULE
+    import django
+    django.setup()
+
+
+def materialized(value):
+    """Снимок без Model/QuerySet/cursor/generator и общих mutable контейнеров."""
+    if value is None or isinstance(value, (str, bytes, bool, int, float, Decimal, date, datetime, UUID)):
+        return value
+    if isinstance(value, dict):
+        if any(not isinstance(key, (str, int)) for key in value):
+            raise TypeError('database boundary requires materialized dictionary keys')
+        return {key: materialized(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        items = [materialized(item) for item in value]
+        return items if isinstance(value, list) else tuple(items)
+    if is_dataclass(value) and not isinstance(value, type) and value.__dataclass_params__.frozen:
+        return replace(value, **{field.name: materialized(getattr(value, field.name))
+                                 for field in fields(value) if field.init})
+    raise TypeError('database boundary requires materialized values, not live ORM or I/O objects')
+
+
+def _database_invoke(function, args, kwargs):
+    try:
+        return materialized(function(*args, **kwargs))
+    finally:
+        # Работник потока возвращает все свои соединения, даже при ошибке
+        # в materialization и даже когда async caller уже отменён.
+        connections.close_all()
+
+
+async def _quiescent(task):
+    """Отмена caller не объявляет ещё исполняющийся поток завершённым."""
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
+
+
+async def database_call(function, *args, **kwargs):
+    """Целая sync-служба, thread-sensitive; только материализованный результат.
+
+    Для конкурирующих задач worker использует Runtime.database с ограниченным
+    executor. Этот helper пригоден для редких событий долгого consumer; Channels
+    закрывает устаревшие соединения перед пробуждением, finally — после него.
+    """
+    call = database_sync_to_async(_database_invoke, thread_sensitive=True)
+    return await _quiescent(asyncio.create_task(call(function, args, kwargs)))
+
+
+@contextmanager
+def short_transaction(using='default', budget=10):
+    """Rollback до COMMIT при превышении бюджета. Никакого внешнего I/O.
+
+    Служба берёт project rows по id, resource/aggregate rows по (kind, id).
+    IntegrityError/CAS/lock timeout выходят вызывающему; автоматического retry
+    внешнего эффекта здесь нет. Неопределённый COMMIT требует reconciliation.
+    """
+    if not 0 < budget <= 10:
+        raise ValueError('transaction budget must be within 10 seconds')
+    start = time.monotonic()
+    with transaction.atomic(using=using):
+        yield
+        if time.monotonic() - start > budget:
+            raise TimeoutError('application transaction exceeded its time budget')
+
+
+class Backpressure(RuntimeError):
+    """Локальный ресурс исчерпан; shared admission остаётся владельцем #625."""
+
+
+class Runtime:
+    """Владелец ограниченных потоков, async effects и долгоживущих adapters.
+
+    Это не очередь операций: никакой admission/auth/claim здесь не подменяется.
+    Общие project/node/resource bounds проверяет durable executor #625/#639.
+    """
+    def __init__(self, *, blocking_limit=8, effect_limit=8, queue_limit=256, adapters=()):
+        if not 1 <= blocking_limit <= 8 or not 1 <= effect_limit <= 8 or not 0 <= queue_limit <= 256:
+            raise ValueError('runtime limits exceed controller safety caps')
+        self._executor = ThreadPoolExecutor(max_workers=blocking_limit, thread_name_prefix='mop-controller')
+        self._blocking = asyncio.Semaphore(blocking_limit)
+        self._effects = asyncio.Semaphore(effect_limit)
+        self._capacity = blocking_limit + effect_limit + queue_limit
+        self._blocking_capacity = blocking_limit + queue_limit
+        self._effect_capacity = effect_limit + queue_limit
+        self._counts = {'blocking': 0, 'effect': 0}
+        self._tasks = set()
+        self._adapters = tuple(adapters)
+        self._started_adapters = []
+        self._started = False
+        self._stopped = False
+
+    @property
+    def pending(self):
+        return sum(self._counts.values())
+
+    async def start(self):
+        if self._stopped:
+            raise RuntimeError('runtime is stopped')
+        if self._started:
+            return
+        try:
+            for adapter in self._adapters:
+                # Частично запущенный adapter тоже обязан поддерживать cleanup.
+                self._started_adapters.append(adapter)
+                await adapter.start()
+            self._started = True
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def _submit(self, kind, semaphore, capacity, function):
+        if self._stopped:
+            raise RuntimeError('runtime is stopped')
+        if self._counts[kind] >= capacity or self.pending >= self._capacity:
+            raise Backpressure('controller runtime capacity exhausted')
+        self._counts[kind] += 1
+        async def execute():
+            try:
+                async with semaphore:
+                    return await function()
+            finally:
+                self._counts[kind] -= 1
+        task = asyncio.create_task(execute())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return await _quiescent(task)
+
+    async def database(self, function, *args, **kwargs):
+        call = database_sync_to_async(_database_invoke, thread_sensitive=False, executor=self._executor)
+        return await self._submit('blocking', self._blocking, self._blocking_capacity,
+                                  lambda: call(function, args, kwargs))
+
+    async def blocking(self, function, *args, **kwargs):
+        # Только adapters с собственными timeout: поток Python нельзя убить.
+        async def call():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._executor, partial(function, *args, **kwargs))
+        return await self._submit('blocking', self._blocking, self._blocking_capacity, call)
+
+    async def effect(self, function, *args, **kwargs):
+        return await self._submit('effect', self._effects, self._effect_capacity,
+                                  lambda: function(*args, **kwargs))
+
+    async def aclose(self, timeout=10):
+        self._stopped = True
+        if self._tasks:
+            _, pending = await asyncio.wait(tuple(self._tasks), timeout=timeout)
+            if pending:
+                # Не закрывать adapters под ещё живым эффектом и не освобождать
+                # его слот. Следующий shutdown может дождаться quiescence.
+                raise RuntimeError('controller shutdown incomplete: work is still running')
+        errors = []
+        while self._started_adapters:
+            adapter = self._started_adapters.pop()
+            try:
+                await asyncio.wait_for(adapter.aclose(), timeout=timeout)
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        if errors:
+            raise RuntimeError('controller adapter shutdown failed: ' + ', '.join(errors))
+
+
+def _maintenance_role():
+    from django.conf import settings
+    if settings.BOOTSTRAP['role'] != 'maintenance':
+        raise RuntimeError('this action requires the separate maintenance DB principal')
+
+
+def installation_snapshot(using='default'):
+    from .models import Installation
+    value = Installation.objects.using(using).values('identity', 'epoch', 'effects_enabled').first()
+    if value is None:
+        raise RuntimeError('controller installation is not initialized')
+    return {**value, 'epoch': str(value['epoch'])}
+
+
+def _schema_ready(using):
+    from django.db.migrations.executor import MigrationExecutor
+    executor = MigrationExecutor(connections[using])
+    if executor.migration_plan(executor.loader.graph.leaf_nodes()):
+        raise RuntimeError('controller schema requires migrations')
+
+
+def verify_installation(using='default'):
+    from django.conf import settings
+    from .bootstrap import root_digest
+    from .models import Installation
+    _schema_ready(using)
+    row = Installation.objects.using(using).first()
+    if row is None:
+        raise RuntimeError('controller installation is not initialized')
+    if row.identity != settings.BOOTSTRAP['installation_id']:
+        raise RuntimeError('controller installation identity does not match bootstrap')
+    if settings.BOOTSTRAP['role'] == 'maintenance' and row.root_digest != root_digest(settings.BOOTSTRAP):
+        raise RuntimeError('controller root key does not match initialized trust')
+    return installation_snapshot(using)
+
+
+def initialize(using='default'):
+    from django.conf import settings
+    from .bootstrap import root_digest
+    from .models import Installation
+    _maintenance_role()
+    _schema_ready(using)
+    digest = root_digest(settings.BOOTSTRAP)
+    with short_transaction(using):
+        Installation.objects.using(using).get_or_create(
+            pk=1, defaults={'identity': settings.BOOTSTRAP['installation_id'], 'root_digest': digest})
+    return verify_installation(using)
+
+
+def create_admin(username, password, using='default'):
+    from django.contrib.auth import get_user_model
+    from django.contrib.auth.password_validation import validate_password
+    from .models import Installation
+    _maintenance_role()
+    verify_installation(using)
+    User = get_user_model()
+    with short_transaction(using):
+        Installation.objects.using(using).select_for_update().get(pk=1)
+        if User.objects.using(using).filter(is_superuser=True).exists():
+            raise RuntimeError('initial administrator already exists; use authorized account recovery')
+        if User.objects.using(using).filter(username=username).exists():
+            raise RuntimeError('administrator username already exists')
+        user = User(username=username, is_staff=True, is_superuser=True, is_active=True)
+        user.full_clean(exclude=['password'])
+        validate_password(password, user)
+        user.set_password(password)
+        user.save(using=using)
+    return {'username': user.username}
+
+
+def close_pools():
+    """Вызывается после quiescence на shutdown, не после каждого request."""
+    connections.close_all()
+    for connection in connections.all():
+        if hasattr(connection, 'close_pool'):
+            connection.close_pool()
+
+
+def maintenance(action, *, username=None, file=None):
+    from django.core.exceptions import ValidationError
+    from django.core.management import call_command, CommandError
+    from django.db import DatabaseError
+    output = io.StringIO()
+    try:
+        if action not in {'check', 'migrations-check'}:
+            _maintenance_role()
+        if action in {'migrate', 'migrations-check'}:
+            command = 'migrate' if action == 'migrate' else 'makemigrations'
+            options = {'interactive': False} if action == 'migrate' else {'check': True, 'dry_run': True}
+            call_command(command, stdout=output, stderr=output, verbosity=0, **options)
+        elif action == 'initialize':
+            initialize()
+        elif action == 'check':
+            call_command('check', databases=['default'], stdout=output, stderr=output, verbosity=0)
+            verify_installation()
+        elif action in {'backup', 'restore'}:
+            from .backup import backup, restore
+            if not file:
+                raise RuntimeError(f'{action} requires --file')
+            (backup if action == 'backup' else restore)(file)
+        else:
+            raise RuntimeError('unsupported controller maintenance action')
+    except (CommandError, ValidationError) as exc:
+        # Это сообщения проверок/валидаторов, не сырые DSN и не SQL driver.
+        raise RuntimeError(f'controller {action} refused: {exc}') from exc
+    except DatabaseError as exc:
+        code = getattr(exc.__cause__, 'sqlstate', None)
+        detail = f' (SQLSTATE {code})' if code else ''
+        raise RuntimeError(f'controller database refused {action}: {type(exc).__name__}{detail}') from exc
+    finally:
+        close_pools()
+
+
+def validate_asgi_startup():
+    from django.conf import settings
+    if settings.BOOTSTRAP['role'] not in {'web', 'gateway'}:
+        raise RuntimeError('ASGI requires a web/gateway bootstrap, not maintenance credentials')
+    maintenance('check')
+
+
+def serve(host, port, *, hostnames=(), tls_cert=None, tls_key=None):
+    import ipaddress
+    import re
+    from pathlib import Path
+    from django.conf import settings
+    from .bootstrap import private_bytes
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == 'localhost'
+    if bool(tls_cert) != bool(tls_key) or not loopback and not tls_cert:
+        raise RuntimeError('native TLS certificate and key are required for a public listener')
+    if not 1 <= port <= 65535:
+        raise RuntimeError('ASGI port must be within 1..65535')
+    names = list(hostnames or [host])
+    if len(names) > 16 or any(not isinstance(name, str) or len(name) > 253 or
+                              not re.fullmatch(r'[A-Za-z0-9.\[\]:-]+', name) for name in names):
+        raise RuntimeError('ASGI requires explicit allowed hostnames without wildcards')
+    validate_asgi_startup()
+    if tls_key:
+        private_bytes(tls_key)
+        if not Path(tls_cert).is_file():
+            raise RuntimeError('TLS certificate file is unavailable')
+    settings.ALLOWED_HOSTS = names
+    import uvicorn
+    uvicorn.run('mop.server.controller.asgi:application', host=host, port=port,
+                workers=1, lifespan='on', limit_concurrency=16, timeout_graceful_shutdown=10,
+                proxy_headers=False, server_header=False, ssl_certfile=tls_cert, ssl_keyfile=tls_key)
+
+
+async def run_worker(stop, runtime):
+    try:
+        await runtime.start()
+        # Foundation не выдумывает временную очередь/handler: их связывает #625.
+        await stop.wait()
+    finally:
+        await runtime.aclose()
+        await database_call(close_pools)
+
+
+def worker():
+    from django.conf import settings
+    if settings.BOOTSTRAP['role'] != 'worker':
+        raise RuntimeError('worker requires its restricted runtime DB principal')
+    maintenance('check')
+    async def run():
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for name in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(name, stop.set)
+        try:
+            await run_worker(stop, Runtime())
+        finally:
+            for name in (signal.SIGTERM, signal.SIGINT):
+                loop.remove_signal_handler(name)
+    asyncio.run(run())

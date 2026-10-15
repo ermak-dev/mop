@@ -64,6 +64,9 @@ HOME = tempfile.mkdtemp(prefix="mop-test-home-")
 # строка SKIPPED, файл идёт дальше; строгий ставит сборка CI (#230), где
 # стоят все необязательные библиотеки и пропуску неоткуда взяться.
 STRICT = (os.environ.get("MOP_TESTS_STRICT") or "").lower() in ("1", "yes", "true", "on")
+# Только координата изолированной CI fixture, не bootstrap/credentials установки.
+FIXTURE_NAMES = ('MOP_TEST_POSTGRES_HOST',)
+FIXTURE_ENV = {key: os.environ[key] for key in FIXTURE_NAMES if key in os.environ}
 
 
 def skip(what, why):
@@ -82,6 +85,8 @@ def child_env(extra, strict=None):
     прочие), с extra и со строгим режимом этого прогона -- иначе изоляция,
     убравшая MOP_*, сделала бы детей мягкими."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(MACHINE)}
+    env.update({key: os.environ.get(key, FIXTURE_ENV.get(key)) for key in FIXTURE_NAMES
+                if os.environ.get(key, FIXTURE_ENV.get(key)) is not None})
     env.update(extra)
     if STRICT if strict is None else strict:
         env["MOP_TESTS_STRICT"] = "1"

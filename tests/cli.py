@@ -2227,7 +2227,7 @@ CAPS_OK = {
     # статусы, которые читают глазами и модель
     "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
     # протоколы, сигналы, литералы чужих программ
-    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
+    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "ASGI", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
     "PLAY", "RECAP", "EXIT",
     # идентификаторы в тексте
     "SECTIONS",
@@ -3524,7 +3524,7 @@ def check_server_namespace_259(c):
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
             "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
             "diagnose",   # #536: офлайн-сводка локальной установки
-            "proxykey", "grant"}
+            "proxykey", "grant", "controller"}
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))

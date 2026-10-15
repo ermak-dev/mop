@@ -105,6 +105,116 @@ specific failure. Missing tables, incompatible schema and failed decryption
 are distinct from a valid empty installation; none triggers file discovery,
 credential regeneration or an in-memory-only mode.
 
+## Foundation entrypoints (#632)
+
+The isolated new controller lives in `mop/server/controller`; it does not replace
+any deployed old service merely by being present. Run its commands through
+`mop server controller`, not `manage.py`, `runserver`, or old `server web`.
+The dispatcher bypasses old context/environment initialization for this command.
+
+`setup --venv /absolute/new/path` is the stdlib-only source-tree installer. It
+installs the package's declared `[server]` extra into that new environment and
+checks its framework imports. The ordinary package install and node dependency
+list do not contain Django, Channels, DRF or psycopg. Use that environment's `mop`
+for subsequent controller commands. Setup installs software only, never creates
+trust roots, connects to an installation, runs migrations or starts a service.
+
+`MOP_CONTROLLER_BOOTSTRAP` is the one explicit absolute path to a private JSON
+file. It is a startup selector, not a general environment-over-ORM precedence
+rule. The bootstrap and referenced key files must be regular, owned by the
+process account, inaccessible to group/others, in private owned directories;
+symlinks are refused. Provision these outside the repository and served files.
+The finite schema is:
+
+```json
+{
+  "installation_id": "new-installation-identity",
+  "role": "maintenance",
+  "database": {
+    "ENGINE": "django.db.backends.postgresql",
+    "HOST": "database.example.invalid",
+    "PORT": "5432",
+    "NAME": "new_controller_database",
+    "USER": "schema_maintenance_principal",
+    "PASSWORD": "<provided privately, never in argv>",
+    "OPTIONS": {
+      "sslmode": "verify-full",
+      "sslrootcert": "/private/trust/database-ca.pem"
+    }
+  },
+  "root_key": "/private/controller/encryption-root.key",
+  "django_key": "/private/controller/django-signing.key"
+}
+```
+
+The encryption root contains at least 32 bytes. The separate Django signing key
+contains at least 50 ASCII bytes of cryptographically random material; Django
+needs it before DB-backed authentication starts. Do not use the illustrative
+strings above as credentials. The optional TLS options are `sslcert` and
+`sslkey`; backend-specific connection options beyond this finite trust schema
+are selected by the foundation, not passed through arbitrary bootstrap keys.
+`sslmode=disable` is available for explicitly isolated fixtures only; production
+provisions verified TLS. Missing or malformed inputs fail, never select `.env`,
+old profiles, a local database file or adjacent credentials.
+
+Use separate bootstrap files **and OS service identities** for `maintenance`,
+`web`, `worker` and `gateway`. Only maintenance receives `root_key`. Ordinary
+web/worker/gateway processes receive their own least-privilege DB login and the
+Django signing reference, not encryption-root, migration, builder, Nomad or NATS
+credentials. The maintenance principal owns schema/migrations and has authorized
+backup/restore access. Runtime principals need application-table CRUD and sequence
+usage grants from provisioning, but no schema/table ownership, schema CREATE,
+role/database administration or membership permitting elevation to such a role.
+System checks reject elevated runtime principals. Foundation does not provision
+roles through an HTTP request or distribute DB/bootstrap files to nodes.
+#644 owns concrete grants, service units and instance-wide connection accounting.
+The separately privileged builder is not an ordinary worker role.
+
+Cold-start order is dependency setup, provisioned PostgreSQL 16/17 and trust
+roots, `migrate`, `initialize`, `admin --username name`, `check`, then `serve` and
+`worker` under their restricted principals. `admin` reads and confirms the
+password privately; it only creates the first administrator and refuses to reset
+an existing account. `initialize` binds a singleton installation identity/root
+fingerprint without resetting it on repetition. `migrations-check` checks model
+changes; `check` also refuses unapplied schema migrations or a mismatched
+installation. These maintenance paths use the configured DB directly with HTTP
+and NATS stopped. They are not a general domain-repair console; domain repair
+and audit services connect in their owning epic tasks.
+
+`serve --host bind-address --port port --hostname public-name --tls-cert path
+--tls-key path` starts one bounded production Uvicorn ASGI process, not Django's
+development server. `--hostname` is repeatable and distinct from the bind address;
+wildcards are refused. A non-loopback listener requires native HTTPS, the key is
+private, and untrusted forwarding headers are disabled. Loopback HTTP redirects
+to HTTPS rather than accepting authenticated cleartext requests. Deployment
+renders these process arguments from accepted ORM configuration in #644; they
+are not another persistent settings registry. Standard Auth/Admin/Sessions and
+DRF token infrastructure are installed; token rows are not exposed in Admin.
+The only foundation API query is authenticated `GET /api/v1/health`. There are
+no temporary admission/operations queues, anonymous WS endpoints or domain apps.
+The worker entrypoint owns lifecycle; #625 binds its durable handlers.
+
+The initial process DB pool has at most 8 connections (zero persistent
+thread-local connections), with 5 s connect/query, 2 s lock and 10 s idle-in-
+transaction deadlines. Application services use short synchronous atomic blocks;
+the maintenance `short_transaction` helper checks its 10 s budget before COMMIT.
+The composition runtime permits at most 8 blocking jobs and 8 async effects,
+with a bounded local backlog. This does not replace durable project/node/resource
+admission limits or fencing in #625/#639. Shutdown drains running work before
+closing adapters/pools; a timeout reports incomplete shutdown and does not
+pretend a still-running effect released its slot.
+
+`backup --file /private/new.dump` creates a new private PostgreSQL custom-format
+archive using `pg_dump`; `restore --file /private/backup.dump` uses `pg_restore`
+against an **empty** configured target, with services stopped. Matching PostgreSQL
+client tools of the same major must be installed by provisioning and selected
+in the process PATH (CI tests matching clients 16 and 17). Mismatched tools are
+refused: a newer dump tool can introduce settings an older server cannot restore. Passwords travel through a transient private passfile, not argv.
+Root-key recovery material is separately protected and is not in the dump.
+Restore checks schema, identity and root custody, changes the database epoch and
+keeps effects disabled. #625/#639 own reconciliation before dispatch can reopen;
+foundation provides no bypass to enable it. No old-data import exists.
+
 ## Initial client connection is not a local settings registry
 
 A remote client needs a server address and an explicit TLS trust basis when

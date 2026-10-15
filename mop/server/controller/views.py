@@ -1,0 +1,28 @@
+"""Синхронный DRF query инфраструктуры; admission принадлежит #625."""
+from django.db import DatabaseError
+from rest_framework.response import Response
+from rest_framework.views import APIView, exception_handler as framework_exception_handler
+from .runtime import installation_snapshot
+
+
+def exception_handler(error, context):
+    """Отказ DB, включая auth lookup, не становится anonymous/empty success."""
+    if isinstance(error, DatabaseError):
+        response = Response({'schema_version': 1, 'error': {
+            'code': 'database_unavailable', 'message': 'controller database unavailable',
+            'retryable': True}}, status=503)
+        response['Cache-Control'] = 'no-store'
+        return response
+    return framework_exception_handler(error, context)
+
+
+class Health(APIView):
+    def get(self, request):
+        try:
+            installation = installation_snapshot()
+            response = Response({'schema_version': 1, 'state': 'ready', **installation})
+        except RuntimeError as error:
+            response = Response({'schema_version': 1, 'error': {
+                'code': 'installation_unavailable', 'message': str(error), 'retryable': False}}, status=503)
+        response['Cache-Control'] = 'no-store'
+        return response
