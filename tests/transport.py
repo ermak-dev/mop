@@ -164,14 +164,14 @@ def check_caller_603(c):
              busnames.caller("mop.mop.node.hyper.rpc"), None)
     c.expect("startup has no caller",
              busnames.caller("mop.mop.node.hyper.startup"), None)
-    # Переход: без токена квалифицированный server-субъект -- прежний
-    # анонимный, старый сервер отвечает ему и при смешанной раскатке.
-    c.expect("without_caller strips the qualified server token",
+    # Машинный субъект не понижается при переходе (#652): анонимный
+    # повтор стирал границу выдачи credentials и авторизации роли.
+    c.expect("without_caller preserves the qualified node identity",
              busnames.without_caller(f"mop.mop.server.rpc.{NODE_USER}"),
-             "mop.mop.server.rpc")
-    c.expect("without_caller strips the role token",
+             f"mop.mop.server.rpc.{NODE_USER}")
+    c.expect("without_caller preserves the role principal",
              busnames.without_caller(f"mop.mop.node.hyper.role.{GRANT}"),
-             "mop.mop.node.hyper.role")
+             f"mop.mop.node.hyper.role.{GRANT}")
 
 
 def check_principals_603(c):
