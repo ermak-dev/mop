@@ -9,17 +9,21 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { PuppetCard } from "./PuppetCard";
 import { renderUi } from "../test-utils";
 
+// #661: snapshot-проверки используют startup; чат и терминал больше не split.
 const ADMIN = { login: "admin", role: "admin" as const };
-const ok = (lines: string[]) => ({ ok: true, status: 200, json: async () => ({ lines }) }) as Response;
+const ok = (lines: string[], source = 'initialization') => ({ ok: true, status: 200, json: async () => ({ source, lines }) }) as Response;
 const tick = async (ms = 0) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
 const open = () => {
   const fetchTail = vi.mocked(fetch);
-  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
-    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
-    : fetchTail(url, init));
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (String(url).includes('/history')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) });
+    if (String(url).endsWith('/term')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ tid: 'writer', epoch: 'pty', cursor: 0, mode: 'rw', cols: 80, rows: 24 }) } as Response);
+    if (String(url).includes('/read?')) return new Promise<Response>(() => {});
+    if (String(url).endsWith('/close')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) } as Response);
+    return fetchTail(url, init);
+  });
   const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
   fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   return view;
 };
 
@@ -30,8 +34,7 @@ test("#489 the composer sits inside the screen dialog", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => ok(["screen"])));
   open(); await tick();
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
-  const composer = screen.getByRole("textbox", { name: "Сообщение" });
+  const composer = screen.getByRole("textbox", { name: "Ввод человека в CLI" });
   expect(composer.closest('[data-testid="output-scroll"]')).toBeNull();
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
 });
@@ -45,13 +48,11 @@ test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", asyn
   vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(2000);
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
   open(); await tick();
-  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
-  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
   const terminal = screen.getByTestId("tail-lines");
-  const input = screen.getByRole("textbox", { name: "Сообщение" });
-  fireEvent.change(input, { target: { value: "unsent draft" } });
   fireEvent.click(screen.getByRole("button", { name: "Увеличить" }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  const input = screen.getByRole("textbox", { name: "Ввод человека в CLI" });
+  fireEvent.change(input, { target: { value: "unsent draft" } });
   input.focus();
   const viewport = screen.getByTestId("output-scroll");
   Object.defineProperty(viewport, "scrollHeight", { value: 2000 });
@@ -59,7 +60,7 @@ test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", asyn
   viewport.scrollTop = 125; fireEvent.scroll(viewport);
   await tick(3000);
   expect(mock).toHaveBeenCalledTimes(2);
-  expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  expect(screen.getByLabelText("Обновить")).toBeEnabled();
   expect(screen.getByTestId("tail-lines")).toBe(terminal);
   expect(screen.queryByRole("status")).toBeNull();
   expect(screen.getByText("old screen")).toBeInTheDocument();
@@ -140,19 +141,24 @@ test("#489 a transient failure keeps the last frame and recovers without remount
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-test.each([401, 403])("#489 HTTP %s removes private output and composer and stops polling", async (status) => {
-  const mock = vi.fn().mockResolvedValueOnce(ok(["private output"]))
+test.each([401, 403])("#661 HTTP %s clears private output, revokes input and stops polling", async (status) => {
+  const mock = vi.fn().mockResolvedValueOnce(ok(["private output"], 'screen'))
     .mockResolvedValue({ ok: false, status });
   vi.stubGlobal("fetch", mock);
   open(); await tick();
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
-  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
-  expect(screen.getByRole('textbox', { name: 'Сообщение' })).toBeInTheDocument();
+  const input = screen.getByRole('textbox', { name: 'Ввод человека в CLI' });
+  fireEvent.change(input, { target: { value: 'private draft' } });
+  expect(screen.getByRole('button', { name: 'Отправить' })).toBeEnabled();
   await tick(3000);
   expect(screen.queryByText("private output")).toBeNull();
-  expect(screen.queryByRole("textbox", { name: "Сообщение" })).toBeNull();
-  expect(screen.getAllByRole('alert').some(el => /прав не хватает/.test(el.textContent ?? ''))).toBe(true);
+  // #661: удалённый channel composer сменился постоянным CLI-полем;
+  // потеря прав запрещает отправку, даже если пользователь введёт черновик.
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ввод человека в CLI' }), { target: { value: 'must not send' } });
+  expect(screen.getByRole('button', { name: 'Отправить' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  expect(screen.getAllByRole('alert').some(el => /прав не хватает|авторизация потеряна/.test(el.textContent ?? ''))).toBe(true);
   await tick(9000);
   expect(mock).toHaveBeenCalledTimes(2);
 });

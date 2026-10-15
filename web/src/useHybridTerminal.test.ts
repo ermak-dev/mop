@@ -85,6 +85,39 @@ test('late open after target change closes stale attach, never displays it or wr
   expect(output.write).not.toHaveBeenCalled();
   view.unmount();
 });
+// HYPOTHESIS: invalidate(true) не отменяет поколение pending open без attach,
+// поэтому поздний writer включает ввод уже после смены сессии (#661).
+// SOLUTION: pending open тоже проходит через disconnect и отмену поколения;
+// поздний tid закрывается существующим cleanup, invalidate(false) не меняется.
+// RESULT: проверка красная до правки; поздний writer больше не включает ввод.
+// STATUS: FIXED — see #661
+test.each([true, false])('pending writer open respects sessionChanged=%s invalidation', async sessionChanged => {
+  let release!: (response: Response) => void;
+  const output = sink();
+  const mock = vi.fn((url: string) => {
+    if (url.endsWith('/term')) return new Promise<Response>(resolve => { release = resolve; });
+    if (url.endsWith('/close')) return Promise.resolve(ok({ ok: true }));
+    return new Promise<Response>(() => {});
+  });
+  vi.stubGlobal('fetch', mock);
+  const view = renderHook(() => useHybridTerminal(admin, 'p', output));
+  let pending!: Promise<void>;
+  await act(async () => { pending = view.result.current.open('rw'); });
+  expect(view.result.current.phase).toBe('opening');
+  act(() => { view.result.current.invalidate(sessionChanged); });
+  await act(async () => { release(ok(attach('rw', 'late'))); await pending; });
+  expect(view.result.current.canInput).toBe(!sessionChanged);
+  expect(view.result.current.mode).toBe(sessionChanged ? null : 'rw');
+  expect(view.result.current.phase).toBe(sessionChanged ? 'disconnected' : 'connected');
+  expect(mock.mock.calls.filter(([url]) => url.endsWith('/late/close'))).toHaveLength(sessionChanged ? 1 : 0);
+  expect(mock.mock.calls.filter(([url]) => url.includes('/read?'))).toHaveLength(sessionChanged ? 0 : 1);
+  if (sessionChanged) {
+    await act(async () => { expect(await view.result.current.send(encodeInput('must not send'))).toBe(false); });
+    expect(mock.mock.calls.some(([url]) => url.endsWith('/input'))).toBe(false);
+  }
+  expect(output.write).not.toHaveBeenCalled();
+  view.unmount();
+});
 test('input transport failure is unknown and is never automatically replayed', async () => {
   const mock = vi.fn((url: string) => {
     if (url.includes('/read?')) return new Promise(() => {});

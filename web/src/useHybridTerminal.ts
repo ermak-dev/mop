@@ -219,7 +219,7 @@ export function useHybridTerminal(session: Session, target: string, sink: Termin
     } catch (error) { if (generation.current === gen && identityRef.current === identity) update({ ...initial, phase: 'disconnected', error: reasonOf(error) }); }
   }, [cancel, closeAt, base, identity, update]);
   const invalidate = useCallback((sessionChanged: boolean) => {
-    if (attachment.current && sessionChanged) disconnect('сессия изменилась; переподключитесь явно', true, true);
+    if ((attachment.current || opening.current) && sessionChanged) disconnect('сессия изменилась; переподключитесь явно', true, true);
   }, [disconnect]);
   const revoke = useCallback(() => disconnect('авторизация потеряна; откройте сессию заново', true, true), [disconnect]);
   const timing = attachment.current?.interrupt_delay_ms;

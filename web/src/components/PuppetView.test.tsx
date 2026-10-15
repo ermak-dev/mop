@@ -26,14 +26,18 @@ const row: Puppet = {
 const snapshot = emptySnapshot({ projects: [{ name: "mop", puppets: [row],
   counts: { puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0 } }] });
 const response = (body: unknown) => ({ ok: true, json: async () => body }) as Response;
+// #661: zoom и refresh остались у startup-снимка, не у живого терминала.
 const card = () => {
   const fetchTail = vi.mocked(fetch);
   vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => String(url).includes('/history')
     ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
-    : fetchTail(url, init)));
+    : String(url).endsWith('/tail')
+      ? fetchTail(url, init).then(async result => result.ok
+        ? response({ ...await result.json(), source: 'initialization' }) : result)
+      : String(url).includes('/read?') ? new Promise<Response>(() => {})
+      : Promise.resolve(response({ ok: true }))));
   const view = renderUi(<PuppetCard session={session} target={row.name} onClose={() => {}} />);
   fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   return view;
 };
 

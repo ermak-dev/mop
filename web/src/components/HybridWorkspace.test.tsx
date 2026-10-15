@@ -1,13 +1,13 @@
-// HYPOTHESIS: чат не должен переиспользовать peer-send и выдавать меню
-// терминала за исполненную команду. Снимок tail остаётся независимым.
-// SOLUTION: вкладки, безопасный текст, реальный xterm и один human writer.
-// RESULT: RED до реализации; STATUS: FIXED — see #601
+// HYPOTHESIS: ручное управление и технические панели заслоняют переписку.
+// SOLUTION: открытие диалога подключает writer; метаданные включаются отдельно.
+// RESULT: проверки сначала упали на старом интерфейсе, затем прошли.
+// STATUS: FIXED — see #661
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
+const { readFileSync } = await vi.importActual<{ readFileSync: (path: string, encoding: string) => string }>('node:fs');
 import { renderUi } from '../test-utils';
 import { HybridWorkspace } from './HybridWorkspace';
-import wire from '../../tests/fixtures/hybrid-wire.json';
-const terminals = vi.hoisted(() => [] as Array<{ options: Record<string, unknown>; write: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>);
+const terminals = vi.hoisted(() => [] as Array<{ options: Record<string, unknown>; dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>);
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   options: Record<string, unknown>; cols = 80; rows = 24;
   write = vi.fn(); reset = vi.fn(); dispose = vi.fn();
@@ -18,209 +18,164 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} dispose() {} } }));
 const admin = { login: 'anton', role: 'admin' as const };
 const ok = (data: unknown) => ({ ok: true, status: 200, json: async () => data }) as Response;
-const history = { epoch: 'h1-digest', session_id: 's', cursor: 'c', reset: false, partial: true, has_more: false, records: [
+const history = { epoch: 'history-digest', session_id: 's', cursor: 'c', reset: false, partial: true, has_more: false, records: [
+  { type: 'user', uuid: 'u', message: { content: 'hello' } },
   { type: 'assistant', uuid: 'a', message: { content: [{ type: 'text', text: '<img src="https://evil.test/i">' }, { type: 'tool_use', id: 't', name: 'Bash', input: { command: 'pwd' } }], model: 'actual-model' } },
   { type: 'user', origin: 'peer', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: 'denied', is_error: true }] } },
   { type: 'future', data: 'kept' },
 ] };
+function wire() {
+  let page = history, outcome = 'written', source = 'screen';
+  const posts: Array<[string, Record<string, unknown>]> = [];
+  const mock = vi.fn((url: string, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (init?.method === 'POST') posts.push([url, body]);
+    if (url.includes('/read?')) return new Promise<Response>(() => {});
+    if (url.includes('/history')) return Promise.resolve(ok(page));
+    if (url.endsWith('/tail')) return Promise.resolve(ok({ source, lines: ['startup output'], truncated: false }));
+    if (url.endsWith('/input')) return Promise.resolve(ok({ seq: body.seq, written: atob(body.data).length, outcome, error: outcome === 'unknown' ? 'uncertain' : undefined }));
+    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'writer', epoch: 'terminal-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
+  });
+  vi.stubGlobal('fetch', mock);
+  return { posts, mock, setPage: (next: typeof history) => { page = next; }, setOutcome: (next: string) => { outcome = next; }, setSource: (next: string) => { source = next; } };
+}
 const open = () => renderUi(<HybridWorkspace session={admin} target="p" />);
-afterEach(() => { vi.unstubAllGlobals(); terminals.length = 0; });
-// HYPOTHESIS: третья вкладка дублирует терминал; снимок нужен как режим
-// просмотра внутри единственного терминала, а не как отдельная сессия.
-// STATUS: FIXED — see #622
-test('chat opens first; only chat and terminal tabs, with explicit old-output inspection', async () => {
-  vi.stubGlobal('fetch', vi.fn(async (url: string) => ok(url.endsWith('/tail')
-    ? { source: 'screen', lines: ['legacy tail'], truncated: false } : history)));
-  open();
-  expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Чат', 'Терминал']);
+const input = () => screen.getByRole('textbox', { name: 'Ввод человека в CLI' });
+const send = () => screen.getByRole('button', { name: 'Отправить' });
+const ready = async () => { fireEvent.change(input(), { target: { value: 'draft' } }); await waitFor(() => expect(send()).toBeEnabled()); };
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); terminals.length = 0; });
+
+test('#661 opening takes control once; tabs keep one writer and closing detaches it', async () => {
+  const api = wire(); const view = open();
+  await ready();
+  expect(api.posts).toEqual([['/api/puppet/p/term', { mode: 'rw', cols: 80, rows: 24 }]]);
   expect(screen.getByRole('tab', { name: 'Чат' })).toHaveAttribute('aria-selected', 'true');
+  for (const text of ['Взять управление', 'Отдать управление', 'Переподключить чтение', 'Обновить историю', 'Закрыть подключение', 'Команды и ввод CLI', 'Сообщение папету через канал', 'История сессии, не поток токенов', 'Источник не подтверждён']) expect(screen.queryByText(text)).toBeNull();
+  expect(screen.queryByRole('switch', { name: 'Терминал рядом' })).toBeNull();
+  expect(screen.getAllByRole('button').map(el => el.textContent)).toEqual(['Отправить']);
   fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
-  expect(await screen.findByText('legacy tail')).toBeVisible();
+  expect(screen.getByRole('region', { name: 'Терминал: управление' })).toBeVisible();
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  expect(await screen.findByText('<img src="https://evil.test/i">')).toBeVisible();
+  expect(input()).toHaveValue('draft');
+  expect(terminals).toHaveLength(1);
+  expect(api.posts).toHaveLength(1);
+  view.unmount();
+  await waitFor(() => expect(api.posts.filter(([url]) => url.endsWith('/writer/close'))).toHaveLength(1));
+  expect(terminals[0].dispose).toHaveBeenCalled();
+});
+
+test('#661 metadata is opt-in and can be hidden again without hiding conversation', async () => {
+  wire(); open();
+  expect(await screen.findByText('hello')).toBeVisible();
+  expect(screen.getByText('<img src="https://evil.test/i">')).toBeVisible();
   expect(document.querySelector('img')).toBeNull();
+  const checkbox = screen.getByRole('checkbox', { name: 'Отображать метаданные' });
+  expect(checkbox).not.toBeChecked();
+  expect(screen.queryByText(/Bash/)).toBeNull();
+  expect(screen.queryByText(/неполная запись/i)).toBeNull();
+  expect(screen.queryByText(/неизвестная запись/i)).toBeNull();
+  expect(screen.queryByText(/метаданные/i, { selector: 'summary' })).toBeNull();
+  fireEvent.click(checkbox);
   expect(screen.getByText(/неполная запись/i)).toBeVisible();
   expect(screen.getByText(/неизвестная запись/i)).toBeVisible();
   fireEvent.click(screen.getByText(/Bash/, { selector: 'summary' }));
   expect(screen.getByText('denied')).toBeVisible();
   expect(screen.getByText(/ошибка инструмента/i)).toBeVisible();
-  expect(screen.queryByText(/выполнено/i)).toBeNull();
-  expect(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' })).toBeDisabled();
+  expect(screen.getAllByText(/actual-model/).length).toBeGreaterThan(0);
+  expect(screen.queryByText(/Источник не подтверждён/)).toBeNull();
+  fireEvent.click(checkbox);
+  expect(screen.queryByText('denied')).toBeNull();
+  expect(screen.getByText('hello')).toBeVisible();
 });
-test('reader opens only on terminal tab; rw explicitly closes reader, human slash submits same bytes, preserves draft on refused send', async () => {
-  const posts: Array<[string, Record<string, unknown>]> = [];
-  let outcome = 'written';
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    if (init?.method === 'POST') posts.push([url, body]);
-    if (url.includes('/read?')) return new Promise(() => {});
-    if (url.endsWith('/history')) return Promise.resolve(ok(history));
-    if (url.endsWith('/input')) return Promise.resolve(ok({ seq: body.seq, written: atob(body.data).length, outcome, error: outcome === 'unknown' ? 'uncertain' : undefined }));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: body.mode, epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
-  }));
-  const view = open();
-  expect(posts).toHaveLength(0);
-  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  await waitFor(() => expect(posts).toHaveLength(1));
-  expect(posts[0][1].mode).toBe('ro');
-  expect(terminals[0].options.disableStdin).toBe(true);
-  expect(terminals[0].options.windowOptions).toEqual({});
-  expect(terminals[0].options.linkHandler).toEqual({ activate: expect.any(Function) });
-  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
-  await waitFor(() => expect(posts).toHaveLength(3));
-  expect(posts[1][0]).toContain('/ro/close');
-  expect(posts[2][1].mode).toBe('rw');
-  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  const composer = screen.getByRole('textbox', { name: 'Ввод человека в CLI' });
-  fireEvent.change(composer, { target: { value: '/model' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' }));
-  await waitFor(() => expect(posts.some(([url]) => url.endsWith('/input'))).toBe(true));
-  expect(atob(String(posts.find(([url]) => url.endsWith('/input'))?.[1].data))).toBe('\x1b[200~/model\x1b[201~\r');
-  expect(posts.some(([url]) => url.includes('/send') || url.includes('/admin/ops'))).toBe(false);
-  await waitFor(() => expect(composer).toHaveValue(''));
-  outcome = 'unknown';
-  fireEvent.change(composer, { target: { value: 'keep draft' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' }));
-  await screen.findByText(/uncertain/);
-  expect(composer).toHaveValue('keep draft');
-  expect(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' })).toBeDisabled();
-  view.unmount();
-  expect(terminals[0].dispose).toHaveBeenCalled();
+
+test('#661 puppet role is only displayed with metadata enabled', async () => {
+  wire(); renderUi(<HybridWorkspace session={admin} target="p" role="builder" />);
+  await screen.findByText('hello');
+  expect(screen.queryByText('Role: builder')).toBeNull();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Отображать метаданные' }));
+  expect(screen.getByText('Role: builder')).toBeVisible();
 });
-test('history session identity change disconnects even when epoch is unchanged, preserving draft', async () => {
-  let sessionId = 's';
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
-    if (url.includes('/read?')) return new Promise(() => {});
-    if (url.includes('/history')) return Promise.resolve(ok({ ...history, session_id: sessionId }));
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
-  }));
-  open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  await screen.findByText('<img src="https://evil.test/i">');
-  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
-  const composer = screen.getByRole('textbox', { name: 'Ввод человека в CLI' });
-  fireEvent.change(composer, { target: { value: 'unsent draft' } });
-  sessionId = 's2';
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeDisabled());
-  expect(composer).toHaveValue('unsent draft');
+
+test('#661 Enter sends CLI input, Ctrl+Enter inserts a newline at the selection, IME never sends', async () => {
+  const api = wire(); open(); await ready();
+  fireEvent.change(input(), { target: { value: '/model' } });
+  fireEvent.keyDown(input(), { key: 'Enter', isComposing: true, keyCode: 229 });
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(0);
+  fireEvent.keyDown(input(), { key: 'Enter' });
+  await waitFor(() => expect(input()).toHaveValue(''));
+  expect(atob(String(api.posts.find(([url]) => url.endsWith('/input'))?.[1].data))).toBe('\x1b[200~/model\x1b[201~\r');
+  expect(api.posts.some(([url]) => url.includes('/admin/ops') || url.includes('/send'))).toBe(false);
+  expect(screen.queryByText(/Байты записаны|Выполнение команды/)).toBeNull();
+  fireEvent.change(input(), { target: { value: 'before selected after' } });
+  (input() as HTMLTextAreaElement).setSelectionRange(7, 15);
+  fireEvent.keyDown(input(), { key: 'Enter', ctrlKey: true });
+  expect(input()).toHaveValue('before \n after');
+  expect((input() as HTMLTextAreaElement).selectionStart).toBe(8);
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);
+  fireEvent.change(input(), { target: { value: '   ' } });
+  fireEvent.keyDown(input(), { key: 'Enter' });
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);
 });
-test('desktop optional terminal is visible alongside chat and remains mounted across tabs', async () => {
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
-    if (url.includes('/read?')) return new Promise(() => {});
-    if (url.includes('/history')) return Promise.resolve(ok(history));
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'ro', epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
-  }));
-  open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
-  await waitFor(() => expect(terminals).toHaveLength(1));
-  expect(screen.getByRole('region', { name: 'Терминал: только чтение' })).toBeVisible();
-  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  expect(terminals).toHaveLength(1);
-  expect(terminals[0].dispose).not.toHaveBeenCalled();
+
+test('#661 uncertain send keeps draft and error visible even with metadata disabled, never retries writer', async () => {
+  vi.useFakeTimers(); const api = wire(); api.setOutcome('unknown'); open();
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  fireEvent.change(input(), { target: { value: 'keep draft' } });
+  await act(async () => { fireEvent.keyDown(input(), { key: 'Enter' }); });
+  expect(input()).toHaveValue('keep draft');
+  expect(screen.getByRole('alert')).toHaveTextContent('uncertain');
+  expect(send()).toBeDisabled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(api.posts.filter(([url]) => url.endsWith('/term'))).toHaveLength(1);
 });
-test('history authorization loss also disables human control and clears terminal output', async () => {
-  let denied = false;
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
-    if (url.includes('/read?')) return new Promise(() => {});
-    if (url.includes('/history')) return Promise.resolve(denied ? { ok: false, status: 403, json: async () => ({ error: 'session revoked' }) } as Response : ok(history));
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
-  }));
-  open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  await screen.findByText('<img src="https://evil.test/i">');
-  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
-  denied = true;
+
+test('#661 startup gates automatic control until a confirmed screen arrives', async () => {
+  vi.useFakeTimers(); const api = wire(); api.setSource('initialization'); open();
+  fireEvent.change(input(), { target: { value: 'wait' } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(send()).toBeDisabled();
+  expect(api.posts).toHaveLength(0);
+  api.setSource('screen');
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(send()).toBeEnabled();
+  expect(api.posts.filter(([url]) => url.endsWith('/term'))).toHaveLength(1);
+});
+
+test('#661 history session change disconnects the writer and preserves draft', async () => {
+  vi.useFakeTimers(); const api = wire(); open();
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  fireEvent.change(input(), { target: { value: 'unsent draft' } });
+  expect(send()).toBeEnabled();
+  api.setPage({ ...history, session_id: 'replacement' });
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(send()).toBeDisabled();
+  expect(input()).toHaveValue('unsent draft');
+  expect(screen.getByRole('alert')).toHaveTextContent('сессия изменилась');
+  expect(api.posts.filter(([url]) => url.endsWith('/close'))).toHaveLength(1);
+});
+
+test('#661 history authorization loss clears private output and revokes control', async () => {
+  vi.useFakeTimers(); const api = wire(); open();
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
   expect(terminals).toHaveLength(1);
   const resets = terminals[0].reset.mock.calls.length;
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
-  await screen.findByText(/session revoked/);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeDisabled());
+  api.mock.mockImplementation((url: string) => url.includes('/history')
+    ? Promise.resolve({ ok: false, status: 403, json: async () => ({ error: 'session revoked' }) } as Response)
+    : url.includes('/read?') ? new Promise<Response>(() => {}) : Promise.resolve(ok({ ok: true })));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(screen.getAllByRole('alert').some(el => el.textContent?.includes('session revoked'))).toBe(true);
+  expect(screen.queryByText('hello')).toBeNull();
+  fireEvent.change(input(), { target: { value: 'draft' } });
+  expect(send()).toBeDisabled();
   expect(terminals[0].reset.mock.calls.length).toBeGreaterThan(resets);
-  expect(screen.queryByText('<img src="https://evil.test/i">')).toBeNull();
 });
-// HYPOTHESIS: digest истории и случайный terminal epoch независимы;
-// первое появление SID и скрытие чата не являются сменой сессии.
-// STATUS: FIXED — see #601
-test('different wire epochs preserve writer across Chat, Terminal and split without close', async () => {
-  const mock = vi.fn((url: string, init?: RequestInit) => {
-    if (url.includes('/read?')) return new Promise(() => {});
-    if (url.includes('/history')) return Promise.resolve(ok(wire.history));
-    if (url.endsWith('/tail')) return Promise.resolve(ok({ source: 'screen', lines: [], truncated: false }));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { ...wire.open, mode: JSON.parse(String(init?.body)).mode }));
-  });
-  vi.stubGlobal('fetch', mock);
-  open(); fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Взять управление' })).toBeEnabled());
-  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
-  const closes = mock.mock.calls.filter(([url]) => url.endsWith('/close')).length;
-  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  await act(async () => {});
-  expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled();
-  fireEvent.click(screen.getByRole('switch', { name: 'Терминал рядом' }));
-  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  await act(async () => {});
-  expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled();
-  expect(mock.mock.calls.filter(([url]) => url.endsWith('/close'))).toHaveLength(closes);
-});
-test('missing timing metadata disables only combined action with reason', async () => {
-  vi.stubGlobal('fetch', vi.fn((url: string) => url.includes('/read?') ? new Promise(() => {})
-    : Promise.resolve(ok(url.includes('/history') ? history : url.endsWith('/tail')
-      ? { source: 'screen', lines: [], truncated: false } : { ...wire.open, interrupt_delay_ms: undefined }))));
-  open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Взять управление' })).toBeEnabled());
-  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
-  fireEvent.change(screen.getByRole('textbox', { name: 'Ввод человека в CLI' }), { target: { value: 'hello' } });
-  expect(screen.getByRole('button', { name: 'Escape, затем добавить и отправить' })).toBeDisabled();
-  expect(screen.getByText(/задержка Escape неизвестна/i)).toBeVisible();
-  expect(screen.getByRole('button', { name: 'Добавить в CLI и отправить Enter' })).toBeEnabled();
-});
-test('switching tabs preserves unsent peer-message draft rather than silently clearing it', async () => {
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
-    if (url.endsWith('/tail')) return Promise.resolve(ok({ source: 'screen', lines: [], truncated: false }));
-    if (url.includes('/history')) return Promise.resolve(ok(history));
-    if (url.includes('/read?')) return new Promise(() => {});
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true }
-      : { tid: 'ro', epoch: 'pty', cursor: 0, mode: body.mode, cols: 80, rows: 24 }));
-  }));
-  open();
-  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
-  const input = await screen.findByRole('textbox', { name: 'Сообщение' });
-  fireEvent.change(input, { target: { value: 'keep this unsent text' } });
-  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  expect(screen.getByRole('textbox', { name: 'Сообщение' })).toBe(input);
-  expect(input).toHaveValue('keep this unsent text');
-});
-test('Stop sends Escape only while read is pending; shortcut only appends draft and does not claim execution', async () => {
-  const inputs: string[] = [];
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    if (url.includes('/read?')) return new Promise(() => {});
-    if (url.includes('/history')) return Promise.resolve(ok(history));
-    if (url.endsWith('/tail')) return Promise.resolve(ok({ source: 'screen', lines: [], truncated: false }));
-    if (url.endsWith('/input')) { inputs.push(atob(body.data)); return Promise.resolve(ok({ seq: body.seq, written: 1, outcome: 'written' })); }
-    return Promise.resolve(ok(url.endsWith('/close') ? { ok: true } : { tid: 'rw', epoch: 't-random', cursor: 0, mode: 'rw', cols: 80, rows: 24 }));
-  }));
-  open(); fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Взять управление' })).toBeEnabled());
-  fireEvent.click(screen.getByRole('button', { name: 'Взять управление' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop: отправить Escape' })).toBeEnabled());
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop: отправить Escape' })); });
-  expect(inputs).toEqual(['\x1b']);
-  const composer = screen.getByRole('textbox', { name: 'Ввод человека в CLI' });
-  fireEvent.change(composer, { target: { value: 'half typed ' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Добавить /help в черновик' }));
-  expect(composer).toHaveValue('half typed /help');
-  expect(inputs).toHaveLength(1);
-  expect(screen.getByText(/команды отправляются/i)).toBeVisible();
+
+test('#661 transcript and dialog use the available width without a reading-column cap', () => {
+  const css = readFileSync('src/components/hybridWorkspace.css', 'utf8');
+  const transcript = css.match(/\.hybrid-transcript\s*\{([^}]+)\}/)?.[1] ?? '';
+  expect(transcript).not.toMatch(/max-width:\s*76ch/);
+  expect(transcript).toMatch(/width:\s*100%/);
+  const card = readFileSync('src/components/PuppetCard.tsx', 'utf8');
+  expect(card).not.toContain('min(1000px,');
+  expect(card).toContain('xOffset={16}');
 });

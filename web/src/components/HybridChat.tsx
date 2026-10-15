@@ -1,12 +1,12 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
-import { Button, Group, Text } from '@mantine/core';
+import { Text } from '@mantine/core';
 import { chatEntries } from '../hybridProtocol';
 import type { ChatEntry, RawRecord } from '../hybridProtocol';
 const json = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-const originLabel = (origin: string) => origin === 'assistant' ? 'Ассистент' : origin === 'human' ? 'Человек' : origin === 'peer' ? 'Папет / мастер' : `Источник не подтверждён${origin === 'unknown' ? '' : ` (${origin})`}`;
-function Entry({ entry }: { entry: ChatEntry }) {
+const originLabel = (origin: string) => origin === 'assistant' ? 'Ассистент' : origin === 'human' ? 'Человек' : origin === 'peer' ? 'Папет / мастер' : 'Сообщение';
+function Entry({ entry, showMetadata }: { entry: ChatEntry; showMetadata: boolean }) {
   if (entry.kind === 'text') return <article className="hybrid-message">
-    <Text size="xs" c="dimmed" mb={4}>{originLabel(entry.origin)}</Text>
+    {showMetadata && <Text size="xs" c="dimmed" mb={4}>{originLabel(entry.origin)}</Text>}
     <div className="hybrid-chat-text">{entry.text}</div>
   </article>;
   const tool = entry.kind === 'tool' || entry.kind === 'result';
@@ -24,26 +24,22 @@ function Entry({ entry }: { entry: ChatEntry }) {
     </> : <pre>{json(entry.raw)}</pre>}
   </details>;
 }
-export function HybridChat({ records, partial, loading, error, refresh }: {
-  records: RawRecord[]; partial: boolean; loading: boolean; error: string | null; refresh: () => Promise<void>;
+export function HybridChat({ records, partial, loading, error, showMetadata }: {
+  records: RawRecord[]; partial: boolean; loading: boolean; error: string | null; showMetadata: boolean;
 }) {
-  const entries = useMemo(() => chatEntries(records), [records]);
+  const entries = useMemo(() => chatEntries(records).filter(entry => showMetadata || entry.kind === 'text'), [records, showMetadata]);
   const viewport = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   useLayoutEffect(() => {
     if (follow.current && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
   }, [entries]);
   return <>
-    <Group justify="space-between" px="md" py="xs" className="hybrid-history-toolbar">
-      <Text size="xs" c="dimmed">История сессии, не поток токенов</Text>
-      <Button size="compact-sm" variant="subtle" disabled={loading} onClick={() => void refresh()}>Обновить историю</Button>
-    </Group>
     {error && <Text role="alert" c="red" size="sm" px="md">История недоступна: {error}. Последние строки доступны во вкладке «Терминал».</Text>}
-    {partial && <Text size="xs" c="dimmed" px="md">Неполная запись: продолжение появится после обновления</Text>}
+    {showMetadata && partial && <Text size="xs" c="dimmed" px="md">Неполная запись: продолжение появится после обновления</Text>}
     <div ref={viewport} className="hybrid-history" role="region" aria-label="История чата" tabIndex={0}
       onScroll={() => { const el = viewport.current!; follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 16; }}>
       <div className="hybrid-transcript">
-        {entries.map(entry => <Entry key={entry.key} entry={entry} />)}
+        {entries.map(entry => <Entry key={entry.key} entry={entry} showMetadata={showMetadata} />)}
         {!entries.length && !error && <Text size="sm" c="dimmed" role={loading ? 'status' : undefined}>{loading ? 'Загрузка истории' : 'В истории пока нет записей'}</Text>}
       </div>
     </div>
