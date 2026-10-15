@@ -112,6 +112,12 @@ test('#661 Enter sends CLI input, Ctrl+Enter inserts a newline at the selection,
   expect(input()).toHaveValue('before \n after');
   expect((input() as HTMLTextAreaElement).selectionStart).toBe(8);
   expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);
+  fireEvent.change(input(), { target: { value: 'first\nlast' } });
+  (input() as HTMLTextAreaElement).setSelectionRange(5, 6);
+  fireEvent.keyDown(input(), { key: 'Enter', ctrlKey: true });
+  expect(input()).toHaveValue('first\nlast');
+  expect((input() as HTMLTextAreaElement).selectionStart).toBe(6);
+  expect((input() as HTMLTextAreaElement).selectionEnd).toBe(6);
   fireEvent.change(input(), { target: { value: '   ' } });
   fireEvent.keyDown(input(), { key: 'Enter' });
   expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
 import type { Terminal } from '@xterm/xterm';
 import { Box, Button, Checkbox, Group, Tabs, Text, Textarea } from '@mantine/core';
 import type { Session } from '../useSession';
@@ -20,8 +20,6 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
   const [notice, setNotice] = useState<string | null>(null);
   const [authLost, setAuthLost] = useState(false);
   const termRef = useRef<Terminal | null>(null);
-  const composer = useRef<HTMLTextAreaElement>(null);
-  const caret = useRef<number | null>(null);
   const sending = useRef(false);
   const bind = useCallback((terminal: Terminal | null) => { termRef.current = terminal; }, []);
   const sink = useMemo(() => ({ write: (data: Uint8Array) => termRef.current?.write(data), reset: () => termRef.current?.reset() }), []);
@@ -65,12 +63,6 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
     // Потерянное подключение не перехватывает writer повторно без открытия диалога.
     if (tail.loaded && tail.mode === 'screen' && !tail.error && !tail.blocked && !attached && !authLost && !history.denied) setAttached(true);
   }, [tail.loaded, tail.mode, tail.error, tail.blocked, attached, authLost, history.denied]);
-  useLayoutEffect(() => {
-    if (caret.current !== null) {
-      composer.current?.setSelectionRange(caret.current, caret.current);
-      caret.current = null;
-    }
-  }, [draft]);
   const showTerminal = tab === 'terminal';
   const showSnapshot = !authLost && !history.denied && (
     terminal.phase === 'disconnected' || terminal.phase === 'unknown'
@@ -104,15 +96,15 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
         <HybridChat records={history.records} partial={history.partial} loading={history.loading} error={history.error} showMetadata={showMetadata} />
         <Box p="md" className="hybrid-composer">
           <div className="hybrid-compose-row">
-            <Textarea ref={composer} className="hybrid-input" aria-label="Ввод человека в CLI" placeholder="Сообщение или /команда" autosize minRows={2} maxRows={6} value={draft}
+            <Textarea className="hybrid-input" aria-label="Ввод человека в CLI" placeholder="Сообщение или /команда" autosize minRows={2} maxRows={6} value={draft}
               onChange={event => setDraft(event.currentTarget.value)}
               onKeyDown={event => {
                 if (event.key !== 'Enter' || event.nativeEvent.isComposing || event.keyCode === 229) return;
                 event.preventDefault();
                 if (event.ctrlKey) {
                   const { selectionStart, selectionEnd } = event.currentTarget;
-                  caret.current = selectionStart + 1;
-                  setDraft(current => current.slice(0, selectionStart) + '\n' + current.slice(selectionEnd));
+                  event.currentTarget.setRangeText('\n', selectionStart, selectionEnd, 'end');
+                  setDraft(event.currentTarget.value);
                 } else void submit();
               }} />
             <Button size="sm" disabled={!terminal.canInput || terminal.busy || !draft.trim()} onClick={() => void submit()}>Отправить</Button>
