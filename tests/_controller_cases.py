@@ -25,8 +25,8 @@ class TransportDeadline(TransactionTestCase):
         from django.test import override_settings
         from _controller_transport import Blackhole
         for pooled in (False, True):
-            for mode in ('orm', 'drf', 'commit'):
-                commit = mode == 'commit'
+            for mode in ('orm', 'drf', 'commit', 'atomic_commit'):
+                commit = mode in {'commit', 'atomic_commit'}
                 with self.subTest(pool=pooled, mode=mode), override_settings(CONTROLLER_DB_TIMEOUT=.25):
                     proxy = Blackhole(connection.settings_dict)
                     alias = proxy.alias('blackhole', pool=pooled)
@@ -39,9 +39,15 @@ class TransportDeadline(TransactionTestCase):
                         try:
                             db.ensure_connection()
                             raw.append(db.connection)
+                            if mode == 'atomic_commit':
+                                from mop.server.controller.runtime import short_transaction
+                                with short_transaction(using=alias, budget=1):
+                                    get_user_model().objects.using(alias).create(username=f'lost-{mode}-{pooled}')
+                                    proxy.drop.set()
+                                return
                             if commit:
                                 db.set_autocommit(False)
-                                get_user_model().objects.using(alias).create(username=f'lost-commit-{pooled}')
+                                get_user_model().objects.using(alias).create(username=f'lost-{mode}-{pooled}')
                             proxy.drop.set()
                             if commit:
                                 db.commit()
@@ -77,7 +83,8 @@ class TransportDeadline(TransactionTestCase):
                         self.assertTrue(raw[0].closed, 'uncertain transport connection was reused')
                         if commit:
                             self.assertIn('outcome unknown', str(errors[0]))
-                            self.assertTrue(get_user_model().objects.filter(username=f'lost-commit-{pooled}').exists())
+                            self.assertTrue(getattr(errors[0].__cause__, 'outcome_unknown', False))
+                            self.assertTrue(get_user_model().objects.filter(username=f'lost-{mode}-{pooled}').exists())
                     finally:
                         # Только ПОСЛЕ deadline assertion закрываем proxy: иначе тест скрывает дефект.
                         proxy.close()
