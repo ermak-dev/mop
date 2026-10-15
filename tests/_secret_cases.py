@@ -367,6 +367,45 @@ class SecretCases(TransactionTestCase):
         self.assertNotEqual(r.claim_id, claim)
         self.assertEqual(r.generation, 2)
 
+    def test_rotation_issues_staged_bytes_only_to_current_claim_and_address(self):
+        svc, a, new, b, r = self.rotation()
+        api, gate = self.delivery(b)
+        self.assertTrue(callable(getattr(api, 'issue_rotation', None)),
+                        'staged credentials require an explicit claim-bound issuer')
+        with self.assertRaises(self.s.Conflict):
+            api.issue_rotation('machine', r.id, claim_id=uuid.uuid4(), generation=1)
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        issued = api.issue_rotation('machine', r.id, claim_id=r.claim_id, generation=r.generation)
+        self.assertEqual((issued[0].version_id, issued[0].value), (new.id, b'new-key'))
+        self.assertEqual(api.issue_addressed('machine')[0].value, b'private-value\x00\xff')
+        with self.assertRaises(self.s.Conflict):
+            api.issue_rotation('machine', r.id, claim_id=uuid.uuid4(), generation=r.generation)
+
+    def test_credential_update_cannot_bypass_rotation_and_db_rejects_raw_reason(self):
+        proxy = self.secret('PROXY', project_id=None, purpose='proxy', kind='credential')
+        with self.assertRaises(self.s.Refused):
+            self.api.update(self.actor, proxy.id, b'bypass', expected_revision=1)
+        svc, a, new, b, r = self.rotation()
+        for fields in ({'pending': 'arbitrary'}, {'original_reason': 'private-value'},
+                       {'original_failure': 'deliver', 'original_reason': None}):
+            with self.subTest(fields=fields), self.assertRaises(IntegrityError), transaction.atomic():
+                self.m.CredentialRotation._base_manager.filter(pk=r.id).update(**fields)
+
+    def test_concurrent_nonce_collision_is_reencrypted_with_independent_connections(self):
+        barrier = threading.Barrier(2)
+        seen = threading.local()
+        def nonce(size):
+            if not getattr(seen, 'once', False):
+                seen.once = True
+                barrier.wait(timeout=10)
+                return b'n' * size
+            from os import urandom
+            return urandom(size)
+        with patch('mop.server.secrets.crypto.utils.random', side_effect=nonce):
+            results = self.race(lambda i: self.secret('PARALLEL_' + str(i)))
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self.m.SecretVersion.objects.values('key_id', 'nonce').distinct().count(), 2)
+
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission
         codes = set(Permission.objects.filter(content_type__app_label='secrets').values_list('codename', flat=True))
