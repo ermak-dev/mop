@@ -51,7 +51,7 @@ def _tool_environment(config):
 
 
 def _tool(tool, config, *, major, input=None, output=None, extra=(), database=True):
-    if config['ENGINE'] != 'django.db.backends.postgresql':
+    if config['ENGINE'] not in {'django.db.backends.postgresql', 'mop.server.controller.postgresql'}:
         raise RuntimeError('backup/restore is supported only for PostgreSQL')
     try:
         version = subprocess.run([tool, '--version'], capture_output=True, timeout=5, check=True)

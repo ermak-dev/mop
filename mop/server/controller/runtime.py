@@ -2,7 +2,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from functools import partial
@@ -30,20 +30,49 @@ def configure():
 
 
 def materialized(value):
-    """Снимок без Model/QuerySet/cursor/generator и общих mutable контейнеров."""
-    if value is None or isinstance(value, (str, bytes, bool, int, float, Decimal, date, datetime, UUID)):
+    """Снимок всех полей без Model/QuerySet/cursor/generator и циклов."""
+    return _snapshot(value, set())
+
+
+def _snapshot(value, ancestors):
+    kind = type(value)
+    # isinstance() читает __class__ у Django lazy proxy и тем самым запускает
+    # его loader. Только обычные scalar/container значения проходят без hooks.
+    if value is None or kind in (str, bytes, bool, int, float, Decimal, date, datetime, UUID):
         return value
-    if isinstance(value, dict):
-        if any(not isinstance(key, (str, int)) for key in value):
-            raise TypeError('database boundary requires materialized dictionary keys')
-        return {key: materialized(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        items = [materialized(item) for item in value]
-        return items if isinstance(value, list) else tuple(items)
-    if is_dataclass(value) and not isinstance(value, type) and value.__dataclass_params__.frozen:
-        return replace(value, **{field.name: materialized(getattr(value, field.name))
-                                 for field in fields(value) if field.init})
-    raise TypeError('database boundary requires materialized values, not live ORM or I/O objects')
+    identity = id(value)
+    if identity in ancestors:
+        raise TypeError('database boundary requires acyclic materialized values')
+    ancestors.add(identity)
+    try:
+        if is_dataclass(kind):
+            if not kind.__dataclass_params__.frozen:
+                raise TypeError('database boundary requires materialized frozen dataclasses')
+            try:
+                values = {field.name: _snapshot(object.__getattribute__(value, field.name), ancestors)
+                          for field in fields(kind)}
+            except AttributeError:
+                raise TypeError('database boundary requires all dataclass fields to be materialized') from None
+            # replace() повторяет factory/post_init и теряет состояние init=False.
+            # Встроенные базовые типы с непрозрачным состоянием нельзя копировать
+            # через object.__new__: явно отказываем, а не теряем это состояние.
+            try:
+                copy = object.__new__(kind)
+                for name, item in values.items():
+                    object.__setattr__(copy, name, item)
+            except (TypeError, AttributeError):
+                raise TypeError('database boundary requires materialized plain frozen dataclasses') from None
+            return copy
+        if kind is dict:
+            if any(type(key) not in (str, int, bool) for key in value):
+                raise TypeError('database boundary requires materialized dictionary keys')
+            return {key: _snapshot(item, ancestors) for key, item in value.items()}
+        if kind in (list, tuple):
+            items = [_snapshot(item, ancestors) for item in value]
+            return items if kind is list else tuple(items)
+        raise TypeError('database boundary requires materialized values, not live ORM or I/O objects')
+    finally:
+        ancestors.remove(identity)
 
 
 def _database_invoke(function, args, kwargs):
@@ -55,38 +84,16 @@ def _database_invoke(function, args, kwargs):
         connections.close_all()
 
 
-async def _quiescent(task):
-    """Отмена caller не объявляет ещё исполняющийся поток завершённым."""
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled():
-            task.exception()
-        raise
-
-
-async def database_call(function, *args, **kwargs):
-    """Целая sync-служба, thread-sensitive; только материализованный результат.
-
-    Для конкурирующих задач worker использует Runtime.database с ограниченным
-    executor. Этот helper пригоден для редких событий долгого consumer; Channels
-    закрывает устаревшие соединения перед пробуждением, finally — после него.
-    """
-    args, kwargs = materialized(args), materialized(kwargs)
-    call = database_sync_to_async(_database_invoke, thread_sensitive=True)
-    return await _quiescent(asyncio.create_task(call(function, args, kwargs)))
+def _observe(task):
+    # Отменённый caller уже не прочтёт ошибку; владелец продолжает учитывать
+    # задачу до настоящего завершения, без утечки traceback через asyncio log.
+    if not task.cancelled():
+        task.exception()
 
 
 @contextmanager
 def short_transaction(using='default', budget=10):
-    """Rollback до COMMIT при превышении бюджета. Никакого внешнего I/O.
+    """Deadline до COMMIT; при сетевом отказе соединение fenced. Без внешнего I/O.
 
     Служба берёт project rows по id, resource/aggregate rows по (kind, id).
     IntegrityError/CAS/lock timeout выходят вызывающему; автоматического retry
@@ -94,8 +101,11 @@ def short_transaction(using='default', budget=10):
     """
     if not 0 < budget <= 10:
         raise ValueError('transaction budget must be within 10 seconds')
+    from .postgresql.base import transaction_deadline
     start = time.monotonic()
-    with transaction.atomic(using=using):
+    # Бюджет действует на каждом driver wait, не только после yield. Python
+    # без обращений к БД нельзя прервать: для него остаётся проверка на выходе.
+    with transaction_deadline(budget), transaction.atomic(using=using):
         yield
         if time.monotonic() - start > budget:
             raise TimeoutError('application transaction exceeded its time budget')
@@ -132,6 +142,9 @@ class Runtime:
         self._started_adapters = []
         self._started = False
         self._stopped = False
+        self._closed = False
+        self._cleanup = None
+        self._closing_adapter = None
 
     @property
     def pending(self):
@@ -167,9 +180,13 @@ class Runtime:
         task = asyncio.create_task(execute())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        return await _quiescent(task)
+        task.add_done_callback(_observe)
+        # Отмена caller завершается сразу, но не отменяет работу и не отдаёт
+        # её слот. Бесконечный CPU callback оставит честный incomplete shutdown.
+        return await asyncio.shield(task)
 
     async def database(self, function, *args, **kwargs):
+        """Единственная async DB-граница: целая служба в owned bounded worker."""
         args, kwargs = materialized(args), materialized(kwargs)
         call = database_sync_to_async(_database_invoke, thread_sensitive=False, executor=self._database_executor)
         return await self._submit('database', self._database, self._database_capacity,
@@ -187,6 +204,8 @@ class Runtime:
                                   lambda: function(*args, **kwargs))
 
     async def aclose(self, timeout=10):
+        if self._closed:
+            return
         self._stopped = True
         if self._tasks:
             _, pending = await asyncio.wait(tuple(self._tasks), timeout=timeout)
@@ -194,17 +213,38 @@ class Runtime:
                 # Не закрывать adapters под ещё живым эффектом и не освобождать
                 # его слот. Следующий shutdown может дождаться quiescence.
                 raise RuntimeError('controller shutdown incomplete: work is still running')
-        errors = []
         while self._started_adapters:
-            adapter = self._started_adapters.pop()
+            if self._closing_adapter is None:
+                self._closing_adapter = asyncio.ensure_future(self._started_adapters[-1].aclose())
+                self._closing_adapter.add_done_callback(_observe)
+            # wait_for отменяет coroutine и ждёт acknowledgement без верхней
+            # границы. Здесь cleanup остаётся owned и продолжается при retry.
+            _, pending = await asyncio.wait((self._closing_adapter,), timeout=timeout)
+            if pending:
+                raise RuntimeError('controller shutdown incomplete: adapter cleanup is still running')
             try:
-                await asyncio.wait_for(adapter.aclose(), timeout=timeout)
+                self._closing_adapter.result()
             except Exception as exc:
-                errors.append(type(exc).__name__)
+                self._closing_adapter = None
+                raise RuntimeError('controller adapter shutdown failed: ' + type(exc).__name__) from None
+            self._closing_adapter = None
+            self._started_adapters.pop()
+        if self._cleanup is None:
+            self._cleanup = asyncio.get_running_loop().run_in_executor(self._executor, close_pools)
+            self._cleanup.add_done_callback(_observe)
+        _, pending = await asyncio.wait((self._cleanup,), timeout=timeout)
+        if pending:
+            raise RuntimeError('controller shutdown incomplete: database cleanup is still running')
+        try:
+            self._cleanup.result()
+        except Exception:
+            # Пул сохранил живых workers; после их stop следующий drain может
+            # повторить cleanup, а не навсегда читать старую failed future.
+            self._cleanup = None
+            raise
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._database_executor.shutdown(wait=True, cancel_futures=True)
-        if errors:
-            raise RuntimeError('controller adapter shutdown failed: ' + ', '.join(errors))
+        self._closed = True
 
 
 def _maintenance_role():
@@ -407,7 +447,6 @@ async def run_worker(stop, runtime):
         await stop.wait()
     finally:
         await runtime.aclose()
-        await database_call(close_pools)
 
 
 def worker():
