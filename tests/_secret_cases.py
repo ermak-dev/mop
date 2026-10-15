@@ -27,12 +27,13 @@ class Allow:
 
 
 class Gate:
-    def __init__(self, selection):
+    def __init__(self, selection, actor='machine'):
         self.selection = selection
+        self.actor = actor
         self.calls = 0
 
     def resolve(self, actor):
-        if actor != 'machine':
+        if actor != self.actor:
             raise PermissionError('denied')
         self.calls += 1
         return self.selection
@@ -179,7 +180,8 @@ class SecretCases(TransactionTestCase):
             def encrypt(_, value, context):
                 calls.append(context)
                 if len(calls) == 1:
-                    return Envelope.from_bytes(bytes(row.envelope))
+                    with patch('mop.server.secrets.crypto.utils.random', return_value=bytes(row.nonce)):
+                        return original(value, context)
                 return original(value, context)
             def decrypt(_, envelope, context):
                 return self.crypto.decrypt(envelope, context)
@@ -271,7 +273,8 @@ class SecretCases(TransactionTestCase):
         a = self.secret()
         new = self.api.stage(self.actor, a.id, b'new-key', expected_revision=1)
         b = self.binding(self.api.metadata(self.actor, a.id))
-        service = self.s.RotationService(authorizer=Allow())
+        gate = Gate(self.s.DeliverySelection((b.id,), ((b.kind, b.name),)), actor=self.actor)
+        service = self.s.RotationService(authorizer=Allow(), delivery_gate=gate)
         r = service.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
         return service, a, new, b, r
 
@@ -381,10 +384,12 @@ class SecretCases(TransactionTestCase):
         with self.assertRaises(self.s.Conflict):
             api.issue_rotation('machine', r.id, claim_id=uuid.uuid4(), generation=r.generation)
 
-    def test_credential_update_cannot_bypass_rotation_and_db_rejects_raw_reason(self):
+    def test_credential_update_cannot_bypass_rotation(self):
         proxy = self.secret('PROXY', project_id=None, purpose='proxy', kind='credential')
         with self.assertRaises(self.s.Refused):
             self.api.update(self.actor, proxy.id, b'bypass', expected_revision=1)
+
+    def test_database_rejects_non_enum_rotation_reasons(self):
         svc, a, new, b, r = self.rotation()
         for fields in ({'pending': 'arbitrary'}, {'original_reason': 'private-value'},
                        {'original_failure': 'deliver', 'original_reason': None}):
@@ -437,6 +442,40 @@ class SecretCases(TransactionTestCase):
             self.assertIsNone(error.__context__)
         else:
             self.fail('provider failure was swallowed')
+
+    def test_file_metadata_exposes_size_without_content(self):
+        a = self.secret('keys/private.pem', kind='file')
+        self.assertEqual(getattr(self.api.metadata(self.actor, a.id), 'size', None), len(b'private-value\x00\xff'))
+        self.assertNotIn('private-value', repr(self.api.list(self.actor, project_id=self.p.pk)))
+
+    def test_retirement_and_compensation_have_persisted_crash_checkpoints(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        svc.receipt(self.actor, r.id, b.id, version_id=new.id, claim_id=r.claim_id,
+                    generation=r.generation, outcome=Outcome.APPLIED)
+        r = svc.record(self.actor, r.id, Outcome.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        r = svc.activate(self.actor, r.id, expected_revision=r.revision)
+        r = svc.begin(self.actor, r.id, Effect.RETIRE_OLD, expected_revision=r.revision)
+        restarted = self.s.RotationService(authorizer=Allow(), delivery_gate=svc.delivery_gate)
+        self.assertEqual(restarted.metadata(self.actor, r.id).pending, Effect.RETIRE_OLD)
+        r = restarted.record(self.actor, r.id, Outcome.REJECTED, claim_id=r.claim_id,
+                             expected_revision=r.revision, reason=FailureReason.REFUSED)
+        r = restarted.begin(self.actor, r.id, Effect.RESTORE_OLD, expected_revision=r.revision)
+        r = restarted.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        with self.assertRaises(self.s.Refused):
+            restarted.reconcile(self.actor, r.id, Observation.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        restarted.receipt(self.actor, r.id, b.id, version_id=a.active_version_id, claim_id=r.claim_id,
+                          generation=r.generation, outcome=Outcome.APPLIED)
+        r = restarted.reconcile(self.actor, r.id, Observation.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        self.assertEqual(r.state, Stage.OLD_RESTORED)
+        self.assertEqual(self.api.metadata(self.actor, a.id).active_version_id, a.active_version_id)
+        r = restarted.begin(self.actor, r.id, Effect.REVOKE_NEW, expected_revision=r.revision)
+        self.assertEqual(self.s.RotationService(authorizer=Allow()).metadata(self.actor, r.id).pending, Effect.REVOKE_NEW)
+        r = restarted.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        r = restarted.reconcile(self.actor, r.id, Observation.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        self.assertEqual(r.state, Stage.COMPENSATED)
+        self.assertTrue(self.m.CredentialRotation.objects.get(pk=r.id).resolved)
+        self.assertEqual(r.original_reason, FailureReason.REFUSED)
 
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission

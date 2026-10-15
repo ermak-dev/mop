@@ -11,11 +11,12 @@ id и сами SecretBinding не являются доказательство�
 Admin. Provider инжектируется только защищённой композицией; root_digest не ключ.
 """
 from dataclasses import dataclass, field
+from functools import wraps
 import json
 from typing import Protocol
 import uuid
 
-from django.db import IntegrityError, connections, transaction
+from django.db import DatabaseError, IntegrityError, connections, transaction
 
 from . import models as m
 from .crypto import CryptoProvider, Envelope, SecretContext, SecretCryptoError, MAX_PLAINTEXT_BYTES
@@ -31,6 +32,21 @@ class Refused(ValueError):
 
 class TransactionBoundary(ValueError):
     """Внешний provider запрещён даже внутри транзакции вызывающего кода."""
+
+
+class StorageUnavailable(ValueError):
+    """Без DSN, параметров запроса, ciphertext или exception context драйвера."""
+
+
+def storage_errors(command):
+    @wraps(command)
+    def run(*args, **kwargs):
+        try:
+            return command(*args, **kwargs)
+        except DatabaseError:
+            pass
+        raise StorageUnavailable('secret storage is unavailable')
+    return run
 
 
 class Authorizer(Protocol):
@@ -200,11 +216,13 @@ class SecretStore:
         self.authorizer = authorizer if authorizer is not None else Deny()
         self.delivery_gate = delivery_gate if delivery_gate is not None else Deny()
 
+    @storage_errors
     def metadata(self, actor, secret_id):
         row = m.Secret.objects.get(pk=secret_id)
         authorize(self.authorizer, actor, 'view_secret_metadata', row)
         return metadata(row)
 
+    @storage_errors
     def list(self, actor, *, project_id):
         # Установка и проект — разные relational namespaces; wildcard list нет.
         rows = tuple(m.Secret.objects.filter(project_id=project_id).order_by('id'))
@@ -212,6 +230,7 @@ class SecretStore:
             project_ids=(project_id,) if project_id else (), node_ids=(), client_ids=())
         return tuple(metadata(row) for row in rows)
 
+    @storage_errors
     def create(self, actor, *, project_id, name, kind, purpose, value):
         outside_transaction()
         value_bytes(value)
@@ -254,6 +273,8 @@ class SecretStore:
         expected(row, expected_revision)
         available(row)
         no_rotation(row)
+        if activate and (row.purpose != 'project' or row.kind not in ('variable', 'file')):
+            raise Refused('credential replacement requires staged rotation')
         version = m.SecretVersion(secret=row, number=row.last_number + 1, size=len(value))
         aad = context(row, version)
         for _ in range(4):
@@ -282,12 +303,15 @@ class SecretStore:
                 raise Conflict('secret version could not be committed')
         raise Conflict('secret nonce reservation exhausted')
 
+    @storage_errors
     def stage(self, actor, secret_id, value, *, expected_revision):
         return self._write(actor, secret_id, value, expected_revision, False)
 
+    @storage_errors
     def update(self, actor, secret_id, value, *, expected_revision):
         return self._write(actor, secret_id, value, expected_revision, True)
 
+    @storage_errors
     def revoke(self, actor, secret_id, *, expected_revision):
         with transaction.atomic():
             row = m.Secret.objects.select_for_update().get(pk=secret_id)
@@ -299,6 +323,7 @@ class SecretStore:
             audit(actor, 'revoke', row)
             return metadata(row)
 
+    @storage_errors
     def bind(self, actor, secret_id, *, expected_revision, node_id=None, client_id=None,
              controller=False, role, digest, incarnation, grant_id, assignment_id):
         with transaction.atomic():
@@ -340,6 +365,7 @@ class SecretStore:
                 raise Refused('addressed secret version mismatch')
         return selection, bindings
 
+    @storage_errors
     def issue_addressed(self, actor):
         outside_transaction()
         selected, bindings = self._selection(actor)
@@ -347,10 +373,7 @@ class SecretStore:
         result = []
         for binding in bindings:
             secret, version = binding.secret, binding.secret.active_version
-            envelope = Envelope.from_bytes(bytes(version.envelope))
-            if envelope.key_id != version.key_id or envelope.nonce != bytes(version.nonce):
-                raise SecretCryptoError('secret envelope metadata mismatch')
-            value = reveal(self.provider, envelope, context(secret, version))
+            value = self._decrypt(secret, version)
             result.append(AddressedSecret(binding.id, version.id, secret.name, secret.kind, value))
         # После любого provider wait заново gate + current refs. Только ORM/local
         # auth в этой короткой транзакции; root/provider I/O уже закончился.
@@ -361,6 +384,52 @@ class SecretStore:
             if current != selected or current_pins != pins:
                 raise Conflict('addressed secret assignment or version changed')
         return tuple(result)
+
+    def _decrypt(self, secret, version):
+        envelope = Envelope.from_bytes(bytes(version.envelope))
+        if envelope.key_id != version.key_id or envelope.nonce != bytes(version.nonce):
+            raise SecretCryptoError('secret envelope metadata mismatch')
+        value = reveal(self.provider, envelope, context(secret, version))
+        if len(value) != version.size:
+            raise SecretCryptoError('secret envelope size mismatch')
+        return value
+
+    def _rotation_version(self, row, bindings, claim_id, generation):
+        if (row.claim_id != claim_id or claim_id is None or row.generation != generation
+                or row.state not in (Stage.DELIVERING.value, Stage.RESTORING_OLD.value)
+                or row.pending not in (Effect.DELIVER.value, Effect.RESTORE_OLD.value)
+                or row.secret_revision != row.secret.revision or row.secret.revoked):
+            raise Conflict('rotation issuance requires current pending claim')
+        required = set(m.RotationRecipient.objects.filter(rotation=row).values_list('binding_id', flat=True))
+        if any(b.secret_id != row.secret_id or b.id not in required for b in bindings):
+            raise Refused('rotation issuance recipient mismatch')
+        version = row.new_version if row.pending == Effect.DELIVER.value else row.old_version
+        if version.secret_id != row.secret_id:
+            raise Refused('rotation issuance version mismatch')
+        return version
+
+    @storage_errors
+    def issue_rotation(self, actor, rotation_id, *, claim_id, generation):
+        outside_transaction()
+        if type(generation) is not int or generation < 1:
+            raise Conflict('invalid rotation issuance generation')
+        selection, bindings = self._selection(actor)
+        row = m.CredentialRotation.objects.select_related('secret', 'old_version', 'new_version').get(pk=rotation_id)
+        version = self._rotation_version(row, bindings, claim_id, generation)
+        pins = tuple((b.id, b.secret.revision, b.secret.active_version_id) for b in bindings)
+        results = tuple(AddressedSecret(b.id, version.id, b.secret.name, b.secret.kind,
+                        self._decrypt(b.secret, version)) for b in bindings)
+        with transaction.atomic():
+            secret = m.Secret.objects.select_for_update().get(pk=row.secret_id)
+            current = m.CredentialRotation.objects.select_for_update().get(pk=rotation_id)
+            current.secret = secret
+            selected, bound = self._selection(actor)
+            actual_version = self._rotation_version(current, bound, claim_id, generation)
+            actual_pins = tuple((b.id, b.secret.revision, b.secret.active_version_id) for b in bound)
+            if (selected != selection or pins != actual_pins or current.revision != row.revision
+                    or actual_version.id != version.id):
+                raise Conflict('rotation issuance binding changed after provider wait')
+        return results
 
 
 # Конкретный ORM lifecycle только оборачивает проверенную чистую политику.
@@ -396,8 +465,9 @@ class RotationService:
     означает доказанный покой старого executor, не результат сетевого timeout.
     Эти факты будущий #639/#648 адаптер подаёт через авторизованный порт.
     """
-    def __init__(self, *, authorizer: Authorizer | None = None):
+    def __init__(self, *, authorizer: Authorizer | None = None, delivery_gate: DeliveryGate | None = None):
         self.authorizer = authorizer if authorizer is not None else Deny()
+        self.delivery_gate = delivery_gate if delivery_gate is not None else Deny()
 
     def _bindings(self, row):
         return tuple(m.SecretBinding.objects.filter(rotationrecipient__rotation=row).order_by('id'))
@@ -441,11 +511,13 @@ class RotationService:
             raise Conflict('rotation active version changed')
         return row
 
+    @storage_errors
     def metadata(self, actor, rotation_id):
         row = m.CredentialRotation.objects.select_related('secret').get(pk=rotation_id)
         self._authorize(actor, row, 'view_secret_metadata')
         return self._metadata(row)
 
+    @storage_errors
     def stage(self, actor, secret_id, new_version_id, binding_ids, *, expected_revision):
         if not binding_ids or len(set(binding_ids)) != len(binding_ids):
             raise Refused('rotation requires exact addressed recipients')
@@ -495,6 +567,7 @@ class RotationService:
         audit(actor, action, row.secret, row)
         return self._metadata(row)
 
+    @storage_errors
     def begin(self, actor, rotation_id, effect, *, expected_revision):
         if type(effect) is not Effect:
             raise ValueError('invalid rotation effect')
@@ -517,6 +590,7 @@ class RotationService:
         if row.pending is None or claim_id is None or row.claim_id != claim_id:
             raise Conflict('rotation claim changed or has no pending intent')
 
+    @storage_errors
     def receipt(self, actor, rotation_id, binding_id, *, version_id, claim_id, generation, outcome):
         if type(outcome) is not Outcome or type(generation) is not int or generation < 1:
             raise ValueError('invalid rotation receipt')
@@ -532,6 +606,10 @@ class RotationService:
             if recipient is None or version_id != expected_version:
                 raise Refused('rotation receipt recipient or version mismatch')
             authorize(self.authorizer, actor, 'deliver_secret', row.secret, (recipient.binding,))
+            selected = self.delivery_gate.resolve(actor)
+            if (type(selected) is not DeliverySelection or recipient.binding_id not in selected.binding_ids
+                    or (row.secret.kind, row.secret.name) not in selected.required_names):
+                raise Refused('rotation receipt has no current addressed proof')
             receipt = m.DeliveryReceipt.objects.filter(recipient=recipient, generation=generation).first()
             if receipt:
                 if (receipt.claim_id, receipt.version_id, receipt.outcome) != (claim_id, version_id, outcome.value):
@@ -542,6 +620,7 @@ class RotationService:
                 audit(actor, 'receipt', row.secret, row)
             return receipt.id
 
+    @storage_errors
     def record(self, actor, rotation_id, outcome, *, claim_id, expected_revision, reason=None):
         with transaction.atomic():
             row = self._locked(actor, rotation_id, expected_revision)
@@ -554,6 +633,7 @@ class RotationService:
             next_policy = policy.record(expected_revision=expected_revision, outcome=outcome, receipts=receipts, reason=reason)
             return self._save(actor, row, next_policy, 'rotation_record')
 
+    @storage_errors
     def reconcile(self, actor, rotation_id, outcome, *, claim_id, expected_revision, quiescent=False):
         with transaction.atomic():
             row = self._locked(actor, rotation_id, expected_revision)
@@ -567,6 +647,7 @@ class RotationService:
                                            receipts=receipts, quiescent=quiescent)
             return self._save(actor, row, next_policy, 'rotation_reconcile')
 
+    @storage_errors
     def activate(self, actor, rotation_id, *, expected_revision):
         with transaction.atomic():
             row = self._locked(actor, rotation_id, expected_revision)
