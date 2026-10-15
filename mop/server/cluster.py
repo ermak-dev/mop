@@ -1657,7 +1657,7 @@ async def serve(log, api=nomad):
     (#275), по умолчанию живой."""
     # Оба субъекта (#207): с логином вызывающего и прежний, до уборки.
     subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY),
-            busnames.join_config(busnames.ANY)]
+            busnames.join_config(busnames.ANY), busnames.cluster_role(busnames.ANY)]
     # Ключ LLM-прокси узлам (#391): клиентские пути раздачи умерли, владелец
     # ключа -- сервер. Старт -- не тик: ключ обязан опередить первый папет.
     proxykey.start(log)
