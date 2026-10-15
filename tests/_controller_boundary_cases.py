@@ -112,6 +112,32 @@ class Materialization(unittest.TestCase):
         self.assertEqual(wrapper.settings_dict['NAME'], 'explicit-target-before-connect')
         self.assertIsNone(wrapper.connection)
 
+    def test_plain_enum_identity_values_can_cross_with_frozen_contexts(self):
+        # HYPOTHESIS: ActorContext.kind — Enum; строгая scalar-проверка
+        # ошибочно отвергала полностью материализованный frozen context.
+        # SOLUTION: только обычные enum members со scalar value и без
+        # дополнительного/lazy состояния; исходные ORM guards сохраняются.
+        # RESULT: observed red, затем безопасный roundtrip и два отказа green.
+        from dataclasses import dataclass
+        from enum import Enum
+        from mop.server.controller.runtime import materialized
+        class Kind(str, Enum):
+            HUMAN = 'human'
+        @dataclass(frozen=True)
+        class Context:
+            kind: Kind
+        copied = materialized(Context(Kind.HUMAN))
+        self.assertIs(copied.kind, Kind.HUMAN)
+        class Lazy(Enum):
+            VALUE = iter([1])
+        with self.assertRaisesRegex(TypeError, 'materialized'):
+            materialized(Lazy.VALUE)
+        class Extra(str, Enum):
+            HUMAN = 'human'
+        Extra.HUMAN.hidden = iter([1])
+        with self.assertRaisesRegex(TypeError, 'materialized'):
+            materialized(Extra.HUMAN)
+
     def test_only_owned_runtime_exposes_the_database_bridge(self):
         from mop.server.controller import runtime
         self.assertFalse(hasattr(runtime, 'database_call'), 'unowned database bridge remains public')

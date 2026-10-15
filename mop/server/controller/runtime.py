@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from functools import partial
 import io
 import os
@@ -63,6 +64,18 @@ def _snapshot(value, ancestors):
             except (TypeError, AttributeError):
                 raise TypeError('database boundary requires materialized plain frozen dataclasses') from None
             return copy
+        if issubclass(kind, Enum):
+            metadata = object.__getattribute__(value, '__dict__')
+            allowed = {'_value_', '_name_', '__objclass__', '_sort_order_', '_label_'}
+            scalars = (str, bytes, bool, int, float, Decimal, date, datetime, UUID, type(None))
+            if (not {'_value_', '_name_', '__objclass__'} <= metadata.keys()
+                    or set(metadata) - allowed or metadata.get('__objclass__') is not kind
+                    or any(type(item) not in scalars for name, item in metadata.items() if name != '__objclass__')
+                    or any(base.__dict__.get('__slots__') for base in kind.__mro__)):
+                raise TypeError('database boundary requires materialized plain enum values')
+            if kind.__members__.get(metadata.get('_name_')) is not value:
+                raise TypeError('database boundary requires materialized enum members')
+            return value
         if kind is dict:
             if any(type(key) not in (str, int, bool) for key in value):
                 raise TypeError('database boundary requires materialized dictionary keys')
