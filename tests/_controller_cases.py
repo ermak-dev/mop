@@ -29,6 +29,8 @@ class TransportDeadline(TransactionTestCase):
                 with self.subTest(pool=pooled, commit=commit), override_settings(CONTROLLER_DB_TIMEOUT=.25):
                     proxy = Blackhole(connection.settings_dict)
                     alias = proxy.alias('blackhole', pool=pooled)
+                    allowed = type(self).databases
+                    type(self).databases = allowed | {alias}
                     finished = threading.Event()
                     errors, raw = [], []
                     def service():
@@ -68,7 +70,9 @@ class TransportDeadline(TransactionTestCase):
                         db = connections[alias]
                         if hasattr(db, 'close_pool'):
                             db.close_pool()
+                        del connections[alias]
                         del connections.databases[alias]
+                        type(self).databases = allowed
 
     def test_cancelled_async_database_call_drains_blackholed_transport_and_executor(self):
         from django.test import override_settings
@@ -77,6 +81,8 @@ class TransportDeadline(TransactionTestCase):
         with override_settings(CONTROLLER_DB_TIMEOUT=.25):
             proxy = Blackhole(connection.settings_dict)
             alias = proxy.alias('async_blackhole', pool=False)
+            allowed = type(self).databases
+            type(self).databases = allowed | {alias}
             entered = threading.Event()
             raw = []
             def service():
@@ -105,6 +111,7 @@ class TransportDeadline(TransactionTestCase):
                     await asyncio.gather(task, return_exceptions=True)
                     await runtime.aclose()
                     del connections.databases[alias]
+                    type(self).databases = allowed
             async_to_sync(run)()
 
     def test_transaction_deadline_releases_observed_lock_during_successive_short_queries(self):
