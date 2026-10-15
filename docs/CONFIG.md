@@ -1,691 +1,247 @@
-# CONFIG: хранилища конфигурации установки
+# Configuration ownership
 
-Карта всех хранилищ mop: кто владеет файлом, кто его читает, какие у него
-права, откуда он берётся и как обновляется. Один документ отвечает на
-вопрос «где правда про X и кто её пишет» — раньше ответ был рассыпан по
-комментариям модулей и докам подсистем, и исторические комментарии
-расходились с активными путями.
+## Which release this describes
 
-Документ описывает **текущее** состояние; плановые изменения (#532, эпик
-#531) названы отдельно в конце и нигде не смешаны с настоящим.
+There are two distinct contracts:
 
-## Как читать карту
+* **Existing file-backed release:** the source currently uses `.env`,
+  inventory, private credential files and runtime JSON stores. The legacy
+  reference below explains that design. The precise version deployed on a
+  particular installation must be checked independently; documentation does
+  not establish what code is running there.
+* **New Django release (#624, epic #623):** durable mop-owned configuration
+  and state live exclusively in Django ORM records. This is a fresh-install
+  contract, not a migration procedure for an existing installation. It is
+  specified here and in [STORAGE.md](STORAGE.md), not implemented merely by
+  adding these documents.
 
-Каждое хранилище описано пятью ролями:
+Do not remove files, change a running installation's precedence rules, rotate
+credentials or point old services at a new database on the strength of this
+page. There is no automatic legacy import, fallback or dual-write in the new
+release. A rollout or replacement of an existing installation is an explicit
+operator decision outside this documentation change.
 
-| Роль | Вопрос |
-|---|---|
-| Владелец | чья это правда — единственный писатель (файла или записи) |
-| Читатели | кто читает и зачем |
-| Права | mode файла и каталога, кто может прочитать |
-| Источник | откуда значение берётся первоначально |
-| Обновление | как и когда меняется, что происходит с живыми потребителями |
+[STORAGE.md](STORAGE.md) is the complete runtime reader/writer replacement
+matrix, including configuration, identities, client bindings, secrets,
+bootstrap bytes/logs, leases, grants, operations and observations.
+[API.md](API.md) is the canonical API and security contract. The configuration
+rules below must not create a second authentication or authorization path.
 
-«Владелец» здесь — писатель файла целиком или записи в нём; там, где
-писателей двое (кто кладёт файл, кто правит записи), это сказано явно.
-Терминология машин: **контроллер** — сервер установки (он же ansible
-controller), **мастер** — машина человека, **узел** — машина пула, **тело**
-— песочница папета.
+## New release: one installation authority
 
-## Три яруса источников настройки
+Django models and the ORM hold installation values, node definitions,
+project policy, credentials, user/access records and client/workspace
+bindings. Code supplies typed schemas and defaults. Accepted values and their
+revisions are durable ORM state; a process's environment is not a universal
+higher-precedence settings layer.
 
-Прежде чем файлы — общая рамка. Настройки установки (не секреты, а пары
-`ключ=значение`) делятся по ярусам старшинства, и деление это не
-косметическое (`mop/common/config.py`):
-
-```
-переменная окружения > node.env > .env > дефолт config.SETTINGS
-```
-
-| Файл | Где лежит | Кто пишет | Кто читает |
-|---|---|---|---|
-| `.env` | клона на контроллере | человек | сервер и прогон deploy; **на узлы не едет** (там креды GitLab) |
-| `node.env` | `~/.config/mop/node.env` узла | `mop server deploy` из инвентаря | агент и драйвер узла (`config.NODE_SCOPED`) |
-| `secrets.env` | `~/.config/mop/secrets.env` узла | сервис кластера (`proxykey`, глагол `write`) | врапер папета: ключ LLM-прокси |
-
-Тот же `KEY=VALUE`-формат читает и ansible (`lookup('ini')`), поэтому он
-намеренно примитивен. Порядок ярусов объяснён в `config.py`; здесь важна
-карта владельцев: `.env` — человек, `node.env` — прогон (править на узле
-бесполезно, перепишет), `secrets.env` — сервис, человек его не трогает.
-
-Ниже — остальные хранилища, сгруппированные по месту.
-
-## Контроллер (сервер установки)
-
-### `~/.config/mop/secrets/` — каталог сгенерированных кредов
-
-Владелец: прогон `mop server deploy` (ansible `lookup('password')` —
-заводит файл при первом обращении, переиспользует дальше). Каталог `0700`,
-файлы `0600`.
-
-| Файл | Что это | Читатель |
+| Question | New-release authority | Consumer |
 |---|---|---|
-| `nats-service.pass` | пароль машинного пользователя `service` | рендер `/etc/nats/base-users.json`; `operator.json` пользователя пула (роль web) |
-| `nats-callout.pass` | пароль учётки auth callout | `base-users.json` |
-| `nats-node-<узел>.pass` | пароль узла шины | `bus.json` узла (роль bus, `deploy/setup.yml`) |
-| `llm-proxy-client.pass` | клиентский ключ LLM-прокси | конфиг прокси; закрытая копия сервису кластера (`proxykey.KEY_FILE`); ответ `client_config` при join |
-| `llm-proxy-mgmt.pass` | management-ключ прокси | конфиг прокси; копия шлюзу панели (роль web) |
-| `tls.pem` | самоподписанный сертификат TLS-прокси | сборка кредов (`creds.collect`), узлы не получают |
-| `operators` | файл операторов (провайдер file, `mop server user`) | копия в `/etc/nats/identity/operators` |
-| `nats-op-<логин>.pass` | пароли людей легаси-времён: созданы прогоном до #219; нынешний прогон их не заводит (проверяет `tests/deploy.py`) | только переход `mop server user import` (#219): хеш в файл операторов |
-| `ldap-bind.pass` | пароль служебной учётки LDAP (если его нет в `.env`) | копия в `/etc/nats/identity/ldap-bind.pass` |
+| Where is the database and how can the process open it? | Protected local process bootstrap | Django startup and local maintenance only |
+| Which root key decrypts mop secrets? | Protected local root-key material outside the database | Authorized controller encryption/decryption service only |
+| Which installation is this client contacting initially? | Minimal explicit address/token/trust bootstrap | Client's first authenticated API connection |
+| What settings does the installation use? | Typed, revisioned ORM configuration | API/domain services, workers and configuration renderers |
+| Which machine belongs to the pool and how should it run? | ORM managed-node definition and policy | Provisioning, inventory renderer, admission and agent configuration delivery |
+| Which project, role and bootstrap policy is accepted? | ORM project and immutable approved snapshots | Builds, lifecycle, authorization and bootstrap services |
+| What is deployed or healthy now? | Nomad, node, Git and proxy observations | Reconciliation and timestamped status views, not settings writers |
+| Which server, identity and integration branch is bound to a workspace? | ORM client/workspace binding | Authenticated client context resolution |
 
-Обновление: только прогон. `lookup('password')` не меняет существующее
-значение — ротация ключа это отдельный шаг (описан в
-[PROXY.md](PROXY.md)). Потеря каталога не фатальна: новый прогон заведёт
-новые пароли сразу и серверу, и узлам — ценой переподключения всех.
+Settings edits validate type, range, cross-field requirements and caller
+permissions through the shared domain service. Store revision/provenance so a
+reader can explain which configuration it used without displaying secrets.
+A commit records desired state; it does not claim a service was restarted or
+an external configuration was applied. Applied revision, failures and pending
+work are recorded separately. Conflicting edits must not silently overwrite a
+newer revision.
 
-Заметьте разницу внутри каталога: `nats-puppet-*.pass` здесь **нет** —
-пароли папетов заводит сам сервер (`natsconf.passwords`), потому что
-проект регистрируется глаголом без ansible, и копия с контроллера
-переписала бы пароль, под которым пользователь уже заведён в NATS.
+Deployment renders inventory, service configuration, specs and consumer files
+from an accepted ORM revision. It does not seed empty records from a leftover
+`.env` or infer settings from generated files. A file edited on a node is not
+a settings change; reconciliation can replace it from desired state and must
+report an unapplied revision honestly. No database/root credentials go to
+nodes or puppets. Private consumer credentials remain purpose-scoped, with
+no secrets in a Nomad job spec or ordinary systemd environment output.
 
-### `.env` клона — настройки установки
+External integrations are not brought inside Django by renaming their files.
+Git owns source history and actual worktrees; Nomad owns allocations and
+scheduler/ACL state; CLIProxyAPI owns provider credentials and internal
+configuration/runtime persistence. Mop owns the integration settings and
+intent it manages, records accepted input revisions and uses adapters to
+apply/observe external effects. See STORAGE for the exact boundary.
 
-Владелец: человек (шаблон `.env.example`). Читатели: `config.SETTINGS` на
-контроллере и сервисы сервера — но не напрямую: `.env` на сервер не
-едет, а каждому юниту сервис рендерит `Environment=` по
-`config.SERVER_SCOPED` (один список на юнит, сверяет `tests/deploy.py`).
-Секреты (пароль LDAP-привязки) в юниты не попадают — им отдельный файл.
+## Protected process bootstrap
 
-Обновление: правкой файла; подхватывается следующим прогоном или
-перезапуском юнита. `mop server deploy` отказывает, пока в `.env` лежит
-убранная настройка (например, `MOP_OPERATORS`) — молча игнорировать
-установку хуже отказа.
+The database cannot contain the only copy of the information required to open
+it. The encryption root key cannot be stored in the database it protects.
+These are explicit trust roots, not exceptions permitting arbitrary settings
+to remain in `.env`.
 
-### Реестр проектов и лимиты — `~/.config/mop/projects.json` (на сервере)
+The controller's protected local bootstrap contains only what is necessary
+to initialize Django and reach the configured database: backend/connection
+coordinates, database authentication and required database TLS trust, the
+installation identity needed for validation, and a reference to protected
+root-key material. Any additional pre-database cryptographic material must
+have a documented startup need. Exact setting names and management-command
+spellings belong to the implementation; this contract does not invent a
+working command or a new environment variable.
 
-Текущий формат — один атомарный снимок v1 (#534):
-`{version:1, projects:[{origin, limit?}]}`. Имя нигде не хранится, оно
-выводится из origin (`driver.project_of`); `limit` без ключа — без
-лимита, `limit: 0` — заморозка (новых папетов не заводить). Один проект
-на basename: второй origin того же имени не заводится.
+Bootstrap and root-key files use restricted ownership and permissions
+(private directories, ordinarily `0700`, secret files `0600` or an equivalent
+service-manager credential boundary). They are outside the repository,
+web-served directories, database backups and generated node/body files.
+Only the controller service account and explicitly authorized local operator
+can access them. Do not put secret values into command-line arguments,
+version control, logs, diagnostics, normal unit `Environment=` lines or
+world-readable configuration. A protected service-manager injection may
+transport bootstrap material, but must not revive the old blanket
+`environment > file > database` precedence.
 
-Владелец: сервис кластера, мутирующие глаголы `project_add`/
-`project_delete`/`project_limit` (`mop/server/cluster.py`, #117, #534),
-под своим замком, снимок целиком за одну операцию. Первый успешный
-мутирующий глагол выполняет миграцию лежащей легаси-пары в снимок —
-тот же замок, тот же снимок: обрыв между «реестр» и «лимиты» больше
-не разводит данные. Непредставимое в v1 (голое имя без origin, два
-origin'а одного basename, orphan-лимит) — отказ мутации с именем,
-без потерь и без выдумывания origin'а.
+Every other persistent mop setting, including service addresses, ports,
+provider policy, resource limits, node overrides, selected client bindings,
+secret values and accepted project configuration, is ORM-owned. A root-key
+reference is not a path to a general secret-directory fallback. Missing,
+unreadable, malformed or wrong-installation bootstrap must give a safe,
+specific failure. Missing tables, incompatible schema and failed decryption
+are distinct from a valid empty installation; none triggers file discovery,
+credential regeneration or an in-memory-only mode.
 
-Читатели: сервис на каждый глагол (`view_of` — старые данные видны и
-без миграции, отказ представимости блокирует мутацию, не чтение);
-`mop server deploy` — посев по матрице снимка (#540: снимок не
-перетирает себя парой) и глагол `projects` в сверке (реестр сервера —
-правда; недоступный реестр — копия этой машины с примечанием, пустой
-ответ — правда, а не повод для копии); `mop project list` печатает
-лимит рядом с именем.
+## Initial client connection is not a local settings registry
 
-Права: `0600`, запись атомарна (`fsutil.write_atomic`), правка — под
-замком против одновременных заводов.
+A remote client needs a server address and an explicit TLS trust basis when
+normal system trust is insufficient. It obtains its first token through API.md's
+Django-password-authenticated issuance endpoint, or receives an enrolled service
+credential through authorized local provisioning; a token is not a prerequisite
+for password login. This minimal local bootstrap
+is unavoidable connection material, not a replacement `connection.json`
+containing all server settings or a general environment override system.
+It contains no Nomad token, database password, encryption root key, LDAP bind
+secret, proxy management key or another principal's credential.
 
-Источник: `mop project add <origin>`; миграция — первый мутирующий
-глагол, откат данных — операторский export (#542, см. раздел
-перехода).
+After authentication the client resolves its authorized server/identity and
+workspace/integration-branch binding from ORM-backed API records. Binding
+creation and changes use that API and its access checks. Remote clients never
+receive direct database access. Explicit one-command selection is request
+context; it must not silently rewrite the durable binding or gain rights from
+a claimed username. Cached responses are revisioned, non-authoritative views,
+not offline configuration or authorization fallback.
 
-Обновление: глагол с откатом — если шина не приняла нового пользователя
-`puppet-<проект>`, снимок и `users.conf` возвращаются назад. Лимит
-снятого проекта уходит с ним — заведённый заново не получил бы чужой
-потолок из прошлого.
+Old `git config mop.server/mop.user/mop.branch`, `MOP_SERVER_LAN`,
+`MOP_BUS_USER`, `MOP_BRANCH`, joined-server directory scanning and legacy
+connection files are not durable binding authorities in the new release.
+An unavailable API is an explicit connection failure for a remote client,
+not permission to choose a neighboring server or use a stale local profile.
+The lifecycle, scope and protection of the initial credential follow API.md.
 
-Легаси-пара `~/.config/mop/projects` + `~/.config/mop/limits.json`
-(строка на проект и `{имя: потолок}`) остаётся на диске читаемой для
-совместимости: её видит читатель до миграции и откат кода; новый
-writer её не пишет. После миграции это устаревший снимок, а не
-резерв — обратный путь через export, не через возврат пары. От
-легаси-времён в ней остаются голые имена, чей origin уже не узнать —
-новые такие не заводятся, старые не теряются (`puppets.project_ids`).
+## Cold boot and local repair
 
-### Просьбы проектов — `~/.config/mop/project-asks.json` (на сервере)
+First installation and recovery must work with the HTTP server stopped. A
+controller-local maintenance entry point initializes Django directly, opens
+the same database through the ORM and invokes the same validated domain
+services. It must not call the public HTTP API, an internal HTTP endpoint or
+the commandlets as subprocesses. Operator identity and authorization for this
+privileged path are defined by API.md; local repair is not anonymous remote
+administration or arbitrary SQL access.
 
-Владелец: прогон `mop server deploy` — роль `cluster` кладёт его из
-манифестов `.mop` всех проектов (только просьбы: размеры тела). Формат:
-`{проект: {настройка: значение}}`, JSON.
+The required lifecycle is:
 
-Читатели: сервис кластера при каждой сборке спеки (`spec.read_asks`) —
-сервис работает под учёткой пула и файлов контроллера не видит; `.mop`
-он не читает по той же причине.
+1. **Provision trust roots locally.** Supply protected database bootstrap and
+   create/provision the root key outside the database. Do not read an old
+   installation's files to fill missing values. First initialization is
+   explicitly requested and distinguishable from repairing an existing
+   installation; absence of a database or key is not automatic consent to
+   create replacements.
+2. **Initialize the new schema and installation.** Run Django migrations and
+   validated initial domain setup through the local maintenance path. Record
+   installation identity, required settings and initial authorized operator
+   without relying on a healthy HTTP listener. Repeating setup must not reset
+   identities, rotate secrets or overwrite an initialized installation.
+3. **Validate before serving or dispatching.** Check schema compatibility,
+   bootstrap/installation identity and decryptability of required secret
+   versions. Build effective configuration from ORM; only then enable normal
+   HTTP, workers and external-effect dispatch. Diagnostics expose presence,
+   revisions and safe error categories, never secret contents.
+4. **Repair without the broken endpoint.** A bad public address, TLS setting,
+   provider configuration or revoked remote login must be inspectable and
+   correctable through authorized local ORM/domain maintenance. Record actor,
+   reason and revision/audit changes just as for an API mutation. Validation,
+   encryption and access-policy invariants still apply; direct row editing
+   that bypasses them is not the repair contract.
+5. **Restore coherently after loss.** Recover a consistent database backup and
+   its separately protected root-key material, verify the identity/schema,
+   decryptability and references, then reconcile unresolved operations before
+   resuming effects. An unreachable database requires database/bootstrap
+   repair first; a lost root key cannot be repaired by reading ciphertext or
+   regenerating a key under the same identifier. Report unrecoverable secrets
+   explicitly, and re-provision only under an authorized recovery decision.
 
-Обновление: следующий прогон deploy. Нет файла или проекта в нём —
-значения установки, без отказа; поэтому правка `.mop` доходит до спеки
-со следующим прогоном, не раньше. Битый файл — падение сборки спеки:
-его пишет ansible целиком, тихий откат спрятал бы поломку прогона.
+This is an implementation requirement, not a set of executable instructions
+for the currently deployed old release. Concrete installation/maintenance
+commands must be documented and verified when implemented. Do not attempt
+the sequence against an existing file-backed service.
 
-Производный файл по построению: править его руками бесполезно, правда —
-`.mop` проектов.
+## Existing file-backed release: reference only
 
-### Пароли папетов — `~/.config/mop/puppets/nats-puppet-<проект>.pass` (на сервере)
+This section describes the pre-Django architecture visible in the source. It
+is neither a source list for automatic import nor a new-release operations
+manual. In the table, the controller is the installation server and Ansible
+controller; the master is the operator's client machine; a node runs pool
+bodies. Each `~` belongs to that process's account.
 
-Владелец: сервер (`natsconf.passwords` заводит недостающий и не трогает
-имеющийся — смена отвалит живых папетов при первом переподключении).
-Прогон сюда не пишет: только каталог и уборка паролей снятых проектов
-(`deploy/roles/bootstrap/tasks/creds.yml`).
+### Setting resolution and ownership
 
-Читатели: `bootstrap.puppet_creds` — ответ узлу на bootstrap песочницы:
-кред папета проекта приезжает в ответе, узел кладёт его в тело
-(`bus-<проект>.json` в доме пула).
+The existing `mop/common/config.py` resolves normal settings as context (for
+context-scoped keys), process environment, node `node.env`, controller `.env`,
+then code defaults. Client mode omits the installation `.env`.
+`config.SETTINGS` defines defaults, `REQUIRED` declares required installation
+inputs, `NODE_SCOPED` controls delivery to nodes, and `SERVER_SCOPED` controls
+service-unit settings. Inventory gives machine/group overrides. The deployment
+must not copy the installation `.env` to nodes: it can contain tracker and
+other installation credentials.
 
-Каталог отдельный от `servers/<адрес>/` намеренно: тот — про то, что
-держит оператор, и пароль папета оператору не положен (`creds.pick`).
-
-Обновление: с проектом — снятие проекта уносит пароль (сервер не должен
-раздавать кред пользователя, которого на шине нет).
-
-### Файлы bootstrap'а — `~/.config/mop/bootstrap/` (на сервере)
-
-`<папет>-tasks.yml`, `<папет>-vars.yml`, `<папет>-sent.json`. Владелец:
-сервис кластера — их шлют глаголы жизненного цикла папета (`mop add`,
-`mop update`, `mop recycle`) из рабочей копии; `mop project add` и прогон
-их не трогают. Подробности — [BOOTSTRAP.md](BOOTSTRAP.md).
-
-### Секреты проектов — `~/.config/mop/project-secrets/<проект>/` (на сервере)
-
-`files/<путь>` и `vars.env`. Владелец: сервис кластера, глаголы
-`secret_put`/`secret_remove` (клиент — `mop secret`). Мастер кладёт из
-рабочей копии, bootstrap доставляет в тело при каждом старте. Каталоги
-`0700`, файлы `0600`. Снятие проекта уносит секреты: заведённый заново
-не получил бы чужие.
-
-### Runtime-состояние сервисов (на сервере)
-
-| Файл | Владелец | Что это |
+| Existing store | Writer/owner | Readers and role |
 |---|---|---|
-| `landing.json` | сервис кластера (глагол `landing`) | токены посадки проектов (#42); **прогон его не кладёт и не трогает** — иначе прогон посреди посадки ронял бы токен; рестарт сервиса токен не роняет |
-| `proxy-key.json` | сервис кластера (поток `proxykey`) | отпечаток розданного ключа LLM: «что именно уехало на узлы», чтобы не гонять то же самое |
-| `inventory-hosts.json` | прогон (роль `cluster`) | хосты инвентаря для отказа `forget` (#178); сервис читает на каждый `forget` |
-| `sessions.json` | mop-web (`websession`) | сессии дашборда |
+| Controller clone `.env` | Operator; setting-edit logic where used | Dispatcher/config resolution, server commands and deployment input |
+| `inventory.yaml` | Operator | Deployment, machine/group settings, inventory membership checks |
+| Controller `sandbox.yaml`, project `.mop/sandbox.yaml` | Installation/project source owners | Image/build and resource-request collection; not per-start bootstrap policy |
+| Node `~/.config/mop/node.env` | Deployment from inventory and declared node-scoped settings | Agent and node drivers; manual edits are overwritten |
+| Node/body `secrets.env` | Cluster proxy-key distributor and node/body delivery | Wrapper's proxy key and optional CA material; not general installation settings |
 
-Это не конфигурация, а состояние — но они живут в том же каталоге и
-границы владения те же: кто пишет, тот и перечитывает.
+### Credentials and state stores
 
-### Конфигурация NATS — `/etc/nats/` (на сервере)
-
-| Файл | Владелец | Что это |
+| Existing store | Writer → reader | Boundary |
 |---|---|---|
-| `base-users.json` | прогон (роль bus) | базовые пользователи шины (`service`, `callout`, узлы) с паролями; `0600` |
-| `users.conf` | сервер (`mop cluster users`, `natsconf`) | итоговый файл пользователей, включается в authorization; люди — через auth callout, не здесь |
-| `callout.conf` | сервер (`natsconf.apply_callout`) | блок auth callout; рестарт, не reload |
-| `identity/operators` | прогон — копия `secrets/operators` | файл операторов для сервисов (callout, владелец задания) |
-| `identity/ldap-bind.pass` | прогон — из окружения ansible | пароль LDAP-привязки; файлом, не юнитом: юнит читаем всем |
-
-Разделение прогон/сервис здесь и есть ответ на «кто заводит
-пользователя»: базовые машины — контроллер (их пароли знает только он),
-проекты — сервер (проект регистрируется без ansible). Один рендерер
-`natsconf`, второй копии нет. Смена `users.conf` — reload по контрольной
-сумме; `callout.conf` — рестарт.
-
-### Конфигурация LLM-прокси — `~/.config/mop/llm-proxy/config.yaml`
-
-Владелец: прогон, **только при первой установке** — дальше файл
-редактирует человек панелью, и повторный рендер стёр бы правки. Ключи
-прокси берёт из `secrets/` (см. выше). Управление — [PROXY.md](PROXY.md).
-
-## Машина оператора (мастер)
-
-### Каталог сервера — `~/.config/mop/servers/<адрес>/`
-
-Владелец: `mop login` человека — пишет один атомарный `connection.json`
-(#533, в дереве); на сервере — роль web: служебный `operator.json`
-учётки `service`. Сборку каталога кредов на самом контроллере делает
-прогон `mop server deploy` (`creds.collect`), чтобы контроллеру не
-нужен был join. Ключ каталога — адрес сервера, и только он:
-`MOP_SERVER_LAN` в окружении переключает адрес шины и каталог кредов
-разом. Каталог `0700`, файлы `0600` (там пароль).
-
-| Файл | Что это | Пишет | Читают |
-|---|---|---|---|
-| `connection.json` | целый профиль человека `{version, bus, https_port, proxy}` — один вход одним файлом (#533) | `mop login` (`creds.write_connection`) — единственная запись, атомарная, после обеих сетевых проверок | `creds.snapshot` — единственный решатель; через него `bus.server_config` (wss-конфиг мастера и сервисов), `_common.session_env` (URL и ключ Claude), `doctor/proxy`, `mop models` |
-| `operator.json` | легаси-половина «кто на шине» `{user, password}`; на сервере — живая служебная запись `service` (#104) | на сервере — роль web (`no_log`); на машине человека writer'а больше нет (писал прежний `mop login`) | с `client.json` целиком — человеческий профиль совместимости (`creds.snapshot`); машинность в роль-конфликте решателя определяет именно он |
-| `client.json` | легаси-половина: порт шины, URL и ключ прокси этого сервера | writer'а нет (писал прежний `mop login`) | с `operator.json` целиком — совместимость; в служебном каталоге — только порт (`snapshot`: machine) |
-| `tls.pem` | закреплённый самоподписанный сертификат TLS-прокси (#97); с настоящим (`MOP_TLS_CERT`) не кладётся, с частной CA (`MOP_TLS_CA`) кладётся корень | `mop login` при первом входе — ДО отправки пароля; сборка кредов | `creds.tls_context`, `NODE_EXTRA_CA_CERTS` для Claude |
-| `bootstrap.json` | management-токен Nomad, `SecretID` — **только на контроллере** | игра сервера Nomad (`deploy/nomad`) | `creds.token`; в `mop mcp` отсутствие токена — признак профиля |
-
-Здесь нет и не должно быть паролей папетов и узлов: с ними мастер мог бы
-представиться узлом, а границу проектов держат ровно креды. Общих паролей
-людей (`nats-admin.pass`, `nats-master-*.pass`) тоже нет (#106): человек
-входит своим именем, право решает роль в провайдере личностей (#219).
-Оставшиеся от прежних join'ов легаси-файлы снимает `mop login` и сборка
-кредов в конце прогона.
-
-Легаси-пара на машине оператора — снимок совместимости, не резерв:
-решатель читает её только целиком и только пока нет `connection.json`
-(новый файл пару затеняет, половина — не вход). После успешной записи
-`mop login` убирает ролевые пароли легаси-времён и токен (на машине без
-своего secrets-каталога), а НЕ половины пары; неудачная уборка
-докладывается, не глотается.
-
-Обновление: `mop login` проверяет всё до записи — новый
-`connection.json` появляется только после обеих сетевых проверок (шина
-пускает, ключ прокси принимает `/v1/models`), одной атомарной записью:
-провал между двумя прежними оставлял смесь, пароль одного входа с
-портом и ключом другого (#533). Повторный вход обновляет ротированный
-ключ, не трогая рабочие креды. Сломанный `connection.json` или
-легаси-пара — отказ, не переход к `.env`, соседнему серверу или другому
-формату.
-
-`connection.json` несёт контракт «машина знает о сервере»: порт, URL
-прокси, ключ — это текущий формат входа человека (#533, раздел
-«Реализовано»), не плановый. Текущая граница без номера задачи:
-потребители (`_common.session_env`, `bus.server_config`) уже читают
-его через `creds.snapshot`, но запущенная сессия держит ENV,
-полученный при старте, — новый login не меняет его до перезапуска
-сессии.
-
-### Привязка клона — `git config mop.server`, `mop.user`, `mop.branch`
-
-Владелец: `mop login` (пишет `_bind`); `mop.branch` — человек или `mop
-dev bug start`. Читатели: контекст команды (`context.clone_binding`) —
-слой «рабочая копия» под окружением и командной строкой (#131). Не
-коммитится, паролей не несёт — только адрес, логин и ветка.
-
-## Узел
-
-### `~/.config/mop/bus.json` — креды агента
-
-Владелец: прогон (роль bus, `deploy/setup.yml`): рендер `bus.json.j2` —
-`{url, user, password}` с LAN-адресом и пользователем `node-<узел>`; пароль
-из `secrets/nats-node-<узел>.pass`. Права `0600`, пользователь пула.
-
-Читатели: агент узла — читает **только** их (`bus.NODE_FILE`): каталог
-сервера с кредами мастера на машине в двух ролях ему не указ. Драйвер
-`host` берёт из `url` адрес сервера (nats ему не нужен).
-
-Обновление: прогон; рестарт агента. Пароль узла знает только контроллер
-и сам узел.
-
-### `~/.config/mop/node.env` — что узел знает о себе
-
-Владелец: прогон (роль bus): рендер по `config.NODE_SCOPED` из
-глобального значения группы инвентаря и переопределения на хосте
-(`mop_driver` строчными → `MOP_DRIVER`). `0644` — секrets здесь нет.
-
-Читатели: агент и `mop driver run` (`config.get` с ярусом node.env).
-
-Обновление: следующий прогон; рестарт агента. Править на узле
-бесполезно — перепишет. Прогон сверяет записанное с инвентарём (assert):
-узел, врущий о себе, поднимает папетов не там.
-
-`config.NODE_SCOPED` — один список на систему: по нему же видно, чего
-узлу ждать; разойдись он с тем, что узел читает, — настройка молча не
-доедет.
-
-### `~/.config/mop/secrets.env` — ключ LLM-прокси узла
-
-Владелец: сервис кластера — поток `proxykey` (#391): глагол `write`
-агента, путь — единственный в белом списке `paths.WRITABLE`. Формат:
-`KEY=VALUE` (`MOP_PROXY_KEY` — обязательный ключ; `MOP_PROXY_CA` —
-корень закрепления base64-PEM, когда сервер пинит цепочку, #557).
-Сломанная строка корня валит врапер громко — как отсутствие ключа.
-
-Читатели: врапер папета (`PU_SECRETS`): ключ уходит в окружение сессии
-claude, корень декодируется в `~/.config/mop/tls.pem` тела и едет
-переменной `NODE_EXTRA_CA_CERTS`; в спеке джоба секретов нет — она
-видна в UI Nomad.
-
-Обновление: сервис на старте и раз в пять минут, по отпечатку (`sha`
-того, что уже роздано): ключ не менялся — ни одного запроса шине.
-Недошедший узел держит раздачу открытой. Живые тела получают письмо
-напрямую, свежие сеются с копии узла.
-
-Граница: `write` может доставить только путь из `WRITABLE` узла —
-кластерный сервис не может записать на узел произвольный файл (#284,
-#308, #393).
-
-## Тело (песочница папета)
-
-Файлы тела кладут двое — узел (`mop driver run`) и bootstrap — и пишет
-их сервер, а не мастер: с клоном папета конфигурация не едет никогда.
-
-| Файл | Владелец | Что это |
-|---|---|---|
-| `bus-<проект>.json` | `mop driver run` на подъёме (кред приезжает в ответе на bootstrap песочницы) | кред шины папета `puppet-<проект>`; врапер подаёт через `MOP_BUS_CONFIG` |
-| `secrets.env` (в доме пула) | сервис кластера (раздача узлам; узел копирует в тело) | ключ LLM-прокси — копия узловой |
-| `project-secrets/<проект>/` | bootstrap при каждом старте | файлы и переменные проекта (#127): файлы — в клон, переменные — в окружение сессии |
-| `bootstrap.pub` | прогон (роль bus) | публичный ключ сервера: узел впускает его в тело на время bootstrap'а (#62) |
-
-Папет не хранит ничего сверх этого: его правда о себе — спека джоба
-(`JobMeta`) и окружение задачи, а не файлы.
-
-## Что не объединяется
-
-Границы, которые легко потерять при рефакторинге:
-
-* **Креды ролей не смешиваются.** Один файл «всё про шину» дал бы
-  мастеру пароль папета (представиться узлом) и папету — мастера.
-  `connection.json` (человек; легаси-пара `operator.json` +
-  `client.json` читается для совместимости), `operator.json` службы
-  на сервере, `bus.json` (узел), `bus-<проект>.json`
-  (папет), `nats-puppet-*.pass` (сервер) — разные хранилища с разными
-  читателями.
-* **`node.env` не срастается с `.env`.** Один файл настройки означал бы
-  или вывоз `.env` на узлы (там креды GitLab), или невывоз узловых
-  значений. Ярус — механизм, а не неудобство.
-* **Проектные секреты — не настройки.** `project-secrets/` правят
-  глаголами из рабочей копии, а не прогоном: у них другой владелец
-  (проект) и другой путь доставки (bootstrap).
-* **Runtime-состояние — не конфигурация.** `landing.json`,
-  `proxy-key.json`, `sessions.json` переживают прогон молча; прогон,
-  кладущий их, ронял бы посадку и раздачу ключа.
-* **`.mop` проекта — не каталог установки.** Просьбы проектов приезжают в
-  `project-asks.json` только прогоном: сервис под учёткой пула чужих
-  репозиториев не читает.
-
-
-## Реализовано в эпике #531 (текущее)
-
-Что уже в дереве на момент этого раздела (ветка эпика), а что остаётся
-плановым. Раздел меняется с каждым слоем эпика; «Плановое» ниже — то,
-чего в дереве ещё нет.
-
-### `connection.json` — version 1 (на машине оператора; #533)
-
-Человек входит `mop login` — и на его машине каталог сервера получает
-один целый файл профиля вместо пары `operator.json` + `client.json`
-(схема — в «Плановом» блоке ниже, форматы совпадают). Что уже так:
-
-* **Один снимок профиля.** `creds.snapshot` — единственный решатель для
-  шины и login: каждый файл читается один раз. Легенда файлов не
-  «два файла всегда»: новый человеческий вход — ОДИН атомарный файл
-  `connection.json` (роль-конфликт всё равно пробует
-  `operator.json` — машинность определяет он); служебный каталог —
-  один `operator.json` плюс необязательный `client.json` (только
-  порт шины); легаси-пара человека — два файла без FS-транзакции
-  между ними, конкурирующий old/new writer в одном каталоге не
-  поддержан. Ответ — («human», профиль) | («machine», служебное) |
-  («partial», остаток половины) | (None, None).
-* **Служебный и человеческий входы разведены.** Каталог с машинной
-  учёткой `service` и человеческим профилем одновременно — конфликт с
-  громким отказом, независимо от времени файлов; человеческий `mop
-  login` в служебный каталог отказывает. На сервере каталог пишет
-  deploy (роль web), читают сервисы.
-* **Половина — не вход.** Осталась одна половина пары — («partial»,
-  только поля, что лежат): потребители отказывают «не полный вход»,
-  login берёт из остатка подсказку (имя/порт) и идёт ПОЛНЫМ входом;
-  старый proxy-ключ остатка не доверяется. После успешной записи
-  уборка снимает ролевые пароли легаси-времён и токен (на машине без
-  своего secrets-каталога), а не половины пары — их затеняет
-  `connection.json`; неудачная уборка докладывается, не глотается.
-* **Новый файл не падает назад к старому.** Битый или неподдерживаемый
-  `connection.json` — отказ с фактом и типом причины, без fallback на
-  легаси-пару и без совета «удали файл».
-* **Диагностика входа** — `mop diagnose` (#536): offline, без сети и
-  записи; полный профиль, половина, машинный или пустой каталог —
-  фактами, не приговорами; schema-строка только у валидированного
-  `connection.json`. Наблюдение каталога — bounded readonly:
-  presence-проба одних и тех же имён ДО и ПОСЛЕ единственного
-  снимка, расхождение — отказ «changed while diagnosing», а не
-  смесь поколений. Реагирует на ОБНАРУЖЕННОЕ расхождение имён: все
-  изменения содержимого и ABA (подмена между пробами) она не
-  ловит — это не сильная FS-консистентность снимка, а честный
-  предел метода. Ошибка чтения настроек (`.env`) — громкая (#535):
-  существующий-но-нечитаемый файл это отказ, не «пусто»; молча
-  пусто — только отсутствующий файл.
-
-Смотри: [CLI.md](CLI.md) (`mop login`, `mop diagnose`, `mop server
-diagnose`), тесты `tests/connection.py`, `tests/login.py`,
-`tests/diagnose.py`.
-
-### `projects.json` — version 1 (реестр на сервере; #534)
-
-Снимок `{version, projects:[{origin, limit?}]}` — единственная правда
-реестра для writer'ов; читатели видят живые файлы (`view_of`: снимок
-включая старую пару, пока она на диске). Что уже так:
-
-* **Мутирующий глагол мигрирует под замком.** `project_add`/
-  `project_delete`/`project_limit` читают снимок, валидируют
-  представимость старого состояния и пишут атомарный снимок, всё под
-  `_projects_lock`, до эффектов на шине; несовместимость — откат
-  записанного.
-* **Легаси-аномалии блокируют мутацию, не чтение.** Голое имя, два
-  origin одного basename, orphan-потолок, мусорный лимит — отказ с
-  именем причины, без потери данных и без raw origin в тексте.
-* **Чистая установка — нормальное пустое состояние.** Нет ни пары, ни
-  снимка — пустой реестр, `read`/`list` отвечают пусто и не пишут.
-* **Отказ migrations/отказ чтения отличён от пустоты.** Несуществующий
-  каталог реестра и недоступный — разные ответы; существующий-но-
-  нечитаемый снимок — громкий отказ, не «пусто».
-* **Обратный export для отката** — `mop server cluster export <DIR>`
-  (#542): снимок читается один раз (байты → digest → валидатор), пара
-  собирается в неугадываемом staging-каталоге рядом с DIR (привязка fd,
-  O_NOFOLLOW), файлы пишутся по fd и перечитываются (байты и 0600),
-  маркер `export.json` последним и тоже перечитан; публикация — один
-  атомарный `renameat2 RENAME_NOREPLACE`: занятое имя (файл, каталог,
-  symlink, пустой чужой каталог) — отказ, чужое не тронуто. Origin, из
-  которого легаси-читатель собрал бы не то, что писали (CR/LF, NUL,
-  краевой пробел), отказывает ДО всякой записи: экспорт обязан быть
-  lossless. Ограничения названы: salt-имя staging — граница от не
-  знающего имя, не защита от того же uid; сохранность при потере
-  питания не обещается; платформа без `renameat2` — отказ с именем
-  ограничения (ENOSYS), без TOCTOU-fallback.
-
-Смотри: `mop/common/projects.py`, `mop/server/cluster.py`,
-[CLI.md](CLI.md) (`mop server cluster export`), тесты
-`tests/projects.py`, `tests/fsutil.py`, `tests/cluster.py`.
-
-### Единый контракт URL прокси (#547, в дереве)
-
-Один контракт в `mop/common/llm.py` (merge `214eeef`): сервер выдаёт
-адрес прокси без `/llm`, потребители добавляют `/v1` ровно один раз,
-`/llm` снимается только у известного издателя (`canonical` режет
-легаси-префикс лишь при явных подсказках выбранного сервера; `endpoint`
-добавляет ровно один `/v1/<ресурс>`; `origin` отказывает базе с `/v1`
-для `ANTHROPIC_BASE_URL` вместо молчаливого `/v1/v1`). Потребители
-(`session_env`, проба входа, `models`, `doctor`, `adminapi`,
-`llm.env`) зовут контракт с подсказками, что уже держат. Снятие
-временного nginx-алиаса `/llm/` — за #546, отдельным шагом после
-раскатки и окна наблюдения.
-
-### Ротация клиентского ключа прокси — CLI и реальные эффекты (#539, в дереве)
-
-`mop server proxykey start/resume/status` поверх оркестратора #538
-(`mop/server/proxykey.py`): start записывает приватный чекпоинт без
-сетевых эффектов, resume ведёт шаги до первого блокера, status
-печатает состояние. Адаптер `mop/server/proxyapi.py` даёт швам
-настоящие эффекты: transport — management API петли
-(`127.0.0.1`, порт `MOP_LLM_PROXY_PORT`, только `urllib` с
-`ProxyHandler({})` и без redirect), ключ management читается из
-файла при каждом эффекте; доставка — прямым write-каналом по
-сохранённому списку получателей. Граница контроллера (инвентарь +
-отказ puppet-контексту) проверяется до сети и файлов; отказы
-типизированы (`http_status`/`reason`), 401 несёт предупреждение о
-30-минутной блокировке адреса. Ротация — контроллерная операция
-оператора, не автоматизм раскатки. Смотри [PROXY.md](PROXY.md),
-[CLI.md](CLI.md), тесты `tests/proxykey.py`, `tests/proxyapi.py`,
-`tests/transition_rotation.py`.
-
-### Что из эпика в дереве, а что нет
-
-В дереве: ротация клиентского ключа прокси с реальными эффектами
-(#539: `mop server proxykey start/resume/status`, адаптер management
-API, см. «Реализовано»), правильный посев реестра прогоном deploy
-(#540: источник по матрице снимка), единый контракт URL прокси
-(#547), переходные проверки трансформаций (#541, #548), снятие
-временного nginx-алиаса `/llm/` — явный 410 вместо прокси (#546).
-«В дереве» не значит «раскатано»: на установки до раскатки эпика
-работают прежние механизмы.
-
-Не в дереве: ничего из эпика. Декларация test-deps песочницы
-(#543: jinja2 в `sandbox.yaml` проекта) в дереве есть; pending —
-только выкатка на свежее тело и её проверка живьём.
-Каждый — отдельная ветка и свой CI;
-этот раздел обновляется по мере их посадки в эпик.
-
-Частичность названа честно: root/foreign-service uid и
-runtime-совместимость сервисов под чужими учётками — пределы,
-отмеченные как частичные; «всё реализовано» этот раздел не заявляет.
-
-## Плановое (эпик #531, здесь и только здесь)
-
-Контракт перехода фиксирует #532; исполняли #533 и #534; #541 готовит
-финальное переключение (само переключение — отдельное разрешение
-человека), операторский offline export #542 в приёмке #541 обязателен и
-уже в дереве (см. раздел «Реализовано» выше). Общие правила:
-
-- Ошибка нового файла громкая: новый reader не падает назад к старому
-  файлу. Fallback отвечал бы «работает», когда конфигурация потеряна.
-- Старые файлы остаются на диске — снимком, а не резервом. Совместимость
-  old reader / new writer не обещается вовсе; downgrade — отдельный
-  протокол, а не молчаливое чтение нового старым.
-
-### Схемы (формат уже в дереве, владение — как написано)
-
-#### `connection.json` — version 1 (для человека; на машине оператора — вместо `operator.json` и `client.json`)
-
-```json
-{
-  "version": 1,
-  "bus": {"user": "...", "password": "..."},
-  "https_port": "<строка>",
-  "proxy": {"url": "...", "key": "..."}
-}
-```
-
-Владелец — `mop login` человека; человек уже так и входит (#533, см.
-«Реализовано»). `tls.pem` остаётся отдельным файлом: у сертификата
-другой цикл ротации. Серверский каталог — service-owned: туда пишет
-deploy (роль web), читают сервисы; человеческий вход в служебный
-каталог отказывает. Что ещё планово в этой части:
-
-- `https_port` — строка, как в `client.json` (проверка диапазона
-  1–65535 на строке, `creds._client_values`). URL прокси в
-  `proxy.url` — контракт #529: один origin для сессий и каталога
-  моделей, корневой `/v1/` того же origin обслуживает каталог моделей
-  панели без среза префикса. Единый URL-контракт и канонизация
-  origin'а у входа (issuer authority) уже в дереве (#547, см.
-  «Реализовано»): сервер выдаёт адрес без `/llm`, потребители
-  добавляют `/v1` ровно один раз.
-
-#### `projects.json` — version 1 (вместо `projects` и `limits.json`)
-
-```json
-{
-  "version": 1,
-  "projects": [
-    {"origin": "...", "limit": 5}
-  ]
-}
-```
-
-В записи только origin и `limit`, легаси-полей нет: имя вычисляется из
-origin (`driver.project_of` — один basename на систему; сегодня два
-одноимённых репозитория делят один проект — в новой схеме две записи с
-одним basename запрещены), в файле не хранится. Отсутствие `limit` —
-без ограничения; `0` — запрет новых папетов (заморозка).
-`project-asks.json` остаётся производным deploy'а и в этот файл не
-входит.
-
-Переход реестра (миграция под замком уже в дереве, #534; см.
-«Реализовано»):
-
-- `read`/`list` не мигрирует: чтение отвечает по живым файлам и ничего
-  не пишет.
-- Легаси-аномалии блокируют мутацию, не чтение; чистая установка —
-  нормальное пустое состояние; отказ отличён от пустоты.
-- После перехода старая пара устарела: это снимок, а не резерв, и
-  `git revert` перехода пул не возвращает. Обратный путь — чистый
-  export актуального снимка (#542, в дереве).
-
-### Операторский протокол перехода и отката реестра
-
-Финальное переключение — отдельное решение человека, не шаг эпика.
-Порядок (что обязан видеть оператор):
-
-1. **Стоп всех writers реестра** — включая новый сервис кластера
-   (`mop server stop`-класс действий на установке), не только writers
-   старой пары. Снимок меняется — экспорт будет не финальным.
-2. **Финальный export**: `mop server cluster export <новый-каталог>` —
-   снимок читается один раз, digest в ответе и в маркере
-   `export.json`; пара `projects` + `limits.json` и маркер лежат
-   рядом с источником, файлы `0600`, каталог `0700`. Оператор сверяет
-   digest ответа с маркером (оба — про одни и те же байты снимка).
-3. **Переключение** — за оператором, отдельным решением: старая пара
-   остаётся на диске устаревшим снимком, не резервом.
-4. **Откат — это два разных процесса, не один git-revert:**
-   - **откат кода (инструмента)** — ветка эпика, не `master`.
-     Родители merge `1154692` (`epic/531-config-refactor`),
-     read-only:
-
-     | Родитель | SHA | Что это |
-     |---|---|---|
-     | первый (`-m 1`) | `01698df` | локальная линия эпика: merge посадки #542 |
-     | второй (`-m 2`) | `9180e6a` | свежий remote-конец эпика с #538 |
-
-     Асимметрия проверена по дереву: `diff(01698df→1154692)` —
-     только #538, `diff(9180e6a→1154692)` — только #542: именно
-     дифф от ВТОРОГО родителя вычитает #542. Отсюда кандидаты:
-     `git revert -m 1 01698df` (снимает merge #542 как таковой,
-     вычитая #542 из линии эпика) и `git revert -m 2 1154692`
-     (снимает #542 из merge с #538, сохраняя #538 целиком);
-     `revert -m 1 1154692` — НЕ кандидат: вычел бы #538. Оба
-     кандидата проверены математикой деревьев, на реальной истории
-     не выполнялись.
-   - **откат формата (данных)** — НЕ следствие снятия кода #542:
-     `revert -m 2 1154692` убирает инструмент, но #534 v1
-     reader/writer остаётся и «возврата легаси-формата» не
-     происходит. Возврат данных — самостоятельный процесс: старый
-     код (без v1) плюс экспортированная легаси-пара, установленная
-     оператором в правильный service HOME (или fallback
-     контроллера) с сохранением uid и прав. Он выполняется под
-     стопом всех writers и отдельным разрешением — это не «четвёртый
-     шаг» отката merge и не метод «поправить руками»: процесс
-     описан, контролируем и начинается оператором.
-
-**Повторный подъём после отката формата.** При возвращении нового
-кода лежащий `projects.json` мог стать устаревшим: старый writer
-писал легаси-пару, а v1-снимок молчал. Текущее поведение reader'а
-(и #534): лежащий активный `projects.json` читается ВСЕГДА
-приоритетно, устаревание он не определяет — без действий оператора
-новый код молча поднял бы устаревший v1 и затенил актуальные
-легаси-записи (old-data shadowing). Поэтому это предписание
-оператору, а не свойство кода: до повторного подъёма — стоп всех
-writers, устаревший v1 убрать из активного пути `projects.json`
-(сохранить рядом как архив, вне активного имени), а активный новый
-v1 получить из актуальной легаси-пары валидированной повторной
-миграцией. Сам export ничего не архивирует и файлов не
-устанавливает; автоматизации этого шага в CLI нет — это плановый
-шаг оператора, не реализованный механизм. Активация — отдельное
-решение человека.
-
-### Откат клиентской стороны — тоже данные, не git
-
-`connection.json` прежние `operator.json`/`client.json` не
-пишет: реестровый export логинами не бэкапится. Прежняя пара на
-машине, прошедшей новый login, — устаревший остаток, и старый код
-новый `connection.json` не читает. Консервативный откат клиента:
-
-- перед переключением — проверенный вход старой версией в отдельном
-  приватном каталоге/учётке, с проверкой полноты профиля;
-- неизвестные новые профили не удаляются и не переписываются;
-- смена URL/ключа прокси живые открытые сессии не перевоспитывают —
-  ENV сессии не обновляется само, сессию перезапускают.
-
-Полного отката клиента одним git-revert не существует; это отдельная
-операторская процедура над данными.
-
-### Ещё плановое (не в дереве)
-
-- **#539 и #540 — в дереве** (см. «Что из эпика в дереве, а что
-  нет»). **#546 — сделано**: временный nginx-алиас `/llm/` снят
-  (явный 410 в `mop.conf.j2`, `/llm/v1/*` отказывается явно), клиенты
-  и сервер уже на origin без `/llm` (#547). Остаётся текущая граница
-  без номера задачи: запущенная сессия держит ENV, полученный при
-  старте, и новый login не меняет его до перезапуска сессии;
-  переключать потребителей на `connection.json` не нужно — они уже
-  читают его через `creds.snapshot`.
-- **#543** — декларация test-deps песочницы (jinja2 в `sandbox.yaml`
-  проекта) уже в дереве; pending — выкатка на свежее тело и
-  доказательство живьём, что полный прогон там возможен. Пока этого
-  нет — полный локальный прогон невозможен на теле без deps, gate —
-  CI.
-- Ограничение, названное, не обещание: root/foreign-service uid и
-  same-uid гонки вокруг приватных каталогов — предел механизма на
-  этой платформе; готовность не «выключает» их, а видит их.
-  Root/identity runtime-совместимость — гейт, отмеченный как
-  частичный, не закрытый.
-
-### Что остаётся как есть
-
-`node.env`, креды шины разных ролей, проектные секреты и runtime-состояние
-в переход не входят и не объединяются (см. «Что не объединяется»).
+| Controller `~/.config/mop/secrets/` passwords and private keys | Deployment/key provisioning → NATS/proxy rendering and controller services | Private credentials; generated passwords are reused, not rotated merely by a normal deployment. Losing the directory is a credential-loss incident, not a harmless cache miss. |
+| `secrets/operators`, configured operator file and `/etc/nats/identity/` copies | User administration/deployment → file identity provider, callout and web login | Local users/password hashes; LDAP is a separate provider, with a protected bind password |
+| `/etc/nats/base-users.json`, `users.conf`, `callout.conf` and callout seeds | Deployment plus `natsconf`/callout key setup → NATS/callout | Generated machine/project access configuration, not a human password database |
+| `servers/<address>/connection.json` on the master | Login → `creds.snapshot`, bus connection, session environment, models and diagnose | Whole human connection profile; the old human `operator.json` + `client.json` pair is no longer read after #662. Broken new profiles fail rather than fall back. |
+| Service `servers/<address>/operator.json`, optional `client.json` | Deployment → server machine connection consumers | Service machine identity remains distinct from human login; do not merge their credentials |
+| `servers/<address>/tls.pem` | Login/credential collection/deployment → TLS consumers | Trust pin or CA material; separate from credential profile rotation |
+| Controller `servers/<address>/bootstrap.json` and Nomad's own bootstrap file | Nomad ACL bootstrap/deployment copy → controller Nomad adapter | Nomad management token stays on the controller, never distributed to masters/nodes |
+| `projects.json` | Cluster project mutation → registry/admission/list/deployment | Versioned project snapshot is authoritative; limits travel with project records. The older `projects`/`limits.json` pair is not a new-release fallback or import source. |
+| `project-asks.json`, `inventory-hosts.json` | Deployment → spec resource requests and cluster forget guard | Derived deployment files, refreshed by deployment rather than a live project edit |
+| `puppets/nats-puppet-*.pass` | Server `natsconf` → project credential/bootstrap readers where used | Project credential store is separate from master credentials; role grants have their own credentials |
+| `souls/registry.json`, grant passwords and pinned bundle files | Grant lifecycle service → callout, cluster and bootstrap resolvers | Role binding, incarnation, request reservation, approval and revocation authority; not interchangeable with a self-declared role name |
+| `bootstrap/<puppet>-tasks.yml`, `-vars.yml`, `-sent.json`, `-approved.json` | Human lifecycle requests and approved inheritance → bootstrap/registration | Accepted per-puppet policy, including explicit empty approval; not overwritten by project registration or ordinary deployment |
+| Bootstrap result/progress JSON and progress logs | Bootstrap runner → polling, web progress and give-up logic | Execution evidence associated with registration and allocation; may contain sensitive output |
+| `project-secrets/<project>/files/`, `vars.env` | Cluster secret operations → bootstrap and body delivery | Project secret values, role allowlist filtering and restricted delivery, not installation settings |
+| `landing.json` | Cluster landing operation → landing arbitration | Runtime ownership survives service restart; deployment must not reset it |
+| `proxy-key.json`, `proxy-rotation.json` | Proxy distribution/rotation → status and recovery | Applied-key fingerprint and private rotation checkpoint are separate from the actual key |
+| `sessions.json` | Web login/logout → session authentication | Existing persistent web sessions; this is not the new ORM session contract |
+| Clone `.git/mop-owner` | Agent ownership handling → lease/safety checks and Git identity installation | Ownership is not inferred from a silent session or clean-looking dashboard row |
+| Git config `mop.server`, `mop.user`, `mop.branch` | Login/operator → command context | Existing client selection layer, not the new ORM binding design |
+| Node `bus.json`, body bus credentials, role bundles/ready receipts, generated hooks and MCP configuration | Deployment/driver/agent/bootstrap → execution consumers | Distinct machine/project/grant scopes; no universal credential file |
+| `.local/state/mop/turns`, `models`, runtime session registry and transcripts | Hooks/session runtime → agent/roster/usage/history | Observations and runtime-owned history, not installation desired state |
+| Admin operations, per-target lanes, terminal registries and web event rings in memory | HTTP adapter/workers/terminal/collector → live clients | No durable operation queue in current `adminapi`; historical `ops.jsonl` is not an active store. Journald and NATS events do not make an in-memory operation result durable. |
+| `llm-proxy/config.yaml`, provider auth directory and proxy logs | Initial provisioning then CLIProxyAPI/operator management → proxy | External service persistence; repeated provisioning must not erase provider management changes |
+
+Existing secret directories and files normally use `0700`/`0600`; public
+configuration and trust certificates can be readable without exposing private
+keys. Refer to [AUTH.md](AUTH.md), [BOOTSTRAP.md](BOOTSTRAP.md),
+[CLUSTER.md](CLUSTER.md), [PROXY.md](PROXY.md), [SOUL.md](SOUL.md) and
+[CLI.md](CLI.md) for the existing protocols and command reference. Historical
+#531 transition/export behavior is not the transition plan for #623; reverting
+code is not a database migration or a credential/data rollback.
+
+The legacy mechanisms above remain facts about the old release until an
+explicit replacement. They do not authorize preserving any of those files as
+a runtime reader/writer authority in the fresh Django installation.

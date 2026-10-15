@@ -1,5 +1,42 @@
 # Дашборд: состояние пула в браузере
 
+## Release boundary: Django control and Channels
+
+This page describes the current pre-Django dashboard, including its stdlib HTTP
+handler, in-memory operation adapter, SSE and private terminal long-poll routes.
+It remains the operational reference for that runtime, not a claim that the
+Django replacement has shipped. For the future release in epic #623, read
+[CONTROL](CONTROL.md) for the functional preservation mapping, the parent
+[API](API.md) for canonical wire/authority rules, and [STORAGE](STORAGE.md) for
+persistence and recovery. These documents specify the target; their presence
+does not establish runtime availability.
+
+The replacement uses Django REST Framework for shared web/CLI/MCP control and
+Django ASGI with Channels for scoped realtime delivery. NATS is internal
+realtime-only, not browser CRUD or an operation queue; the browser receives no
+bus credentials. Current `/api/*`, `/events` and terminal routes below are not
+compatibility commitments. Neither the anonymous overview nor the old admin
+cookie/Origin implementation implicitly defines the replacement's permissions.
+
+Private terminal access must bind the current authenticated session, actor,
+target and live conversation to the existing foreground PTY, with one writer
+across all workers, reader/writer scopes, Django CSRF on cookie mutations and
+Origin validation on WebSocket upgrades. Logout, revocation, expiry, disconnect
+and conversation replacement revoke and clean up attachments without killing
+the puppet. History, terminal bytes/handles, messages and private receipts never
+enter public pool events. CONTROL.md specifies the preservation requirements;
+API.md defines their wire representation, not the old routes below.
+
+The protected proxy management gateway remains distinct from externally
+reachable inference: current Admin authority and a server-only management key
+for the former, inference credentials for the latter. No public management
+pass-through, browser management key or client-chosen upstream is permitted.
+Fresh installation is the release boundary; no old URL, session, credential or
+storage migration compatibility is promised. Until implementation replaces it,
+the rest of this document is current behavior and historical context.
+
+## Current implementation and history
+
 `mop server web` отдаёт по HTTP ту же картину, что `mop list`, `mop node` и
 `mop stat`, одной страницей на русском, которая обновляется на месте, — и,
 с эпика #456, действия над пулом под актуальной admin-ролью. Адрес —

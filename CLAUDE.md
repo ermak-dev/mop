@@ -13,6 +13,21 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 [BOOTSTRAP](docs/BOOTSTRAP.md), [CLUSTER](docs/CLUSTER.md), [LEASE](docs/LEASE.md), [AUTH](docs/AUTH.md), [PROXY](docs/PROXY.md),
 [CLAUDECODE](docs/CLAUDECODE.md).
 
+## New controller release (epic #623)
+
+The Django release is a fresh-install replacement, not an in-place migration.
+[API](docs/API.md) is its normative architecture/wire/authority contract;
+[STORAGE](docs/STORAGE.md) maps state owners and removal;
+[CONTROL](docs/CONTROL.md) maps preserved functions and permissions.
+These documents specify the target, not functionality already implemented.
+
+ - **MUST** Integrate this epic's tasks only into `epic/623-unified-pool-api`; do not merge to `master` or deploy on the old pool without a separate operator order. Before final integration, the operator must explicitly settle the old installation's automatic CI deploy.
+ - **MUST** For new-release code, Django ORM owns durable mop state, Django Auth owns users/sessions/permissions, DRF owns commands/queries, and NATS/WS carry realtime only. CONFIG/STORAGE replace the old-runtime rules below that prescribe .env/inventory authority, private credential stores, connection.json login storage and file/NATS/HTTP state. Only their narrow protected DB/root/client bootstrap and generated external artifacts remain outside ORM; do not recreate the old stores in Django. The old-runtime rules still apply when maintaining the deployed version.
+ - **MUST** New models and application transactions live in the server layer; common/client/node and stdlib-only session.py do not depend on Django. Follow the subject-module dependencies and invariant-owner matrix in API, with one mutation path shared by DRF/Admin/worker.
+ - **MUST** Use portable ORM models/migrations/constraints/queries, PostgreSQL in production and its real concurrency gate; no vendor SQL or backend-specific business rules. Old script-suite green is not Django acceptance; #632 adds the runner, test database and clean-install gate.
+ - **MUST** Keep admission/claim/result transactions short and synchronous, effects outside HTTP/SQL transactions in bounded workers, and async I/O outside blocking ORM code. Pass whole transactional functions through the safe sync/async boundary; never pass lazy QuerySets/connections across it.
+ - **MUST NOT** Do not add old-data import, dual-write, file fallback, compatibility APIs, mixed-agent rollout or business effects in model.save/signals. Remove each old owner when its replacement is connected in the epic; preserve safety policies, not obsolete wire formats.
+
 ## Overall structure
 
  - `/mop` — the library: returns data, prints nothing; laid out by layers (#260): `mop/common` (everyone), `mop/client` (operator's machine and master shell), `mop/server` (controller), `mop/node` (agent); `mop/session.py` and `mop/usage.py` stay in the root (they travel to bodies by path), `mop/driver` is common with the node drivers inside, `mop/cli` holds the commands
