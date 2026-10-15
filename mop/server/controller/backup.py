@@ -193,8 +193,10 @@ def restore(path, using='default'):
     from .runtime import _maintenance_role, _guard_row, _verify_installation_state, short_transaction
     from .models import Installation
     _maintenance_role()
-    path = _private_path(path, exists=True)
     connection = connections[using]
+    if connection.in_atomic_block or not connection.get_autocommit():
+        raise RuntimeError('restore requires autocommit outside application transactions')
+    path = _private_path(path, exists=True)
     generation = _arm_restore(using)
     # После arm никакой finally не объявляет target готовым: даже SystemExit,
     # потеря COMMIT reply и авария процесса должны оставлять durable fence.

@@ -307,6 +307,9 @@ class Foundation(TransactionTestCase):
     def test_archive_commit_crash_cannot_reopen_old_timeline_after_restart(self):
         # BUG: pg_restore COMMIT предшествует fence; авария возвращает старую authority.
         # HYPOTHESIS: guard вне архива должен переживать COMMIT и новый startup.
+        # SOLUTION: ORM guard коммитится до restore и не входит в archive.
+        # RESULT: окно воспроизведено в PG16/17; PG16 job29332 уже отвергает startup.
+        # STATUS: FIXED — see #632
         self._backup_restore_case(archive_commit_crash=True)
 
     def _backup_restore_case(self, root_mismatch=False, archive_commit_crash=False):

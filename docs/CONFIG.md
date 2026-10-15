@@ -244,7 +244,9 @@ Standard migrations create its uninitialized row; only initialization of a truly
 new installation can make that row ready. A missing guard row/table is a refusal,
 not permission for `initialize` to recreate it around existing data.
 
-Restore commits a new, dirty guard generation **before** invoking archive tools.
+Restore requires autocommit and refuses an ambient application transaction
+before filesystem/tool work: its guard arm must be a real COMMIT, not a caller's
+savepoint. It commits a new, dirty guard generation **before** invoking archive tools.
 The archive's table of contents is checked for forbidden guard entries before
 execution; the public schema itself is not dropped. Archive migration history
 must exactly match the controller's migrated target. Older/newer or otherwise
@@ -256,16 +258,21 @@ clear a failed restore. No ad hoc schema creation or migration faking is used.
 After archive COMMIT the guard still denies startup, even though the archive may
 contain an old epoch with effects enabled. Restore commits a fresh installation
 epoch and disables effects, verifies schema, identity and root custody, then
-clears only the same guard generation. Crashes or failures before/during/after
-archive COMMIT, failed validation and stale restorers leave it dirty across
-process restarts. Keep services stopped and use a fresh empty target for a new
-restore attempt; do not delete/reset the guard as a repair shortcut. Successful
-restore still leaves effects disabled. #625/#639 own reconciliation before
+clears only the same guard generation. Crashes or failures before that completion
+commit, including before/during/after archive COMMIT, failed validation and stale
+restorers leave it dirty across process restarts. A lost completion-COMMIT reply
+is an unknown outcome: the target may already be valid in its new epoch, still
+with effects disabled. Check it rather than assuming rollback or enabling effects.
+Keep services stopped and use a fresh empty target for a new restore attempt;
+do not delete/reset the guard as a repair shortcut. Successful restore still
+leaves effects disabled. #625/#639 own reconciliation before
 dispatch can reopen; foundation provides no bypass to enable it. No old-data
 import exists.
 
 `runtime.require_restore_ready(using='default', lock=False)` is the cheap
-single-row readiness query for future admission/claim consumers. It returns the
+single-row readiness query for future admission/claim consumers. The composition
+root injects this check into domain services; domain modules must not import the
+composition runtime back into their own layer. It returns the
 current guard generation or refuses missing/uninitialized/dirty state. With
 `lock=True` it must run inside the caller's short SQL transaction, before
 project/resource locks, so a restore cannot arm concurrently with that admission

@@ -122,20 +122,27 @@ finally:
         with self.archive() as archive:
             for phase in ('before', 'during', 'after'):
                 with self.subTest(phase=phase), self.target() as target:
+                    reached = []
+                    generations = []
                     def interrupt(command, *args, **kwargs):
                         self.assertFalse(connections[target].in_atomic_block, 'tool I/O under SQL transaction')
                         if command != 'pg_restore' or '--single-transaction' not in kwargs.get('extra', ()):
                             return tool(command, *args, **kwargs)
+                        reached.append(phase)
                         from mop.server.controller.models import RestoreGuard
                         guard = RestoreGuard.objects.using(target).get(pk=1)
                         self.assertEqual(guard.state, 'restoring')
+                        generations.append(guard.generation)
                         if phase == 'before':
                             raise SystemExit('before restore')
                         if phase == 'during':
-                            # Реальный pg_restore получает оборванный архив и откатывает tx.
+                            # TOC цел; обрыв в конце data stream достигается уже
+                            # после DDL/начала загрузки, внутри single-transaction.
                             kwargs['input'].seek(0)
+                            payload = kwargs['input'].read()
+                            self.assertGreater(len(payload), 4096)
                             with tempfile.TemporaryFile() as broken:
-                                broken.write(kwargs['input'].read(64))
+                                broken.write(payload[:-128])
                                 broken.seek(0)
                                 kwargs['input'] = broken
                                 return tool(command, *args, **kwargs)
@@ -144,11 +151,18 @@ finally:
                     with patch.object(archive_tools, '_tool', interrupt):
                         with self.assertRaises((SystemExit, RuntimeError)):
                             archive_tools.restore(archive, using=target)
+                    self.assertEqual(reached, [phase], 'failure did not reach the requested restore boundary')
                     self.assert_restart_denied(target)
+                    from mop.server.controller.models import RestoreGuard
+                    durable = RestoreGuard.objects.using(target).get(pk=1)
+                    self.assertEqual(durable.state, 'restoring')
+                    self.assertEqual([durable.generation], generations)
                     if phase == 'after':
                         row = Installation.objects.using(target).get(pk=1)
                         self.assertTrue(row.effects_enabled)
                         self.assertEqual(str(row.epoch), self.original['epoch'])
+                    else:
+                        self.assertFalse(Installation.objects.using(target).exists())
 
     def test_fence_commit_crash_keeps_guard_until_successful_completion(self):
         from mop.server.controller import runtime
@@ -227,14 +241,14 @@ finally:
         with tempfile.TemporaryDirectory() as directory, self.target() as target:
             archive = Path(directory) / 'wrong-schema.dump'
             # Архив с прежней/чужой схемой нельзя объявить текущим по target ledger.
-            MigrationRecorder(connection).record_unapplied('controller', '0001_initial')
+            MigrationRecorder(connection).record_unapplied('controller', '0002_restore_guard')
             try:
                 with archive.open('wb') as output:
                     archive_tools._tool('pg_dump', connection.settings_dict, major=connection.pg_version // 10000,
                                         output=output, extra=('--format=custom', '--no-owner', '--no-acl',
                                                               '--exclude-table=public.controller_restoreguard'))
             finally:
-                MigrationRecorder(connection).record_applied('controller', '0001_initial')
+                MigrationRecorder(connection).record_applied('controller', '0002_restore_guard')
             archive.chmod(0o600)
             with self.assertRaisesRegex(RuntimeError, 'schema|migration'):
                 archive_tools.restore(archive, using=target)
