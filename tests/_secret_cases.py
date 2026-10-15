@@ -477,6 +477,32 @@ class SecretCases(TransactionTestCase):
         self.assertTrue(self.m.CredentialRotation.objects.get(pk=r.id).resolved)
         self.assertEqual(r.original_reason, FailureReason.REFUSED)
 
+    def test_unknown_transport_result_is_not_an_immutable_receipt_that_blocks_readback(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        with self.assertRaises(self.s.Refused):
+            svc.receipt(self.actor, r.id, b.id, version_id=new.id, claim_id=r.claim_id,
+                        generation=r.generation, outcome=Outcome.UNKNOWN)
+        r = svc.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        svc.receipt(self.actor, r.id, b.id, version_id=new.id, claim_id=r.claim_id,
+                    generation=r.generation, outcome=Outcome.APPLIED)
+        r = svc.reconcile(self.actor, r.id, Observation.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        self.assertEqual(r.receipts, r.required)
+
+    def test_absent_readback_cannot_discard_confirmed_delivery_evidence(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        svc.receipt(self.actor, r.id, b.id, version_id=new.id, claim_id=r.claim_id,
+                    generation=r.generation, outcome=Outcome.APPLIED)
+        r = svc.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        with self.assertRaises(self.s.Refused):
+            svc.reconcile(self.actor, r.id, Observation.ABSENT, claim_id=r.claim_id,
+                          expected_revision=r.revision, quiescent=True)
+        r = svc.reconcile(self.actor, r.id, Observation.PARTIAL, claim_id=r.claim_id,
+                          expected_revision=r.revision, quiescent=True)
+        self.assertEqual(r.receipts, r.required)
+        self.assertEqual(r.state, Stage.RECOVERY_REQUIRED)
+
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission
         codes = set(Permission.objects.filter(content_type__app_label='secrets').values_list('codename', flat=True))
