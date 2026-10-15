@@ -406,6 +406,38 @@ class SecretCases(TransactionTestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(self.m.SecretVersion.objects.values('key_id', 'nonce').distinct().count(), 2)
 
+    def test_receipt_default_gate_does_not_trust_machine_or_permission_alone(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        unbound = self.s.RotationService(authorizer=Allow())
+        with self.assertRaises(PermissionError):
+            unbound.receipt(self.actor, r.id, b.id, version_id=new.id, claim_id=r.claim_id,
+                            generation=r.generation, outcome=Outcome.APPLIED)
+
+    def test_storage_and_provider_failures_do_not_retain_raw_secret_exception(self):
+        from django.db import DatabaseError
+        self.assertTrue(hasattr(self.s, 'StorageUnavailable'), 'storage failures require a typed safe reason')
+        a = self.secret()
+        with patch.object(self.m.Secret.objects, 'get', side_effect=DatabaseError('private-value')):
+            try:
+                self.api.metadata(self.actor, a.id)
+            except self.s.StorageUnavailable as error:
+                self.assertNotIn('private-value', str(error))
+                self.assertIsNone(error.__context__)
+            else:
+                self.fail('storage failure was swallowed')
+        class Broken:
+            def encrypt(_, value, context):
+                raise RuntimeError('private-value')
+        api = self.s.SecretStore(provider=Broken(), authorizer=Allow())
+        try:
+            api.stage(self.actor, a.id, b'private-value', expected_revision=1)
+        except SecretCryptoError as error:
+            self.assertNotIn('private-value', str(error))
+            self.assertIsNone(error.__context__)
+        else:
+            self.fail('provider failure was swallowed')
+
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission
         codes = set(Permission.objects.filter(content_type__app_label='secrets').values_list('codename', flat=True))
