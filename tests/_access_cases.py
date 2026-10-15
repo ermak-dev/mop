@@ -227,7 +227,9 @@ class AccessContracts(TransactionTestCase):
                 return self.password_ok
         provider = Provider()
         router = Router(provider=provider)
-        self.assertIsNone(router.authenticate(None, username='human', password='wrong'))
+        from django.core.exceptions import PermissionDenied
+        with self.assertRaises(PermissionDenied):
+            router.authenticate(None, username='human', password='wrong')
         self.assertEqual(provider.calls, [])
         user = router.authenticate(None, username='ldap', password='test-password-only')
         self.assertIsNotNone(user)
@@ -296,6 +298,62 @@ class AccessContracts(TransactionTestCase):
         self.s.revoke_token(self.actor)
         with self.assertRaises(self.s.Denied):
             self.s.current_actor(self.actor)
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_drf_and_admin_share_filtered_list_and_in_scope_denial(self):
+        client = Client(HTTP_AUTHORIZATION='Token ' + self.token)
+        response = client.get('/api/v1/projects', secure=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['count'], 1)
+        self.assertEqual(response.json()['results'][0]['id'], str(self.project.pk))
+        self.assertEqual(client.get('/api/v1/projects/' + str(self.foreign.pk), secure=True).status_code, 404)
+        self.user.is_staff = True
+        self.user.save()
+        browser = Client()
+        browser.login(username='human', password='test-password-only')
+        response = browser.get('/admin/catalog/project/', secure=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, self.foreign.origin)
+        self.user.user_permissions.clear()
+        self.assertEqual(client.get('/api/v1/projects/' + str(self.project.pk), secure=True).status_code, 403)
+        self.assertEqual(browser.get('/admin/catalog/project/', secure=True).status_code, 403)
+
+    def test_client_fk_cannot_move_binding_to_foreign_project_or_client(self):
+        from mop.server.catalog.models import ClientRegistration
+        from mop.server.catalog.services import Catalog
+        from mop.server.controller.runtime import initialize
+        from mop.server.controller.models import Installation
+        initialize()
+        client = ClientRegistration.objects.create(installation=Installation.objects.get(pk=1), label='owned')
+        foreign_client = ClientRegistration.objects.create(installation=Installation.objects.get(pk=1), label='foreign')
+        self.m.ClientOwnership.objects.create(client=client, user=self.user)
+        self.permission('catalog.change_workspacebinding')
+        catalog = Catalog(authorizer=self.s.Access())
+        result = catalog.bind_workspace(self.actor, client.pk, 'work', self.project.pk,
+            integration_branch='main', expected_revision=0)
+        self.assertEqual(result.project_id, self.project.pk)
+        with self.assertRaises(self.s.NotVisible):
+            catalog.bind_workspace(self.actor, client.pk, 'work', self.foreign.pk,
+                integration_branch='main', expected_revision=1)
+        with self.assertRaises(self.s.NotVisible):
+            catalog.bind_workspace(self.actor, foreign_client.pk, 'work', self.project.pk,
+                integration_branch='main', expected_revision=0)
+
+    def test_two_concurrent_rotations_accept_only_one_old_credential(self):
+        barrier = Barrier(2)
+        def rotate(_):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                try:
+                    self.s.rotate_token(self.actor)
+                    return 'rotated'
+                except self.s.Denied:
+                    return 'denied'
+            finally:
+                close_old_connections()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertCountEqual(tuple(pool.map(rotate, range(2))), ('rotated', 'denied'))
 
     def test_token_admin_is_not_registered(self):
         from django.contrib import admin
