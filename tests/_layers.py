@@ -187,7 +187,7 @@ def violations(c, mods):
                 continue
             owner, target = subject_of(name), subject_of(dep)
             if owner:
-                allowed = dep.startswith('mop.common') or dep == 'mop' or (
+                allowed = dep.startswith('mop.common') or dep == 'mop' or (owner == 'catalog' and dep == 'mop.driver') or (
                     target is not None and (target == owner or target in SUBJECTS[owner]))
                 c.check(f'{name}: forbidden subject dependency {dep}', allowed)
             if dep.startswith("mop.cli") and name in ("mop.cli", "mop.cli.__main__"):

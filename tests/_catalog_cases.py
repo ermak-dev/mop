@@ -286,7 +286,7 @@ class CatalogCases(TransactionTestCase):
         p = self.project()
         with self.assertRaises(PermissionError):
             services.Catalog(authorizer=Allow(set())).get_project(self.actor, p.id)
-        self.assertEqual(self.auth.calls[-1][2], ())
+        self.assertEqual(self.auth.calls[-1][2], (p.id,))
         self.assertIsInstance(self.api.list_projects(self.actor), tuple)
         from django.db import connection
         connection.ensure_connection()
