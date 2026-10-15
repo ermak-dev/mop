@@ -3,6 +3,9 @@
 
 HYPOTHESIS: unknown требует readback, CAS и доказанного покоя, а не повтора.
 Компенсация — два отдельных эффекта со своими отказами, не универсальный undo.
+SOLUTION: конечные состояния, CAS-намерения, подтверждение и отдельный readback.
+RESULT: локальные проверки проходят; транзакции и внешние эффекты не реализованы.
+STATUS: FIXED — see #637 (только чистая политика, не вся задача).
 """
 import importlib
 import pathlib
@@ -174,6 +177,62 @@ class RotationTests(unittest.TestCase):
                 self.apply(method)
             self.assertNotIn("receiver/inc-1", str(caught.exception))
         self.assertNotIn("node-a", repr(pending))
+
+    def test_restored_snapshots_reject_inconsistent_safety_facts(self):
+        from dataclasses import replace
+        r = self.r
+        for changes in (
+            {"state": r.Stage.ACTIVE},
+            {"state": r.Stage.RETIRED},
+            {"state": r.Stage.FAILED},
+            {"state": r.Stage.PARTIAL},
+            {"state": r.Stage.OLD_RESTORED},
+            {"state": r.Stage.COMPENSATED},
+            {"state": r.Stage.DELIVERING},
+            {"original_failure": r.Effect.DELIVER},
+            {"compensation_failure": r.Effect.RESTORE_OLD},
+            {"state": r.Stage.STAGED, "receipts": self.rotation.required},
+        ):
+            with self.assertRaises(r.RotationError):
+                replace(self.rotation, **changes)
+        active = self.active()
+        with self.assertRaises(r.RotationError):
+            replace(active, receipts=frozenset())
+        with self.assertRaises(r.RotationError):
+            replace(active, original_failure=r.Effect.RETIRE_OLD)
+        failed = self.apply("record", self.apply("begin_delivery"), outcome=r.Outcome.REJECTED)
+        with self.assertRaises(r.RotationError):
+            replace(failed, original_failure=r.Effect.RESTORE_OLD)
+
+    def test_transition_entry_points_are_finite_for_each_reachable_stage(self):
+        r = self.r
+        delivering = self.apply("begin_delivery")
+        delivered = self.delivered()
+        active = self.active()
+        retiring = self.apply("begin_retirement", active)
+        retired = self.apply("record", retiring, outcome=r.Outcome.APPLIED)
+        unknown = self.apply("record", retiring, outcome=r.Outcome.UNKNOWN)
+        absent = self.apply("reconcile", unknown, outcome=r.Observation.ABSENT, quiescent=True)
+        failed = self.apply("record", retiring, outcome=r.Outcome.REJECTED)
+        restoring = self.apply("begin_compensation", failed)
+        restored = self.apply("record", restoring, outcome=r.Outcome.APPLIED)
+        revoking = self.apply("begin_new_revocation", restored)
+        done = self.apply("record", revoking, outcome=r.Outcome.APPLIED)
+        partial = self.apply("record", revoking, outcome=r.Outcome.REJECTED)
+        entries = ("begin_delivery", "activate", "begin_retirement", "begin_compensation",
+                   "begin_new_revocation", "retry_effect")
+        for snapshot, allowed in ((self.rotation, "begin_delivery"), (delivering, None),
+                                  (delivered, "activate"), (active, "begin_retirement"),
+                                  (retiring, None), (retired, None), (unknown, None),
+                                  (absent, "retry_effect"), (failed, "begin_compensation"),
+                                  (restoring, None), (restored, "begin_new_revocation"),
+                                  (revoking, None), (done, None), (partial, None)):
+            for method in entries:
+                if method == allowed:
+                    self.apply(method, snapshot)
+                else:
+                    with self.assertRaises(r.RotationError):
+                        self.apply(method, snapshot)
 
 
 if __name__ == "__main__":

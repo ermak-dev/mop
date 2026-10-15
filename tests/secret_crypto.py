@@ -3,6 +3,9 @@
 
 HYPOTHESIS: AEAD с явным контекстом исключает перестановку защищённых значений.
 Сначала проверяется наличие публичного поведения, а не ошибка импорта.
+SOLUTION: PyNaCl XChaCha20-Poly1305, immutable bootstrap keyring и бинарный v1.
+RESULT: локальные проверки проходят; ORM и реальные credentials не затрагиваются.
+STATUS: FIXED — see #637 (только независимая криптографическая часть).
 """
 import importlib
 import pathlib
@@ -159,6 +162,23 @@ class CryptoTests(unittest.TestCase):
             envelope.ciphertext, aad, envelope.nonce, b"a" * 32), self.plaintext)
         self.assertEqual(envelope.to_bytes(), b"MOPS\x01" + struct.pack(">H", len(key_id))
                          + key_id + envelope.nonce + envelope.ciphertext)
+
+    def test_provider_failures_do_not_keep_raw_exception_context(self):
+        envelope = self.provider.encrypt(self.plaintext, self.context)
+        for operation, symbol in (
+            (lambda: self.provider.encrypt(self.plaintext, self.context),
+             "nacl.bindings.crypto_aead_xchacha20poly1305_ietf_encrypt"),
+            (lambda: self.provider.decrypt(envelope, self.context),
+             "nacl.bindings.crypto_aead_xchacha20poly1305_ietf_decrypt"),
+        ):
+            with patch(symbol, side_effect=RuntimeError(self.plaintext.decode())):
+                error = self.rejected(operation)
+                self.assertIsNone(error.__context__)
+
+    def test_root_keyrings_with_different_material_are_not_equal(self):
+        # Сравнение только active_key_id скрывает ошибочно подменённый bootstrap.
+        other = self.c.Keyring("root-v1", {"root-v1": b"b" * 32})
+        self.assertNotEqual(self.ring, other)
 
 
 if __name__ == "__main__":
