@@ -60,13 +60,46 @@ CERT_FILE = "tls.pem"
 WSS_PATH = "/nats"
 
 
+def _runtime_grant_host():
+    """Адрес выданного подключения роли: человеческий join в теле не нужен."""
+    path = config.get("MOP_BUS_CONFIG")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as stream:
+            runtime = json.load(stream)
+    except (OSError, ValueError):
+        raise RuntimeError("cannot read the explicit runtime bus configuration") from None
+    if not isinstance(runtime, dict):
+        raise RuntimeError("the explicit runtime bus configuration is not a mapping")
+    if not busnames.is_grant(runtime.get("user")):
+        return None
+    value = runtime.get("url")
+    try:
+        parsed = urlsplit(value)
+        valid = (isinstance(value, str) and parsed.scheme in ("nats", "tls", "ws", "wss")
+                 and parsed.hostname and parsed.port != 0
+                 and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+                 and parsed.path in ("", "/nats")
+                 and not any(c.isspace() for c in value))
+    except (TypeError, ValueError, AttributeError):
+        valid = False
+    if not valid:
+        raise RuntimeError("the runtime role connection has no valid server address")
+    return parsed.hostname
+
+
 def joined_host():
     """Единственный joined-сервер клиента; несколько требуют явного выбора.
 
     Joined -- след входа: целый профиль (#533: connection.json или целая
     legacy-пара), машинный вход или остаток половины как подсказка адреса
     для повторного login. Профиль из остатка не собирается: запускатели
-    откажут сами, внятно."""
+    откажут сами, внятно. Явное подключение роли (#650) уже содержит
+    сервер: его адрес не выбирается из человеческих каталогов."""
+    runtime = _runtime_grant_host()
+    if runtime:
+        return runtime
     hosts = joined_dirs()
     if len(hosts) == 1:
         return hosts[0]
