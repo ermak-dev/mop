@@ -10,6 +10,7 @@ from django.utils import timezone
 from django.views.decorators.debug import sensitive_variables
 from . import models as m
 from .permissions import ACTIONS
+from .policy import directory_dn_key as _norm
 from .services import Denied, _principal
 
 
@@ -71,9 +72,7 @@ def _configuration(source):
         row.nested_ad, row.starttls, row.ca_secret_ref)
 
 
-def _norm(dn):
-    return ','.join(part.strip().casefold() for part in dn.split(','))
-
+from .policy import directory_dn_key as _norm
 
 def _mapping(source, account):
     groups = {_norm(dn) for dn in account.groups}
