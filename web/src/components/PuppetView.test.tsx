@@ -8,6 +8,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import { afterEach, expect, test, vi } from "vitest";
 import { PoolTable } from "./PoolTable";
 import { PuppetCard } from "./PuppetCard";
+import { PuppetActions } from "./PuppetActions";
 import { emptySnapshot, renderUi } from "../test-utils";
 import type { Puppet } from "../types";
 
@@ -49,37 +50,31 @@ afterEach(() => {
   else Reflect.deleteProperty(HTMLElement.prototype, "scrollTop");
 });
 
-// #507: иконка «лог» ушла. #516: в строке только «экран» и «правка»,
-// все операции цели -- пунктами в окне правки.
-test("row icon экран opens only its own dialog", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => response({ models: [], lines: [] })));
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
-  const actions = screen.getByRole("group", { name: `действия ${row.name}` });
-  const button = within(actions).getByRole("button", { name: "Экран" });
-  expect(button.querySelector("svg")).not.toBeNull();
-  expect(button.textContent).toBe("");
-  fireEvent.click(button);
-  const dialog = await screen.findByRole("dialog", { name: `экран ${row.name}` });
-  expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  expect(dialog).toHaveTextContent(row.name);
+// #664: экран выбирается строкой, отдельной иконки и моды больше нет.
+test("#664 row selection replaces the screen icon", () => {
+  const open = vi.fn();
+  renderUi(<PoolTable projects={snapshot.projects} session={session} onOpen={open} />);
+  expect(screen.queryByRole("button", { name: "Экран" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Правка" })).toBeNull();
+  fireEvent.click(screen.getByText(row.name).closest("tr")!);
+  expect(open).toHaveBeenCalledExactlyOnceWith(row.name);
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 test("read-only viewers have no action icons", () => {
-  renderUi(<PoolTable projects={snapshot.projects} session={{ login: "user", role: "user" }} />);
+  renderUi(<PuppetActions row={row} session={{ login: "user", role: "user" }} />);
   expect(screen.queryByRole("group", { name: /действия/ })).toBeNull();
 });
 
-test("#487 actions have a right-aligned shrink-to-fit column", () => {
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
-  expect(screen.getByRole("columnheader", { name: "действия" })).toHaveStyle({ textAlign: "right", width: "1%" });
+test("#664 panel actions stay compact without a table column", () => {
+  renderUi(<PuppetActions row={row} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   expect(actions).toHaveStyle({ justifyContent: "flex-end", flexWrap: "nowrap" });
-  expect(actions.closest("td")).toHaveStyle({ width: "1%", whiteSpace: "nowrap", textAlign: "right" });
-  // #516: строка -- экран и правка; модель/рестарт/разрушительные уехали
-  // пунктами в окно правки, состав перечислен, не только число
+  expect(actions.closest("td")).toBeNull();
+  // #664: правка остаётся единственным входом операций в заголовке панели.
   expect(within(actions).getAllByRole("button")
     .map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim()))
-    .toEqual(["Экран", "Правка"]);
+    .toEqual(["Правка"]);
   expect(within(actions).queryByRole("button", { name: "сообщение" })).toBeNull();
 });
 
@@ -93,7 +88,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s result ne
     init?.method === "POST" ? { id: "op-1", status: "accepted" }
       : url.endsWith("/models") ? { models: ["other-model"] }
       : { id: "op-1", status: "succeeded" })));
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
@@ -204,7 +199,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves
     ? response({ id: "op-1", status: "accepted" })
     : url.endsWith("/models") ? response({ models: ["other-model"] }) : pending);
   vi.stubGlobal("fetch", mock);
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   // вход #522: строка -> визард -> финальный экран -> «Завершить»
   fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
@@ -231,6 +226,10 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves
   } else {
     // #522: экран хода живёт в визарде -- «Принято» на экране хода
     await screen.findByText("Принято");
+    // #664: действительно закрываем визард до позднего вердикта, движок живёт.
+    fireEvent.click(within(screen.getByTestId("control-window"))
+      .getAllByRole("button", { name: "Закрыть" }).at(-1)!);
+    await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
     await act(async () => { finish(response({ status: "failed", error: "review refusal" })); });
     // терминал приехал в закрытое окно: повторный вход (#522) -- не форма,
     // а сразу экран вердикта: поднятый движком стейт открывает ход без
@@ -257,7 +256,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves
 
 test("#512 the row offers the destructive actions, a non-admin never sees them", () => {
   vi.stubGlobal("fetch", vi.fn());
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = screen.getByTestId("control-window");
   // #512/#516/#520: три разрушительных действия -- пунктами визарда
@@ -270,7 +269,7 @@ test("#512 the row offers the destructive actions, a non-admin never sees them",
   // тоже; первый стол убираем до второго рендера, иначе он отвечает за
   // кнопки
   cleanup();
-  renderUi(<PoolTable projects={snapshot.projects} session={{ login: "user", role: "user" }} />);
+  renderUi(<PuppetActions row={row} session={{ login: "user", role: "user" }} />);
   expect(screen.queryByRole("button", { name: "Правка" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Пересоздать" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Удалить" })).toBeNull();
@@ -294,7 +293,7 @@ test("#487 opening the screen scrolls its viewport to the end", async () => {
 // переключает шаг, приказ уходит движку с последнего экрана.
 test("#516 the edit window lists every operation as an item", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => response({ models: [] })));
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
@@ -314,9 +313,7 @@ test.each([
   const target: Puppet = kind === "down"
     ? { ...row, alloc_status: "stopped", bucket: "down", state: "stopped" }
     : { ...row, kind: "failing", state: "FAILED: exit 1", detail: "exit 1" };
-  const shot = emptySnapshot({ projects: [{ name: "mop", puppets: [target],
-    counts: { puppets: 1, free: 0, busy: 1, sick: 0, silent: 0, down: 0 } }] });
-  renderUi(<PoolTable projects={shot.projects} session={session} />);
+  renderUi(<PuppetActions row={target} session={session} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   const item = within(win).getByRole("button", { name: new RegExp(reason) });
@@ -330,7 +327,7 @@ test.each([
 test("#516 a destructive item rides its two-step flow from the window", async () => {
   const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
@@ -353,7 +350,7 @@ test("#516 a destructive verdict rides the wizard progress screen", async () => 
       : { id: "op-1", action: "recycle", target: row.name, status: "failed",
           error: "image builder refused" }));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
@@ -372,7 +369,7 @@ test("#516 a destructive verdict rides the wizard progress screen", async () => 
 test("#516 the restart item posts from its final screen", async () => {
   const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  renderUi(<PuppetActions row={row} session={session} />);
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");

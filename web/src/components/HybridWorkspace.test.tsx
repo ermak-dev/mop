@@ -282,5 +282,6 @@ test('#661 transcript and dialog use the available width without a reading-colum
   expect(transcript).toMatch(/width:\s*100%/);
   const card = readFileSync('src/components/PuppetCard.tsx', 'utf8');
   expect(card).not.toContain('min(1000px,');
-  expect(card).toContain('xOffset={16}');
+  expect(card).toContain('<aside');
+  expect(card).not.toContain('<Modal');
 });

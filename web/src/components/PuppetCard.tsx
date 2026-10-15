@@ -1,24 +1,31 @@
-import { Modal } from '@mantine/core';
+import { Text } from '@mantine/core';
+import { IconX } from '@tabler/icons-react';
+import type { Puppet } from '../types';
 import type { Session } from '../useSession';
 import { HybridWorkspace } from './HybridWorkspace';
+import { PuppetActions } from './PuppetActions';
+import { IconButton } from './IconButton';
 import { LABELS } from './labels';
 
-export function PuppetCard({ session, target, role, onClose }: {
+export function PuppetCard({ session, target, role, rows = [], onClose }: {
   session: Session;
   target: string | null;
   role?: string | null;
+  rows?: Puppet[];
   onClose: () => void;
 }) {
-  if (!target || session.role !== 'admin') return null;
-  return <Modal opened onClose={onClose} size="calc(100vw - 32px)" xOffset={16} yOffset={16}
-    title={`экран ${target}`}
-    data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ 'aria-label': LABELS.close }}
-    styles={{
-      content: { height: 'calc(100dvh - 32px)', maxHeight: 'calc(100dvh - 32px)',
-        display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-      header: { flexShrink: 0 },
-      body: { flex: 1, minHeight: 0, padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-    }}>
-    <HybridWorkspace key={`${session.login}\0${session.role}\0${target}`} session={session} target={target} role={role} />
-  </Modal>;
+  if (session.role !== 'admin') return null;
+  return <aside className="dashboard-screen" hidden={!target} aria-label={`экран ${target ?? ''}`}
+    data-testid={target ? 'puppet-card' : undefined}>
+    <header className="dashboard-screen-header">
+      <Text component="h2" size="md" fw={600} m={0} className="dashboard-screen-title">экран {target}</Text>
+      <div className="dashboard-screen-tools">
+        {rows.map(row => <div key={`${session.login}\0${row.name}`} className="dashboard-screen-actions" hidden={row.name !== target}>
+          <PuppetActions row={row} session={session} active={row.name === target} />
+        </div>)}
+        <IconButton label={LABELS.close} variant="subtle" size="lg" onClick={onClose}><IconX size={18} /></IconButton>
+      </div>
+    </header>
+    {target && <HybridWorkspace key={`${session.login}\0${session.role}\0${target}`} session={session} target={target} role={role} />}
+  </aside>;
 }

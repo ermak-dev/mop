@@ -60,7 +60,7 @@ test("#378 one row of badges and the allocation bar", () => {
 
 // HYPOTHESIS (#446): вкладки страниц идут первым рядом, а полоса вместе с
 // логотипом, бейджами и секциями лежит внутри одного рабочего контейнера.
-// SOLUTION: Mantine Tabs в навигации, общий Container size="xl".
+// SOLUTION: Mantine Tabs в навигации; с #664 общий fluid-контейнер dashboard.
 // RESULT: порядок и общий контейнер проверены. STATUS: FIXED — see #446.
 test("#446 navigation precedes branding and the load bar stays inside the workspace", () => {
   renderUi(<App />);
@@ -75,8 +75,8 @@ test("#446 navigation precedes branding and the load bar stays inside the worksp
   expect(nav.compareDocumentPosition(logo!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   expect(logo!.compareDocumentPosition(badges)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   expect(badges.compareDocumentPosition(bar)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-  expect(bar.closest(".mantine-Container-root")).toBe(nav.closest(".mantine-Container-root"));
-  expect(bar.closest(".mantine-Container-root")).toBe(screen.getByText("nomad: no connection").closest(".mantine-Container-root"));
+  expect(bar.closest(".dashboard")).toBe(nav.closest(".dashboard"));
+  expect(bar.closest(".dashboard")).toBe(screen.getByText("nomad: no connection").closest(".dashboard"));
 });
 
 // Подвала нет (просьба оператора 27.09, #301): строка «поток событий · без

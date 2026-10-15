@@ -7,9 +7,8 @@
 import { Badge, Box, Code, Group, NativeSelect, Stack, Table, Text, Tooltip } from "@mantine/core";
 import { useState } from "react";
 import type { Counts, LocalSession, Master, Project, Puppet, RosterSession } from "../types";
-import { roleKey, roleLabel, roster } from "../roster";
+import { roster } from "../roster";
 import type { Session } from "../useSession";
-import { PuppetActions } from "./PuppetActions";
 import { gb, KIND_WORD, presentKinds, verdictColor, verdictWord } from "./format";
 import { EmptyNote, SectionTitle } from "./Section";
 import { align, TableHead } from "./TableHead";
@@ -35,12 +34,34 @@ const statusTip = (p: Puppet): string => `${p.state} · ${p.alloc_status}`;
 const origins = (entries: RosterSession[]): string[] =>
   [...new Set(entries.flatMap((entry) => entry.source === "managed" && entry.origin ? [entry.origin] : []))];
 
-function Row({ p, role, onOpen, session }: {
-  p: Puppet; role: string | null; onOpen?: (name: string) => void; session?: Session;
+// Клик по вложенному контролу принадлежит контролу, не строке (#664).
+const interactive = (target: EventTarget | null, row: HTMLElement): boolean => {
+  const control = target instanceof Element && target.closest(
+    'button, a, input, select, textarea, summary, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"]), [tabindex]',
+  );
+  return !!control && control !== row;
+};
+
+function Row({ p, role, onOpen, selected }: {
+  p: Puppet; role: string | null; onOpen?: (name: string) => void; selected: boolean;
 }) {
   const color = verdictColor(p.kind, p.bucket);
   return (
-    <Table.Tr data-kind={p.bucket || p.kind} data-source="managed">
+    <Table.Tr data-kind={p.bucket || p.kind} data-source="managed"
+      tabIndex={onOpen ? 0 : undefined} aria-selected={onOpen ? selected : undefined}
+      data-selected={selected || undefined}
+      style={{ cursor: onOpen ? "pointer" : undefined,
+               backgroundColor: selected ? "var(--mantine-primary-color-light)" : undefined }}
+      onClick={onOpen ? (event) => {
+        if (event.target !== event.currentTarget && interactive(event.target, event.currentTarget)) return;
+        if (event.detail > 0 && window.getSelection()?.toString()) return;
+        onOpen(p.name);
+      } : undefined}
+      onKeyDown={onOpen ? (event) => {
+        if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        onOpen(p.name);
+      } : undefined}>
       <Table.Td>
         {/* точка корзины перед именем, в одну строку: узкая колонка иначе
             переносила имя под точку. Имя -- кнопка при наличии карточки
@@ -51,7 +72,7 @@ function Row({ p, role, onOpen, session }: {
             <Text component="button" span size="sm" title="карточка папета"
                   style={{ whiteSpace: "nowrap", background: "none", border: 0,
                            padding: 0, cursor: "pointer", textAlign: "left", font: "inherit" }}
-                  onClick={() => onOpen(p.name)}>{p.name}</Text>
+                  onClick={event => { if (event.detail === 0 || !window.getSelection()?.toString()) onOpen(p.name); }}>{p.name}</Text>
           ) : (
             <Text span size="sm" style={{ whiteSpace: "nowrap" }}>{p.name}</Text>
           )}
@@ -78,14 +99,11 @@ function Row({ p, role, onOpen, session }: {
       <Table.Td>{p.owner || "-"}</Table.Td>
       <Table.Td>{p.llm}</Table.Td>
       <Table.Td ta={align(COLS.disk)}>{gb(p.disk_kb)}</Table.Td>
-      {session?.role === "admin" && <Table.Td ta="right" style={{ width: "1%", whiteSpace: "nowrap" }}>
-        <PuppetActions key={`${session.login}\0${p.name}`} row={p} role={role} session={session} />
-      </Table.Td>}
     </Table.Tr>
   );
 }
 
-function LocalRow({ entry, admin }: { entry: LocalSession; admin: boolean }) {
+function LocalRow({ entry }: { entry: LocalSession }) {
   return <Table.Tr data-source="local">
     <Table.Td>
       <Text size="sm">{entry.display}</Text>
@@ -101,24 +119,24 @@ function LocalRow({ entry, admin }: { entry: LocalSession; admin: boolean }) {
     <Table.Td>{entry.user || "-"}</Table.Td>
     <Table.Td>-</Table.Td>
     <Table.Td ta="right">-</Table.Td>
-    {admin && <Table.Td />}
   </Table.Tr>;
 }
 
-export function PoolTable({ projects, sessions, masters, onOpen, session }: {
+export function PoolTable({ projects, sessions, masters, onOpen, session, selected }: {
   projects: Project[];
   sessions?: RosterSession[];
   masters?: Master[];
   session?: Session;
+  selected?: string | null;
   /** Открыть можно только управляемую строку; локальные сессии не имеют
    *  Nomad-цели, даже когда зритель — администратор. */
   onOpen?: (name: string) => void;
 }) {
-  const [role, setRole] = useState("");
+  const [project, setProject] = useState("");
   const entries = roster(projects, sessions, masters);
-  const keys = [...new Set(entries.map(roleKey))].sort();
-  if (role && !keys.includes(role)) keys.push(role);
-  const visible = entries.filter((entry) => !role || roleKey(entry) === role);
+  const keys = [...new Set(entries.map((entry) => entry.project))].sort();
+  if (project && !keys.includes(project)) keys.push(project);
+  const visible = entries.filter((entry) => !project || entry.project === project);
   const groups = new Map<string, RosterSession[]>();
   for (const entry of visible) {
     const group = groups.get(entry.project) ?? [];
@@ -129,29 +147,29 @@ export function PoolTable({ projects, sessions, masters, onOpen, session }: {
   return (
     <Stack gap="md" data-testid="pool">
       <Group justify="space-between" align="end">
-        <NativeSelect label="Role" w="100%" maw={260} value={role}
-          data={[{ value: "", label: "All roles" }, ...keys.map((key) => ({ value: key, label: roleLabel(key) }))]}
-          onChange={(event) => setRole(event.currentTarget.value)} />
+        <NativeSelect label="Проект" w="100%" maw={260} value={project}
+          data={[{ value: "", label: "Все проекты" }, ...keys.map((key) => ({ value: key, label: key }))]}
+          onChange={(event) => setProject(event.currentTarget.value)} />
         <Text size="sm" c="dimmed">{visible.length} entries</Text>
       </Group>
-      {!visible.length && <EmptyNote>{entries.length ? "No sessions match this role" : "No sessions"}</EmptyNote>}
+      {!visible.length && <EmptyNote>{entries.length ? "No sessions match this project" : "No sessions"}</EmptyNote>}
       {[...groups].map(([name, group]) => {
         const counts = projects.find((project) => project.name === name)?.counts;
         const locals = group.filter((entry) => entry.source === "local").length;
-        const note = role ? `${group.length} entries` :
-          [counts ? projectNote(counts) : "", locals ? `${locals} local entries` : ""].filter(Boolean).join(", ");
+        const note = [counts ? projectNote(counts) : "", locals ? `${locals} local entries` : ""].filter(Boolean).join(", ");
         return <div key={name}>
           <SectionTitle title={name} note={note} />
           {origins(group).map((origin) => (
             <Text key={origin} size="sm" c="dimmed"><Code>{origin}</Code></Text>
           ))}
-          <Table.ScrollContainer minWidth={admin ? 1160 : 900}>
+          <Table.ScrollContainer minWidth={900}>
             <Table striped highlightOnHover withTableBorder>
-              <TableHead cols={[...Object.values(COLS), ...(admin ? [{ label: "действия", right: true, compact: true }] : [])]} />
+              <TableHead cols={Object.values(COLS)} />
               <Table.Tbody>{group.map((entry) => entry.source === "local"
-                ? <LocalRow key={entry.id} entry={entry} admin={admin} />
+                ? <LocalRow key={entry.id} entry={entry} />
                 : <Row key={entry.id} p={{ ...entry, owner: entry.user || "", origin: entry.origin || "?" }}
-                    role={entry.role} onOpen={onOpen} session={session} />)}</Table.Tbody>
+                    role={entry.role} onOpen={admin ? onOpen : undefined}
+                    selected={admin && selected === entry.name} />)}</Table.Tbody>
             </Table>
           </Table.ScrollContainer>
         </div>;

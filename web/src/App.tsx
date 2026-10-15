@@ -1,8 +1,6 @@
-// Приложение дашборда (#296): шапка со счётчиками корзин, ошибки сборщика и
-// секции -- пул и узлы (#298), расход (#299). Журнал (#422) -- отдельная
-// страница на #journal для админа: событиям больше нет места на главной,
-// их источник -- закрытый /api/journal (#424), а не публичный снимок.
-import { Alert, Container, Group, Stack, Tabs, Text } from "@mantine/core";
+// Журнал админа читает закрытый /api/journal (#424), не публичный снимок.
+// Панель сессии и движки операций не принадлежат фильтру ростера.
+import { Alert, Group, Stack, Tabs, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { usePool } from "./usePool";
 import { useOperationBalloons } from "./useOperationBalloons";
@@ -20,6 +18,7 @@ import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
 import { LoadBadges, LoadBar } from "./components/PoolLoad";
 import { ThemeSwitch } from "./components/ThemeSwitch";
+import './dashboard.css';
 
 // Слова, цвета корзин и склонение -- одна таблица на страницу (#301, #323):
 // components/format.ts. Бейджи шапки и полоса аллокаций -- места пула от
@@ -93,8 +92,12 @@ export default function App() {
   // Карточка папета (#463): цель держит App, не таблица -- закрытие и смена
   // роли/логина гасят её отсюда одним setState, а опоздавший ответ прежней
   // цели отбрасывает сам хук (поколение). Гостю и не-admin опенера нет.
-  const [puppet, setPuppet] = useState<string | null>(null);
-  const closePuppet = () => setPuppet(null);
+  const identity = `${session.login ?? ''}\0${session.role ?? ''}`;
+  const [selection, setSelection] = useState<{ name: string; identity: string } | null>(null);
+  const puppet = selection?.identity === identity ? selection.name : null;
+  const setPuppet = (name: string | null) => setSelection(name ? { name, identity } : null);
+  const closePuppet = () => setSelection(null);
+  useEffect(() => { setSelection(null); }, [page, identity]);
   const logout = async () => {
     try {
       setSession(await postLogout());
@@ -107,61 +110,59 @@ export default function App() {
       setPanelError("панель недоступна");
     }
   };
-  const onJournal = page === "journal";
-  const puppetRole = snapshot ? roster(snapshot.projects, snapshot.sessions, snapshot.masters)
-    .find((entry) => entry.source === "managed" && entry.name === puppet)?.role : null;
+  const managed = snapshot ? roster(snapshot.projects, snapshot.sessions, snapshot.masters)
+    .filter(entry => entry.source === 'managed') : [];
+  const selected = managed.find(entry => entry.name === puppet);
+  const target = page === 'main' && session.role === 'admin' && selected ? selected.name : null;
+  const screenRows = managed.map(entry => ({ ...entry, owner: entry.user || '', origin: entry.origin || '?' }));
   return (
-    <Container size="xl" pt="md" pb="md">
-      <Stack gap="md">
-        <Group justify="space-between" align="center">
-          <Tabs value={page} onChange={(value) => {
-            if (value === "main" || value === "journal") go(value);
-          }}>
-            <Tabs.List aria-label="страницы">
-              <Tabs.Tab value="main">Пул</Tabs.Tab>
-              {session.role === "admin" && <Tabs.Tab value="journal">Журнал</Tabs.Tab>}
-            </Tabs.List>
-          </Tabs>
-          <Group gap="md">
-            {panelError && <Text c="red" size="sm">{panelError}</Text>}
-            <SessionBox session={session} onLogin={login} onLogout={logout} failed={failed} />
-            <ThemeSwitch />
-          </Group>
+    <div className="dashboard" data-testid="dashboard">
+      <Group justify="space-between" align="center" className="dashboard-header">
+        <Tabs value={page} onChange={(value) => {
+          if (value === 'main' || value === 'nodes' || value === 'tokens' || value === 'journal') go(value);
+        }}>
+          <Tabs.List aria-label="страницы">
+            <Tabs.Tab value="main">Пул</Tabs.Tab>
+            <Tabs.Tab value="nodes">Узлы</Tabs.Tab>
+            <Tabs.Tab value="tokens">Токены</Tabs.Tab>
+            {session.role === 'admin' && <Tabs.Tab value="journal">Журнал</Tabs.Tab>}
+          </Tabs.List>
+        </Tabs>
+        <Group gap="md">
+          {panelError && <Text c="red" size="sm">{panelError}</Text>}
+          <SessionBox session={session} onLogin={login} onLogout={logout} failed={failed} />
+          <ThemeSwitch />
         </Group>
-        <Group gap="sm">
-          <img src="/logo.png" alt="" width={28} height={28} />
-          {snapshot ? <LoadBadges load={snapshot.load} counts={snapshot.counts} />
-            : <Text c="dimmed">снимок ещё не пришёл</Text>}
-        </Group>
-        {!onJournal && snapshot?.load && <LoadBar load={snapshot.load} />}
-        {onJournal ? (
-          <JournalPage journal={journal.journal} error={journal.error} open={() => {}}
-                       sourceKey={`${session.login ?? ""}\0${session.role ?? ""}`} />
-        ) : (
-        <Stack gap="md">
-          {snapshot && snapshot.errors.length > 0 && (
-            <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join("\n")}</Alert>
-          )}
-          {/* завести папета (#472): кнопка главной страницы, только админу */}
-          <AddBox session={session} />
-          {snapshot && (
-            <>
-              <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
-                         masters={snapshot.masters} session={session}
-                         onOpen={session.role === "admin" ? setPuppet : undefined} />
-              <PuppetCard session={session} role={puppetRole}
-                          target={session.role === "admin" ? puppet : null}
-                          onClose={closePuppet} />
-              <NodesPanel nodes={snapshot.nodes} />
-              {/* расход (#299) */}
+      </Group>
+      <Group gap="sm">
+        <img src="/logo.png" alt="" width={28} height={28} />
+        {snapshot ? <LoadBadges load={snapshot.load} counts={snapshot.counts} />
+          : <Text c="dimmed">снимок ещё не пришёл</Text>}
+      </Group>
+      {page === 'main' && snapshot?.load && <LoadBar load={snapshot.load} />}
+      <div className={`dashboard-body${target ? ' has-screen' : ''}`}>
+        <main className="dashboard-main">
+          {page === 'journal' ? (
+            <JournalPage journal={journal.journal} error={journal.error} open={() => {}}
+              sourceKey={identity} />
+          ) : <Stack gap="md">
+            {snapshot && snapshot.errors.length > 0 && <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join('\n')}</Alert>}
+            {page === 'main' && <>
+              <AddBox session={session} />
+              {snapshot && <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
+                masters={snapshot.masters} session={session} selected={target}
+                onOpen={session.role === 'admin' ? setPuppet : undefined} />}
+            </>}
+            {page === 'nodes' && snapshot && <NodesPanel nodes={snapshot.nodes} />}
+            {page === 'tokens' && snapshot && <>
               <UsageChart days={snapshot.usage} />
               <UsageByUser users={snapshot.per_user} />
-              {/* журнал -- отдельная страница админа (#422), на главной его нет */}
-            </>
-          )}
-        </Stack>
-        )}
-      </Stack>
-    </Container>
+            </>}
+          </Stack>}
+        </main>
+        <PuppetCard key={identity} session={session} role={selected?.role} rows={screenRows}
+          target={target} onClose={closePuppet} />
+      </div>
+    </div>
   );
 }

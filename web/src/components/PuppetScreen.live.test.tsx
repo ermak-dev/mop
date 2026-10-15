@@ -36,7 +36,8 @@ test("#489 the composer sits inside the screen dialog", async () => {
   fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
   const composer = screen.getByRole("textbox", { name: "Ввод человека в CLI" });
   expect(composer.closest('[data-testid="output-scroll"]')).toBeNull();
-  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.getAllByRole("complementary", { name: 'экран pu-mop-1' })).toHaveLength(1);
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
 test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", async () => {
