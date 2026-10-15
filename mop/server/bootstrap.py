@@ -1067,11 +1067,14 @@ def answer(project, req, _send=None):
             # Классификация -- по ФАКТИЧЕСКОЙ Meta джоба (#581): тройка
             # роли в Nomad делает джоб ролевым, что бы ни держал реестр
             # (привязка стёрта/битая -- отказ в воротах, не легаси-путь);
-            # нет тройки и нет привязки -- легаси-джоб, как прежде.
+            # Архив старой роли не назначает роль новому legacy-джобу:
+            # исключение требует зарегистрированный origin того же проекта.
             meta = _job_meta(req.get("name") or "")
+            legacy = (not meta.soul and bool(meta.origin)
+                      and driver.project_of(meta.origin) == project)
             is_role = bool(meta.soul and meta.soul_digest and meta.soul_inc) \
                 or grants.binding_named(project, req.get("name") or "",
-                                        root=soul_root)
+                                        root=soul_root, include_revoked=not legacy)
             if is_role:
                 bound = role_gates(req.get("name") or "",
                                    req.get("_caller") or "",
