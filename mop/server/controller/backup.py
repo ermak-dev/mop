@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -50,9 +51,16 @@ def _tool_environment(config):
         yield env
 
 
-def _tool(tool, config, *, input=None, output=None, extra=()):
+def _tool(tool, config, *, major, input=None, output=None, extra=()):
     if config['ENGINE'] != 'django.db.backends.postgresql':
         raise RuntimeError('backup/restore is supported only for PostgreSQL')
+    try:
+        version = subprocess.run([tool, '--version'], capture_output=True, timeout=5, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f'PostgreSQL {tool} is unavailable') from exc
+    match = re.search(rb'\b(\d+)\.', version.stdout)
+    if not match or int(match[1]) != major:
+        raise RuntimeError(f'PostgreSQL {major} {tool} is required; configure matching client tools')
     argv = [tool, '--host', config['HOST'], '--port', config['PORT'],
             '--username', config['USER'], '--dbname', config['NAME'], *extra]
     try:
@@ -83,7 +91,8 @@ def backup(path, using='default'):
         raise RuntimeError('backup destination must be a new private file') from exc
     try:
         with os.fdopen(fd, 'wb') as output:
-            _tool('pg_dump', config, output=output, extra=('--format=custom', '--no-owner', '--no-acl'))
+            _tool('pg_dump', config, major=connections[using].pg_version // 10000,
+                  output=output, extra=('--format=custom', '--no-owner', '--no-acl'))
             output.flush()
             os.fsync(output.fileno())
     except BaseException:
@@ -103,7 +112,7 @@ def restore(path, using='default'):
     path = _private_path(path, exists=True)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as source:
-        _tool('pg_restore', connection.settings_dict, input=source,
+        _tool('pg_restore', connection.settings_dict, major=connection.pg_version // 10000, input=source,
               extra=('--single-transaction', '--exit-on-error', '--no-owner', '--no-acl'))
     try:
         verify_installation(using)

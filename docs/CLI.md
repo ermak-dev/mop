@@ -1222,6 +1222,8 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   initialize                    bind the empty schema to protected trust roots
   admin --username NAME         create initial admin; password is read privately
   serve --host host --port N    production ASGI server (one process)
+    --hostname name             allowed public hostname (repeatable)
+    --tls-cert PATH --tls-key PATH  native HTTPS; required for non-loopback bind
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects

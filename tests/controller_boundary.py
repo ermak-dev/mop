@@ -30,7 +30,7 @@ def main():
             'installation_id': 'boundary-test', 'role': 'web', 'django_key': str(key),
             'database': {'ENGINE': 'django.db.backends.postgresql', 'NAME': 'unused',
                          'HOST': 'unused.invalid', 'PORT': '5432', 'USER': 'unused',
-                         'PASSWORD': 'unused', 'OPTIONS': {'sslmode': 'disable'}}}))
+                         'PASSWORD': 'unused-private-password', 'OPTIONS': {'sslmode': 'disable'}}}))
         bootstrap.chmod(0o600)
         os.environ['MOP_CONTROLLER_BOOTSTRAP'] = str(bootstrap)
         from mop.server.controller.runtime import configure
@@ -78,6 +78,93 @@ class Boundary(unittest.TestCase):
         with patch('django.core.management.call_command', side_effect=CommandError('schema check needs a migration')):
             with self.assertRaisesRegex(RuntimeError, 'schema check needs a migration'):
                 maintenance('migrations-check')
+
+    def test_production_entrypoint_separates_bind_and_https_identity(self):
+        from unittest.mock import patch
+        from mop.cli.server.controller import main
+        with patch('mop.server.controller.runtime.configure'), patch(
+                'mop.server.controller.runtime.serve', return_value=0) as serve:
+            main(['serve', '--host', '127.0.0.1', '--port', '8443',
+                  '--hostname', 'controller.example.invalid',
+                  '--tls-cert', '/private/cert.pem', '--tls-key', '/private/key.pem'])
+        serve.assert_called_once_with('127.0.0.1', 8443,
+                                      hostnames=['controller.example.invalid'],
+                                      tls_cert='/private/cert.pem', tls_key='/private/key.pem')
+
+    def test_public_http_without_tls_is_refused_before_listening(self):
+        from unittest.mock import patch
+        from mop.server.controller.runtime import serve
+        with patch('mop.server.controller.runtime.validate_asgi_startup'), patch('uvicorn.run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'TLS'):
+                serve('0.0.0.0', 8443)
+            run.assert_not_called()
+
+    def test_real_asgi_server_and_worker_harness_own_lifecycle(self):
+        import socket
+        import aiohttp
+        import uvicorn
+        from mop.server.controller.asgi import ControllerApplication
+        from mop.server.controller.runtime import Runtime, run_worker
+        async def run():
+            class HttpResource:
+                session = None
+                async def start(self):
+                    self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2))
+                async def aclose(self):
+                    await self.session.close()
+            resource = HttpResource()
+            runtime = Runtime(adapters=(resource,))
+            async def http(scope, receive, send):
+                await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+                await send({'type': 'http.response.body', 'body': b'fixture'})
+            # Только test harness, не анонимный production endpoint/workflow.
+            app = ControllerApplication(runtime=runtime, startup=lambda: None, http=http)
+            sock = socket.socket()
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+            server = uvicorn.Server(uvicorn.Config(app, lifespan='on', log_level='error'))
+            task = asyncio.create_task(server.serve(sockets=[sock]))
+            try:
+                async with asyncio.timeout(3):
+                    while not server.started:
+                        await asyncio.sleep(.01)
+                async def slow_io():
+                    await asyncio.sleep(.2)
+                    return 'receipt'
+                effect = asyncio.create_task(runtime.effect(slow_io))
+                async with resource.session.get(f'http://127.0.0.1:{port}/fixture') as response:
+                    self.assertEqual(await response.text(), 'fixture')
+                self.assertFalse(effect.done())
+                self.assertEqual(await effect, 'receipt')
+            finally:
+                server.should_exit = True
+                await asyncio.wait_for(task, 3)
+                sock.close()
+            self.assertTrue(resource.session.closed)
+            self.assertEqual(runtime.pending, 0)
+            worker_resource = HttpResource()
+            stop = asyncio.Event()
+            stop.set()
+            await run_worker(stop, Runtime(adapters=(worker_resource,)))
+            self.assertTrue(worker_resource.session.closed)
+        asyncio.run(run())
+
+    def test_backup_tools_require_matching_server_major_without_password_argv(self):
+        from unittest.mock import Mock, patch
+        from django.conf import settings
+        from mop.server.controller.backup import _tool
+        config = settings.DATABASES['default']
+        for major in (16, 17):
+            version = Mock(stdout=f'pg_dump (PostgreSQL) {major}.10'.encode())
+            done = Mock(returncode=0, stderr=b'')
+            with patch('subprocess.run', side_effect=[version, done]) as run:
+                _tool('pg_dump', config, major=major)
+                self.assertEqual(run.call_count, 2)
+                self.assertNotIn(config['PASSWORD'], run.call_args.args[0])
+        with patch('subprocess.run', return_value=Mock(stdout=b'pg_dump (PostgreSQL) 17.10')) as run:
+            with self.assertRaisesRegex(RuntimeError, 'PostgreSQL 16'):
+                _tool('pg_dump', config, major=16)
+            self.assertEqual(run.call_count, 1)
 
     def test_lazy_values_do_not_cross_await(self):
         from django.contrib.auth import get_user_model

@@ -9,6 +9,8 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   initialize                    bind the empty schema to protected trust roots
   admin --username NAME         create initial admin; password is read privately
   serve --host host --port N    production ASGI server (one process)
+    --hostname name             allowed public hostname (repeatable)
+    --tls-cert PATH --tls-key PATH  native HTTPS; required for non-loopback bind
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
@@ -36,6 +38,9 @@ def main(argv):
     parser.add_argument('--file')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--hostname', action='append', default=[])
+    parser.add_argument('--tls-cert')
+    parser.add_argument('--tls-key')
     args = parser.parse_args(argv)
     if args.action == 'setup':
         if not args.venv:
@@ -73,7 +78,8 @@ def main(argv):
             close_pools()
         return 0
     if args.action == 'serve':
-        return serve(args.host, args.port)
+        return serve(args.host, args.port, hostnames=args.hostname,
+                     tls_cert=args.tls_cert, tls_key=args.tls_key)
     if args.action == 'worker':
         return worker()
     return maintenance(args.action, username=args.username, file=args.file)

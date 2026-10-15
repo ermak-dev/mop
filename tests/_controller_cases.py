@@ -235,6 +235,12 @@ class Foundation(TransactionTestCase):
             TokenAuthentication().authenticate(request)
 
     def test_real_postgres_backup_restore_and_fresh_epoch(self):
+        self._backup_restore_case()
+
+    def test_failed_root_verification_cannot_leave_restored_effects_enabled(self):
+        self._backup_restore_case(root_mismatch=True)
+
+    def _backup_restore_case(self, root_mismatch=False):
         import copy
         import tempfile
         from pathlib import Path
@@ -245,6 +251,7 @@ class Foundation(TransactionTestCase):
         from mop.server.controller.backup import backup, restore
         from mop.server.controller.models import Installation
         original = initialize()
+        Installation.objects.filter(pk=1).update(effects_enabled=True)
         get_user_model().objects.create_user('backed-up-user', password='never-in-tool-argv')
         name = 'restore_' + uuid.uuid4().hex
         config = copy.deepcopy(connection.settings_dict)
@@ -262,6 +269,19 @@ class Foundation(TransactionTestCase):
                     backup(archive)
                     self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
                     self.assertNotIn(b'never-in-tool-argv', archive.read_bytes())
+                    if root_mismatch:
+                        from django.conf import settings
+                        from django.test import override_settings
+                        wrong_root = Path(directory) / 'wrong-root.key'
+                        wrong_root.write_bytes(b'wrong-root-material-' * 4)
+                        wrong_root.chmod(0o600)
+                        with override_settings(BOOTSTRAP=dict(settings.BOOTSTRAP, root_key=str(wrong_root))):
+                            with self.assertRaisesRegex(RuntimeError, 'root'):
+                                restore(archive, using='restored')
+                        row = Installation.objects.using('restored').get()
+                        self.assertFalse(row.effects_enabled)
+                        self.assertNotEqual(str(row.epoch), original['epoch'])
+                        return
                     restore(archive, using='restored')
                     restored = verify_installation(using='restored')
                     self.assertNotEqual(restored['epoch'], original['epoch'])

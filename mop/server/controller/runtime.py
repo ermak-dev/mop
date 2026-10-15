@@ -318,14 +318,34 @@ def validate_asgi_startup():
     maintenance('check')
 
 
-def serve(host, port):
+def serve(host, port, *, hostnames=(), tls_cert=None, tls_key=None):
+    import ipaddress
+    import re
+    from pathlib import Path
     from django.conf import settings
+    from .bootstrap import private_bytes
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == 'localhost'
+    if bool(tls_cert) != bool(tls_key) or not loopback and not tls_cert:
+        raise RuntimeError('native TLS certificate and key are required for a public listener')
+    if not 1 <= port <= 65535:
+        raise RuntimeError('ASGI port must be within 1..65535')
+    names = list(hostnames or [host])
+    if len(names) > 16 or any(not isinstance(name, str) or len(name) > 253 or
+                              not re.fullmatch(r'[A-Za-z0-9.\[\]:-]+', name) for name in names):
+        raise RuntimeError('ASGI requires explicit allowed hostnames without wildcards')
     validate_asgi_startup()
-    settings.ALLOWED_HOSTS = [host]
+    if tls_key:
+        private_bytes(tls_key)
+        if not Path(tls_cert).is_file():
+            raise RuntimeError('TLS certificate file is unavailable')
+    settings.ALLOWED_HOSTS = names
     import uvicorn
     uvicorn.run('mop.server.controller.asgi:application', host=host, port=port,
                 workers=1, lifespan='on', limit_concurrency=16, timeout_graceful_shutdown=10,
-                proxy_headers=False, server_header=False)
+                proxy_headers=False, server_header=False, ssl_certfile=tls_cert, ssl_keyfile=tls_key)
 
 
 async def run_worker(stop, runtime):
