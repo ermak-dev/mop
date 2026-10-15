@@ -11,7 +11,7 @@ import _lib  # noqa: F401,E402 — lifetime всех временных файл
 import hermetic  # noqa: E402 — сначала отделить настройки старой машины
 
 
-def main():
+def main(labels=None):
     host = hermetic.FIXTURE_ENV.get('MOP_TEST_POSTGRES_HOST')
     if not host:
         hermetic.skip('controller PostgreSQL', 'isolated fixture requires MOP_TEST_POSTGRES_HOST')
@@ -39,7 +39,7 @@ def main():
         # hermetic гоняет clean/hostile одновременно: у каждого своя БД.
         settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = 'test_mop_' + uuid.uuid4().hex
         runner = DiscoverRunner(verbosity=2, interactive=False)
-        return int(bool(runner.run_tests(['_controller_cases'])))
+        return int(bool(runner.run_tests(labels or ['_controller_cases'])))
 
 if __name__ == '__main__':
     sys.exit(main())

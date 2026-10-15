@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.db import IntegrityError, OperationalError, close_old_connections, connection, connections, transaction
 from django.test import TransactionTestCase
-from mop.server.controller.runtime import database_call
+from mop.server.controller.runtime import Runtime
 
 # HYPOTHESIS: штатный sync_to_async пропускает ленивый QuerySet и оставляет
 # соединение живым; настройки по умолчанию не ограничивают runtime.
@@ -20,6 +20,8 @@ from mop.server.controller.runtime import database_call
 # STATUS: FIXED — see #632
 # BUG: statement_timeout не ограничивает ожидание потерянного ответа PostgreSQL.
 # HYPOTHESIS: driver wait должен иметь клиентский deadline и fence соединение.
+# SOLUTION: bounded psycopg wait и абсолютный transaction deadline; COMMIT
+# теряет только ответ, не превращается в подтверждённый rollback при cleanup.
 class TransportDeadline(TransactionTestCase):
     def test_acknowledged_query_and_lost_commit_are_bounded_without_proxy_disconnect(self):
         from django.test import override_settings
@@ -192,20 +194,25 @@ class Foundation(TransactionTestCase):
 
     def test_boundary_rejects_lazy_models_and_closes_connections(self):
         async def run():
-            with self.assertRaisesRegex(TypeError, 'materialized'):
-                await database_call(lambda: get_user_model().objects.all())
-            with self.assertRaisesRegex(TypeError, 'materialized'):
-                await database_call(lambda: get_user_model().objects.first())
-            value = await database_call(lambda: list(get_user_model().objects.values('username')))
-            self.assertIsInstance(value, list)
-            # Повторный вызов в том же потоке видит закрытое прошлое соединение.
-            self.assertTrue(await database_call(lambda: connection.connection is None))
+            runtime = Runtime()
+            try:
+                with self.assertRaisesRegex(TypeError, 'materialized'):
+                    await runtime.database(lambda: get_user_model().objects.all())
+                with self.assertRaisesRegex(TypeError, 'materialized'):
+                    await runtime.database(lambda: get_user_model().objects.first())
+                value = await runtime.database(lambda: list(get_user_model().objects.values('username')))
+                self.assertIsInstance(value, list)
+                # Повторный вызов в том же потоке видит закрытое прошлое соединение.
+                self.assertTrue(await runtime.database(lambda: connection.connection is None))
+            finally:
+                await runtime.aclose()
         get_user_model().objects.create_user('boundary-user')
         async_to_sync(run)()
 
     def test_orm_boundary_does_not_block_heartbeat(self):
         ticks = []
         async def run():
+            runtime = Runtime()
             async def beat():
                 for _ in range(12):
                     ticks.append(time.monotonic())
@@ -215,10 +222,13 @@ class Foundation(TransactionTestCase):
                     return list(get_user_model().objects.values_list('username', flat=True))
             async def slow_effect():
                 # Управляемый сетевой adapter: нет внешнего I/O в atomic.
-                snapshot = await database_call(slow_service)
+                snapshot = await runtime.database(slow_service)
                 await asyncio.sleep(.25)
                 return snapshot
-            await asyncio.gather(beat(), slow_effect())
+            try:
+                await asyncio.gather(beat(), slow_effect())
+            finally:
+                await runtime.aclose()
         async_to_sync(run)()
         self.assertEqual(len(ticks), 12)
         self.assertLess(max(b-a for a, b in zip(ticks, ticks[1:])), .1)
@@ -240,7 +250,8 @@ class Foundation(TransactionTestCase):
                     await asyncio.sleep(.01)
                 task.cancel()
                 await asyncio.sleep(.02)
-                self.assertFalse(task.done())
+                self.assertTrue(task.cancelled())
+                self.assertEqual(runtime.pending, 1)
                 release.set()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
@@ -598,7 +609,7 @@ finally:
 
     def test_observed_threads_and_database_connections_are_bounded_and_drained(self):
         import psycopg
-        from mop.server.controller.runtime import Runtime, close_pools
+        from mop.server.controller.runtime import Runtime
         config = connection.settings_dict
         connections.close_all()
         connection.close_pool()
@@ -629,7 +640,6 @@ finally:
                 stop.set()
                 await observer
                 await runtime.aclose()
-                await database_call(close_pools)
                 self.assertEqual(await count(), 0)
                 self.assertGreater(max(samples), 0)
                 self.assertLessEqual(max(samples), 8)
@@ -639,7 +649,6 @@ finally:
                 stop.set()
                 await observer
                 await runtime.aclose()
-                await database_call(close_pools)
                 await admin.close()
         async_to_sync(run)()
 

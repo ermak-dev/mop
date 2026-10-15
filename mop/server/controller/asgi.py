@@ -4,7 +4,7 @@ import asyncio
 from channels.routing import ProtocolTypeRouter
 from django.core.asgi import get_asgi_application
 
-from .runtime import Runtime, configure, database_call, validate_asgi_startup, close_pools
+from .runtime import Runtime, configure, validate_asgi_startup
 
 configure()
 
@@ -65,7 +65,6 @@ class ControllerApplication:
                         while self.active:
                             await asyncio.sleep(.01)
                         await self.runtime.aclose()
-                    await database_call(close_pools)
                 except Exception as exc:
                     await send({'type': 'lifespan.shutdown.failed', 'message': str(exc)})
                     return

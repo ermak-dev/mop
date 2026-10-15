@@ -44,6 +44,8 @@ def main():
 
 # BUG: init=False обходил проверку, replace повторно запускал пользовательский код.
 # HYPOTHESIS: копировать нужно все поля без __init__/__post_init__, с поиском циклов.
+# SOLUTION: object.__new__ + снимок всех полей; caller cancellation не отменяет
+# owned задачу, не отдаёт её слот и не задерживает самого caller до конца CPU.
 class Materialization(unittest.TestCase):
     def test_all_frozen_fields_are_checked_without_reinitialization(self):
         from dataclasses import dataclass, field
@@ -296,13 +298,13 @@ class Boundary(unittest.TestCase):
     def test_orm_inputs_do_not_cross_the_thread_boundary(self):
         from django.contrib.auth import get_user_model
         from django.db import connection
-        from mop.server.controller.runtime import Runtime, database_call
+        from mop.server.controller.runtime import Runtime
         async def run():
             runtime = Runtime()
             try:
                 for value in (get_user_model()(username='unsaved'),
                               get_user_model().objects.all(), connection):
-                    for call in (database_call, runtime.database):
+                    for call in (runtime.database,):
                         with self.assertRaisesRegex(TypeError, 'materialized'):
                             await call(lambda item: True, value)
                         with self.assertRaisesRegex(TypeError, 'materialized'):
@@ -313,15 +315,19 @@ class Boundary(unittest.TestCase):
 
     def test_lazy_values_do_not_cross_await(self):
         from django.contrib.auth import get_user_model
-        from mop.server.controller.runtime import database_call
+        from mop.server.controller.runtime import Runtime
         async def run():
-            for value in (get_user_model().objects.all(), get_user_model()(username='unsaved'),
-                          {'nested': [get_user_model().objects.all()]}, iter([1])):
-                with self.subTest(type=type(value).__name__):
-                    with self.assertRaisesRegex(TypeError, 'materialized'):
-                        await database_call(lambda: value)
-            self.assertEqual(await database_call(lambda: {'items': [1, 'two', None]}),
-                             {'items': [1, 'two', None]})
+            runtime = Runtime()
+            try:
+                for value in (get_user_model().objects.all(), get_user_model()(username='unsaved'),
+                              {'nested': [get_user_model().objects.all()]}, iter([1])):
+                    with self.subTest(type=type(value).__name__):
+                        with self.assertRaisesRegex(TypeError, 'materialized'):
+                            await runtime.database(lambda: value)
+                self.assertEqual(await runtime.database(lambda: {'items': [1, 'two', None]}),
+                                 {'items': [1, 'two', None]})
+            finally:
+                await runtime.aclose()
         asyncio.run(run())
 
 if __name__ == '__main__':
