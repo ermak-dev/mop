@@ -774,6 +774,18 @@ The roster of this machine, asked from its driver: on a hypervisor the
 containers, on a host node the live tmux servers. Runs on the node itself.
 ```
 
+#### mop driver purge-clone
+
+```text
+remove a deleted host puppet's data: mop driver purge-clone <name> --orphan
+
+Run on the host node after verifying that the job was deleted on the
+controller. Removes only that puppet's clone and target cache. Refuses
+container drivers, live or unknown tmux sessions, unsafe paths and symlinks.
+--orphan explicitly confirms that the job is no longer registered; this is
+not an automatic sweep and may remove unsaved work.
+```
+
 #### mop driver run
 
 ```text
