@@ -84,6 +84,12 @@ def main():
     c.expect("equivalent UUID/time encodings retain intent",
              commands.intent_digest(commands.parse_restart(TARGET.upper(), body(
                  epoch=EPOCH.upper(), not_after="2000-01-01T00:00:00.000000Z")), key=KEY), first)
+    # HYPOTHESIS: один Z ошибочно исключает корректный UTC +00:00 из RFC3339.
+    # SOLUTION: принять обе записи и нормализовать instant для keyed intent.
+    # RESULT: red invalid not_after, затем эквивалентные digests без нового эффекта.
+    c.expect("RFC3339 explicit UTC offset is the same intent as Z",
+             commands.intent_digest(commands.parse_restart(TARGET, body(
+                 not_after="2000-01-01T00:00:00+00:00")), key=KEY), first)
     c.expect("request key is identity, not intent",
              commands.intent_digest(commands.parse_restart(TARGET, body(
                  request_id="00000000-0000-4000-8000-000000000000")), key=KEY), first)
@@ -99,7 +105,8 @@ def main():
     for changes in (dict(schema_version=True), dict(schema_version=2), dict(epoch=MESSAGE),
                     dict(request_id=MESSAGE), dict(incarnation=MESSAGE), dict(expected_revision=1),
                     dict(expected_revision="01"), dict(expected_revision="-1"),
-                    dict(not_after=MESSAGE), dict(not_after="2000-01-01T00:00:00+00:00"),
+                    dict(not_after=MESSAGE), dict(not_after="2000-01-01T00:00:00+02:00"),
+                    dict(not_after="2000-01-01T00:00:00-00:00"),
                     dict(params={}), dict(params={"fresh": 1}), dict(params={"fresh": False, "force": True})):
         refuses("invalid restart fields", lambda changes=changes: commands.parse_restart(TARGET, body(**changes)))
     for params in ({"message": ""}, {"message": "   "}, {"message": MESSAGE + "\ud800"},

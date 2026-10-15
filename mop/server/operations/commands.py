@@ -70,10 +70,10 @@ def _revision(value):
 
 def _deadline(value):
     _require(type(value) is str and re.fullmatch(
-        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z", value) is not None, "not_after")
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)", value) is not None, "not_after")
     result = None
     try:
-        result = datetime.fromisoformat(value[:-1] + "+00:00")
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         pass
     _require(result is not None, "not_after")
