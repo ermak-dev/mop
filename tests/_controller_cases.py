@@ -18,6 +18,129 @@ from mop.server.controller.runtime import database_call
 # matching-major backup/restore; отрицательные сценарии проверяются на БД.
 # RESULT: constraints/CAS/locks и отказ записи не подменяются fake I/O.
 # STATUS: FIXED — see #632
+# BUG: statement_timeout не ограничивает ожидание потерянного ответа PostgreSQL.
+# HYPOTHESIS: driver wait должен иметь клиентский deadline и fence соединение.
+class TransportDeadline(TransactionTestCase):
+    def test_acknowledged_query_and_lost_commit_are_bounded_without_proxy_disconnect(self):
+        from django.test import override_settings
+        from _controller_transport import Blackhole, wait_until
+        for pooled in (False, True):
+            for commit in (False, True):
+                with self.subTest(pool=pooled, commit=commit), override_settings(CONTROLLER_DB_TIMEOUT=.25):
+                    proxy = Blackhole(connection.settings_dict)
+                    alias = proxy.alias('blackhole', pool=pooled)
+                    finished = threading.Event()
+                    errors, raw = [], []
+                    def service():
+                        db = connections[alias]
+                        try:
+                            db.ensure_connection()
+                            raw.append(db.connection)
+                            if commit:
+                                db.set_autocommit(False)
+                                get_user_model().objects.using(alias).create(username=f'lost-commit-{pooled}')
+                            proxy.drop.set()
+                            if commit:
+                                db.commit()
+                            else:
+                                get_user_model().objects.using(alias).count()
+                        except Exception as exc:
+                            errors.append(exc)
+                        finally:
+                            db.close()
+                            finished.set()
+                    thread = threading.Thread(target=service)
+                    thread.start()
+                    try:
+                        self.assertTrue(proxy.dropped.wait(3), 'proxy never dropped a live PostgreSQL reply')
+                        self.assertTrue(proxy.forwarded.is_set())
+                        self.assertTrue(finished.wait(1), 'client transport wait exceeded deadline with proxy still connected')
+                        self.assertTrue(errors, 'blackholed response reported success')
+                        self.assertTrue(raw[0].closed, 'uncertain transport connection was reused')
+                        if commit:
+                            self.assertIn('outcome unknown', str(errors[0]))
+                            self.assertTrue(get_user_model().objects.filter(username=f'lost-commit-{pooled}').exists())
+                    finally:
+                        # Только ПОСЛЕ deadline assertion закрываем proxy: иначе тест скрывает дефект.
+                        proxy.close()
+                        thread.join(5)
+                        self.assertFalse(thread.is_alive())
+                        db = connections[alias]
+                        if hasattr(db, 'close_pool'):
+                            db.close_pool()
+                        del connections.databases[alias]
+
+    def test_cancelled_async_database_call_drains_blackholed_transport_and_executor(self):
+        from django.test import override_settings
+        from mop.server.controller.runtime import Runtime
+        from _controller_transport import Blackhole
+        with override_settings(CONTROLLER_DB_TIMEOUT=.25):
+            proxy = Blackhole(connection.settings_dict)
+            alias = proxy.alias('async_blackhole', pool=False)
+            entered = threading.Event()
+            raw = []
+            def service():
+                db = connections[alias]
+                db.ensure_connection()
+                raw.append(db.connection)
+                proxy.drop.set()
+                entered.set()
+                return get_user_model().objects.using(alias).count()
+            async def run():
+                runtime = Runtime(blocking_limit=1, queue_limit=0)
+                task = asyncio.create_task(runtime.database(service))
+                try:
+                    async with asyncio.timeout(3):
+                        while not entered.is_set() or not proxy.dropped.is_set():
+                            await asyncio.sleep(.005)
+                    task.cancel()
+                    done, _ = await asyncio.wait([task], timeout=1)
+                    self.assertIn(task, done, 'cancelled database caller hangs on lost reply')
+                    await runtime.aclose(timeout=1)
+                    self.assertEqual(runtime.pending, 0)
+                    self.assertTrue(raw[0].closed)
+                    self.assertFalse(any(t.is_alive() for t in runtime._executor._threads))
+                finally:
+                    proxy.close()
+                    await asyncio.gather(task, return_exceptions=True)
+                    await runtime.aclose()
+                    del connections.databases[alias]
+            async_to_sync(run)()
+
+    def test_transaction_deadline_releases_observed_lock_during_successive_short_queries(self):
+        from mop.server.controller.runtime import short_transaction
+        user = get_user_model().objects.create(username='deadline-lock')
+        locked, finished = threading.Event(), threading.Event()
+        errors = []
+        def holder():
+            try:
+                with short_transaction(budget=.2):
+                    get_user_model().objects.select_for_update().get(pk=user.pk)
+                    locked.set()
+                    end = time.monotonic() + 1
+                    while time.monotonic() < end:
+                        get_user_model().objects.filter(pk=user.pk).exists()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                connections.close_all()
+                finished.set()
+        thread = threading.Thread(target=holder)
+        thread.start()
+        try:
+            self.assertTrue(locked.wait(3))
+            start = time.monotonic()
+            with transaction.atomic():
+                get_user_model().objects.select_for_update().get(pk=user.pk)
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, .65, 'independent connection observed a lock past transaction deadline')
+            self.assertTrue(finished.wait(1))
+            self.assertTrue(errors)
+        finally:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+
+
 class Foundation(TransactionTestCase):
     def test_empty_schema_repeatable_and_no_missing_migrations(self):
         call_command('migrate', verbosity=0, interactive=False)

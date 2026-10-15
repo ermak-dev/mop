@@ -42,6 +42,82 @@ def main():
         unittest.main()
 
 
+# BUG: init=False обходил проверку, replace повторно запускал пользовательский код.
+# HYPOTHESIS: копировать нужно все поля без __init__/__post_init__, с поиском циклов.
+class Materialization(unittest.TestCase):
+    def test_all_frozen_fields_are_checked_without_reinitialization(self):
+        from dataclasses import dataclass, field
+        from mop.server.controller.runtime import materialized
+        calls = []
+        @dataclass(frozen=True)
+        class Snapshot:
+            value: list
+            derived: object = field(init=False, default_factory=lambda: calls.append('factory') or [])
+            def __post_init__(self):
+                calls.append('post_init')
+        value = Snapshot([1])
+        object.__setattr__(value, 'derived', [2])
+        copy = materialized(value)
+        self.assertEqual(calls, ['factory', 'post_init'])
+        self.assertEqual(copy.derived, [2])
+        self.assertIsNot(copy.derived, value.derived)
+        self.assertIsNot(copy.value, value.value)
+        object.__setattr__(value, 'derived', iter([1]))
+        with self.assertRaisesRegex(TypeError, 'materialized'):
+            materialized(value)
+        object.__delattr__(value, 'derived')
+        with self.assertRaisesRegex(TypeError, 'materialized'):
+            materialized(value)
+
+    def test_cycles_are_refused_but_shared_values_are_snapshotted(self):
+        from dataclasses import dataclass
+        from mop.server.controller.runtime import materialized
+        @dataclass(frozen=True, slots=True)
+        class Snapshot:
+            value: object
+        value = Snapshot(None)
+        object.__setattr__(value, 'value', value)
+        for cyclic in (value,):
+            with self.assertRaisesRegex(TypeError, 'materialized'):
+                materialized(cyclic)
+        shared = [1]
+        copy = materialized([shared, shared])
+        self.assertEqual(copy, [[1], [1]])
+        self.assertIsNot(copy[0], copy[1])
+
+    def test_only_owned_runtime_exposes_the_database_bridge(self):
+        from mop.server.controller import runtime
+        self.assertFalse(hasattr(runtime, 'database_call'), 'unowned database bridge remains public')
+
+    def test_cancelled_cpu_callback_keeps_capacity_and_shutdown_is_honest(self):
+        import threading
+        from mop.server.controller.runtime import Runtime, Backpressure
+        async def run():
+            runtime = Runtime(blocking_limit=1, queue_limit=0)
+            entered, release = threading.Event(), threading.Event()
+            def callback():
+                entered.set()
+                release.wait(3)
+            task = asyncio.create_task(runtime.blocking(callback))
+            try:
+                while not entered.is_set():
+                    await asyncio.sleep(.005)
+                task.cancel()
+                done, _ = await asyncio.wait([task], timeout=.1)
+                self.assertIn(task, done, 'cancellation waits forever for a trusted CPU callback')
+                self.assertEqual(runtime.pending, 1)
+                with self.assertRaises(Backpressure):
+                    await runtime.blocking(lambda: None)
+                with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+                    await runtime.aclose(timeout=.02)
+                self.assertEqual(runtime.pending, 1)
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+                await runtime.aclose()
+        asyncio.run(run())
+
+
 class Boundary(unittest.TestCase):
     def test_health_is_a_protected_drf_query(self):
         from django.test import Client, override_settings
