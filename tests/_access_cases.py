@@ -203,21 +203,23 @@ class AccessContracts(TransactionTestCase):
 
     def test_ldap_freshness_and_revision_fail_closed(self):
         from mop.server.access.directory import DirectoryResult, apply_directory
-        self.source.kind = 'ldap'
-        self.source.save()
-        result = DirectoryResult(subject='human', username='human', groups=('direct',),
+        # Credential с самого начала LDAP-bound: смена provider — отдельный revoke,
+        # а не допустимый способ подготовить проверку freshness старого local token.
+        source = self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=1)
+        result = DirectoryResult(subject='uid=fresh', username='fresh-directory', groups=('direct',),
             project_ids=(self.project.pk,), all_projects=False, permissions=('catalog.view_project',))
-        apply_directory(self.source.pk, self.source.revision, result)
-        self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
-        self.m.LoginIdentity.objects.filter(user=self.user).update(validated_at=timezone.now() - timedelta(days=1))
+        user_id = apply_directory(source.pk, source.revision, result)
+        actor = self.s.token_context(self.s.issue_token(user_id))
+        self.s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        self.m.LoginIdentity.objects.filter(user_id=user_id).update(validated_at=timezone.now() - timedelta(days=1))
         with self.assertRaises(self.s.Denied):
-            self.s.Access().authorize(self.actor, 'catalog.view_project')
-        apply_directory(self.source.pk, self.source.revision, result)
-        self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
-        self.source.revision += 1
-        self.source.save()
+            self.s.Access().authorize(actor, 'catalog.view_project')
+        apply_directory(source.pk, source.revision, result)
+        self.s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        source.revision += 1
+        source.save()
         with self.assertRaises(self.s.Denied):
-            self.s.Access().authorize(self.actor, 'catalog.view_project')
+            self.s.Access().authorize(actor, 'catalog.view_project')
 
     def test_directory_router_first_known_denial_and_mapping_are_authoritative(self):
         from mop.server.access.directory import DirectoryAccount, Router

@@ -15,7 +15,7 @@ ASGI_APPLICATION = 'mop.server.controller.asgi.application'
 INSTALLED_APPS = [
     'django.contrib.auth', 'django.contrib.contenttypes', 'django.contrib.sessions',
     'django.contrib.messages', 'django.contrib.staticfiles',
-    'mop.server.controller.apps.ControllerAdminConfig',
+    'mop.server.controller.adminapps.ControllerAdminConfig',
     'rest_framework', 'rest_framework.authtoken', 'channels',
     'mop.server.controller.apps.ControllerConfig', 'mop.server.catalog', 'mop.server.access',
 ]

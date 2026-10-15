@@ -1,5 +1,6 @@
 """LDAP DN не может склеить две разные группы в один permission mapping."""
 import unittest
+import _lib  # noqa: F401 — lifetime временного окружения
 import hermetic  # noqa: F401 — раньше mop
 from mop.server.access.policy import directory_dn_key
 
