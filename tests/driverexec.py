@@ -6,6 +6,7 @@ STATUS: FIXED — see #646.
 """
 import asyncio
 import importlib
+import shlex
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,8 +37,11 @@ def main():
              patched(command.subprocess, call=lambda argv, **kw: seen.append(argv) or 0):
             out, err, code = run_command(command.main,
                     [name, "--", "printf", "%s", "literal; not shell"], via_cli=True)
-            c.check("#646 execute the exact driver prefix and user argv",
-                    code == 0 and seen == [["body-exec", name, "--", "printf", "%s", "literal; not shell"]],
+            c.check("#646 SSH receives one quoted command whose arguments stay literal",
+                    code == 0 and len(seen) == 1
+                    and seen[0][:3] == ["body-exec", name, "--"]
+                    and len(seen[0]) == 4
+                    and shlex.split(seen[0][-1]) == ["printf", "%s", "literal; not shell"],
                     (code, out, err, seen))
             for argv in ([name], ["../bad", "--", "true"], [name, "--"],
                          ["pu-other-2", "--", "true"], [name, "true"]):
