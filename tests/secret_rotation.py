@@ -138,6 +138,76 @@ class RotationTests(unittest.TestCase):
         with self.assertRaises(r.RotationError):
             self.apply("begin_compensation", self.active())
 
+    def test_confirmed_partial_delivery_can_be_compensated_without_replay(self):
+        # HYPOTHESIS: подтверждённая частичная доставка с закончившимся
+        # исполнителем не имеет пути к компенсации и навсегда висит в unknown.
+        # SOLUTION: отдельный readback PARTIAL и recovery_required сохраняют
+        # реальные receipts, не открывая повтор исходного эффекта.
+        r = self.r
+        observation = getattr(r.Observation, "PARTIAL", None)
+        self.assertIsNotNone(observation, "confirmed partial readback must be representable")
+        reason = getattr(r.FailureReason, "PARTIAL", None)
+        self.assertIsNotNone(reason, "partial application needs a distinct safe reason")
+        pending = self.apply("begin_delivery")
+        unknown = self.apply("record", pending, outcome=r.Outcome.UNKNOWN)
+        receipts = frozenset({"node-a/inc-1"})
+        with self.assertRaises(r.RotationError):
+            self.apply("reconcile", unknown, outcome=observation, receipts=receipts,
+                       quiescent=False)
+        recovered = self.apply("reconcile", unknown, outcome=observation,
+                               receipts=receipts, quiescent=True)
+        self.assertEqual(recovered.state.value, "recovery_required")
+        self.assertEqual(recovered.receipts, receipts)
+        self.assertEqual(recovered.original_failure, r.Effect.DELIVER)
+        self.assertEqual(recovered.original_reason, reason)
+        self.assertIsNone(recovered.pending)
+        self.assertIsNone(recovered.retryable)
+        from dataclasses import replace
+        for changes in ({"original_reason": r.FailureReason.PRECONDITION},
+                        {"state": r.Stage.FAILED},
+                        {"receipts": recovered.required | {"unrelated/inc-3"}}):
+            with self.assertRaises(r.RotationError):
+                replace(recovered, **changes)
+        for method in ("retry_effect", "activate", "begin_delivery", "begin_retirement"):
+            with self.assertRaises(r.RotationError):
+                self.apply(method, recovered)
+        with self.assertRaises(r.RevisionConflict):
+            recovered.begin_compensation(expected_revision=unknown.revision)
+        restoring = self.apply("begin_compensation", recovered)
+        restored = self.apply("record", restoring, outcome=r.Outcome.APPLIED)
+        revoking = self.apply("begin_new_revocation", restored)
+        done = self.apply("record", revoking, outcome=r.Outcome.APPLIED)
+        self.assertEqual(done.state, r.Stage.COMPENSATED)
+        self.assertEqual(done.receipts, receipts)
+        self.assertEqual(done.original_reason, reason)
+
+    def test_partial_observation_needs_quiescence_and_cannot_masquerade_as_rejection(self):
+        r = self.r
+        observation = getattr(r.Observation, "PARTIAL", None)
+        self.assertIsNotNone(observation, "partial readback policy is missing")
+        reason = getattr(r.FailureReason, "PARTIAL", None)
+        self.assertIsNotNone(reason)
+        retiring = self.apply("begin_retirement", self.active())
+        unknown = self.apply("record", retiring, outcome=r.Outcome.UNKNOWN)
+        with self.assertRaises(r.RotationError):
+            self.apply("reconcile", unknown, outcome=observation, quiescent=False)
+        recovered = self.apply("reconcile", unknown, outcome=observation, quiescent=True)
+        self.assertEqual(recovered.state.value, "recovery_required")
+        self.assertEqual(recovered.original_failure, r.Effect.RETIRE_OLD)
+        self.assertEqual(recovered.receipts, recovered.required)
+        restoring = self.apply("begin_compensation", recovered)
+        uncertain_restore = self.apply("record", restoring, outcome=r.Outcome.UNKNOWN)
+        partial = self.apply("reconcile", uncertain_restore, outcome=observation, quiescent=True)
+        self.assertEqual(partial.state, r.Stage.PARTIAL)
+        self.assertEqual(partial.original_reason, reason)
+        self.assertEqual(partial.compensation_reason, reason)
+        self.assertEqual(partial.compensation_failure, r.Effect.RESTORE_OLD)
+        with self.assertRaises(r.RotationError):
+            self.apply("retry_effect", partial)
+        for pending in (self.apply("begin_delivery"), restoring):
+            with self.assertRaises(r.RotationError):
+                self.apply("record", pending, outcome=r.Outcome.REJECTED, reason=reason)
+
     def test_cas_revisions_and_late_receipts_do_not_overwrite_new_decision(self):
         r = self.r
         pending = self.apply("begin_delivery")
@@ -214,6 +284,7 @@ class RotationTests(unittest.TestCase):
             {"state": r.Stage.ACTIVE},
             {"state": r.Stage.RETIRED},
             {"state": r.Stage.FAILED},
+            {"state": r.Stage.RECOVERY_REQUIRED},
             {"state": r.Stage.PARTIAL},
             {"state": r.Stage.OLD_RESTORED},
             {"state": r.Stage.COMPENSATED},
@@ -248,12 +319,16 @@ class RotationTests(unittest.TestCase):
         revoking = self.apply("begin_new_revocation", restored)
         done = self.apply("record", revoking, outcome=r.Outcome.APPLIED)
         partial = self.apply("record", revoking, outcome=r.Outcome.REJECTED)
+        uncertain_delivery = self.apply("record", delivering, outcome=r.Outcome.UNKNOWN)
+        recovery = self.apply("reconcile", uncertain_delivery, outcome=r.Observation.PARTIAL,
+                              receipts=frozenset({"node-a/inc-1"}), quiescent=True)
         entries = ("begin_delivery", "activate", "begin_retirement", "begin_compensation",
                    "begin_new_revocation", "retry_effect")
         for snapshot, allowed in ((self.rotation, "begin_delivery"), (delivering, None),
                                   (delivered, "activate"), (active, "begin_retirement"),
                                   (retiring, None), (retired, None), (unknown, None),
                                   (absent, "retry_effect"), (failed, "begin_compensation"),
+                                  (recovery, "begin_compensation"),
                                   (restoring, None), (restored, "begin_new_revocation"),
                                   (revoking, None), (done, None), (partial, None)):
             for method in entries:
