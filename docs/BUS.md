@@ -1,5 +1,31 @@
 # Шина пула
 
+## Release boundary: internal realtime transport
+
+This page records the current, pre-Django NATS implementation and its historical
+transitions. It is not the transport contract for the future Django release
+(epic #623). The replacement's functional preservation inventory is
+[CONTROL](CONTROL.md); the parent [API](API.md) owns canonical wire and authority
+rules, and [STORAGE](STORAGE.md) owns persistence. These documents specify the
+target; their presence does not imply an implemented runtime.
+
+In the future release, Django REST Framework is the control boundary for web,
+CLI and MCP. NATS is internal realtime-only: no public CRUD/RPC control API,
+operation queue, persistent registry or authorization bypass. Old subjects below
+are implementation history, not compatibility endpoints to preserve. Django
+ASGI/Channels mediates authorized browser streams; browsers receive no bus or
+service credentials. Private terminal data, history, report delivery and idle
+receipts have separate audience and lifecycle checks described in CONTROL.md;
+a public project event is not a private delivery channel. Revocation and scoped
+authority are enforced by Django, not inferred from a subscriber's subject name.
+
+The target is a fresh installation with no promise of old client, credential,
+subject or storage compatibility. Until a replacement ships, the operational
+instructions below continue to describe the existing runtime; do not disable
+its RPC subjects on the strength of this future contract alone.
+
+## Current implementation and history
+
 Как мастер разговаривает с узлами: сообщения поверх NATS. Сервер разворачивает
 [deploy/setup.yml](../deploy/setup.yml), права — `deploy/roles/bus/templates/nats-server.conf.j2`,
 подписчик — `mop/node/agent.py` (глаголы и таблица прав; программа — `mop agent`,
