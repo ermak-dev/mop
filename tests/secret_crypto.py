@@ -10,12 +10,12 @@ STATUS: FIXED — see #637 (только независимая криптогр
 import importlib
 import pathlib
 import struct
-import sys
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import hermetic  # noqa: F401 -- изоляция установки до импорта mop
+from _lib import offline
 
 
 class DeclaredDependencyTests(unittest.TestCase):
@@ -182,4 +182,5 @@ class CryptoTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    with offline():
+        unittest.main()

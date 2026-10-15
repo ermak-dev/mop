@@ -9,11 +9,11 @@ STATUS: FIXED — see #637 (только чистая политика, не в�
 """
 import importlib
 import pathlib
-import sys
 import unittest
 from dataclasses import FrozenInstanceError
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import hermetic  # noqa: F401 -- изоляция установки до импорта mop
+from _lib import offline
 
 
 class RotationTests(unittest.TestCase):
@@ -236,4 +236,5 @@ class RotationTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    with offline():
+        unittest.main()
