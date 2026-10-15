@@ -450,12 +450,36 @@ class Foundation(TransactionTestCase):
                 provisioner.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
                 provisioner.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
 
+    def test_precommit_guard_check_survives_a_healthy_database_step_longer_than_ten_milliseconds(self):
+        # BUG: pipeline 5464/29462 падал до проверки Python pre-COMMIT guard:
+        # здоровый INSERT занимал больше 10 ms, и driver правильно закрывал socket.
+        # HYPOTHESIS: setup проверки не должен требовать sub-10ms PostgreSQL
+        # под параллельным hermetic load; transport deadlines проверяются отдельно.
+        # SOLUTION: независимые часы только для Python guard после настоящего
+        # INSERT, при неизменных production driver deadlines и SQL rollback.
+        # RESULT: deterministic slow-step red, затем все 43 PG cases green.
+        # STATUS: FIXED — see #632 (изолированный acceptance harness).
+        from unittest.mock import patch
+        from mop.server.controller.postgresql.base import BoundedConnection
+        wait = BoundedConnection.wait
+        def healthy_slow_wait(driver, *args, **kwargs):
+            time.sleep(.02)
+            return wait(driver, *args, **kwargs)
+        with patch.object(BoundedConnection, 'wait', healthy_slow_wait):
+            self.test_short_transaction_rolls_back_before_over_budget_commit()
+
     def test_short_transaction_rolls_back_before_over_budget_commit(self):
-        from mop.server.controller.runtime import short_transaction
-        with self.assertRaisesRegex(TimeoutError, 'transaction'):
-            with short_transaction(budget=.01):
-                get_user_model().objects.create(username='over-budget')
-                time.sleep(.03)
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from mop.server.controller import runtime
+        clock = [0.]
+        # Только часы Python pre-COMMIT guard: настоящий driver/SQL сохраняет
+        # production timeout 10 s, реальную транзакцию и проверку rollback.
+        with patch.object(runtime, 'time', SimpleNamespace(monotonic=lambda: clock[0])):
+            with self.assertRaisesRegex(TimeoutError, 'transaction'):
+                with runtime.short_transaction():
+                    get_user_model().objects.create(username='over-budget')
+                    clock[0] = 11.
         self.assertFalse(get_user_model().objects.filter(username='over-budget').exists())
 
     def test_initialization_binds_identity_and_root_without_resetting_admin(self):

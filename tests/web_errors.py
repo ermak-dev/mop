@@ -111,8 +111,48 @@ def check_workflow_public_errors_611(c):
              "operation refused")
 
 
+def submitted_result(c, api, action, target, params, who):
+    import threading
+    finished = threading.Event()
+    api.on_terminal(lambda frame: finished.set())
+    record = api.submit(action, target, params, who)
+    c.check('#632 error-projection fixture reaches a terminal verdict', finished.wait(5))
+    return record, api.result(record['id'], who)
+
+
+def check_delayed_effect_completion_632(c):
+    # BUG: hermetic PG17 поймал #495 assertion до завершения async эффекта.
+    # HYPOTHESIS: причина терминала проверяется после terminal callback,
+    # а не в гонке между submit и первым GET. Production API не меняется.
+    # SOLUTION: зарегистрировать bounded terminal wait до submit каждого case.
+    # RESULT: controlled effect дал 2 red assertions, затем все причины и
+    # приватность проверяются после подтверждённого завершения, без sleeps.
+    # STATUS: FIXED — see #632 (изолированный acceptance harness).
+    import threading
+    release, settled = threading.Event(), threading.Event()
+    def delayed(*args):
+        release.wait(5)
+        return effect('refused', 'cannot inspect the target before sending')
+    api = adminapi.Api(adminapi.Operations(), origin='https://pool.example', executor=delayed)
+    api.on_terminal(lambda frame: settled.set())
+    register = api.on_terminal
+    def observe(callback):
+        register(callback)
+        release.set()
+    try:
+        with patched(api, on_terminal=observe):
+            _, result = submitted_result(c, api, 'send', 'pu-mop-1', {'message': 'private'}, ('alice', 'admin'))
+        c.expect('#632 completed-error fixture waits for an independently running effect',
+                 result.get('error'), 'target state is unavailable')
+        c.expect('#632 completed-error fixture observes a terminal result', result.get('status'), 'refused')
+    finally:
+        release.set()
+        c.check('#632 controlled effect is drained', settled.wait(5))
+
+
 def main():
     c = Checks()
+    check_delayed_effect_completion_632(c)
     who = ("alice", "admin")
     cases = (
         ("failed", "token=private-key /root/secret.env raw payload", "operation failed"),
@@ -126,8 +166,7 @@ def main():
         api = adminapi.Api(adminapi.Operations(),
                            origin="https://pool.example",
                            executor=lambda *a, e=effect(status, error): e)
-        rec = api.submit("send", "pu-mop-1", {"message": "raw payload"}, who)
-        got = api.result(rec["id"], who)
+        rec, got = submitted_result(c, api, "send", "pu-mop-1", {"message": "raw payload"}, who)
         c.expect(f"#495 {status} has a safe public reason", got.get("error"), public)
         body = json.dumps(got)
         c.check("#495 private details never ride the result", all(secret not in body for secret in
@@ -140,8 +179,7 @@ def main():
                      (403, "admin only"))
     api = adminapi.Api(adminapi.Operations(), origin="https://pool.example",
                        executor=lambda *a: {"outcome": "registered"})
-    rec = api.submit("send", "pu-mop-1", {"message": "hello"}, who)
-    got = api.result(rec["id"], who)
+    rec, got = submitted_result(c, api, "send", "pu-mop-1", {"message": "hello"}, who)
     c.check("#495 success does not acquire a stale error", "error" not in got, got)
     check_workflow_public_errors_611(c)
     return c.report("web_errors")
