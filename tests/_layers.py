@@ -119,18 +119,25 @@ def imports_of(path, name, known):
         tree = ast.parse(stream.read())
     pkg = name if os.path.basename(path) == '__init__.py' else name.rsplit('.', 1)[0]
     out, loaders, libraries = set(), {'__import__'}, set()
+    loader_support = False
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
                 out.add(a.name)
-                if a.name == 'importlib':
-                    libraries.add(a.asname or a.name)
+                if a.name == 'importlib' or a.name.startswith('importlib.'):
+                    loader_support = True
+                    if a.asname is None:
+                        libraries.add('importlib')
+                    elif a.name == 'importlib':
+                        libraries.add(a.asname)
         elif isinstance(n, ast.ImportFrom):
             if n.level:
                 base = '.'.join(pkg.split('.')[:len(pkg.split('.')) - n.level + 1])
                 base += '.' + n.module if n.module else ''
             else:
                 base = n.module or ''
+            if base == 'importlib' or base.startswith('importlib.'):
+                loader_support = True
             for a in n.names:
                 full = f'{base}.{a.name}'
                 out.add(full if full in known else base)
@@ -153,7 +160,7 @@ def imports_of(path, name, known):
                 out.add('forbidden.dynamic_import')
     # Предметным модулям динамическая загрузка не нужна: запрет целиком
     # закрывает alias/getattr/eval обходы сканера, а root остаётся явным.
-    if subject_of(name) and (libraries or loaders != {'__import__'} or any(
+    if subject_of(name) and (loader_support or loaders != {'__import__'} or any(
             isinstance(n, ast.Name) and n.id in {'__import__', 'eval', 'exec'}
             for n in ast.walk(tree))):
         out.add('forbidden.dynamic_import')
