@@ -1295,6 +1295,20 @@ MOP_GC_MAX_PER_RUN per run. Run this on the server, not from a master shell: dis
 is a fact about every tenant, not one project.
 ```
 
+#### mop server grant
+
+```text
+revoke one role principal: mop server grant revoke <principal> [--cut]
+
+Controller-only. Selects the exact grant identifier, never a reusable puppet
+name or a project-wide match. Revocation is idempotent and denies further role
+operations without stopping the body or its current work.
+
+--cut also removes this principal's stored password. Existing bus connections
+retain their transport permissions until reconnecting; this is not a forced
+disconnect and cannot erase credentials or secrets already delivered to a body.
+```
+
 #### mop server proxykey
 
 ```text
