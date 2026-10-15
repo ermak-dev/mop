@@ -30,6 +30,17 @@ class Packaging(unittest.TestCase):
         self.assertEqual(module.requirements('server'), list(server))
         self.assertEqual(module.requirements(), list(deps.PIP))
 
+    def test_pool_worker_ownership_uses_the_explicitly_selected_pool_release(self):
+        # BUG: psycopg[pool]==3.3.6 не фиксирует отдельно выпускаемый psycopg_pool.
+        # HYPOTHESIS: shutdown читает private _workers/_sched_runner, поэтому
+        # новая установка должна получать именно проверенный pool, не latest.
+        # SOLUTION: отдельный точный server-only requirement для psycopg-pool.
+        # RESULT: наблюдался missing-pin red; packaging и реальный shutdown green.
+        # STATUS: FIXED — see #632
+        self.assertIn('psycopg-pool==3.3.3', deps.SERVER)
+        self.assertFalse(any(item.lower().startswith(('psycopg-pool', 'psycopg_pool'))
+                             for item in deps.PIP), 'client must not acquire the controller pool')
+
     def test_isolated_database_fixture_survives_hermetic_children(self):
         from unittest.mock import patch
         import os

@@ -18,6 +18,7 @@ SERVER = (
     "channels==4.3.2",
     "uvicorn[standard]==0.54.0",
     "psycopg[binary,pool]==3.3.6",
+    "psycopg-pool==3.3.3",  # shutdown проверяет workers этого отдельного release
 )
 
 PIP = (

@@ -149,7 +149,7 @@ class DatabaseWrapper(PostgreSQLWrapper):
         pool = self._connection_pools.get(self.alias)
         if pool is None:
             return
-        # В закреплённом psycopg_pool 3.3.6 close() очищает эти ссылки и лишь
+        # В отдельно закреплённом psycopg_pool 3.3.3 close() очищает ссылки и лишь
         # предупреждает об истёкшем join. Сохраняем реальных владельцев до stop.
         workers = getattr(pool, '_controller_closing_workers', None)
         if workers is None:
