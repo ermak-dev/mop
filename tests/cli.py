@@ -3525,8 +3525,9 @@ def check_server_namespace_259(c):
     c.check("#536 mop diagnose stays top-level, for the operator's machine",
             "diagnose" in top)
     # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
-    c.expect("#259 driver keeps run/list/sweep/build/clone-work",
-             set(tree.get("driver") or {}), {"run", "list", "sweep", "build", "clone-work"})
+    c.expect("#631 driver keeps existing operations and explicit orphan purge",
+             set(tree.get("driver") or {}),
+             {"run", "list", "sweep", "build", "clone-work", "purge-clone"})
     for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
         c.expect(f"#259 LEGACY must map {old} into server", cli.LEGACY.get(old), ("server", old))
     for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],
