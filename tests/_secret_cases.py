@@ -617,6 +617,60 @@ class SecretCases(TransactionTestCase):
         self.assertEqual(r.receipts, r.required)
         self.assertEqual(r.state, Stage.RECOVERY_REQUIRED)
 
+    # HYPOTHESIS: исторические receipts и operator scope обходят текущее назначение.
+    # Membership не отделён от immutable evidence, поэтому stage требует умершие incarnation.
+    def delivered(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        svc.receipt(self.actor, r.id, b.id, version_id=new.id, claim_id=r.claim_id,
+                    generation=r.generation, outcome=Outcome.APPLIED)
+        r = svc.record(self.actor, r.id, Outcome.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        return svc, a, new, b, r
+
+    def test_old_receipts_cannot_activate_without_bound_current_assignment_verifier(self):
+        svc, a, new, b, r = self.delivered()
+        unbound = self.s.RotationService(authorizer=Allow(), delivery_gate=svc.delivery_gate)
+        with self.assertRaises(PermissionError):
+            unbound.activate(self.actor, r.id, expected_revision=r.revision)
+        self.assertEqual(self.api.metadata(self.actor, a.id).active_version_id, a.active_version_id)
+
+    def test_old_receipts_cannot_override_current_recipient_denial(self):
+        svc, a, new, b, r = self.delivered()
+        class Revoked:
+            def verify_current(_, actor, proof):
+                return False
+        svc.current_verifier = Revoked()
+        svc.delivery_gate.selection = self.s.DeliverySelection((), ())
+        with self.assertRaises(self.s.Refused):
+            svc.activate(self.actor, r.id, expected_revision=r.revision)
+        self.assertIsNone(svc.metadata(self.actor, r.id).pending)
+
+    def test_binding_retirement_keeps_evidence_but_stage_freezes_current_only(self):
+        a = self.secret()
+        old = self.binding(a)
+        retire = getattr(self.api, 'retire_binding', None)
+        self.assertTrue(callable(retire), 'binding membership needs explicit retirement, not deletion')
+        retire(self.actor, old.id, expected_revision=a.revision)
+        self.assertIsNotNone(self.m.SecretBinding.objects.get(pk=old.id).retired_at)
+        current = self.binding(a)
+        new = self.api.stage(self.actor, a.id, b'new', expected_revision=a.revision)
+        svc = self.s.RotationService(authorizer=Allow())
+        r = svc.stage(self.actor, a.id, new.id, (current.id,), expected_revision=2)
+        self.assertEqual(r.required, frozenset((str(current.id),)))
+        self.assertTrue(self.m.SecretBinding.objects.filter(pk=old.id).exists())
+        api, _ = self.delivery(old)
+        with self.assertRaises(self.s.Refused):
+            api.issue_addressed('machine')
+
+    def test_repeated_bind_returns_same_current_membership_without_extra_evidence(self):
+        a = self.secret()
+        b = self.binding(a)
+        repeated = self.api.bind(self.actor, a.id, expected_revision=a.revision,
+            node_id=b.node_id, role=b.role, digest=b.digest, incarnation=b.incarnation,
+            grant_id=b.grant_id, assignment_id=b.assignment_id)
+        self.assertEqual(repeated.id, b.id)
+        self.assertEqual(self.m.SecretBinding.objects.filter(secret_id=a.id).count(), 1)
+
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission
         codes = set(Permission.objects.filter(content_type__app_label='secrets').values_list('codename', flat=True))
