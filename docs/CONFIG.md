@@ -198,8 +198,10 @@ The initial process DB pool has at most 8 connections (zero persistent
 thread-local connections), with 5 s connect/query, 2 s lock and 10 s idle-in-
 transaction deadlines. Application services use short synchronous atomic blocks;
 the maintenance `short_transaction` helper checks its 10 s budget before COMMIT.
-The composition runtime permits at most 8 blocking jobs and 8 async effects,
-with a bounded local backlog. This does not replace durable project/node/resource
+The composition runtime permits at most 8 blocking I/O jobs, 8 synchronous
+DB jobs in a separate executor, and 8 async effects, with a bounded local
+backlog. Slow blocking adapters cannot occupy the DB threads needed for
+queries, claim/result recording or renewal. This does not replace durable project/node/resource
 admission limits or fencing in #625/#639. Shutdown drains running work before
 closing adapters/pools; a timeout reports incomplete shutdown and does not
 pretend a still-running effect released its slot.

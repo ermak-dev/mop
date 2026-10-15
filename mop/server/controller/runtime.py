@@ -111,16 +111,22 @@ class Runtime:
     Это не очередь операций: никакой admission/auth/claim здесь не подменяется.
     Общие project/node/resource bounds проверяет durable executor #625/#639.
     """
-    def __init__(self, *, blocking_limit=8, effect_limit=8, queue_limit=256, adapters=()):
-        if not 1 <= blocking_limit <= 8 or not 1 <= effect_limit <= 8 or not 0 <= queue_limit <= 256:
+    def __init__(self, *, blocking_limit=8, effect_limit=8, database_limit=None, queue_limit=256, adapters=()):
+        database_limit = blocking_limit if database_limit is None else database_limit
+        if not 1 <= blocking_limit <= 8 or not 1 <= effect_limit <= 8 or \
+                not 1 <= database_limit <= 8 or not 0 <= queue_limit <= 256:
             raise ValueError('runtime limits exceed controller safety caps')
-        self._executor = ThreadPoolExecutor(max_workers=blocking_limit, thread_name_prefix='mop-controller')
+        # Медленный Git/provider I/O не занимает потоки claim/result/renewal.
+        self._executor = ThreadPoolExecutor(max_workers=blocking_limit, thread_name_prefix='mop-controller-io')
+        self._database_executor = ThreadPoolExecutor(max_workers=database_limit, thread_name_prefix='mop-controller-db')
         self._blocking = asyncio.Semaphore(blocking_limit)
+        self._database = asyncio.Semaphore(database_limit)
         self._effects = asyncio.Semaphore(effect_limit)
-        self._capacity = blocking_limit + effect_limit + queue_limit
+        self._capacity = blocking_limit + database_limit + effect_limit + queue_limit
         self._blocking_capacity = blocking_limit + queue_limit
+        self._database_capacity = database_limit + queue_limit
         self._effect_capacity = effect_limit + queue_limit
-        self._counts = {'blocking': 0, 'effect': 0}
+        self._counts = {'blocking': 0, 'database': 0, 'effect': 0}
         self._tasks = set()
         self._adapters = tuple(adapters)
         self._started_adapters = []
@@ -165,8 +171,8 @@ class Runtime:
 
     async def database(self, function, *args, **kwargs):
         args, kwargs = materialized(args), materialized(kwargs)
-        call = database_sync_to_async(_database_invoke, thread_sensitive=False, executor=self._executor)
-        return await self._submit('blocking', self._blocking, self._blocking_capacity,
+        call = database_sync_to_async(_database_invoke, thread_sensitive=False, executor=self._database_executor)
+        return await self._submit('database', self._database, self._database_capacity,
                                   lambda: call(function, args, kwargs))
 
     async def blocking(self, function, *args, **kwargs):
@@ -196,6 +202,7 @@ class Runtime:
             except Exception as exc:
                 errors.append(type(exc).__name__)
         self._executor.shutdown(wait=True, cancel_futures=True)
+        self._database_executor.shutdown(wait=True, cancel_futures=True)
         if errors:
             raise RuntimeError('controller adapter shutdown failed: ' + ', '.join(errors))
 

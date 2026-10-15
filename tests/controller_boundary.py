@@ -170,6 +170,34 @@ class Boundary(unittest.TestCase):
                 _tool('pg_dump', config, major=16)
             self.assertEqual(run.call_count, 1)
 
+    def test_blocking_external_io_does_not_starve_database_boundary(self):
+        import threading
+        from mop.server.controller.runtime import Runtime
+        async def run():
+            runtime = Runtime(blocking_limit=1)
+            entered, release = threading.Event(), threading.Event()
+            def external_io():
+                entered.set()
+                release.wait(timeout=3)
+                return 'receipt'
+            slow = asyncio.create_task(runtime.blocking(external_io))
+            query = None
+            try:
+                while not entered.is_set():
+                    await asyncio.sleep(.005)
+                query = asyncio.create_task(runtime.database(lambda: {'snapshot': 'ready'}))
+                await asyncio.sleep(.1)
+                self.assertTrue(query.done(), 'slow external I/O starved the ORM boundary')
+                self.assertEqual(await query, {'snapshot': 'ready'})
+                self.assertFalse(slow.done())
+            finally:
+                release.set()
+                await slow
+                if query:
+                    await query
+                await runtime.aclose()
+        asyncio.run(run())
+
     def test_shutdown_timeout_keeps_the_running_effect_accounted_for(self):
         from mop.server.controller.runtime import Runtime
         async def run():
