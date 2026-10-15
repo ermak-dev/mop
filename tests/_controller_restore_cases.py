@@ -136,16 +136,23 @@ finally:
                         if phase == 'before':
                             raise SystemExit('before restore')
                         if phase == 'during':
-                            # TOC цел; обрыв в конце data stream достигается уже
-                            # после DDL/начала загрузки, внутри single-transaction.
-                            kwargs['input'].seek(0)
-                            payload = kwargs['input'].read()
-                            self.assertGreater(len(payload), 4096)
-                            with tempfile.TemporaryFile() as broken:
-                                broken.write(payload[:-128])
-                                broken.seek(0)
-                                kwargs['input'] = broken
-                                return tool(command, *args, **kwargs)
+                            # HYPOTHESIS 1 (WRONG): обрыв хвоста обязан дать отказ;
+                            # PG16/17 приняли архив без последних 128 байт (pipeline 5431).
+                            # HYPOTHESIS 2: роль без владения даёт настоящий DDL-отказ
+                            # внутри restore transaction, не ошибку чтения заголовка.
+                            config = connections[target].settings_dict
+                            params = {key.lower(): config[key] for key in ('HOST', 'PORT', 'USER', 'PASSWORD')}
+                            params['dbname'] = 'postgres'
+                            role = 'restore_denied_' + uuid.uuid4().hex
+                            with psycopg.connect(**params, autocommit=True) as admin:
+                                admin.execute(sql.SQL('CREATE ROLE {} NOLOGIN').format(sql.Identifier(role)))
+                                try:
+                                    kwargs['extra'] = (*kwargs['extra'], '--role=' + role)
+                                    with self.assertRaisesRegex(RuntimeError, 'must be owner|permission denied') as refused:
+                                        tool(command, *args, **kwargs)
+                                    raise refused.exception
+                                finally:
+                                    admin.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
                         tool(command, *args, **kwargs)
                         raise SystemExit('after archive commit')
                     with patch.object(archive_tools, '_tool', interrupt):
