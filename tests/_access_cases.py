@@ -41,6 +41,8 @@ class AccessContracts(TransactionTestCase):
         from mop.server.access import models as m, services as s
         from mop.server.catalog.models import Project
         self.m, self.s = m, s
+        from mop.server.controller.runtime import initialize
+        initialize()
         self.source = m.IdentitySource.objects.create(name='local', kind='local', priority=0)
         self.user = get_user_model().objects.create_user('human', password='test-password-only')
         m.Principal.objects.create(user=self.user, kind='human')
@@ -580,6 +582,15 @@ class AccessContracts(TransactionTestCase):
             'password1': 'a-long-distinct-passphrase-633', 'password2': 'a-long-distinct-passphrase-633'}, secure=True)
         self.assertEqual(response.status_code, 403)
         self.assertFalse(get_user_model().objects.get(pk=user_id).has_usable_password())
+
+    def test_changed_external_identity_cannot_reuse_existing_credential_binding(self):
+        identity = self.m.LoginIdentity.objects.get(user=self.user)
+        identity.external_subject = 'different-human-subject'
+        identity.save(update_fields=['external_subject'])
+        with self.assertRaises(self.s.Denied):
+            self.s.current_actor(self.actor)
+        with self.assertRaises(self.s.Denied):
+            self.s.token_context(self.token)
 
     def test_local_admin_binding_is_idempotent_without_password_reset(self):
         from mop.server.controller.runtime import initialize, create_admin
