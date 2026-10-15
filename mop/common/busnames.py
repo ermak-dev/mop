@@ -305,9 +305,16 @@ def caller(subject):
 
 
 def without_caller(subject):
-    """Тот же адрес без вызывающего: прежний субъект, на который отвечает
-    агент или сервис до #207 (переход)."""
-    return subject.rsplit(".", 1)[0] if caller(subject) else subject
+    """Прежний human RPC без вызывающего (#207). Машина не переходит
+    на безымянный путь: для роли/узла это потеря границы авторизации."""
+    who = caller(subject)
+    if not who or is_machine(who):
+        return subject
+    parts = subject.split(".")
+    human_rpc = (parts[0] == ROOT and (
+        (len(parts) == 5 and parts[2:4] == [CLUSTER_CHANNEL, CALLER_CHANNEL])
+        or (len(parts) == 6 and parts[2] == "node" and parts[4] == CALLER_CHANNEL)))
+    return subject.rsplit(".", 1)[0] if human_rpc else subject
 
 
 def server(project, caller=None):
