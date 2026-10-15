@@ -81,13 +81,20 @@ def _tool(tool, config, *, major, input=None, output=None, extra=(), database=Tr
     return result.stdout
 
 
+def _require_autocommit(connection, operation):
+    if connection.in_atomic_block or not connection.get_autocommit():
+        raise RuntimeError(f'{operation} requires autocommit outside application transactions')
+
+
 def backup(path, using='default'):
     from .runtime import _maintenance_role, verify_installation
     from .models import RestoreGuard
     _maintenance_role()
+    connection = connections[using]
+    _require_autocommit(connection, 'backup')
     verify_installation(using)
     path = _private_path(path, exists=False)
-    config = connections[using].settings_dict
+    config = connection.settings_dict
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
@@ -168,8 +175,13 @@ def _archive_plan(source, connection):
         return _tool('pg_restore', config, major=major, input=source, extra=extra, database=False)
     toc = inspect(('--list',))
     guard = RestoreGuard._meta.db_table.encode('ascii').lower()
-    if guard in toc.lower():
-        raise RuntimeError('backup contains forbidden restore guard entries')
+    table_entry = re.compile(
+        rb'^\d+;\s+\d+\s+\d+\s+(?:TABLE DATA|FK CONSTRAINT|CONSTRAINT|DEFAULT|TRIGGER|RULE|POLICY|TABLE)'
+        rb'\s+\S+\s+("[^"]*"|\S+)(?:\s|$)')
+    for line in toc.splitlines():
+        entry = table_entry.match(line)
+        if entry and entry[1].strip(b'"').lower() == guard:
+            raise RuntimeError('backup contains forbidden restore guard entries')
     schema = inspect(('--schema-only', '--file=-', '--no-owner', '--no-acl'))
     if guard in schema.lower():
         raise RuntimeError('backup schema references the forbidden restore guard')
@@ -194,8 +206,7 @@ def restore(path, using='default'):
     from .models import Installation
     _maintenance_role()
     connection = connections[using]
-    if connection.in_atomic_block or not connection.get_autocommit():
-        raise RuntimeError('restore requires autocommit outside application transactions')
+    _require_autocommit(connection, 'restore')
     path = _private_path(path, exists=True)
     generation = _arm_restore(using)
     # После arm никакой finally не объявляет target готовым: даже SystemExit,

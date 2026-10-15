@@ -25,9 +25,9 @@ class RestoreSafety(TransactionTestCase):
     serialized_rollback = True
 
     @contextmanager
-    def target(self, *, migrate=False):
+    def target(self, *, migrate=False, name_prefix='restore_guard_'):
         config = copy.deepcopy(connection.settings_dict)
-        config['NAME'] = 'restore_guard_' + uuid.uuid4().hex
+        config['NAME'] = name_prefix + uuid.uuid4().hex
         params = {key.lower(): config[key] for key in ('HOST', 'PORT', 'USER', 'PASSWORD')}
         params['dbname'] = 'postgres'
         allowed = type(self).databases
@@ -97,6 +97,28 @@ finally:
         self.assertEqual(child.returncode, 0, child.stderr or child.stdout)
         for reason in json.loads(child.stdout).values():
             self.assertRegex(reason, 'restore|guard|maintenance')
+
+    def test_backup_cannot_export_an_uncommitted_installation(self):
+        # pg_dump использует другую connection и не видит initialize до COMMIT.
+        with self.target(migrate=True) as using, tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'uncommitted.dump'
+            with transaction.atomic(using=using):
+                initialize(using)
+                with self.assertRaisesRegex(RuntimeError, 'transaction|autocommit'):
+                    archive_tools.backup(path, using=using)
+                self.assertFalse(path.exists())
+
+    def test_guard_word_in_database_name_does_not_make_archive_forbidden(self):
+        # TOC header содержит dbname, но это не TABLE/CONSTRAINT guard.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'guard-named-source.dump'
+            with self.target(migrate=True, name_prefix='controller_restoreguard_test_') as source:
+                initialize(source)
+                archive_tools.backup(path, using=source)
+            with self.target() as target:
+                result = archive_tools.restore(path, using=target)
+                self.assertFalse(result['effects_enabled'])
+                self.assertEqual(verify_installation(target)['epoch'], result['epoch'])
 
     def test_restore_refuses_an_ambient_transaction_before_archive_io(self):
         # Arm внутри чужого atomic был бы лишь savepoint, не durable COMMIT.
