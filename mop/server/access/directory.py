@@ -72,8 +72,6 @@ def _configuration(source):
         row.nested_ad, row.starttls, row.ca_secret_ref)
 
 
-from .policy import directory_dn_key as _norm
-
 def _mapping(source, account):
     groups = {_norm(dn) for dn in account.groups}
     rules = tuple(m.DirectoryGroupRule.objects.filter(source=source).prefetch_related('permissions__content_type'))

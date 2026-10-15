@@ -9,8 +9,8 @@ from django.views.decorators.debug import sensitive_post_parameters, sensitive_v
 from django.views.decorators.http import require_GET
 from rest_framework import serializers
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.exceptions import PermissionDenied, NotAuthenticated, Throttled
-from rest_framework.permissions import AllowAny, BasePermission
+from rest_framework.exceptions import PermissionDenied, Throttled
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from mop.server.access import services as access
