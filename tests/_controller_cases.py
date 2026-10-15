@@ -23,16 +23,17 @@ from mop.server.controller.runtime import database_call
 class TransportDeadline(TransactionTestCase):
     def test_acknowledged_query_and_lost_commit_are_bounded_without_proxy_disconnect(self):
         from django.test import override_settings
-        from _controller_transport import Blackhole, wait_until
+        from _controller_transport import Blackhole
         for pooled in (False, True):
-            for commit in (False, True):
-                with self.subTest(pool=pooled, commit=commit), override_settings(CONTROLLER_DB_TIMEOUT=.25):
+            for mode in ('orm', 'drf', 'commit'):
+                commit = mode == 'commit'
+                with self.subTest(pool=pooled, mode=mode), override_settings(CONTROLLER_DB_TIMEOUT=.25):
                     proxy = Blackhole(connection.settings_dict)
                     alias = proxy.alias('blackhole', pool=pooled)
                     allowed = type(self).databases
                     type(self).databases = allowed | {alias}
                     finished = threading.Event()
-                    errors, raw = [], []
+                    errors, raw, responses = [], [], []
                     def service():
                         db = connections[alias]
                         try:
@@ -44,6 +45,16 @@ class TransportDeadline(TransactionTestCase):
                             proxy.drop.set()
                             if commit:
                                 db.commit()
+                            elif mode == 'drf':
+                                from rest_framework.test import APIRequestFactory, force_authenticate
+                                from rest_framework.views import APIView
+                                from rest_framework.response import Response
+                                class Probe(APIView):
+                                    def get(self, request):
+                                        return Response({'count': get_user_model().objects.using(alias).count()})
+                                request = APIRequestFactory().get('/fixture')
+                                force_authenticate(request, user=get_user_model()(username='authenticated-fixture'))
+                                responses.append(Probe.as_view()(request))
                             else:
                                 get_user_model().objects.using(alias).count()
                         except Exception as exc:
@@ -57,7 +68,12 @@ class TransportDeadline(TransactionTestCase):
                         self.assertTrue(proxy.dropped.wait(3), 'proxy never dropped a live PostgreSQL reply')
                         self.assertTrue(proxy.forwarded.is_set())
                         self.assertTrue(finished.wait(1), 'client transport wait exceeded deadline with proxy still connected')
-                        self.assertTrue(errors, 'blackholed response reported success')
+                        if mode == 'drf':
+                            self.assertFalse(errors)
+                            self.assertEqual(responses[0].status_code, 503)
+                            self.assertEqual(responses[0].data['error']['code'], 'database_unavailable')
+                        else:
+                            self.assertTrue(errors, 'blackholed response reported success')
                         self.assertTrue(raw[0].closed, 'uncertain transport connection was reused')
                         if commit:
                             self.assertIn('outcome unknown', str(errors[0]))

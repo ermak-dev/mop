@@ -148,6 +148,19 @@ class Boundary(unittest.TestCase):
         self.assertNotIn(b'private credential', response.content)
         self.assertEqual(response['Cache-Control'], 'no-store')
 
+    def test_uncertain_commit_is_not_advertised_as_a_retryable_rollback(self):
+        from django.db import DatabaseError
+        from mop.server.controller.views import exception_handler
+        driver = Exception('private driver context')
+        driver.outcome_unknown = True
+        error = DatabaseError('private database detail')
+        error.__cause__ = driver
+        response = exception_handler(error, {})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data['error']['code'], 'database_outcome_unknown')
+        self.assertFalse(response.data['error']['retryable'])
+        self.assertNotIn('private', str(response.data))
+
     def test_production_asgi_refuses_maintenance_credentials_before_database_access(self):
         from unittest.mock import patch
         from django.conf import settings
