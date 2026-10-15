@@ -435,6 +435,77 @@ class AccessContracts(TransactionTestCase):
         with self.assertRaises(self.s.Denied):
             Catalog(authorizer=RevokeAfterFirstProject()).list_projects(self.actor)
 
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_auth_refusals_have_machine_readable_safe_codes(self):
+        response = Client().post('/api/v1/auth/token',
+            {'username': 'human', 'password': 'wrong-password-only'}, secure=True)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('error', response.json())
+        self.assertEqual(response.json()['error']['code'], 'permission_denied')
+        self.assertIn('no-store', response['Cache-Control'])
+        self.assertNotIn('wrong-password-only', response.content.decode())
+        response = Client().get('/api/v1/identity', secure=True)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['error']['code'], 'authentication_required')
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_password_rate_limit_distinguishes_actual_request_sources(self):
+        noisy = Client(REMOTE_ADDR='192.0.2.10')
+        for _ in range(11):
+            noisy.post('/api/v1/auth/token', {'username': 'unknown', 'password': 'wrong-only'}, secure=True)
+        response = Client(REMOTE_ADDR='192.0.2.11').post('/api/v1/auth/token',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['token'], self.token)
+        self.assertNotIn('sessionid', response.cookies)
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_project_pagination_filters_first_and_rejects_stale_scope_cursor(self):
+        from mop.server.catalog.models import Project
+        for name in ('three', 'four'):
+            project = Project.objects.create(name=name, origin='https://example.invalid/' + name + '.git')
+            self.m.ProjectMembership.objects.create(user=self.user, source=self.source, project=project)
+        client = Client(HTTP_AUTHORIZATION='Token ' + self.token)
+        first = client.get('/api/v1/projects?page_size=1', secure=True)
+        self.assertEqual(first.status_code, 200)
+        data = first.json()
+        self.assertEqual(data['count'], 3)
+        self.assertEqual(len(data['results']), 1)
+        self.assertIsNotNone(data['next_cursor'])
+        self.assertNotIn(str(self.actor.credential_id), data['next_cursor'])
+        second = client.get('/api/v1/projects', {'cursor': data['next_cursor']}, secure=True)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(second.json()['results']), 1)
+        self.assertNotEqual(data['results'][0]['id'], second.json()['results'][0]['id'])
+        self.m.ProjectMembership.objects.filter(user=self.user, project=self.project).delete()
+        stale = client.get('/api/v1/projects', {'cursor': data['next_cursor']}, secure=True)
+        self.assertEqual(stale.status_code, 410)
+        self.assertTrue(stale.json()['error']['reset_required'])
+
+    def test_actual_catalog_m2m_checks_foreign_project_before_mutation(self):
+        from mop.server.catalog.models import Node, NodeProject
+        from mop.server.catalog.services import Catalog
+        node = Node.objects.create(name='m2m', driver='host', ssh_host='node.invalid', ssh_port=22,
+            control_origin='https://controller.invalid', lan_address='node.invalid', bootstrap_address='node.invalid')
+        NodeProject.objects.create(node=node, project=self.project)
+        self.permission('catalog.change_node')
+        with self.assertRaises(self.s.NotVisible):
+            Catalog(authorizer=self.s.Access()).set_node_projects(self.actor, node.pk,
+                (self.project.pk, self.foreign.pk), expected_revision=1)
+        self.assertEqual(tuple(NodeProject.objects.filter(node=node).values_list('project_id', flat=True)), (self.project.pk,))
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_http_rotation_and_revoke_invalidate_old_credentials(self):
+        client = Client(HTTP_AUTHORIZATION='Token ' + self.token)
+        rotated = client.post('/api/v1/auth/token/rotate', {}, secure=True)
+        self.assertEqual(rotated.status_code, 200)
+        replacement = rotated.json()['token']
+        self.assertNotEqual(replacement, self.token)
+        self.assertEqual(client.get('/api/v1/identity', secure=True).status_code, 401)
+        fresh = Client(HTTP_AUTHORIZATION='Token ' + replacement)
+        self.assertEqual(fresh.post('/api/v1/auth/token/revoke', {}, secure=True).status_code, 200)
+        self.assertEqual(fresh.get('/api/v1/identity', secure=True).status_code, 401)
+
     def test_local_admin_binding_is_idempotent_without_password_reset(self):
         from mop.server.controller.runtime import initialize, create_admin
         from mop.server.access.services import bind_local_identity
