@@ -27,6 +27,9 @@ class BootstrapTests(unittest.TestCase):
         self.root = self.directory / 'root.key'
         self.root.write_bytes(b'k' * 64)
         self.root.chmod(0o600)
+        self.ca = self.directory / 'fixture-ca.pem'
+        self.ca.write_text('fixture-only-not-a-certificate')
+        self.ca.chmod(0o644)
         self.path = self.directory / 'bootstrap.json'
         self.data = {
             'installation_id': 'foundation-test', 'role': 'maintenance',
@@ -34,7 +37,7 @@ class BootstrapTests(unittest.TestCase):
             'database': {'ENGINE': 'django.db.backends.postgresql',
                          'NAME': 'controller_test', 'HOST': 'db.example.invalid',
                          'PORT': '5432', 'USER': 'migration', 'PASSWORD': 'private-value',
-                         'OPTIONS': {'sslmode': 'verify-full', 'sslrootcert': '/trust/ca.pem'}}}
+                         'OPTIONS': {'sslmode': 'verify-full', 'sslrootcert': str(self.ca)}}}
         self.write()
 
     def write(self):
