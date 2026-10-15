@@ -553,6 +553,18 @@ class ControlClient(unittest.TestCase):
                 self.client.prepare_restart(self.target, epoch="e_1", not_after=value)
         self.assertEqual(self.fixture.calls, [])
 
+    def test_explicit_rfc3339_utc_deadline_is_accepted_without_changing_intent(self):
+        # HYPOTHESIS: только Z отсекает корректный UTC +00:00 вопреки API.
+        # SOLUTION: принять UTC offset, сохранив точный подготовленный envelope.
+        # RESULT: наблюдаемый ClientError сменился green без I/O.
+        explicit = "2026-10-16T10:05:00+00:00"
+        command = self.client.prepare_restart(self.target, epoch="e_1", not_after=explicit,
+                                              request_id=KEY)
+        self.assertEqual(json.loads(command.body)["not_after"], explicit)
+        self.assertEqual(self.fixture.calls, [])
+        with self.assertRaises(api.ClientError):
+            self.client.prepare_restart(self.target, epoch="e_1", not_after="2026-10-16T10:05:00-00:00")
+
     def test_untrusted_nested_mutation_and_configuration_limits(self):
         for kw in ({"connect_timeout": 0}, {"read_timeout": float("nan")},
                    {"max_pages": True}, {"max_request_bytes": -1}):

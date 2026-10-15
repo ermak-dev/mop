@@ -111,7 +111,7 @@ def _key(value):
 
 def _deadline(value):
     valid = False
-    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z", value):
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)", value):
         try:
             datetime.fromisoformat(value.replace("Z", "+00:00"))
             valid = True
