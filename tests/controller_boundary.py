@@ -80,6 +80,20 @@ class Materialization(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, 'materialized'):
             materialized(Snapshot())
 
+    def test_dataclass_primitive_and_container_subclasses_cannot_bypass_field_validation(self):
+        from dataclasses import dataclass, field
+        from mop.server.controller.runtime import materialized
+        @dataclass(frozen=True)
+        class Text(str):
+            hidden: object = field(init=False, default_factory=lambda: iter([1]))
+        @dataclass(frozen=True)
+        class Sequence(list):
+            hidden: object = field(init=False, default_factory=lambda: iter([1]))
+        for value in (Text(), Sequence()):
+            with self.subTest(type=type(value).__name__):
+                with self.assertRaisesRegex(TypeError, 'materialized'):
+                    materialized(value)
+
     def test_cycles_are_refused_but_shared_values_are_snapshotted(self):
         from dataclasses import dataclass
         from mop.server.controller.runtime import materialized
