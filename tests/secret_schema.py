@@ -16,6 +16,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Schema(unittest.TestCase):
+    # HYPOTHESIS: in_atomic_block не видит ручной set_autocommit(False).
+    # Проверяем все aliases без настройки Django/подключения к реальной установке.
+    def test_provider_guard_rejects_manual_transaction_on_any_connection(self):
+        from types import SimpleNamespace
+        tree = ast.parse((ROOT / 'mop/server/secrets/services.py').read_bytes())
+        guard = next(node for node in tree.body
+                     if isinstance(node, ast.FunctionDef) and node.name == 'outside_transaction')
+        boundary = type('TransactionBoundary', (ValueError,), {})
+        def connection(atomic=False, autocommit=True):
+            return SimpleNamespace(in_atomic_block=atomic, get_autocommit=lambda: autocommit)
+        namespace = {'TransactionBoundary': boundary}
+        exec(compile(ast.Module(body=[guard], type_ignores=[]), '<provider-guard>', 'exec'), namespace)
+        for blocked in (connection(autocommit=False), connection(atomic=True)):
+            for alias in ('default', 'secondary'):
+                with self.subTest(alias=alias, atomic=blocked.in_atomic_block):
+                    namespace['connections'] = {'default': connection(), 'secondary': connection()}
+                    namespace['connections'][alias] = blocked
+                    with self.assertRaises(boundary):
+                        namespace['outside_transaction']()
+        namespace['connections'] = {'default': connection(), 'secondary': connection()}
+        namespace['outside_transaction']()
+
     def test_controller_secret_cases_are_valid_python(self):
         ast.parse((ROOT / 'tests/_secret_cases.py').read_bytes())
 

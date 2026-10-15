@@ -4,7 +4,7 @@ from dataclasses import replace
 import importlib
 import threading
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.core import serializers
 from django.db import IntegrityError, connections, transaction
@@ -280,6 +280,115 @@ class SecretCases(TransactionTestCase):
         service = self.s.RotationService(authorizer=Allow(), delivery_gate=gate)
         r = service.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
         return service, a, new, b, r
+
+    # HYPOTHESIS: bind под parent lock не проверяет frozen recipient set.
+    # Новый binding после stage получает старый ключ без участия в ротации.
+    def test_unresolved_credential_rotation_refuses_late_binding_without_old_key_issuance(self):
+        a = self.secret('PROXY', project_id=None, purpose='proxy', kind='credential')
+        new = self.api.stage(self.actor, a.id, b'new-key', expected_revision=1)
+        current = self.api.metadata(self.actor, a.id)
+        b = self.binding(current)
+        svc = self.s.RotationService(authorizer=Allow())
+        r = svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=current.revision)
+        before = self.m.SecretAudit.objects.count()
+        with self.assertRaisesRegex(self.s.Conflict, 'unresolved credential rotation'):
+            self.binding(current)
+        self.assertEqual(self.m.SecretAudit.objects.count(), before)
+        self.assertEqual(set(self.m.SecretBinding.objects.filter(secret_id=a.id).values_list('id', flat=True)), {b.id})
+        self.assertEqual(set(self.m.RotationRecipient.objects.filter(rotation_id=r.id).values_list('binding_id', flat=True)), {b.id})
+        # Даже доверенный gate с несуществующим late binding не выдаёт старый ключ.
+        api, _ = self.delivery(replace(b, id=uuid.uuid4()))
+        api.provider = Mock(wraps=self.crypto)
+        with self.assertRaises(self.s.Refused):
+            api.issue_addressed('machine')
+        api.provider.decrypt.assert_not_called()
+        self.assertEqual(svc.metadata(self.actor, r.id).required, frozenset({str(b.id)}))
+
+    def test_concurrent_rotation_stage_and_bind_share_parent_lock_in_both_orders(self):
+        for first in ('stage', 'bind'):
+            with self.subTest(first=first):
+                a = self.secret('PROXY_' + first, project_id=None, purpose='proxy', kind='credential')
+                new = self.api.stage(self.actor, a.id, b'new-key', expected_revision=1)
+                current = self.api.metadata(self.actor, a.id)
+                b = self.binding(current)
+                svc = self.s.RotationService(authorizer=Allow())
+                locked, attempted = threading.Event(), threading.Event()
+                def command(kind):
+                    try:
+                        result = (svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
+                                  if kind == 'stage' else self.binding(current))
+                        return 'ok', result
+                    except (self.s.Conflict, self.s.Refused) as error:
+                        return 'refused', error
+                def compete(i):
+                    if i == 0:
+                        with transaction.atomic():
+                            self.m.Secret.objects.select_for_update().get(pk=a.id)
+                            locked.set()
+                            self.assertTrue(attempted.wait(10), 'competing command never requested parent lock')
+                            return command(first)
+                    self.assertTrue(locked.wait(10), 'first command never locked parent')
+                    def observe(execute, sql, params, many, context):
+                        if 'FOR UPDATE' in sql.upper():
+                            attempted.set()
+                        return execute(sql, params, many, context)
+                    with connections['default'].execute_wrapper(observe):
+                        return command('bind' if first == 'stage' else 'stage')
+                results = self.race(compete)
+                self.assertEqual([status for status, _ in results], ['ok', 'refused'])
+                bound = set(self.m.SecretBinding.objects.filter(secret_id=a.id).values_list('id', flat=True))
+                if first == 'stage':
+                    self.assertIsInstance(results[1][1], self.s.Conflict)
+                    self.assertEqual(bound, {b.id})
+                    r = results[0][1]
+                else:
+                    self.assertIsInstance(results[1][1], self.s.Refused)
+                    self.assertEqual(bound, {b.id, results[0][1].id})
+                    self.assertFalse(self.m.CredentialRotation.objects.filter(secret_id=a.id).exists())
+                    r = svc.stage(self.actor, a.id, new.id, tuple(bound), expected_revision=2)
+                self.assertEqual(set(self.m.RotationRecipient.objects.filter(rotation_id=r.id).values_list('binding_id', flat=True)), bound)
+                self.assertEqual(svc.metadata(self.actor, r.id).required, frozenset(map(str, bound)))
+
+    # HYPOTHESIS: ручной autocommit=False пропускает provider внутри caller SQL.
+    def test_all_provider_entries_refuse_manual_and_atomic_transactions_before_io(self):
+        a = self.secret('CONFIG')
+        b = self.binding(a)
+        api, _ = self.delivery(b)
+        svc, _, _, rb, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        rotation_api, _ = self.delivery(rb)
+        commands = {
+            'create': lambda: self.secret('MANUAL'),
+            'update': lambda: self.api.update(self.actor, a.id, b'changed', expected_revision=1),
+            'stage': lambda: self.api.stage(self.actor, a.id, b'staged', expected_revision=1),
+            'decrypt_addressed': lambda: api.issue_addressed('machine'),
+            'decrypt_rotation': lambda: rotation_api.issue_rotation('machine', r.id, claim_id=r.claim_id, generation=r.generation),
+        }
+        provider = Mock(wraps=self.crypto)
+        self.api.provider = api.provider = rotation_api.provider = provider
+        connection = connections['default']
+        for mode in ('manual', 'atomic'):
+            for name, command in commands.items():
+                with self.subTest(mode=mode, command=name):
+                    provider.reset_mock()
+                    if mode == 'manual':
+                        connection.set_autocommit(False)
+                        try:
+                            self.assertFalse(connection.in_atomic_block)
+                            with self.assertRaises(self.s.TransactionBoundary):
+                                command()
+                        finally:
+                            connection.rollback()
+                            connection.set_autocommit(True)
+                    else:
+                        with transaction.atomic(), self.assertRaises(self.s.TransactionBoundary):
+                            command()
+                    provider.encrypt.assert_not_called()
+                    provider.decrypt.assert_not_called()
+        self.assertEqual(self.api.metadata(self.actor, a.id).revision, 1)
+        self.assertEqual(self.m.SecretVersion.objects.filter(secret_id=a.id).count(), 1)
+        self.assertFalse(self.m.Secret.objects.filter(name='MANUAL').exists())
+        self.assertEqual(api.issue_addressed('machine')[0].value, b'private-value\x00\xff')
 
     def test_rotation_intent_restart_unknown_partial_and_failed_compensation(self):
         svc, a, new, b, r = self.rotation()
