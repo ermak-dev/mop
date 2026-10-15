@@ -213,6 +213,35 @@ class Materialization(unittest.TestCase):
                 await runtime.aclose()
         asyncio.run(run())
 
+    def test_failed_adapter_cleanup_does_not_become_a_successful_second_shutdown(self):
+        from mop.server.controller.runtime import Runtime
+        async def run():
+            class Resource:
+                calls = 0
+                closed = False
+                async def start(self):
+                    pass
+                async def aclose(self):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise ValueError('private adapter detail')
+                    self.closed = True
+            resource = Resource()
+            runtime = Runtime(adapters=(resource,))
+            await runtime.start()
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'adapter shutdown failed') as error:
+                    await runtime.aclose()
+                self.assertNotIn('private', str(error.exception))
+                self.assertFalse(runtime._closed)
+                self.assertFalse(resource.closed)
+                await runtime.aclose()
+                self.assertTrue(resource.closed)
+                self.assertEqual(resource.calls, 2)
+            finally:
+                await runtime.aclose()
+        asyncio.run(run())
+
     def test_cancelled_cpu_callback_keeps_capacity_and_shutdown_is_honest(self):
         import threading
         from mop.server.controller.runtime import Runtime, Backpressure
