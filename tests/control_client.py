@@ -6,7 +6,10 @@ HYPOTHESIS: явный HTTPS-контекст и неизменяемая ком
 SOLUTION: конечные маршруты, ограниченный транспорт и материализованные DTO.
 RESULT: red отсутствующего ядра; дополнительные red проверили утечку cleanup,
 surrogate-ввод, HTTP/1.0 body, framing, identity, debug и epoch/snapshot mix.
-Green: транспортный двойник и собственный socketpair; не PostgreSQL/живой TLS.
+Дополнительный red ревью: два IP дали 0.10 при бюджете 0.05, TCP+TLS —
+0.09 при 0.05, истечение wait внутри GET потеряло последний running.
+Green: общие absolute deadlines и WaitTimeout проверены управляемыми часами;
+транспортный двойник/socketpair — не PostgreSQL/живой TLS, DNS остаётся ОС.
 STATUS: FIXED — see #642 (только раннее клиентское ядро).
 """
 import dataclasses
@@ -69,6 +72,17 @@ class Socket:
         self.timeout = value
 
 
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 class Connection:
     def __init__(self, fixture, *args, **kwargs):
         self.fixture, self.args, self.kwargs = fixture, args, kwargs
@@ -109,7 +123,7 @@ class Fixture:
 class ControlClient(unittest.TestCase):
     def setUp(self):
         self.fixture = Fixture()
-        self.patcher = patch.object(api.http.client, "HTTPSConnection", self.fixture.factory)
+        self.patcher = patch.object(api, "_DeadlineHTTPSConnection", self.fixture.factory)
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
         self.context = api.ServerContext("https://controller.example:8443", TOKEN)
@@ -361,6 +375,117 @@ class ControlClient(unittest.TestCase):
         self.assertTrue(all(call[0] == "GET" for call in self.fixture.calls))
         with self.assertRaises(api.ClientError):
             self.client.wait_operation("o_789", timeout=99999)
+
+    def test_connection_attempts_share_the_absolute_request_budget(self):
+        # HYPOTHESIS: каждый IP получает исходный timeout и удваивает срок.
+        # SOLUTION: адреса TCP и TLS делят один абсолютный connect/request deadline.
+        import socket
+        self.patcher.stop()
+        clock, attempts, sockets = Clock(), [], []
+
+        class TimedSocket:
+            def __init__(self, *args):
+                self.closed = False
+                sockets.append(self)
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+            def connect(self, address):
+                attempts.append(self.timeout)
+                clock.advance(self.timeout)
+                raise TimeoutError(TOKEN)
+
+            def close(self):
+                self.closed = True
+
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (host, 443))
+                     for host in ("192.0.2.1", "192.0.2.2")]
+        client = api.Client(self.context, limits=api.Limits(request_timeout=0.05))
+        with patch.object(api.time, "monotonic", clock), \
+                patch.object(socket, "getaddrinfo", return_value=addresses), \
+                patch.object(socket, "socket", TimedSocket):
+            with self.assertRaises(api.TransportError):
+                client.operation("o_789")
+        self.assertLessEqual(clock.now - 100.0, 0.05 + 1e-8)
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(all(sock.closed for sock in sockets))
+
+    def test_tls_handshake_uses_only_the_remaining_connect_budget(self):
+        import socket
+        self.patcher.stop()
+        clock, handshake_budgets, sockets = Clock(), [], []
+
+        class TimedSocket:
+            def __init__(self, *args):
+                self.closed = False
+                sockets.append(self)
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+            def setsockopt(self, *args):
+                pass
+
+            def connect(self, address):
+                clock.advance(0.04)
+
+            def do_handshake(self):
+                handshake_budgets.append(self.timeout)
+                clock.advance(self.timeout)
+                raise TimeoutError(TOKEN)
+
+            def close(self):
+                self.closed = True
+
+        class TLSContext:
+            def wrap_socket(self, sock, *, server_hostname, do_handshake_on_connect=True):
+                if do_handshake_on_connect:
+                    sock.do_handshake()
+                return sock
+
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("192.0.2.1", 443))]
+        with patch.object(api.ssl, "create_default_context", return_value=TLSContext()):
+            client = api.Client(self.context, limits=api.Limits(connect_timeout=0.05, request_timeout=1))
+        with patch.object(api.time, "monotonic", clock), \
+                patch.object(socket, "getaddrinfo", return_value=addresses), \
+                patch.object(socket, "socket", TimedSocket):
+            with self.assertRaises(api.TransportError):
+                client.operation("o_789")
+        self.assertLessEqual(clock.now - 100.0, 0.05 + 1e-8)
+        self.assertLessEqual(handshake_budgets[0], 0.01 + 1e-8)
+        self.assertTrue(all(sock.closed for sock in sockets))
+
+    def test_wait_expiring_inside_a_poll_retains_the_last_operation(self):
+        # HYPOTHESIS: timeout GET на границе wait теряет последний running
+        # и выходит TransportError вместо осмысленного WaitTimeout.
+        clock = Clock()
+        self.queue(operation=operation("running"))
+        self.fixture.responses.append(TimeoutError(TOKEN))
+        original = Connection.getresponse
+
+        def timed_response(connection):
+            if isinstance(connection.fixture.responses[0], TimeoutError):
+                clock.advance(connection.kwargs["timeout"])
+            return original(connection)
+
+        with patch.object(api.time, "monotonic", clock), \
+                patch.object(api.time, "sleep", clock.advance), \
+                patch.object(Connection, "getresponse", timed_response):
+            with self.assertRaises(api.WaitTimeout) as caught:
+                self.client.wait_operation("o_789", timeout=0.05, poll_interval=0.01)
+        self.assertEqual(caught.exception.operation.state, "running")
+        self.assertIsNone(caught.exception.__context__)
+        self.assertTrue(all(call[0] == "GET" for call in self.fixture.calls))
+
+    def test_transport_failure_before_wait_deadline_stays_a_transport_failure(self):
+        clock = Clock()
+        self.queue(operation=operation("running"))
+        self.fixture.responses.append(TimeoutError(TOKEN))
+        with patch.object(api.time, "monotonic", clock), \
+                patch.object(api.time, "sleep", clock.advance):
+            with self.assertRaises(api.TransportError):
+                self.client.wait_operation("o_789", timeout=0.05, poll_interval=0.01)
 
     def test_transport_close_delimited_body_and_deadline_reader(self):
         import socket

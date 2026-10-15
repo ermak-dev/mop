@@ -14,6 +14,7 @@ import io
 import json
 import math
 import re
+import socket
 import ssl
 import time
 from types import MappingProxyType
@@ -437,6 +438,51 @@ class _DeadlineSocket:
             self._socket.close()
 
 
+class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
+    """TCP-адреса и TLS handshake делят один абсолютный срок подключения."""
+
+    def __init__(self, host, port, *, context, timeout, deadline):
+        super().__init__(host, port, context=context, timeout=timeout)
+        self._connect_deadline = min(deadline, time.monotonic() + timeout)
+        self._create_connection = self._connect_tcp
+
+    def _remaining(self):
+        left = self._connect_deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("control connection deadline exceeded")
+        return left
+
+    def _connect_tcp(self, address, timeout, source_address=None):
+        host, port = address
+        last_error = None
+        for family, kind, protocol, _, sockaddr in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            remaining = self._remaining()
+            sock = None
+            try:
+                sock = socket.socket(family, kind, protocol)
+                sock.settimeout(remaining)
+                if source_address is not None:
+                    sock.bind(source_address)
+                sock.connect(sockaddr)
+                return sock
+            except OSError as error:
+                if sock is not None:
+                    sock.close()
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        raise OSError("control host has no usable addresses")
+
+    def connect(self):
+        http.client.HTTPConnection.connect(self)
+        self.sock.settimeout(self._remaining())
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=self._tunnel_host or self.host,
+            do_handshake_on_connect=False)
+        self.sock.settimeout(self._remaining())
+        self.sock.do_handshake()
+
+
 class Client:
     """Синхронный token-клиент без ambient proxy/netrc/cookie и авто-retry.
 
@@ -481,8 +527,12 @@ class Client:
         if body is not None:
             headers["Content-Type"] = "application/json"
         try:
-            connection = http.client.HTTPSConnection(url.hostname, url.port or 443, context=self._tls,
-                                                     timeout=min(limits.connect_timeout, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("control request deadline exceeded")
+            connection = _DeadlineHTTPSConnection(
+                url.hostname, url.port or 443, context=self._tls,
+                timeout=min(limits.connect_timeout, remaining), deadline=deadline)
             connection.debuglevel = 0
             connection.connect()
             connection.sock = _DeadlineSocket(connection.sock, deadline, limits.read_timeout)
@@ -673,7 +723,16 @@ class Client:
             left = deadline - time.monotonic()
             if left <= 0:
                 raise WaitTimeout(last)
-            current = self._read_operation(self._get("/api/v1/operations/" + operation_id, budget=left))
+            wait_expired = False
+            try:
+                data = self._get("/api/v1/operations/" + operation_id, budget=left)
+            except TransportError:
+                if time.monotonic() < deadline:
+                    raise
+                wait_expired = True
+            if wait_expired:
+                raise WaitTimeout(last)
+            current = self._read_operation(data)
             if current.id != operation_id:
                 raise ProtocolError("operation resource identity mismatch")
             if last is not None and current.epoch != last.epoch:
