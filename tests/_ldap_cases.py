@@ -214,7 +214,7 @@ class DirectoryIdentityContracts(TransactionTestCase):
 
     def test_source_revision_and_deactivation_during_blocked_bind_reject_acceptance(self):
         from mop.server.access.directory import DirectoryAccount
-        for change in ('revision', 'inactive'):
+        for change in ('revision', 'configuration', 'inactive'):
             with self.subTest(change=change):
                 user = self.login()
                 pending, release = Event(), Event()
@@ -237,9 +237,12 @@ class DirectoryIdentityContracts(TransactionTestCase):
                     self.assertTrue(pending.wait(10))
                     if change == 'revision':
                         self.m.IdentitySource.objects.filter(pk=self.source.pk).update(revision=2)
+                    elif change == 'configuration':
+                        self.m.DirectoryConfiguration.objects.filter(source=self.source).update(login_attribute='cn')
                     else:
                         get_user_model().objects.filter(pk=user.pk).update(is_active=False)
                     release.set()
                     with self.assertRaises(PermissionDenied):
                         future.result(15)
                 self.m.IdentitySource.objects.filter(pk=self.source.pk).update(revision=1)
+                self.m.DirectoryConfiguration.objects.filter(source=self.source).update(login_attribute='uid')
