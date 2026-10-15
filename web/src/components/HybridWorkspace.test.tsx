@@ -2,7 +2,7 @@
 // SOLUTION: открытие диалога подключает writer; метаданные включаются отдельно.
 // RESULT: проверки сначала упали на старом интерфейсе, затем прошли.
 // STATUS: FIXED — see #661
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, createEvent, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 const { readFileSync } = await vi.importActual<{ readFileSync: (path: string, encoding: string) => string }>('node:fs');
 import { renderUi } from '../test-utils';
@@ -174,6 +174,105 @@ test('#661 history authorization loss clears private output and revokes control'
   fireEvent.change(input(), { target: { value: 'draft' } });
   expect(send()).toBeDisabled();
   expect(terminals[0].reset.mock.calls.length).toBeGreaterThan(resets);
+});
+
+// HYPOTHESIS: Escape в composer не попадает в writer и закрывает внешний диалог.
+// SOLUTION: поглощать Escape, отправлять STOP через очередь текущего writer без изменения черновика.
+// RESULT: восемь новых проверок упали до реализации; после неё весь файл проходит.
+// STATUS: FIXED — see #663
+const escape = (options: KeyboardEventInit = {}) => {
+  const event = createEvent.keyDown(input(), { key: 'Escape', bubbles: true, cancelable: true, ...options });
+  fireEvent(input(), event);
+  return event;
+};
+
+test('#663 Escape sends only ESC through the current writer, preserves draft and cannot close the parent', async () => {
+  const api = wire(); const parentKeyDown = vi.fn();
+  renderUi(<div onKeyDown={parentKeyDown}><HybridWorkspace session={admin} target="p" /></div>);
+  await ready();
+  const event = escape();
+  expect(event.defaultPrevented).toBe(true);
+  expect(parentKeyDown).not.toHaveBeenCalled();
+  await waitFor(() => expect(api.posts.filter(([url]) => url.endsWith('/input'))).toEqual([
+    ['/api/puppet/p/term/writer/input', { seq: 1, data: 'Gw==' }],
+  ]));
+  expect(input()).toHaveValue('draft');
+  expect(api.posts.some(([url]) => url.includes('/admin/ops') || url.includes('/send'))).toBe(false);
+  expect(api.posts.filter(([url]) => url.endsWith('/term'))).toHaveLength(1);
+  fireEvent.change(input(), { target: { value: '' } });
+  escape();
+  await waitFor(() => expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(2));
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))[1][1]).toEqual({ seq: 2, data: 'Gw==' });
+  expect(input()).toHaveValue('');
+});
+
+test('#663 Escape without a confirmed writer consumes the key but sends nothing', async () => {
+  vi.useFakeTimers(); const api = wire(); api.setSource('initialization'); open();
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  fireEvent.change(input(), { target: { value: 'keep draft' } });
+  expect(escape().defaultPrevented).toBe(true);
+  await act(async () => {});
+  expect(api.posts).toHaveLength(0);
+  expect(input()).toHaveValue('keep draft');
+});
+
+test.each([
+  { repeat: true }, { isComposing: true }, { keyCode: 229 },
+])('#663 Escape ignores repeat and unconfirmed IME input: %j', async options => {
+  const api = wire(); open(); await ready();
+  expect(escape(options).defaultPrevented).toBe(true);
+  await act(async () => {});
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(0);
+  expect(input()).toHaveValue('draft');
+});
+
+test.each(['written', 'unknown'])('#663 queued Escape never interleaves paste chunks or replays an uncertain send: %s', async outcome => {
+  const api = wire(); open(); await ready();
+  const original = api.mock.getMockImplementation()!;
+  let release!: (response: Response) => void;
+  let firstBody!: Record<string, unknown>;
+  api.mock.mockImplementation((url: string, init?: RequestInit) => {
+    if (url.endsWith('/input') && !firstBody) {
+      firstBody = JSON.parse(String(init?.body));
+      api.posts.push([url, firstBody]);
+      return new Promise<Response>(resolve => { release = resolve; });
+    }
+    return original(url, init);
+  });
+  fireEvent.change(input(), { target: { value: 'x'.repeat(5000) } });
+  fireEvent.keyDown(input(), { key: 'Enter' });
+  await waitFor(() => expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1));
+  fireEvent.change(input(), { target: { value: 'next draft' } });
+  expect(escape().defaultPrevented).toBe(true);
+  await act(async () => {});
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);
+  await act(async () => { release(ok({ seq: firstBody.seq, written: atob(String(firstBody.data)).length, outcome, error: outcome === 'unknown' ? 'uncertain' : undefined })); });
+  const writes = api.posts.filter(([url]) => url.endsWith('/input')).map(([, body]) => body);
+  if (outcome === 'written') {
+    expect(writes.map(body => body.seq)).toEqual([1, 2, 3]);
+    expect(writes.slice(0, 2).map(body => atob(String(body.data))).join('')).toBe(`\x1b[200~${'x'.repeat(5000)}\x1b[201~\r`);
+    expect(writes[2].data).toBe('Gw==');
+  } else {
+    expect(writes).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent('uncertain');
+    escape();
+    await act(async () => {});
+    expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);
+    expect(api.posts.filter(([url]) => url.endsWith('/term'))).toHaveLength(1);
+  }
+  expect(input()).toHaveValue('next draft');
+});
+
+test('#663 uncertain Escape keeps draft and error visible without retrying', async () => {
+  const api = wire(); open(); await ready(); api.setOutcome('unknown');
+  escape();
+  expect(await screen.findByRole('alert')).toHaveTextContent('uncertain');
+  expect(input()).toHaveValue('draft');
+  expect(send()).toBeDisabled();
+  escape();
+  await act(async () => {});
+  expect(api.posts.filter(([url]) => url.endsWith('/input'))).toHaveLength(1);
+  expect(api.posts.filter(([url]) => url.endsWith('/term'))).toHaveLength(1);
 });
 
 test('#661 transcript and dialog use the available width without a reading-column cap', () => {
