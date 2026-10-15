@@ -16,4 +16,4 @@ PROJECT="$( cd -P "$( dirname "$SOURCE" )/.." && pwd )"
 export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
 # Процессом, а не source: `mop mcp` говорит по stdio, и ему нужен чистый
 # обмен, без наследования чужого шелла.
-exec python3 -m mop.cli "$@"
+exec python3 -P -m mop.cli "$@"
