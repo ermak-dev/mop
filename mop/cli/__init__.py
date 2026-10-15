@@ -453,6 +453,10 @@ def main(argv):
         server, argv = context.strip_server(argv)
     except ValueError as e:
         sys.exit(f"mop: {e}")
+    if argv[:2] == ["server", "controller"]:
+        # Старый глобальный selector не должен включать profile/.env пути.
+        print("controller uses its protected bootstrap; --server is not supported", file=sys.stderr)
+        return 1
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())
         return 0

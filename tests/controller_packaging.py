@@ -39,6 +39,15 @@ class Packaging(unittest.TestCase):
         self.assertEqual(env.get('MOP_TEST_POSTGRES_HOST'), 'isolated-db')
         self.assertNotIn('MOP_SERVER_LAN', env)
 
+    def test_global_server_selector_is_refused_without_old_context(self):
+        from mop import cli
+        from unittest.mock import patch
+        with patch('mop.common.context.here', side_effect=AssertionError('old context read')), \
+                patch.object(cli, 'environment', side_effect=AssertionError('old environment read')), \
+                patch.object(cli, 'command') as command:
+            self.assertEqual(cli.main(['--server', 'old.invalid', 'server', 'controller', 'check']), 1)
+            command.assert_not_called()
+
     def test_controller_dispatch_does_not_initialize_old_environment(self):
         from mop import cli
         from unittest.mock import patch
