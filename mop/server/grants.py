@@ -332,13 +332,15 @@ def by_job(project, job, soul_inc=None, root=None):
         return _select_job(_read(_root_dir(root)), project, job, soul_inc)
 
 
-def binding_named(project, job, root=None):
-    """Есть ли у имени ХОТЬ какая-то привязка (#590): pending, активная,
-    отозванная -- без различения. Ветвление bootstrap'а: ролевое имя
-    не должно молча уйти на легаси-путь с проектным кредом, даже когда
-    привязка ещё не активна или уже отозвана -- отказ, не подмена."""
+def binding_named(project, job, root=None, include_revoked=True):
+    """Есть ли у имени привязка (#590), включая pending и архив по умолчанию.
+
+    Без отозванных записей спрашивает только bootstrap подтверждённого
+    нового legacy-джоба: архив старой инкарнации не назначает ему роль.
+    Пустая или ролевая Meta по-прежнему смотрит весь архив."""
     reg = _read(_root_dir(root))
     return any(rec.get("project") == project and rec.get("job") == job
+               and (include_revoked or not rec.get("revoked_at"))
                for rec in reg.values())
 
 
