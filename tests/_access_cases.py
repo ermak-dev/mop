@@ -339,6 +339,17 @@ class AccessContracts(TransactionTestCase):
             catalog.bind_workspace(self.actor, foreign_client.pk, 'work', self.project.pk,
                 integration_branch='main', expected_revision=0)
 
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_json_cannot_choose_source_actor_owner_node_or_grant(self):
+        for name in ('source', 'actor', 'owner', 'node', 'grant', 'kind'):
+            response = Client().post('/api/v1/auth/token', {
+                'username': 'human', 'password': 'test-password-only', name: 'forged'},
+                content_type='application/json', secure=True)
+            self.assertEqual(response.status_code, 400, name)
+            self.assertNotIn(self.token, response.content.decode())
+        from django.contrib.admin.models import LogEntry
+        self.assertFalse(LogEntry.objects.filter(change_message__contains=self.token).exists())
+
     def test_two_concurrent_rotations_accept_only_one_old_credential(self):
         barrier = Barrier(2)
         def rotate(_):
