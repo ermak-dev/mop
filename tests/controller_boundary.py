@@ -69,6 +69,15 @@ class Materialization(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, 'materialized'):
             materialized(value)
 
+    def test_init_false_factory_cannot_smuggle_a_lazy_value(self):
+        from dataclasses import dataclass, field
+        from mop.server.controller.runtime import materialized
+        @dataclass(frozen=True)
+        class Snapshot:
+            hidden: object = field(init=False, default_factory=lambda: iter([1]))
+        with self.assertRaisesRegex(TypeError, 'materialized'):
+            materialized(Snapshot())
+
     def test_cycles_are_refused_but_shared_values_are_snapshotted(self):
         from dataclasses import dataclass
         from mop.server.controller.runtime import materialized
