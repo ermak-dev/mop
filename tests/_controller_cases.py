@@ -19,6 +19,8 @@ from mop.server.controller.runtime import database_call
 # RESULT: constraints/CAS/locks и отказ записи не подменяются fake I/O.
 # STATUS: FIXED — see #632
 class Foundation(TransactionTestCase):
+    serialized_rollback = True
+
     def test_empty_schema_repeatable_and_no_missing_migrations(self):
         call_command('migrate', verbosity=0, interactive=False)
         call_command('migrate', verbosity=0, interactive=False)
