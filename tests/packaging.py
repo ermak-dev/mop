@@ -98,7 +98,7 @@ def check_master_mcp_351(c):
                  fn(clone, "/venv/bin/python"), (launcher, ["mcp"]))
         c.expect("#351 a package: the interpreter that runs mop",
                  fn(os.path.join(d, "nowhere"), "/venv/bin/python"),
-                 ("/venv/bin/python", ["-m", "mop.cli", "mcp"]))
+                 ("/venv/bin/python", ["-P", "-m", "mop.cli", "mcp"]))
     got = master.mcp_config()
     c.check("#351 mcp_config carries mcp_command", '"mcp"' in got)
 
@@ -158,14 +158,14 @@ def check_self_argv_368(c):
         nowhere = os.path.join(d, "nowhere")
         c.expect("#368 a clone: its own bin/mop", fn(clone, py), [launcher])
         c.expect("#368 a package: the interpreter that runs mop",
-                 fn(nowhere, py), [py, "-m", "mop.cli"])
+                 fn(nowhere, py), [py, "-P", "-m", "mop.cli"])
         with patched(sys, executable=py):
             with patched(lib, BIN=nowhere):
                 c.expect("#368 package: the adapter runs mop via -m mop.cli",
-                         adapter_argv(), [py, "-m", "mop.cli", "list", "--all"])
+                         adapter_argv(), [py, "-P", "-m", "mop.cli", "list", "--all"])
                 c.expect("#368 package: ci_pull restarts via -m mop.cli, canonical name",
                          restart_argv(),
-                         (py, [py, "-m", "mop.cli", "server", "deploy", "--from-ci"]))
+                         (py, [py, "-P", "-m", "mop.cli", "server", "deploy", "--from-ci"]))
             with patched(lib, BIN=clone):
                 c.expect("#368 clone: the adapter runs its bin/mop",
                          adapter_argv(), [launcher, "list", "--all"])
