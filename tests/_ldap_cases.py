@@ -210,7 +210,14 @@ class DirectoryIdentityContracts(TransactionTestCase):
                 with self.subTest(code=code), self.assertRaises(AuthenticationUnavailable) as raised:
                     authenticate(username='person', password='test-password')
                 self.assertNotIn('private-context', str(raised.exception))
-        self.assertEqual(sum(dn == 'cn=reader' for dn in self.wire.binds), 3)
+            self.wire.failure = TimeoutError('private-context test-password')
+            with self.assertRaises(AuthenticationUnavailable) as raised:
+                authenticate(username='person', password='test-password')
+            self.assertNotIn('test-password', str(raised.exception))
+            self.wire.failure = None
+            self.wire.code = 49
+            self.assertIsNone(authenticate(username='person', password='test-password'))
+        self.assertEqual(sum(dn == 'cn=reader' for dn in self.wire.binds), 5)
 
     def test_source_revision_and_deactivation_during_blocked_bind_reject_acceptance(self):
         from mop.server.access.directory import DirectoryAccount
