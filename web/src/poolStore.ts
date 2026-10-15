@@ -176,7 +176,6 @@ function reconcile(state: PoolState, identity: Identity, row?: Entity, issuedAt 
     if (order === 0 && head.incarnation !== previous.head.incarnation) return reset(state, 'version_conflict');
     // ID удалённого ресурса нельзя выдать снова. Отсутствие в странице — не tombstone.
     if (previous.head.deleted && !head.deleted) return state;
-    if (order === 0 && !head.deleted && !row) return state;
     if (order === 0 && head.deleted && previous.head.deleted) return state;
   }
   const replaced = previous && previous.head.incarnation !== head.incarnation;

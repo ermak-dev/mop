@@ -672,8 +672,9 @@ push, so a dist that drifted from its sources is red, not silent.
 ```text
 mop dev web build [--check]: build the dashboard into web/dist
 
-Runs `npm ci` and `npm run build:dist` in web/. The build lifecycle checks
-and typechecks the versioned store core before Vite. Silent when it lands.
+Runs `npm ci`, the versioned store tests/typecheck and `npm run build:dist`
+in web/. Store checks are explicit even when npm lifecycle hooks are disabled.
+Silent when it lands.
 
   --check   build into a temporary directory instead and compare it with
             web/dist byte for byte; the differing files are listed and the

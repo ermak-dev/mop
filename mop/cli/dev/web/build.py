@@ -1,7 +1,8 @@
 """mop dev web build [--check]: build the dashboard into web/dist
 
-Runs `npm ci` and `npm run build:dist` in web/. The build lifecycle checks
-and typechecks the versioned store core before Vite. Silent when it lands.
+Runs `npm ci`, the versioned store tests/typecheck and `npm run build:dist`
+in web/. Store checks are explicit even when npm lifecycle hooks are disabled.
+Silent when it lands.
 
   --check   build into a temporary directory instead and compare it with
             web/dist byte for byte; the differing files are listed and the
@@ -66,6 +67,7 @@ def run(argv, cwd):
 def build(out_dir):
     npm = tool("npm")
     run([npm, "ci", "--no-audit", "--no-fund", "--loglevel=error"], WEB)
+    run([npm, "run", "test:store"], WEB)
     run([npm, "run", "build:dist", "--", "--outDir", out_dir, "--emptyOutDir"], WEB)
 
 

@@ -6,7 +6,6 @@
   "type": "module",
   "scripts": {
     "test:store": "vitest run poolStore.test.ts && tsc --noEmit -p tsconfig.store.json",
-    "prebuild:dist": "npm run test:store",
     "build:dist": "vite build",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "dev": "vite",

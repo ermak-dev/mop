@@ -19,7 +19,7 @@ import tempfile
 from unittest.mock import patch
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.cli.dev.web import build  # noqa: E402
@@ -72,17 +72,40 @@ def main():
                  ["assets/x.js", "assets/y.css", "assets/z.svg", "index.html"])
     check_no_bus_302(c)
     # HYPOTHESIS: прямой вызов vite обходит prebuild и проверки store (#627).
-    # SOLUTION: npm lifecycle проверяет чистое ядро перед сборкой; старый
-    # общий typecheck не включаем в dist-gate побочным эффектом этой задачи.
-    # RESULT: поведенческий red подтверждён, gate идёт через build:dist.
+    # SOLUTION: явный npm run test:store перед сборкой, без зависимости
+    # от prebuild hooks; старый общий typecheck остаётся отдельным gate.
+    # RESULT: red 3/9 подтвердил bypass, отказ store останавливает build.
     # STATUS: FIXED — see #627
     calls = []
-    with patch.object(build, "tool", side_effect=lambda name: name), \
+    # HYPOTHESIS: npm ignore-scripts пропускает prebuild, оставляя Vite
+    # зелёным без behavioral/typecheck store. Gate должен быть явным шагом.
+    with patched_env(npm_config_ignore_scripts="true"), \
+            patch.object(build, "tool", side_effect=lambda name: name), \
             patch.object(build, "run", side_effect=lambda argv, cwd: calls.append((argv, cwd))):
         build.build("/tmp/store-gate-output")
-    c.expect("#627 build enters npm lifecycle after declared dependency install", calls, [
+    c.expect("#627 store checks are explicit even with ignored lifecycle hooks", calls, [
         (["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"], build.WEB),
+        (["npm", "run", "test:store"], build.WEB),
         (["npm", "run", "build:dist", "--", "--outDir", "/tmp/store-gate-output", "--emptyOutDir"], build.WEB),
+    ])
+    calls = []
+
+    def failed_store(argv, cwd):
+        calls.append(argv)
+        if argv == ["npm", "run", "test:store"]:
+            raise SystemExit(1)
+
+    with patch.object(build, "tool", side_effect=lambda name: name), \
+            patch.object(build, "run", side_effect=failed_store):
+        try:
+            build.build("/tmp/store-gate-output")
+        except SystemExit as error:
+            c.expect("#627 failed store gate fails the build", error.code, 1)
+        else:
+            c.fail("#627 failed store gate fails the build", "store gate was bypassed")
+    c.expect("#627 Vite cannot run after a failed store gate", calls, [
+        ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"],
+        ["npm", "run", "test:store"],
     ])
     return c.report("webbuild")
 

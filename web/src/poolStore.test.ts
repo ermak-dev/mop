@@ -293,6 +293,20 @@ describe('versioned pool core #627', () => {
     expect(state.entities[key].value?.revision).toBe('4');
   });
 
+  it('protects presence confirmed by equal-version WS after an older detail completes', () => {
+    // HYPOTHESIS: equal-revision early return теряет новое подтверждение
+    // присутствия и позволяет старому пустому snapshot скрыть созданную сущность.
+    const detail = beginRead(initial(), { type: 'detail' });
+    const req = snapshot(detail.state);
+    let state = reducePool(req.state, { type: 'rest', token: detail.token, epoch: 'e1', rows: [puppet()] });
+    state = event(state, '1', {}, 'creation-after-snapshot');
+    state = reducePool(state, { type: 'rest', token: req.token, epoch: 'e1', rows: [],
+      page: { snapshotId: 's', cursor: 'c', next: null } });
+    expect(state.collections.puppet.ids).toContain(key);
+    expect(state.entities[key].value?.revision).toBe('1');
+    expect(state.entities[key].invalidated).toBe(false);
+  });
+
   it('protects an equal-version detail read issued after the snapshot started', () => {
     const req = snapshot(read(initial(), [puppet()]));
     let state = read(req.state, [puppet()]);
