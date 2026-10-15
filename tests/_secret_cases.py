@@ -93,6 +93,18 @@ class SecretCases(TransactionTestCase):
             self.assertFalse(hasattr(public, 'envelope'))
         dump = serializers.serialize('json', self.m.SecretVersion.objects.all())
         self.assertNotIn('private-value', dump)
+        import base64
+        import tempfile
+        from mop.server.controller.backup import _tool
+        self.assertNotIn(base64.b64encode(b'private-value\x00\xff').decode(), dump)
+        with tempfile.TemporaryFile() as raw:
+            db = connections['default']
+            _tool('pg_dump', db.settings_dict, major=db.pg_version // 10000,
+                  output=raw, extra=('--data-only', '--table=secrets_*'))
+            raw.seek(0)
+            data = raw.read()
+        self.assertNotIn(b'private-value', data)
+        self.assertNotIn(b'private-value\x00\xff'.hex().encode(), data)
         self.assertNotIn('private-value', repr(row))
         self.assertNotIn('private-value', repr(issued))
         with self.assertRaises(PermissionError):
@@ -112,8 +124,14 @@ class SecretCases(TransactionTestCase):
         # Намеренная порча БД обходит immutable manager только через base manager.
         row = self.m.SecretVersion.objects.get(secret_id=a.id)
         other = self.m.SecretVersion.objects.get(secret_id=b.id)
+        foreign = self.crypto.encrypt(b'foreign-value', self.s.context(other.secret, other))
         self.m.SecretVersion._base_manager.filter(pk=row.pk).update(
-            envelope=other.envelope, key_id=other.key_id, nonce=other.nonce)
+            envelope=foreign.to_bytes(), key_id=foreign.key_id, nonce=foreign.nonce)
+        with self.assertRaises(SecretCryptoError):
+            api.issue_addressed('machine')
+        self.m.SecretVersion._base_manager.filter(pk=row.pk).update(
+            envelope=row.envelope, key_id=row.key_id, nonce=row.nonce)
+        self.m.Secret._base_manager.filter(pk=a.id).update(project_id=self.q.pk)
         with self.assertRaises(SecretCryptoError):
             api.issue_addressed('machine')
 
@@ -311,6 +329,43 @@ class SecretCases(TransactionTestCase):
         self.assertEqual(self.m.CredentialRotation.objects.count(), 1)
         with self.assertRaises(self.s.Conflict):
             self.api.update(self.actor, a.id, b'newer', expected_revision=2)
+
+    def test_rotation_recovery_cannot_overwrite_newer_secret_decision(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        r = svc.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        r = svc.reconcile(self.actor, r.id, Observation.PARTIAL, claim_id=r.claim_id,
+                          quiescent=True, expected_revision=r.revision)
+        self.api.revoke(self.actor, a.id, expected_revision=2)
+        with self.assertRaises(self.s.Conflict):
+            svc.begin(self.actor, r.id, Effect.RESTORE_OLD, expected_revision=r.revision)
+
+    def test_rotation_cross_secret_recipient_and_unknown_receipt_refused(self):
+        svc, a, new, b, r = self.rotation()
+        other = self.binding(self.secret('OTHER'))
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        for binding_id, version_id in ((other.id, new.id), (b.id, a.active_version_id)):
+            with self.assertRaises(self.s.Refused):
+                svc.receipt(self.actor, r.id, binding_id, version_id=version_id,
+                    claim_id=r.claim_id, generation=r.generation, outcome=Outcome.APPLIED)
+        with self.assertRaises(ValueError):
+            self.m.RotationRecipient.objects.create(rotation_id=r.id, binding_id=other.id)
+        with self.assertRaises(ProtectedError):
+            self.m.SecretBinding.objects.get(pk=b.id).delete()
+
+    def test_rotation_timeout_preserves_intent_until_explicit_quiescent_readback(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        claim = r.claim_id
+        r = svc.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=claim, expected_revision=r.revision)
+        self.assertEqual(r.pending, Effect.DELIVER)
+        with self.assertRaises(ValueError):
+            svc.reconcile(self.actor, r.id, Observation.ABSENT, claim_id=claim, expected_revision=r.revision)
+        r = svc.reconcile(self.actor, r.id, Observation.ABSENT, claim_id=claim,
+                          quiescent=True, expected_revision=r.revision)
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        self.assertNotEqual(r.claim_id, claim)
+        self.assertEqual(r.generation, 2)
 
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission
