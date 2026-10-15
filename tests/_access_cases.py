@@ -134,9 +134,9 @@ class AccessContracts(TransactionTestCase):
         self.user.is_staff = self.user.is_superuser = True
         self.user.save()
         self.m.Principal.objects.filter(user=self.user).update(kind='service')
-        actor = self.s.token_context(self.token)
         with self.assertRaises(self.s.Denied):
-            self.s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
+            self.s.Access().authorize(self.s.token_context(self.token), 'catalog.view_project',
+                project_ids=(self.project.pk,))
         with self.assertRaises(self.s.Denied):
             self.s.issue_token(self.user.pk)
 
@@ -197,10 +197,20 @@ class AccessContracts(TransactionTestCase):
         self.assertFalse(identity.authorized)
 
     def test_ldap_freshness_and_revision_fail_closed(self):
+        from mop.server.access.directory import DirectoryResult, apply_directory
         self.source.kind = 'ldap'
         self.source.save()
-        self.m.LoginIdentity.objects.filter(user=self.user).update(
-            validated_revision=self.source.revision, validated_at=timezone.now() - timedelta(days=1))
+        result = DirectoryResult(subject='human', username='human', groups=('direct',),
+            project_ids=(self.project.pk,), all_projects=False, permissions=('catalog.view_project',))
+        apply_directory(self.source.pk, self.source.revision, result)
+        self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        self.m.LoginIdentity.objects.filter(user=self.user).update(validated_at=timezone.now() - timedelta(days=1))
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(self.actor, 'catalog.view_project')
+        apply_directory(self.source.pk, self.source.revision, result)
+        self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        self.source.revision += 1
+        self.source.save()
         with self.assertRaises(self.s.Denied):
             self.s.Access().authorize(self.actor, 'catalog.view_project')
 
@@ -265,7 +275,7 @@ class AccessContracts(TransactionTestCase):
 
     @override_settings(ALLOWED_HOSTS=['testserver'])
     def test_browser_flow_csrf_and_password_token_rate_limit(self):
-        client = Client(enforce_csrf_checks=True)
+        client = Client(enforce_csrf_checks=True, HTTP_ORIGIN='https://testserver')
         response = client.get('/api/v1/auth/csrf', secure=True)
         self.assertEqual(response.status_code, 200)
         csrf = client.cookies['csrftoken'].value
@@ -365,6 +375,56 @@ class AccessContracts(TransactionTestCase):
                 close_old_connections()
         with ThreadPoolExecutor(max_workers=2) as pool:
             self.assertCountEqual(tuple(pool.map(rotate, range(2))), ('rotated', 'denied'))
+
+    def test_enrolled_service_is_node_bound_and_never_a_human_owner(self):
+        from mop.server.catalog.models import Node, NodeProject
+        def node(name):
+            return Node.objects.create(name=name, driver='host', ssh_host='node.invalid', ssh_port=22,
+                control_origin='https://controller.invalid', lan_address='node.invalid', bootstrap_address='node.invalid')
+        owned, foreign = node('owned'), node('foreign')
+        NodeProject.objects.create(node=owned, project=self.project)
+        NodeProject.objects.create(node=foreign, project=self.foreign)
+        key = self.s.enroll_service('service-node', owned.pk, project_ids=(self.project.pk,),
+            permissions=('catalog.observe_node',))
+        user = get_user_model().objects.get(username='service-node')
+        self.assertFalse(user.has_usable_password())
+        self.assertFalse(user.is_staff or user.is_superuser)
+        actor = self.s.token_context(key)
+        self.assertIsNone(actor.human_owner_id)
+        self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(owned.pk,), project_ids=(self.project.pk,))
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(foreign.pk,), project_ids=(self.foreign.pk,))
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        user.is_superuser = True
+        user.save()
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(owned.pk,), project_ids=(self.project.pk,))
+        with self.assertRaises(ValueError):
+            self.s.enroll_service('amplified-service', owned.pk, project_ids=(self.project.pk,),
+                permissions=('access.manage_proxy',))
+        self.assertFalse(get_user_model().objects.filter(username='amplified-service').exists())
+
+    def test_grant_kind_fails_closed_until_delegation_resolver_is_bound(self):
+        self.m.Principal.objects.filter(user=self.user).update(kind='grant')
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(self.s.token_context(self.token), 'catalog.view_project',
+                project_ids=(self.project.pk,))
+
+    def test_local_admin_binding_is_idempotent_without_password_reset(self):
+        from mop.server.controller.runtime import initialize, create_admin
+        from mop.server.access.services import bind_local_identity
+        initialize()
+        create_admin('initial-admin', 'a-long-distinct-passphrase-633')
+        user = get_user_model().objects.get(username='initial-admin')
+        self.assertEqual(self.m.Principal.objects.get(user=user).kind, 'human')
+        self.assertEqual(self.m.LoginIdentity.objects.get(user=user).source.kind, 'local')
+        before = user.password
+        bind_local_identity(user.pk)
+        bind_local_identity(user.pk)
+        user.refresh_from_db()
+        self.assertEqual(user.password, before)
+        self.assertEqual(self.m.LoginIdentity.objects.filter(user=user).count(), 1)
 
     def test_token_admin_is_not_registered(self):
         from django.contrib import admin
