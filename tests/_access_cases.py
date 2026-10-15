@@ -565,6 +565,22 @@ class AccessContracts(TransactionTestCase):
             with self.assertRaises(DirectoryUnavailable):
                 LdapDirectory().lookup(configuration, 'human')
 
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_admin_cannot_create_local_password_for_directory_identity(self):
+        from mop.server.access.directory import DirectoryResult, apply_directory
+        source = self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=1)
+        user_id = apply_directory(source.pk, source.revision, DirectoryResult(
+            subject='uid=managed', username='managed-directory', groups=('direct',),
+            project_ids=(self.project.pk,), all_projects=False, permissions=('catalog.view_project',)))
+        self.user.is_staff = self.user.is_superuser = True
+        self.user.save()
+        client = Client()
+        self.assertTrue(client.login(username='human', password='test-password-only'))
+        response = client.post('/admin/auth/user/' + str(user_id) + '/password/', {
+            'password1': 'a-long-distinct-passphrase-633', 'password2': 'a-long-distinct-passphrase-633'}, secure=True)
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(get_user_model().objects.get(pk=user_id).has_usable_password())
+
     def test_local_admin_binding_is_idempotent_without_password_reset(self):
         from mop.server.controller.runtime import initialize, create_admin
         from mop.server.access.services import bind_local_identity
