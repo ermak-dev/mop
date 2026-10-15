@@ -141,12 +141,29 @@ class TransportDeadline(TransactionTestCase):
 
     def test_transaction_deadline_releases_observed_lock_during_successive_short_queries(self):
         from mop.server.controller.runtime import short_transaction
+        self.observe_lock_deadline(lambda: short_transaction(budget=.2))
+
+    def test_plain_atomic_cannot_bypass_the_transaction_deadline(self):
+        from django.test import override_settings
+        with override_settings(CONTROLLER_TRANSACTION_TIMEOUT=.2):
+            self.observe_lock_deadline(transaction.atomic)
+
+    def test_each_transaction_has_a_fresh_deadline(self):
+        from django.test import override_settings
+        with override_settings(CONTROLLER_TRANSACTION_TIMEOUT=.2):
+            for _ in range(3):
+                with transaction.atomic():
+                    end = time.monotonic() + .08
+                    while time.monotonic() < end:
+                        get_user_model().objects.exists()
+
+    def observe_lock_deadline(self, atomic):
         user = get_user_model().objects.create(username='deadline-lock')
         locked, finished = threading.Event(), threading.Event()
         errors = []
         def holder():
             try:
-                with short_transaction(budget=.2):
+                with atomic():
                     get_user_model().objects.select_for_update().get(pk=user.pk)
                     locked.set()
                     end = time.monotonic() + 1
