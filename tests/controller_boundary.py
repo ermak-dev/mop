@@ -94,6 +94,21 @@ class Materialization(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, 'materialized'):
                     materialized(value)
 
+    def test_django_lazy_values_are_rejected_without_resolving_them(self):
+        from dataclasses import dataclass
+        from django.utils.functional import SimpleLazyObject
+        from mop.server.controller.runtime import materialized
+        calls = []
+        @dataclass(frozen=True)
+        class Snapshot:
+            value: object
+        lazy = SimpleLazyObject(lambda: calls.append('resolved') or 'text')
+        for value in (lazy, Snapshot(lazy)):
+            with self.subTest(type=type(value).__name__):
+                with self.assertRaisesRegex(TypeError, 'materialized'):
+                    materialized(value)
+        self.assertEqual(calls, [], 'materialization evaluated a lazy database value')
+
     def test_cycles_are_refused_but_shared_values_are_snapshotted(self):
         from dataclasses import dataclass
         from mop.server.controller.runtime import materialized
