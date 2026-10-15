@@ -21,6 +21,9 @@ class Project(Record):
     puppet_limit = models.BigIntegerField(null=True)
 
     class Meta(Record.Meta):
+        permissions = [('view_pool', 'Can view pool'), ('configure_project', 'Can configure project'),
+            ('set_project_limit', 'Can set project limit'), ('build_project', 'Can build project'),
+            ('recover_build', 'Can recover build')]
         constraints = Record.Meta.constraints + [models.CheckConstraint(
             condition=Q(puppet_limit__isnull=True) | Q(puppet_limit__gte=0), name='project_limit_nonnegative')]
 
@@ -48,6 +51,10 @@ class Node(Record):
     settings_applied_at = models.DateTimeField(null=True)
 
     class Meta(Record.Meta):
+        permissions = [('configure_node', 'Can configure node'), ('drain_node', 'Can drain node'),
+            ('enable_node', 'Can enable node'), ('forget_node', 'Can forget node'),
+            ('record_node_application', 'Can record node application'), ('observe_node', 'Can observe node'),
+            ('record_settings_application', 'Can record settings application')]
         constraints = Record.Meta.constraints + [
             models.CheckConstraint(condition=Q(driver__in=('host', 'pve')), name='node_known_driver'),
             models.CheckConstraint(condition=Q(ssh_port__gte=1, ssh_port__lte=65535), name='node_ssh_port'),
@@ -159,6 +166,7 @@ class ProjectPolicySnapshot(ImmutableRecord):
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta(Record.Meta):
+        permissions = [('pin_project_policy', 'Can pin project policy')]
         constraints = Record.Meta.constraints + [
             models.UniqueConstraint(fields=('project', 'sequence'), name='policy_project_sequence'),
             models.CheckConstraint(condition=Q(sequence__gte=1, cpu__gte=1, memory_mb__gte=1, disk_mb__gte=1), name='policy_positive_resources'),
