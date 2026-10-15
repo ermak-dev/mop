@@ -9,6 +9,11 @@ import hermetic
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# HYPOTHESIS: conditional unique без capability check может тихо исчезнуть.
+# SOLUTION: явная проверка features и стандартного migration graph.
+# RESULT: schema checks проходят локально и в PG16/17 jobs 29440/29441.
+# STATUS: FIXED — see #637.
+
 
 class Schema(unittest.TestCase):
     def test_controller_secret_cases_are_valid_python(self):

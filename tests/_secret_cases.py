@@ -20,6 +20,9 @@ from mop.server.secrets.rotation import Effect, Outcome, Observation, FailureRea
 # HYPOTHESIS: AEAD и чистая Rotation не обеспечивают ORM CAS/nonce/receipt fencing.
 # SOLUTION: явные store и rotation commands с default deny и короткими транзакциями.
 # Red проверяет отсутствие собственного публичного поведения, не чужие imports/setup.
+# RESULT: 26 ORM cases проходят на PG16/17, jobs 29440/29441 (pipeline 5457).
+# Полные jobs остаются красными на отдельном #632 restore/root check.
+# STATUS: FIXED — see #637; это проверка core, не полная приёмка задачи.
 class Allow:
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
         if actor != 'trusted':
