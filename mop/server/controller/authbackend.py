@@ -15,7 +15,7 @@ class ControllerBackend(Router):
         super().__init__(provider=LdapDirectory())
 
     def authenticate(self, request, username=None, password=None, **kwargs):
-        address = str(request.META.get('REMOTE_ADDR', 'local')) if request is not None else 'local'
+        address = str(request.META.get('REMOTE_ADDR', 'local')) if request is not None else str(kwargs.get('remote_address', 'local'))
         if not isinstance(username, str) or not isinstance(password, str) or len(username) > 150 or len(password) > 4096:
             return None
         if not consume_attempt(username, address):

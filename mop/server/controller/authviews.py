@@ -42,12 +42,13 @@ def _input(request):
 
 
 @sensitive_variables('password')
-def _password_user(request, data):
+def _password_user(request, data, *, browser_login=False):
     if not data.get('username') or not data.get('password'):
         raise serializers.ValidationError('username and password required')
-    user = authenticate(request=request, username=data['username'], password=data['password'])
+    address = str(request.META.get('REMOTE_ADDR', 'local')) if request is not None else 'local'
+    user = authenticate(request=request if browser_login else None, username=data['username'],
+        password=data['password'], remote_address=address)
     if user is None:
-        address = str(request.META.get('REMOTE_ADDR', 'local')) if request is not None else 'local'
         if access.attempts_blocked(data['username'], address):
             raise Throttled(wait=300, detail='authentication rate limit exceeded')
         raise PermissionDenied('authentication refused')
@@ -63,7 +64,7 @@ def _reauthenticated_session(request, data):
     if not isinstance(stamp, (float, int)) or timezone.now().timestamp() - stamp > 300:
         if not data.get('password'):
             raise PermissionDenied('password reauthentication required')
-        user = _password_user(None, {'username': request.user.username, 'password': data['password']})
+        user = _password_user(raw, {'username': request.user.username, 'password': data['password']})
         if user.pk != request.user.pk:
             raise PermissionDenied('credential identity changed')
         raw.session['access_reauthenticated_at'] = timezone.now().timestamp()
@@ -97,7 +98,7 @@ class Login(PrivateView):
     permission_classes = (AllowAny,)
 
     def post(self, request):
-        user = _password_user(request._request, _input(request))
+        user = _password_user(request._request, _input(request), browser_login=True)
         login(request._request, user)
         request.session['access_reauthenticated_at'] = timezone.now().timestamp()
         return Response({'schema_version': 1, 'user_id': user.pk})
@@ -111,7 +112,10 @@ class Logout(PrivateView):
     def post(self, request):
         if request.data:
             raise serializers.ValidationError('logout accepts no fields')
-        logout(request._request)
+        from django.db import transaction
+        with transaction.atomic():
+            access.note_session_logout(request.session.session_key)
+            logout(request._request)
         return Response({'schema_version': 1})
 
 
@@ -131,7 +135,7 @@ class IssueToken(PrivateView):
             if request.META.get('HTTP_ORIGIN') or request.META.get('HTTP_REFERER') or request.COOKIES:
                 SessionAuthentication().enforce_csrf(request)
                 raise PermissionDenied('browser token issuance requires login')
-            user_id = _password_user(None, data).pk
+            user_id = _password_user(request._request, data).pk
         token = access.issue_token(user_id)
         return Response({'schema_version': 1, 'token': token})
 
@@ -175,8 +179,12 @@ class Projects(PrivateView):
         actor = actor_for_request(request)
         rows = catalog_api().list_projects(actor)
         access.Access().authorize(actor, 'catalog.view_project', project_ids=tuple(row.id for row in rows))
-        # Фильтр уже применён; count не выдаёт размер чужого каталога.
-        return Response({'schema_version': 1, 'count': len(rows), 'results': [_project(row) for row in rows]})
+        from .pagination import project_page
+        page, following = project_page(actor, rows, request.query_params)
+        # Фильтр применён до count и pagination; cursor не хранит authority.
+        access.Access().authorize(actor, 'catalog.view_project', project_ids=tuple(row.id for row in page))
+        return Response({'schema_version': 1, 'count': len(rows), 'next_cursor': following,
+            'results': [_project(row) for row in page]})
 
 
 class Project(PrivateView):

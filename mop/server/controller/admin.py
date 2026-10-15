@@ -5,7 +5,7 @@ from django.contrib.auth.admin import UserAdmin, GroupAdmin
 from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied
 from mop.server.access import services as access
-from mop.server.access.models import DirectoryGroupOwnership, LoginIdentity
+from mop.server.access.models import LoginIdentity, Principal
 from mop.server.catalog.models import Project
 
 
@@ -39,6 +39,23 @@ class GlobalAuthAdmin:
 
 
 class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        if not change:
+            access.bind_local_identity(obj.pk)
+
+    def user_change_password(self, request, id, form_url=''):
+        if not self.has_change_permission(request):
+            raise PermissionDenied('user administration permission required')
+        user = self.get_object(request, id)
+        if user is None:
+            from django.http import Http404
+            raise Http404('resource not found')
+        if (LoginIdentity.objects.filter(user=user, source__kind='ldap').exists()
+                or Principal.objects.filter(user=user).exclude(kind='human').exists()):
+            raise PermissionDenied('password is managed by the enrolled identity source')
+        return super().user_change_password(request, id, form_url)
+
     def get_readonly_fields(self, request, obj=None):
         fields = tuple(super().get_readonly_fields(request, obj))
         if obj and LoginIdentity.objects.filter(user=obj, source__kind='ldap').exists():

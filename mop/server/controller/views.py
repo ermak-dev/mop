@@ -24,7 +24,21 @@ def exception_handler(error, context):
             'message': message, 'retryable': status == 503}}, status=status)
         response['Cache-Control'] = 'no-store'
         return response
-    return framework_exception_handler(error, context)
+    response = framework_exception_handler(error, context)
+    if response is not None:
+        from .pagination import CursorReset
+        detail = response.data.get('detail') if isinstance(response.data, dict) else None
+        code = {400: 'validation_error', 401: 'authentication_required', 403: 'permission_denied',
+            404: 'not_found', 405: 'method_not_allowed', 429: 'throttled'}.get(response.status_code, 'request_refused')
+        message = str(detail) if detail is not None else 'input validation failed'
+        if message.startswith('CSRF Failed:'):
+            code, message = 'csrf_failed', 'CSRF validation failed'
+        verdict = {'code': code, 'message': message, 'retryable': response.status_code in (429, 503)}
+        if isinstance(error, CursorReset):
+            verdict.update(code='reset_required', reset_required=True)
+        response.data = {'schema_version': 1, 'error': verdict}
+        response['Cache-Control'] = 'no-store'
+    return response
 
 
 class Health(APIView):

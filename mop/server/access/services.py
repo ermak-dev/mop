@@ -286,6 +286,18 @@ def enroll_service(username, node_id, *, project_ids, permissions):
         return token.key
 
 
+def note_session_logout(session_key):
+    """Вызывает browser boundary в одной transaction со стандартным logout."""
+    session = Session.objects.filter(pk=session_key).first()
+    if session is None:
+        return
+    user_id = session.get_decoded().get(SESSION_KEY)
+    if user_id is not None:
+        user = get_user_model().objects.select_for_update().filter(pk=user_id).first()
+        if user is not None:
+            m.CredentialEvent.objects.create(user=user, action='session_logged_out')
+
+
 def consume_attempt(username, remote_address='local'):
     """Общий DB rate limit: ключи не содержат пароль, логин или адрес в plaintext."""
     source = m.LoginIdentity.objects.filter(user__username=username).values_list('source_id', flat=True).first()
