@@ -471,7 +471,9 @@ def resolve(principal, service, verb, target=None, root=None):
     verbs = tuple(getattr(parsed.capabilities,
                           "node_verbs" if service == "node"
                           else "cluster_verbs"))
-    out = {"allow": verb in verbs,
+    allowed = (parsed.capabilities.dispatch if service == "node" and verb == "dispatch"
+               else verb in verbs)
+    out = {"allow": allowed,
            "principal": principal,
            "job": rec.get("job"), "soul_inc": rec.get("soul_inc"),
            "owner": rec.get("owner"), "project": rec.get("project"),
