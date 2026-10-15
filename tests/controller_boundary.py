@@ -114,6 +114,53 @@ class Materialization(unittest.TestCase):
         from mop.server.controller import runtime
         self.assertFalse(hasattr(runtime, 'database_call'), 'unowned database bridge remains public')
 
+    def test_pool_closed_flag_does_not_hide_a_live_driver_thread(self):
+        import copy
+        import threading
+        from django.conf import settings
+        from django.db import connections
+        from mop.server.controller.runtime import Runtime
+        release = threading.Event()
+        worker = threading.Thread(target=lambda: release.wait(10))
+        worker.start()
+        class Pool:
+            # psycopg_pool.close очищает ссылки, даже когда join истёк.
+            _workers = [worker]
+            _sched_runner = None
+            closed = False
+            def close(self, timeout=5):
+                self.closed = True
+                self._workers = []
+        alias = 'closing_probe'
+        connections.databases[alias] = copy.deepcopy(settings.DATABASES['default'])
+        db, pool = connections[alias], Pool()
+        db._connection_pools[alias] = pool
+        async def run():
+            runtime = Runtime()
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'shutdown incomplete'):
+                    await runtime.aclose(timeout=.5)
+                self.assertTrue(pool.closed)
+                self.assertFalse(runtime._closed)
+                self.assertIs(db._connection_pools[alias], pool)
+                release.set()
+                worker.join(1)
+                await runtime.aclose(timeout=.5)
+                self.assertTrue(runtime._closed)
+                self.assertNotIn(alias, db._connection_pools)
+            finally:
+                release.set()
+                worker.join(3)
+                await runtime.aclose()
+        try:
+            asyncio.run(run())
+        finally:
+            release.set()
+            worker.join(3)
+            db._connection_pools.pop(alias, None)
+            del connections[alias]
+            del connections.databases[alias]
+
     def test_cancelled_cpu_callback_keeps_capacity_and_shutdown_is_honest(self):
         import threading
         from mop.server.controller.runtime import Runtime, Backpressure

@@ -100,20 +100,28 @@ class TransportDeadline(TransactionTestCase):
                         type(self).databases = allowed
 
     def test_cancelled_async_database_call_drains_blackholed_transport_and_executor(self):
+        for pooled in (False, True):
+            with self.subTest(pool=pooled):
+                self.cancelled_database_call(pooled)
+
+    def cancelled_database_call(self, pooled):
         from django.test import override_settings
         from mop.server.controller.runtime import Runtime
         from _controller_transport import Blackhole
         with override_settings(CONTROLLER_DB_TIMEOUT=.25):
             proxy = Blackhole(connection.settings_dict)
-            alias = proxy.alias('async_blackhole', pool=False)
+            alias = proxy.alias('async_blackhole', pool=pooled)
             allowed = type(self).databases
             type(self).databases = allowed | {alias}
             entered = threading.Event()
-            raw = []
+            raw, driver_threads = [], []
             def service():
                 db = connections[alias]
                 db.ensure_connection()
                 raw.append(db.connection)
+                if pooled:
+                    driver_threads.extend(db.pool._workers)
+                    driver_threads.append(db.pool._sched_runner)
                 proxy.drop.set()
                 entered.set()
                 return get_user_model().objects.using(alias).count()
@@ -127,10 +135,13 @@ class TransportDeadline(TransactionTestCase):
                     task.cancel()
                     done, _ = await asyncio.wait([task], timeout=1)
                     self.assertIn(task, done, 'cancelled database caller hangs on lost reply')
-                    await runtime.aclose(timeout=1)
+                    # Пул может уже заменять fenced соединение: connect_timeout
+                    # тоже конечен (5 s). Proxy не закрывается до всех assertions.
+                    await runtime.aclose(timeout=6 if pooled else 1)
                     self.assertEqual(runtime.pending, 0)
                     self.assertTrue(raw[0].closed)
                     self.assertFalse(any(t.is_alive() for t in runtime._executor._threads))
+                    self.assertFalse(any(t.is_alive() for t in driver_threads))
                 finally:
                     proxy.close()
                     await asyncio.gather(task, return_exceptions=True)
