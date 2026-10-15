@@ -91,6 +91,8 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
+    # Узкий цикл foundation; финальный SHA возвращает полный строгий suite.
+    TESTS: bin/mop dev test controller controller_boundary controller_bootstrap controller_packaging controller_layers layers cli packaging ci tests_lib -v
     PYTHON_IMAGE: python:3.12-slim-trixie
     POSTGRES_IMAGE: postgres:16-bookworm
 

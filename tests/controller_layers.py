@@ -2,7 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
-import layers
+import _layers as layers
 
 # HYPOTHESIS: старый scanner отбрасывает внешние и динамические импорты,
 # поэтому Django в common и скрытый цикл Access/Secrets остаются зелёными.
@@ -36,6 +36,7 @@ class ImportTests(unittest.TestCase):
                 ('mop.server.secrets.leak', 'from mop.server.access import models'),
                 ('mop.server.catalog.leak', 'import mop.server.controller.runtime'),
                 ('mop.server.access.leak', 'import importlib\nimportlib.import_module(target)'),
+                ('mop.server.secrets.leak', 'import importlib as il\nloader = il.import_module\nloader("mop.server.access.models")'),
             ):
                 with self.subTest(name=name):
                     path = Path(directory) / 'probe.py'

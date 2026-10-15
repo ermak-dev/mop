@@ -1221,7 +1221,7 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   migrations-check              refuse uncommitted model changes
   initialize                    bind the empty schema to protected trust roots
   admin --username NAME         create initial admin; password is read privately
-  serve --host HOST --port N    production ASGI server (one process)
+  serve --host host --port N    production ASGI server (one process)
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects

@@ -8,7 +8,7 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   migrations-check              refuse uncommitted model changes
   initialize                    bind the empty schema to protected trust roots
   admin --username NAME         create initial admin; password is read privately
-  serve --host HOST --port N    production ASGI server (one process)
+  serve --host host --port N    production ASGI server (one process)
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
@@ -45,11 +45,33 @@ def main(argv):
             parser.error('setup requires a new venv path')
         subprocess.run([sys.executable, '-m', 'venv', str(target)], check=True)
         source = Path(__file__).resolve().parents[3]
+        if not (source / 'pyproject.toml').is_file():
+            raise RuntimeError('dependency setup requires a mop source tree')
         subprocess.run([str(target / 'bin/python'), '-m', 'pip', 'install',
                         str(source) + '[server]'], check=True)
+        subprocess.run([str(target / 'bin/python'), '-I', '-c',
+                        'import django, rest_framework, channels, psycopg, uvicorn'], check=True)
         return 0
-    from mop.server.controller.runtime import configure, maintenance, serve, worker
+    from mop.server.controller.runtime import configure, maintenance, serve, worker, create_admin, close_pools
     configure()
+    if args.action == 'admin':
+        import getpass
+        from django.core.exceptions import ValidationError
+        from django.db import DatabaseError
+        if not args.username:
+            parser.error('admin requires --username')
+        try:
+            password = getpass.getpass('Initial administrator password: ')
+            if password != getpass.getpass('Confirm password: '):
+                raise RuntimeError('administrator passwords do not match')
+            create_admin(args.username, password)
+        except ValidationError as exc:
+            raise RuntimeError(f'administrator creation refused: {exc}') from exc
+        except (EOFError, DatabaseError) as exc:
+            raise RuntimeError(f'administrator creation refused: {type(exc).__name__}') from exc
+        finally:
+            close_pools()
+        return 0
     if args.action == 'serve':
         return serve(args.host, args.port)
     if args.action == 'worker':

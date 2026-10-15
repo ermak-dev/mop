@@ -32,7 +32,21 @@ TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates',
                   'django.template.context_processors.request',
                   'django.contrib.auth.context_processors.auth',
                   'django.contrib.messages.context_processors.messages']}}]
-DATABASES = {'default': dict(BOOTSTRAP['database'])}
+from psycopg import IsolationLevel
+
+# Ресурсные пределы foundation: предметные настройки позднее владеет Catalog.
+# Пул общий для процесса, а не отдельный пул на каждый ASGI request/thread.
+DATABASES = {'default': {
+    **BOOTSTRAP['database'], 'CONN_MAX_AGE': 0, 'ATOMIC_REQUESTS': False,
+    'CONN_HEALTH_CHECKS': True,
+    'OPTIONS': {**BOOTSTRAP['database']['OPTIONS'],
+                'connect_timeout': 5,
+                'isolation_level': IsolationLevel.READ_COMMITTED,
+                'options': '-c statement_timeout=5000 -c lock_timeout=2000 '
+                           '-c idle_in_transaction_session_timeout=10000',
+                'pool': {'min_size': 0, 'max_size': 8, 'max_waiting': 16,
+                         'timeout': 5, 'max_idle': 30}},
+}}
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 USE_TZ = True
 TIME_ZONE = 'UTC'
@@ -52,6 +66,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 REST_FRAMEWORK = {
+    'EXCEPTION_HANDLER': 'mop.server.controller.views.exception_handler',
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication'],

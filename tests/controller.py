@@ -7,14 +7,14 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+import _lib  # noqa: F401,E402 — lifetime всех временных файлов
+import hermetic  # noqa: E402 — сначала отделить настройки старой машины
 
 
 def main():
-    host = os.environ.get('MOP_TEST_POSTGRES_HOST')
+    host = hermetic.FIXTURE_ENV.get('MOP_TEST_POSTGRES_HOST')
     if not host:
-        if os.environ.get('MOP_TESTS_STRICT') == '1':
-            raise RuntimeError('PostgreSQL gate requires MOP_TEST_POSTGRES_HOST')
-        print('SKIPPED controller: isolated PostgreSQL fixture is not configured')
+        hermetic.skip('controller PostgreSQL', 'isolated fixture requires MOP_TEST_POSTGRES_HOST')
         return 0
     with tempfile.TemporaryDirectory(prefix='mop-controller-test-') as directory:
         path = Path(directory)
@@ -34,6 +34,10 @@ def main():
         from mop.server.controller.runtime import configure
         configure()
         from django.test.runner import DiscoverRunner
+        from django.conf import settings
+        import uuid
+        # hermetic гоняет clean/hostile одновременно: у каждого своя БД.
+        settings.DATABASES['default']['TEST'] = {'NAME': 'test_mop_' + uuid.uuid4().hex}
         runner = DiscoverRunner(verbosity=2, interactive=False)
         return int(bool(runner.run_tests(['_controller_cases'])))
 

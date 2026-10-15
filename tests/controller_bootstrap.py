@@ -8,6 +8,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+import _lib  # noqa: F401,E402 — lifetime временных файлов
+import hermetic  # noqa: F401,E402 — настройки установки не являются входом
 from mop.server.controller.bootstrap import load
 
 # HYPOTHESIS: простой JSON reader принимает публичные credentials и лишние
@@ -100,6 +102,21 @@ class BootstrapTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as error:
                     load(self.path)
                 self.assertNotIn('private-value', str(error.exception))
+
+    def test_database_policy_does_not_use_django_unbounded_defaults(self):
+        import importlib
+        from unittest.mock import patch
+        self.data['django_key'] = str(self.root)
+        self.write()
+        with patch.dict(os.environ, {'MOP_CONTROLLER_BOOTSTRAP': str(self.path)}):
+            sys.modules.pop('mop.server.controller.settings', None)
+            settings = importlib.import_module('mop.server.controller.settings')
+            db = settings.DATABASES['default']
+            self.assertEqual(db.get('CONN_MAX_AGE'), 0)
+            self.assertIs(db.get('ATOMIC_REQUESTS'), False)
+            self.assertEqual(db['OPTIONS']['connect_timeout'], 5)
+            self.assertLessEqual(db['OPTIONS']['pool']['max_size'], 8)
+        sys.modules.pop('mop.server.controller.settings', None)
 
     def test_no_fallback_for_missing_file(self):
         with self.assertRaisesRegex(RuntimeError, 'bootstrap'):

@@ -6,4 +6,6 @@ from django.urls import path
 from rest_framework.authtoken.models import TokenProxy
 if admin.site.is_registered(TokenProxy):
     admin.site.unregister(TokenProxy)
-urlpatterns = [path('admin/', admin.site.urls)]
+from .views import Health
+
+urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view())]

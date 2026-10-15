@@ -7,12 +7,13 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+import _lib  # noqa: F401,E402 — lifetime временных файлов
+import hermetic  # noqa: E402 — отдельная CI fixture, не настройки установки
 
 class ClientInstall(unittest.TestCase):
     def test_client_wheel_does_not_install_server_dependencies(self):
-        if not os.environ.get('MOP_TEST_POSTGRES_HOST'):
-            if os.environ.get('MOP_TESTS_STRICT') == '1':
-                self.fail('clean-install CI fixture is required')
+        if not hermetic.FIXTURE_ENV.get('MOP_TEST_POSTGRES_HOST'):
+            hermetic.skip('clean client install', 'isolated CI fixture is required')
             self.skipTest('isolated install gate is not configured')
         with tempfile.TemporaryDirectory(prefix='mop-package-') as directory:
             venv = Path(directory) / 'venv'
