@@ -278,6 +278,10 @@ def project_ready(project):
     готов к шине (machine), человеческий -- тоже; broken/conflict НЕ
     глотаются «нет, не готов» -- причина доезжает до вызывающего командлета,
     а не умирает в проверке, посылая человека в неработающий ремонт."""
+    # Роль уже получила отдельное подключение (#653): joined-профиля
+    # человека в теле нет. Права проекта и spawn всё равно решает сервер.
+    if bus.principal():
+        return True
     kind, _ = creds.snapshot(creds.server_dir())
     return kind is not None      # human | machine -- есть кем представиться
 
