@@ -42,6 +42,23 @@ class Gate:
         return self.selection
 
 
+class CurrentVerifier:
+    """Явный test-only verifier: текущий полный набор, не operator scope bypass."""
+    def __init__(self, recipients):
+        self.recipients = tuple(sorted(recipients, key=lambda b: str(b.id)))
+        self.calls = []
+        self.allowed = True
+
+    def verify_current(self, actor, proof):
+        if not connections['default'].in_atomic_block:
+            raise AssertionError('current proof must be checked in the lifecycle CAS transaction')
+        self.calls.append((actor, proof))
+        return (self.allowed and actor == 'trusted' and proof.recipients == self.recipients
+                and all(b.secret_id == proof.secret_id for b in proof.recipients)
+                and proof.old_version.secret_id == proof.secret_id
+                and proof.new_version.secret_id == proof.secret_id)
+
+
 class SecretCases(TransactionTestCase):
     def setUp(self):
         self.assertIsNotNone(importlib.util.find_spec('mop.server.secrets.services'),
@@ -277,7 +294,8 @@ class SecretCases(TransactionTestCase):
         new = self.api.stage(self.actor, a.id, b'new-key', expected_revision=1)
         b = self.binding(self.api.metadata(self.actor, a.id))
         gate = Gate(self.s.DeliverySelection((b.id,), ((b.kind, b.name),)), actor=self.actor)
-        service = self.s.RotationService(authorizer=Allow(), delivery_gate=gate)
+        service = self.s.RotationService(authorizer=Allow(), delivery_gate=gate,
+                                         current_verifier=CurrentVerifier((b,)))
         r = service.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
         return service, a, new, b, r
 
@@ -396,7 +414,7 @@ class SecretCases(TransactionTestCase):
         svc, a, new, b, r = self.rotation()
         r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
         self.assertIsNotNone(r.claim_id)
-        restarted = self.s.RotationService(authorizer=Allow())
+        restarted = self.s.RotationService(authorizer=Allow(), current_verifier=svc.current_verifier)
         r = restarted.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id,
                              expected_revision=r.revision)
         self.assertEqual(r.state, Stage.RECONCILING)
@@ -570,7 +588,8 @@ class SecretCases(TransactionTestCase):
         r = svc.record(self.actor, r.id, Outcome.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
         r = svc.activate(self.actor, r.id, expected_revision=r.revision)
         r = svc.begin(self.actor, r.id, Effect.RETIRE_OLD, expected_revision=r.revision)
-        restarted = self.s.RotationService(authorizer=Allow(), delivery_gate=svc.delivery_gate)
+        restarted = self.s.RotationService(authorizer=Allow(), delivery_gate=svc.delivery_gate,
+                                           current_verifier=svc.current_verifier)
         self.assertEqual(restarted.metadata(self.actor, r.id).pending, Effect.RETIRE_OLD)
         r = restarted.record(self.actor, r.id, Outcome.REJECTED, claim_id=r.claim_id,
                              expected_revision=r.revision, reason=FailureReason.REFUSED)
@@ -619,6 +638,12 @@ class SecretCases(TransactionTestCase):
 
     # HYPOTHESIS: исторические receipts и operator scope обходят текущее назначение.
     # Membership не отделён от immutable evidence, поэтому stage требует умершие incarnation.
+    # SOLUTION: explicit retirement + parent lock/no_rotation; отдельный ORM-only
+    # verifier получает полный frozen контекст перед begin/activation/dispatch после wait.
+    # UNKNOWN остаётся durable наблюдением, а не разрешением нового effect.
+    # RESULT: 39 secret cases green на изолированных PG16/17; общий controller run
+    # всё ещё red только на отдельном foundation root-restore check (72 tests, 1 failure).
+    # STATUS: FIXED — see #637; реальная композиция verifier из #639 не проверена.
     def delivered(self):
         svc, a, new, b, r = self.rotation()
         r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
@@ -670,6 +695,215 @@ class SecretCases(TransactionTestCase):
             grant_id=b.grant_id, assignment_id=b.assignment_id)
         self.assertEqual(repeated.id, b.id)
         self.assertEqual(self.m.SecretBinding.objects.filter(secret_id=a.id).count(), 1)
+
+    def test_verifier_sees_full_frozen_context_and_changed_current_facts_cannot_be_overridden(self):
+        svc, a, new, b, r = self.delivered()
+        verifier = svc.current_verifier
+        mutations = ({'incarnation': uuid.uuid4()}, {'grant_id': uuid.uuid4()},
+                     {'digest': 'b' * 64}, {'assignment_id': uuid.uuid4()},
+                     {'role': 'other'}, {'node_id': uuid.uuid4()})
+        for changes in mutations:
+            with self.subTest(changes=changes):
+                verifier.recipients = (replace(b, **changes),)
+                with self.assertRaises(self.s.Refused):
+                    svc.activate(self.actor, r.id, expected_revision=r.revision)
+        verifier.recipients = (b,)
+        verifier.allowed = False  # Active grant/ancestor/owner revoked, same IDs.
+        with self.assertRaises(self.s.Refused):
+            svc.activate(self.actor, r.id, expected_revision=r.revision)
+        verifier.allowed = True
+        svc.delivery_gate = Gate(self.s.DeliverySelection((), ()), actor='not-the-operator')
+        # Operator не притворяется recipient: отдельный полный verifier, не resolve(operator).
+        r = svc.activate(self.actor, r.id, expected_revision=r.revision)
+        actor, proof = verifier.calls[-1]
+        self.assertEqual(actor, self.actor)
+        self.assertEqual(proof.recipients, (b,))
+        self.assertEqual((proof.rotation_id, proof.secret_id, proof.project_id), (r.id, a.id, self.p.pk))
+        self.assertEqual((proof.old_version.id, proof.new_version.id), (a.active_version_id, new.id))
+        self.assertEqual((proof.old_version.number, proof.new_version.number), (1, 2))
+        self.assertEqual((proof.name, proof.kind, proof.purpose), ('TOKEN', 'variable', 'project'))
+        self.assertEqual(proof.secret_revision, 2)
+        self.assertEqual(proof.installation_id, 1)
+        self.assertEqual(proof.installation_identity, self.m.Secret.objects.get(pk=a.id).installation.identity)
+        verifier.allowed = False
+        with self.assertRaises(self.s.Refused):
+            svc.begin(self.actor, r.id, Effect.RETIRE_OLD, expected_revision=r.revision)
+        verifier.allowed = True
+        r = svc.begin(self.actor, r.id, Effect.RETIRE_OLD, expected_revision=r.revision)
+        self.assertEqual(r.pending, Effect.RETIRE_OLD)
+
+    def test_after_effect_wait_current_proof_is_required_but_unknown_evidence_can_be_saved(self):
+        svc, a, new, b, r = self.rotation()
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        check = getattr(svc, 'verify_effect', None)
+        self.assertTrue(callable(check), 'executor needs current full proof after waits, not claim alone')
+        checked = check(self.actor, r.id, claim_id=r.claim_id, generation=r.generation,
+                        expected_revision=r.revision)
+        self.assertEqual(checked, r)
+        for claim, generation in ((uuid.uuid4(), r.generation), (r.claim_id, r.generation + 1)):
+            with self.assertRaises(self.s.Conflict):
+                check(self.actor, r.id, claim_id=claim, generation=generation, expected_revision=r.revision)
+        unbound = self.s.RotationService(authorizer=Allow())
+        with self.assertRaises(PermissionError):
+            unbound.verify_effect(self.actor, r.id, claim_id=r.claim_id, generation=r.generation,
+                                  expected_revision=r.revision)
+        svc.current_verifier.allowed = False
+        with self.assertRaises(self.s.Refused):
+            check(self.actor, r.id, claim_id=r.claim_id, generation=r.generation, expected_revision=r.revision)
+        # Отзыв назначения не должен стирать или запрещать durable UNKNOWN.
+        r = svc.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        with self.assertRaises(self.s.Conflict):
+            check(self.actor, r.id, claim_id=r.claim_id, generation=r.generation, expected_revision=r.revision)
+        r = svc.reconcile(self.actor, r.id, Observation.PARTIAL, claim_id=r.claim_id,
+                          quiescent=True, expected_revision=r.revision)
+        with self.assertRaises(self.s.Refused):
+            svc.begin(self.actor, r.id, Effect.RESTORE_OLD, expected_revision=r.revision)
+        svc.current_verifier.allowed = True
+        r = svc.begin(self.actor, r.id, Effect.RESTORE_OLD, expected_revision=r.revision)
+        svc.receipt(self.actor, r.id, b.id, version_id=a.active_version_id, claim_id=r.claim_id,
+                    generation=r.generation, outcome=Outcome.APPLIED)
+        svc.current_verifier.allowed = False
+        with self.assertRaises(self.s.Refused):
+            svc.record(self.actor, r.id, Outcome.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        r = svc.record(self.actor, r.id, Outcome.UNKNOWN, claim_id=r.claim_id, expected_revision=r.revision)
+        with self.assertRaises(self.s.Refused):
+            svc.reconcile(self.actor, r.id, Observation.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        svc.current_verifier.allowed = True
+        r = svc.reconcile(self.actor, r.id, Observation.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        svc.current_verifier.allowed = False
+        with self.assertRaises(self.s.Refused):
+            svc.begin(self.actor, r.id, Effect.REVOKE_NEW, expected_revision=r.revision)
+
+    def test_payload_cannot_supply_verifier_or_scope_override(self):
+        svc, a, new, b, r = self.delivered()
+        with self.assertRaises(TypeError):
+            svc.activate(self.actor, r.id, expected_revision=r.revision,
+                         current_verifier=CurrentVerifier((b,)))
+        class ScopeOnly:
+            def authorize(_, actor, action, **scope):
+                pass
+        svc.authorizer = ScopeOnly()
+        with self.assertRaises(self.s.Refused):
+            svc.activate({'current_verifier': CurrentVerifier((b,)), 'scope_override': True},
+                         r.id, expected_revision=r.revision)
+
+    def test_current_binding_slot_is_explicit_and_retired_identity_stays_immutable(self):
+        a = self.secret()
+        b = self.binding(a)
+        with self.assertRaises(self.s.Conflict):
+            self.binding(a)  # Тот же node/role, но другая incarnation не supersede автоматически.
+        retired = self.api.retire_binding(self.actor, b.id, expected_revision=a.revision)
+        self.assertEqual(retired, self.api.retire_binding(self.actor, b.id, expected_revision=a.revision))
+        row = self.m.SecretBinding.objects.get(pk=b.id)
+        row.retired_at = None
+        with self.assertRaises(ValueError):
+            row.save()
+        row.refresh_from_db()
+        row.digest = 'b' * 64
+        with self.assertRaises(ValueError):
+            row.save()
+        current = self.binding(a)
+        self.assertNotEqual(current.id, b.id)
+        self.assertEqual(self.m.SecretAudit.objects.filter(action='retire_binding', secret_id=a.id).count(), 1)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.m.SecretBinding._base_manager.create(secret_id=a.id, node_id=b.node_id,
+                role=b.role, digest=b.digest, incarnation=uuid.uuid4(), grant_id=uuid.uuid4(),
+                assignment_id=uuid.uuid4())
+
+    def test_current_membership_race_serializes_with_rotation_freeze(self):
+        svc, a, new, b, r = self.rotation()
+        with self.assertRaises(self.s.Conflict):
+            self.api.retire_binding(self.actor, b.id, expected_revision=2)
+        with self.assertRaises(self.s.Conflict):
+            self.api.bind(self.actor, a.id, expected_revision=2, node_id=b.node_id,
+                role='another-role', digest=b.digest, incarnation=uuid.uuid4(),
+                grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
+        # Current exact lost-response retry — чтение того же решения, без изменения set.
+        self.assertEqual(self.api.bind(self.actor, a.id, expected_revision=2, node_id=b.node_id,
+            role=b.role, digest=b.digest, incarnation=b.incarnation,
+            grant_id=b.grant_id, assignment_id=b.assignment_id).id, b.id)
+        with self.assertRaises(ValueError):
+            self.m.SecretBinding.objects.create(secret_id=a.id, node_id=b.node_id,
+                role='another-role', digest=b.digest, incarnation=uuid.uuid4(),
+                grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
+
+    def test_binding_stage_and_retirement_race_with_independent_connections(self):
+        a = self.secret()
+        b = self.binding(a)
+        new = self.api.stage(self.actor, a.id, b'new', expected_revision=1)
+        svc = self.s.RotationService(authorizer=Allow())
+        def act(i):
+            try:
+                if i:
+                    svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
+                else:
+                    self.api.retire_binding(self.actor, b.id, expected_revision=2)
+                return 'ok'
+            except (self.s.Conflict, self.s.Refused):
+                return 'conflict'
+        self.assertCountEqual(self.race(act), ['ok', 'conflict'])
+        current = self.m.SecretBinding.objects.get(pk=b.id)
+        self.assertEqual(current.retired_at is None,
+                         self.m.CredentialRotation.objects.filter(secret_id=a.id).exists())
+
+    def test_retired_binding_preserves_old_rotation_receipts_and_does_not_block_next_set(self):
+        svc, a, new, old, r = self.delivered()
+        r = svc.activate(self.actor, r.id, expected_revision=r.revision)
+        r = svc.begin(self.actor, r.id, Effect.RETIRE_OLD, expected_revision=r.revision)
+        r = svc.record(self.actor, r.id, Outcome.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        self.api.retire_binding(self.actor, old.id, expected_revision=3)
+        current = self.binding(self.api.metadata(self.actor, a.id))
+        next_version = self.api.stage(self.actor, a.id, b'next', expected_revision=3)
+        next_rotation = svc.stage(self.actor, a.id, next_version.id, (current.id,), expected_revision=4)
+        self.assertEqual(next_rotation.required, frozenset((str(current.id),)))
+        self.assertEqual(svc.metadata(self.actor, r.id).required, frozenset((str(old.id),)))
+        self.assertTrue(self.m.DeliveryReceipt.objects.filter(recipient__binding_id=old.id,
+                                                             recipient__rotation_id=r.id).exists())
+        with self.assertRaises(ProtectedError):
+            self.m.SecretBinding.objects.get(pk=old.id).delete()
+        # Даже ошибочный gate со старым id не выдаёт новый credential.
+        r2 = self.s.RotationService(authorizer=Allow(), current_verifier=CurrentVerifier((current,)))
+        pending = r2.begin(self.actor, next_rotation.id, Effect.DELIVER, expected_revision=next_rotation.revision)
+        api, _ = self.delivery(old)
+        with self.assertRaises(self.s.Refused):
+            api.issue_rotation('machine', pending.id, claim_id=pending.claim_id, generation=pending.generation)
+
+    def test_full_current_set_includes_offline_recipients_without_operator_delivery_selection(self):
+        a = self.secret()
+        first = self.binding(a)
+        second = self.api.bind(self.actor, a.id, expected_revision=1, node_id=self.n.pk,
+            role='offline-role', digest='b' * 64, incarnation=uuid.uuid4(),
+            grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
+        new = self.api.stage(self.actor, a.id, b'new', expected_revision=1)
+        gate = Gate(self.s.DeliverySelection((first.id,), ((first.kind, first.name),)), actor=self.actor)
+        verifier = CurrentVerifier((first, second))
+        svc = self.s.RotationService(authorizer=Allow(), delivery_gate=gate, current_verifier=verifier)
+        with self.assertRaises(self.s.Refused):
+            svc.stage(self.actor, a.id, new.id, (first.id,), expected_revision=2)
+        r = svc.stage(self.actor, a.id, new.id, (first.id, second.id), expected_revision=2)
+        r = svc.begin(self.actor, r.id, Effect.DELIVER, expected_revision=r.revision)
+        for binding in (first, second):
+            gate.selection = self.s.DeliverySelection((binding.id,), ((binding.kind, binding.name),))
+            svc.receipt(self.actor, r.id, binding.id, version_id=new.id, claim_id=r.claim_id,
+                        generation=r.generation, outcome=Outcome.APPLIED)
+        r = svc.record(self.actor, r.id, Outcome.APPLIED, claim_id=r.claim_id, expected_revision=r.revision)
+        svc.delivery_gate = Gate(self.s.DeliverySelection((), ()), actor='machine-not-operator')
+        r = svc.activate(self.actor, r.id, expected_revision=r.revision)
+        self.assertEqual(r.state, Stage.ACTIVE)
+        self.assertEqual(set(b.id for b in verifier.calls[-1][1].recipients), {first.id, second.id})
+
+    def test_binding_retired_during_provider_wait_cannot_return_credential(self):
+        a = self.secret()
+        b = self.binding(a)
+        api, _ = self.delivery(b)
+        class Waiting:
+            def decrypt(_, envelope, context):
+                value = self.crypto.decrypt(envelope, context)
+                self.api.retire_binding(self.actor, b.id, expected_revision=a.revision)
+                return value
+        api.provider = Waiting()
+        with self.assertRaises(self.s.Refused):
+            api.issue_addressed('machine')
 
     def test_action_permissions_are_registered_without_default_duplicate(self):
         from django.contrib.auth.models import Permission

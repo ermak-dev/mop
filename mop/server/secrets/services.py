@@ -4,17 +4,20 @@ Actor — доверенная ссылка composition root, не объект 
 синхронно проверяет текущие ORM-полномочия по реальным refs. DeliveryGate
 возвращает закреплённый серверный allowlist и проверяет authenticated node,
 project/assignment/role/digest/incarnation, active grant и текущие права owner.
-Без будущего #633/#635/#639 binding оба порта закрыты. Machine token, operation
+Без будущего #633/#635/#639 binding все порты закрыты. Machine token, operation
 id и сами SecretBinding не являются доказательством назначения.
 
 Нет root lookup, общего plaintext download, импорта прежних stores, HTTP или
 Admin. Provider инжектируется только защищённой композицией; root_digest не ключ.
 """
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import wraps
 import json
 from typing import Protocol
 import uuid
+
+from django.utils import timezone
 
 from django.db import DatabaseError, IntegrityError, connections, transaction
 
@@ -71,6 +74,9 @@ class Deny:
     def resolve(self, actor):
         raise PermissionError('addressed secret delivery gate is not bound')
 
+    def verify_current(self, actor, proof):
+        raise PermissionError('current rotation recipient verifier is not bound')
+
 
 @dataclass(frozen=True)
 class SecretMetadata:
@@ -109,6 +115,44 @@ class BindingMetadata:
     incarnation: uuid.UUID
     grant_id: uuid.UUID
     assignment_id: uuid.UUID
+    retired_at: datetime | None
+
+
+@dataclass(frozen=True)
+class RotationProof:
+    """Полный серверный контекст, не payload и не машинный token + operation id."""
+    rotation_id: uuid.UUID
+    rotation_revision: int
+    secret_id: uuid.UUID
+    secret_revision: int
+    installation_id: int
+    installation_identity: str
+    project_id: uuid.UUID | None
+    name: str
+    kind: str
+    purpose: str
+    old_version: VersionMetadata
+    new_version: VersionMetadata
+    active_version_id: uuid.UUID
+    recipients: tuple[BindingMetadata, ...]
+    action: str
+    effect: str | None
+    claim_id: uuid.UUID | None
+    generation: int
+
+
+class CurrentRecipientVerifier(Protocol):
+    """Trusted sync ORM-only порт, вызываемый под parent/rotation locks.
+
+    Проверяет каждого frozen recipient из proof по текущим authoritative данным:
+    project/node/client/controller, role/digest/incarnation, assignment, grant и
+    его ancestors/owner, без scope override оператора. True — весь точный набор
+    current, включая offline; False/отказ — ни одного нового effect. Никакой сети
+    или ожидания. Порт блокирует authoritative ORM refs до commit (их mutators
+    обязаны брать те же locks); внешний resolver требует preflight + ORM CAS fence.
+    Композиция #639 ещё не подключена; отсутствие порта всегда deny.
+    """
+    def verify_current(self, actor, proof: RotationProof) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -137,7 +181,7 @@ def version_metadata(row):
 def binding_metadata(row):
     return BindingMetadata(row.id, row.secret_id, row.secret.name, row.secret.kind,
         row.node_id, row.client_id, row.controller, row.role, row.digest,
-        row.incarnation, row.grant_id, row.assignment_id)
+        row.incarnation, row.grant_id, row.assignment_id, row.retired_at)
 
 
 def expected(row, revision):
@@ -343,8 +387,32 @@ class SecretStore:
                 grant_id=grant_id, assignment_id=assignment_id)
             binding.clean()
             authorize(self.authorizer, actor, 'deliver_secret', secret, (binding,))
+            current = m.SecretBinding.objects.filter(secret=secret, retired_at__isnull=True,
+                node_id=node_id, client_id=client_id, controller=controller, role=role).first()
+            if current:
+                if any(getattr(current, f) != getattr(binding, f)
+                       for f in ('digest', 'incarnation', 'grant_id', 'assignment_id')):
+                    raise Conflict('current secret binding must be explicitly retired before replacement')
+                # Потерянный ответ bind не создаёт дополнительного обязательного recipient.
+                return binding_metadata(current)
+            no_rotation(secret)
             binding.save()
             audit(actor, 'bind', secret)
+            return binding_metadata(binding)
+
+    @storage_errors
+    def retire_binding(self, actor, binding_id, *, expected_revision):
+        lookup = m.SecretBinding.objects.only('secret_id').get(pk=binding_id)
+        with transaction.atomic():
+            secret = m.Secret.objects.select_for_update().get(pk=lookup.secret_id)
+            binding = m.SecretBinding.objects.get(pk=binding_id)
+            expected(secret, expected_revision)
+            authorize(self.authorizer, actor, 'deliver_secret', secret, (binding,))
+            if binding.retired_at is None:
+                no_rotation(secret)
+                binding.retired_at = timezone.now()
+                binding.save(update_fields=['retired_at'])
+                audit(actor, 'retire_binding', secret)
             return binding_metadata(binding)
 
     def _selection(self, actor):
@@ -353,7 +421,7 @@ class SecretStore:
                 or type(selection.required_names) is not tuple or not selection.binding_ids
                 or len(selection.binding_ids) != len(set(selection.binding_ids))):
             raise Refused('invalid addressed secret selection')
-        bindings = tuple(m.SecretBinding.objects.filter(pk__in=selection.binding_ids)
+        bindings = tuple(m.SecretBinding.objects.filter(pk__in=selection.binding_ids, retired_at__isnull=True)
                          .select_related('secret__installation', 'secret__active_version').order_by('id'))
         if len(bindings) != len(selection.binding_ids):
             raise Refused('addressed secret binding is missing')
@@ -473,9 +541,25 @@ class RotationService:
     означает доказанный покой старого executor, не результат сетевого timeout.
     Эти факты будущий #639/#648 адаптер подаёт через авторизованный порт.
     """
-    def __init__(self, *, authorizer: Authorizer | None = None, delivery_gate: DeliveryGate | None = None):
+    def __init__(self, *, authorizer: Authorizer | None = None, delivery_gate: DeliveryGate | None = None,
+                 current_verifier: CurrentRecipientVerifier | None = None):
         self.authorizer = authorizer if authorizer is not None else Deny()
         self.delivery_gate = delivery_gate if delivery_gate is not None else Deny()
+        self.current_verifier = current_verifier if current_verifier is not None else Deny()
+
+    def _current(self, actor, row, action, effect=None):
+        bindings = self._bindings(row)
+        if not bindings or any(b.retired_at is not None for b in bindings):
+            raise Refused('rotation requires current recipient membership')
+        secret = row.secret
+        proof = RotationProof(row.id, row.revision, secret.id, secret.revision,
+            secret.installation_id, secret.installation.identity, secret.project_id,
+            secret.name, secret.kind, secret.purpose,
+            version_metadata(row.old_version), version_metadata(row.new_version),
+            secret.active_version_id, tuple(binding_metadata(b) for b in bindings),
+            action, effect.value if effect is not None else row.pending, row.claim_id, row.generation)
+        if self.current_verifier.verify_current(actor, proof) is not True:
+            raise Refused('rotation has no current addressed recipient proof')
 
     def _bindings(self, row):
         return tuple(m.SecretBinding.objects.filter(rotationrecipient__rotation=row).order_by('id'))
@@ -540,9 +624,9 @@ class RotationService:
                 if (new.secret_id != secret.id or new.id == secret.active_version_id
                         or new.number != secret.last_number):
                     raise Refused('rotation requires latest staged version of its secret')
-                bindings = tuple(m.SecretBinding.objects.filter(secret=secret).order_by('id'))
-                # Все известные получатели, включая offline. Авторизатор будущего
-                # executor дополнительно проверяет текущую inventory/assignment.
+                bindings = tuple(m.SecretBinding.objects.filter(secret=secret, retired_at__isnull=True).order_by('id'))
+                # Все текущие получатели, включая offline; retired остаются evidence.
+                # Перед каждым новым effect проверяется полное текущее назначение.
                 if set(binding_ids) != {b.id for b in bindings}:
                     raise Refused('rotation recipient set is incomplete or cross-secret')
                 authorize(self.authorizer, actor, 'rotate_proxy_key', secret, bindings)
@@ -559,6 +643,10 @@ class RotationService:
             raise Conflict('secret already has an unresolved rotation or invalid reference')
 
     def _save(self, actor, row, policy, action):
+        if policy.state in (Stage.ACTIVE, Stage.OLD_RESTORED):
+            # Старые receipts не переживают смену назначения как полномочие.
+            # После wait разрешено записать UNKNOWN, но не активировать версию.
+            self._current(actor, row, action)
         for name in ('revision', 'state', 'pending', 'retryable', 'original_failure',
                      'compensation_failure', 'original_reason', 'compensation_reason'):
             value = getattr(policy, name)
@@ -592,11 +680,32 @@ class RotationService:
             row.generation += 1
             if effect is Effect.DELIVER:
                 row.delivery_generation = row.generation
+            self._current(actor, row, 'begin', effect)
             return self._save(actor, row, next_policy, 'rotation_begin')
 
     def _claim(self, row, claim_id):
         if row.pending is None or claim_id is None or row.claim_id != claim_id:
             raise Conflict('rotation claim changed or has no pending intent')
+
+    @storage_errors
+    def verify_effect(self, actor, rotation_id, *, claim_id, generation, expected_revision):
+        """Перепроверить pending dispatch после wait, не выдать долгоживущий permit.
+
+        Executor вызывает непосредственно перед внешним effect и заново после
+        каждого await. Сам вызов не повторяет unknown effect и не меняет intent.
+        """
+        if type(generation) is not int or generation < 1:
+            raise Conflict('invalid rotation execution generation')
+        with transaction.atomic():
+            row = self._locked(actor, rotation_id, expected_revision)
+            self._claim(row, claim_id)
+            effect = Effect(row.pending)
+            state = {Effect.DELIVER: Stage.DELIVERING, Effect.RETIRE_OLD: Stage.RETIRING,
+                     Effect.RESTORE_OLD: Stage.RESTORING_OLD, Effect.REVOKE_NEW: Stage.REVOKING_NEW}[effect]
+            if row.generation != generation or row.state != state.value or row.retryable is not None:
+                raise Conflict('rotation execution requires a current confirmed pending intent')
+            self._current(actor, row, 'execute', effect)
+            return self._metadata(row)
 
     @storage_errors
     def receipt(self, actor, rotation_id, binding_id, *, version_id, claim_id, generation, outcome):
@@ -618,6 +727,7 @@ class RotationService:
             if recipient is None or version_id != expected_version:
                 raise Refused('rotation receipt recipient or version mismatch')
             authorize(self.authorizer, actor, 'deliver_secret', row.secret, (recipient.binding,))
+            self._current(actor, row, 'receipt')
             selected = self.delivery_gate.resolve(actor)
             if (type(selected) is not DeliverySelection or recipient.binding_id not in selected.binding_ids
                     or (row.secret.kind, row.secret.name) not in selected.required_names):
