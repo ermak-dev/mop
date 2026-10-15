@@ -37,7 +37,7 @@ def main():
         from django.conf import settings
         import uuid
         # hermetic гоняет clean/hostile одновременно: у каждого своя БД.
-        settings.DATABASES['default']['TEST'] = {'NAME': 'test_mop_' + uuid.uuid4().hex}
+        settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = 'test_mop_' + uuid.uuid4().hex
         runner = DiscoverRunner(verbosity=2, interactive=False)
         return int(bool(runner.run_tests(['_controller_cases'])))
 

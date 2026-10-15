@@ -311,14 +311,16 @@ def maintenance(action, *, username=None, file=None):
         close_pools()
 
 
-def serve(host, port):
+def validate_asgi_startup():
     from django.conf import settings
-    from django.core.management import call_command
     if settings.BOOTSTRAP['role'] not in {'web', 'gateway'}:
         raise RuntimeError('ASGI requires a web/gateway bootstrap, not maintenance credentials')
-    call_command('check', databases=['default'], stdout=io.StringIO(), verbosity=0)
-    verify_installation()
-    connections.close_all()
+    maintenance('check')
+
+
+def serve(host, port):
+    from django.conf import settings
+    validate_asgi_startup()
     settings.ALLOWED_HOSTS = [host]
     import uvicorn
     uvicorn.run('mop.server.controller.asgi:application', host=host, port=port,
@@ -338,12 +340,9 @@ async def run_worker(stop, runtime):
 
 def worker():
     from django.conf import settings
-    from django.core.management import call_command
     if settings.BOOTSTRAP['role'] != 'worker':
         raise RuntimeError('worker requires its restricted runtime DB principal')
-    call_command('check', databases=['default'], stdout=io.StringIO(), verbosity=0)
-    verify_installation()
-    connections.close_all()
+    maintenance('check')
     async def run():
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()

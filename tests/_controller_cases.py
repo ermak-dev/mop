@@ -253,6 +253,8 @@ class Foundation(TransactionTestCase):
                   'password': config['PASSWORD'], 'dbname': 'postgres'}
         with psycopg.connect(**params, autocommit=True) as provisioner:
             provisioner.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(name)))
+            original_databases = type(self).databases
+            type(self).databases = original_databases | {'restored'}
             try:
                 connections.databases['restored'] = config
                 with tempfile.TemporaryDirectory() as directory:
@@ -271,7 +273,9 @@ class Foundation(TransactionTestCase):
                 connections['restored'].close()
                 if hasattr(connections['restored'], 'close_pool'):
                     connections['restored'].close_pool()
+                del connections['restored']
                 del connections.databases['restored']
+                type(self).databases = original_databases
                 provisioner.execute(sql.SQL('DROP DATABASE {}').format(sql.Identifier(name)))
 
     def test_asgi_lifespan_owns_adapters_and_rejects_unbound_websockets(self):

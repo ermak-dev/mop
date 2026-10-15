@@ -4,7 +4,7 @@ import asyncio
 from channels.routing import ProtocolTypeRouter
 from django.core.asgi import get_asgi_application
 
-from .runtime import Runtime, configure, database_call, verify_installation, close_pools
+from .runtime import Runtime, configure, database_call, validate_asgi_startup, close_pools
 
 configure()
 
@@ -16,7 +16,7 @@ async def unbound_websocket(scope, receive, send):
 
 class ControllerApplication:
     """HTTP/gateway и adapters имеют одного владельца запуска и остановки."""
-    def __init__(self, *, runtime=None, startup=verify_installation, http=None, http_limit=16):
+    def __init__(self, *, runtime=None, startup=validate_asgi_startup, http=None, http_limit=16):
         if not 1 <= http_limit <= 16:
             raise ValueError('HTTP concurrency must be within 16 requests')
         self.runtime = runtime or Runtime()

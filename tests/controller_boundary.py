@@ -59,6 +59,18 @@ class Boundary(unittest.TestCase):
         self.assertNotIn(b'private credential', response.content)
         self.assertEqual(response['Cache-Control'], 'no-store')
 
+    def test_production_asgi_refuses_maintenance_credentials_before_database_access(self):
+        from unittest.mock import patch
+        from django.conf import settings
+        from django.test import override_settings
+        from mop.server.controller.asgi import ControllerApplication
+        with override_settings(BOOTSTRAP=dict(settings.BOOTSTRAP, role='maintenance')):
+            app = ControllerApplication()
+            with patch('mop.server.controller.runtime._schema_ready',
+                       side_effect=AssertionError('database accessed before process role check')):
+                with self.assertRaisesRegex(RuntimeError, 'web/gateway'):
+                    app.startup()
+
     def test_safe_management_refusal_keeps_its_reason(self):
         from unittest.mock import patch
         from django.core.management import CommandError
