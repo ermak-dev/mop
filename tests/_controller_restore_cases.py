@@ -67,6 +67,36 @@ class RestoreSafety(TransactionTestCase):
             verify_installation(using)
         with self.assertRaisesRegex(RuntimeError, 'restore|guard|maintenance'):
             initialize(using)
+        # Совсем новый процесс не наследует Python globals/соединения restorer.
+        import json
+        import subprocess
+        import sys
+        code = '''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from mop.server.controller import runtime
+runtime.configure()
+from django.db import connections
+connections.databases['default']['NAME'] = sys.argv[2]
+results = {}
+try:
+    for name in ('verify_installation', 'initialize'):
+        try:
+            getattr(runtime, name)()
+        except RuntimeError as exc:
+            results[name] = str(exc)
+        else:
+            raise SystemExit(name + ' accepted interrupted restore')
+    print(json.dumps(results))
+finally:
+    runtime.close_pools()
+'''
+        child = subprocess.run([sys.executable, '-I', '-c', code, str(Path(__file__).resolve().parents[1]),
+                                connections[using].settings_dict['NAME']],
+                               capture_output=True, text=True, timeout=20)
+        self.assertEqual(child.returncode, 0, child.stderr or child.stdout)
+        for reason in json.loads(child.stdout).values():
+            self.assertRegex(reason, 'restore|guard|maintenance')
 
     def test_restore_crashes_before_during_and_after_archive_commit_stay_fenced(self):
         tool = archive_tools._tool
@@ -106,6 +136,7 @@ class RestoreSafety(TransactionTestCase):
         tool_verify = runtime._verify_installation_state
         with self.archive() as archive, self.target() as target:
             def crash(using):
+                self.assertFalse(connections[using].in_atomic_block, 'root/schema verification under SQL lock')
                 row = Installation.objects.using(using).get(pk=1)
                 self.assertFalse(row.effects_enabled)
                 self.assertNotEqual(str(row.epoch), self.original['epoch'])
