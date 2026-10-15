@@ -204,6 +204,99 @@ class AccessContracts(TransactionTestCase):
         with self.assertRaises(self.s.Denied):
             self.s.Access().authorize(self.actor, 'catalog.view_project')
 
+    def test_directory_router_first_known_denial_and_mapping_are_authoritative(self):
+        from mop.server.access.directory import DirectoryAccount, Router
+        source = self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=1)
+        self.m.DirectoryConfiguration.objects.create(source=source, url='ldaps://directory.invalid',
+            bind_dn='cn=reader', bind_secret_ref='protected:test', user_base='dc=example')
+        rule = self.m.DirectoryGroupRule.objects.create(source=source, group_dn='cn=nested',
+            project=self.foreign, all_projects=True)
+        rule.permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='view_project'))
+        class Provider:
+            def __init__(self):
+                self.calls = []
+                self.password_ok = True
+                self.groups = ('cn=nested',)
+            def lookup(self, configuration, username):
+                from django.db import connection
+                if connection.in_atomic_block:
+                    raise AssertionError('LDAP I/O inside SQL')
+                self.calls.append(username)
+                return (DirectoryAccount(subject='uid=ldap', username='ldap', groups=self.groups),)
+            def check_password(self, configuration, subject, password):
+                return self.password_ok
+        provider = Provider()
+        router = Router(provider=provider)
+        self.assertIsNone(router.authenticate(None, username='human', password='wrong'))
+        self.assertEqual(provider.calls, [])
+        user = router.authenticate(None, username='ldap', password='test-password-only')
+        self.assertIsNotNone(user)
+        self.assertFalse(user.has_usable_password())
+        self.assertTrue(user.has_perm('catalog.view_project'))
+        self.assertTrue(self.m.AllProjectMembership.objects.filter(user=user, source=source).exists())
+        provider.groups = ()
+        from django.core.exceptions import PermissionDenied
+        with self.assertRaises(PermissionDenied):
+            router.authenticate(None, username='ldap', password='test-password-only')
+        self.assertFalse(self.m.AllProjectMembership.objects.filter(user=user, source=source).exists())
+        self.assertFalse(get_user_model().objects.get(pk=user.pk).has_perm('catalog.view_project'))
+
+    def test_directory_outage_ambiguous_and_unbound_secret_do_not_fall_through(self):
+        from mop.server.access.directory import DirectoryAccount, Router, DirectoryUnavailable
+        from django.core.exceptions import PermissionDenied
+        source = self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=-1)
+        self.m.DirectoryConfiguration.objects.create(source=source, url='ldaps://directory.invalid',
+            bind_dn='cn=reader', bind_secret_ref='protected:test', user_base='dc=example')
+        class Outage:
+            def lookup(self, configuration, username):
+                raise DirectoryUnavailable('directory unavailable')
+        with self.assertRaises(PermissionDenied):
+            Router(provider=Outage()).authenticate(None, username='unknown', password='anything')
+        class Ambiguous:
+            def lookup(self, configuration, username):
+                return (DirectoryAccount(subject='a', username='unknown', groups=()),
+                        DirectoryAccount(subject='b', username='unknown', groups=()))
+        with self.assertRaises(PermissionDenied):
+            Router(provider=Ambiguous()).authenticate(None, username='unknown', password='anything')
+        with self.assertRaises(PermissionDenied):
+            Router().authenticate(None, username='unknown', password='anything')
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_browser_flow_csrf_and_password_token_rate_limit(self):
+        client = Client(enforce_csrf_checks=True)
+        response = client.get('/api/v1/auth/csrf', secure=True)
+        self.assertEqual(response.status_code, 200)
+        csrf = client.cookies['csrftoken'].value
+        response = client.post('/api/v1/auth/login',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True, HTTP_X_CSRFTOKEN=csrf)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(client.cookies['sessionid']['secure'])
+        self.assertTrue(client.cookies['sessionid']['httponly'])
+        response = client.post('/api/v1/auth/token', secure=True)
+        self.assertEqual(response.status_code, 403)
+        response = client.post('/api/v1/auth/token', secure=True,
+            HTTP_X_CSRFTOKEN=client.cookies['csrftoken'].value)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['token'], self.token)
+        response = client.post('/api/v1/auth/logout', secure=True,
+            HTTP_X_CSRFTOKEN=client.cookies['csrftoken'].value)
+        self.assertEqual(response.status_code, 200)
+        password_client = Client()
+        for _ in range(12):
+            response = password_client.post('/api/v1/auth/token',
+                {'username': 'unknown', 'password': 'not-the-password'}, secure=True)
+        self.assertEqual(response.status_code, 429)
+        self.assertNotIn('not-the-password', response.content.decode())
+
+    def test_read_after_wait_rechecks_scope_and_revoke(self):
+        self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        self.m.ProjectMembership.objects.filter(user=self.user).delete()
+        with self.assertRaises(self.s.NotVisible):
+            self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
+        self.s.revoke_token(self.actor)
+        with self.assertRaises(self.s.Denied):
+            self.s.current_actor(self.actor)
+
     def test_token_admin_is_not_registered(self):
         from django.contrib import admin
         from rest_framework.authtoken.models import Token, TokenProxy
