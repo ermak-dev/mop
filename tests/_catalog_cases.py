@@ -299,6 +299,10 @@ class CatalogCases(TransactionTestCase):
         finally:
             connections.close_all()
 
+    def test_protection_port_rechecks_authority_after_wait(self):
+        from catalog_schema import protection_reauthorizes_after_external_wait
+        protection_reauthorizes_after_external_wait()
+
     def test_catalogue_has_no_old_store_or_late_domain_imports(self):
         import ast
         from pathlib import Path
