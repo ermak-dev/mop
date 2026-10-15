@@ -559,7 +559,9 @@ class GatewayExecution(TransactionTestCase):
         self.assertNotIn('only-encrypted', repr(audit))
         missing = SecretCredentialSource(SecretStore(provider=crypto,
             controller_gate=ControllerSecretGate(uuid.uuid4())))
-        self.assertEqual(self.run_gateway(source=missing).status, 503)
+        missing_reply = self.run_gateway(source=missing)
+        self.assertEqual(missing_reply.status, 503)
+        self.assertIn(b'proxy management secret is missing', missing_reply.body)
 
     def test_service_and_grant_never_proxy_even_with_staff_superuser_flags(self):
         from mop.server.access.models import Principal

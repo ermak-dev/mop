@@ -2,6 +2,7 @@
 from django.contrib.auth import get_user_model
 from mop.server.access.context import PrincipalKind
 from mop.server.access.services import current_actor, session_context, Denied
+from mop.server.secrets.services import Refused
 from .values import Credential
 
 
@@ -23,7 +24,7 @@ class HumanAuthority:
 class CredentialSource:
     """Без root composition нет discovery файлов, env, global current_key."""
     def get(self, actor):
-        raise PermissionError('proxy management credential source is not bound')
+        raise Refused('proxy management credential source is not bound')
 
     def current(self, actor, credential):
         return False
@@ -49,9 +50,9 @@ class SecretCredentialSource(CredentialSource):
         try:
             key = value.value.decode('ascii')
         except UnicodeDecodeError:
-            raise ValueError('proxy management credential is malformed') from None
+            raise Refused('proxy management credential is malformed') from None
         if not 1 <= len(key) <= 4096 or any(ord(char) < 33 or ord(char) > 126 for char in key):
-            raise ValueError('proxy management credential is malformed')
+            raise Refused('proxy management credential is malformed')
         return Credential(value.version_id, key)
 
     def current(self, actor, credential):

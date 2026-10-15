@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from django.db import DatabaseError
 from mop.server.access.services import Denied
 from mop.server.controller.runtime import Backpressure
+from mop.server.secrets.services import Conflict, Refused, StorageUnavailable
 from mop.server.management_policy import guard_management_write, redact_management_read, private_material, REDIRECT_MAX
 from .authority import CredentialSource, HumanAuthority
 from .breaker import Breaker
@@ -29,7 +30,7 @@ class Gateway:
     def _authorize(self, actor, credential=None):
         self.authority.authorize(actor)
         if credential is not None and not self.source.current(actor, credential):
-            raise ValueError('proxy management credential changed')
+            raise Conflict('proxy management credential changed')
 
     def _claim(self, actor, credential, write):
         self._authorize(actor, credential)
@@ -38,12 +39,15 @@ class Gateway:
     async def request(self, actor, method, target, body, headers, *, panel=False):
         try:
             return await self.runtime.effect(self._request, actor, method, target, body, headers, panel=panel)
-        except Denied:
-            return refusal(403, 'proxy management permission required')
+        except Denied as exc:
+            return refusal(403, str(exc))
         except Backpressure:
             return refusal(429, 'proxy management capacity exhausted')
         except DatabaseError:
             return refusal(503, 'proxy management authority unavailable')
+        except (Conflict, Refused, StorageUnavailable) as exc:
+            # Безопасные причины public SecretStore не санитизируются повторно.
+            return refusal(503, str(exc))
         except (PermissionError, ValueError):
             return refusal(503, 'proxy management credential unavailable')
 
