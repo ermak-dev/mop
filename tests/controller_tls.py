@@ -17,6 +17,9 @@ from mop.server.controller.bootstrap import load
 
 # BUG: bootstrap доверяет любым непустым sslrootcert/sslcert/sslkey (#632).
 # HYPOTHESIS: проверка типа строки не защищает от подмены trust/key через путь.
+# SOLUTION: единая проверка dirfd/O_NOFOLLOW, владельцев и прав до передачи libpq.
+# RESULT: небезопасные ссылки отвергнуты; публичный доверенный CA разрешён.
+# STATUS: FIXED — see #632.
 class ProtectedTLS(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -114,6 +117,31 @@ class ProtectedTLS(unittest.TestCase):
             self.refused()
         with patch('mop.server.controller.bootstrap.os.fstat', owner(0)):
             self.load()
+
+    def test_sticky_trusted_directory_safe_but_untrusted_directory_owner_refused(self):
+        ca = self.file('sticky/ca.pem', 0o644)
+        ca.parent.chmod(0o1777)
+        self.options['sslrootcert'] = str(ca)
+        self.load()
+        real_fstat = os.fstat
+        inode = ca.parent.stat().st_ino
+
+        def fstat(fd):
+            info = real_fstat(fd)
+            if info.st_ino == inode:
+                values = list(info)
+                values[4] = os.geteuid() + 10001
+                return os.stat_result(values)
+            return info
+
+        with patch('mop.server.controller.bootstrap.os.fstat', fstat):
+            self.refused()
+
+    def test_fifo_tls_reference_refused_without_blocking(self):
+        fifo = self.directory / 'fifo.pem'
+        os.mkfifo(fifo, 0o600)
+        self.options['sslrootcert'] = str(fifo)
+        self.refused()
 
     def test_verify_full_requires_explicit_trust_not_ambient_libpq_default(self):
         del self.options['sslrootcert']

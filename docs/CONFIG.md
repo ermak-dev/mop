@@ -151,8 +151,24 @@ The encryption root contains at least 32 bytes. The separate Django signing key
 contains at least 50 ASCII bytes of cryptographically random material; Django
 needs it before DB-backed authentication starts. Do not use the illustrative
 strings above as credentials. The optional TLS options are `sslcert` and
-`sslkey`; backend-specific connection options beyond this finite trust schema
-are selected by the foundation, not passed through arbitrary bootstrap keys.
+`sslkey`, supplied together when selecting a client identity. Every supplied TLS
+reference must be an explicit absolute regular file without symlinks, owned by
+root or the process account, with no group/other write permission. Public CA and
+certificate files may be `0644`; a private client key must be `0600` or `0400`.
+Every ancestor must also be owned by root or the process account and protected
+against untrusted replacement. A trusted sticky directory (such as `/tmp`)
+may contain a trusted-owned descendant; an untrusted owner or a non-sticky
+writable directory is refused. Bootstrap/root/Django key files retain their
+stricter private-directory and process-owner requirements.
+
+`verify-full` requires an explicit protected `sslrootcert`, never ambient
+`~/.postgresql/root.crt` discovery. The libpq `system` sentinel is not supported:
+this foundation accepts validated filesystem references, not version-dependent
+system-trust selectors. Validation does not parse PEM contents or copy trust
+material; provision valid certificates and keep the protected paths stable for
+runtime and native backup/restore consumers. Backend-specific connection options
+beyond this finite trust schema are selected by the foundation, not passed through
+arbitrary bootstrap keys.
 `sslmode=disable` is available for explicitly isolated fixtures only; production
 provisions verified TLS. Missing or malformed inputs fail, never select `.env`,
 old profiles, a local database file or adjacent credentials.
