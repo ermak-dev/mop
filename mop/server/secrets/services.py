@@ -83,6 +83,7 @@ class SecretMetadata:
     active_version_id: uuid.UUID | None
     last_number: int
     revoked: bool
+    size: int | None
 
 
 @dataclass(frozen=True)
@@ -121,7 +122,12 @@ class AddressedSecret:
 
 
 def metadata(row):
-    return SecretMetadata(*(getattr(row, f) for f in SecretMetadata.__dataclass_fields__))
+    version = row.active_version if row.active_version_id else None
+    if version and version.secret_id != row.id:
+        raise Refused('secret metadata version binding mismatch')
+    return SecretMetadata(row.id, row.project_id, row.name, row.kind, row.purpose,
+        row.revision, row.active_version_id, row.last_number, row.revoked,
+        version.size if version else None)
 
 
 def version_metadata(row):
@@ -594,6 +600,10 @@ class RotationService:
     def receipt(self, actor, rotation_id, binding_id, *, version_id, claim_id, generation, outcome):
         if type(outcome) is not Outcome or type(generation) is not int or generation < 1:
             raise ValueError('invalid rotation receipt')
+        if outcome is Outcome.UNKNOWN:
+            # Unknown — durable checkpoint record(UNKNOWN), а не immutable
+            # квитанция, которая запретит последующий подтверждённый readback.
+            raise Refused('unconfirmed delivery requires rotation reconciliation')
         with transaction.atomic():
             row = self._locked(actor, rotation_id)
             self._claim(row, claim_id)
@@ -640,6 +650,12 @@ class RotationService:
             self._claim(row, claim_id)
             policy = self._policy(row)
             receipts = self._receipts(row) if policy.pending is Effect.DELIVER and outcome in (Observation.APPLIED, Observation.PARTIAL) else frozenset()
+            if outcome is Observation.ABSENT:
+                evidence = (self._receipts(row) if policy.pending is Effect.DELIVER
+                    else self._receipts(row, generation=row.generation, version_id=row.old_version_id)
+                    if policy.pending is Effect.RESTORE_OLD else frozenset())
+                if evidence:
+                    raise Refused('absence contradicts confirmed addressed delivery; reconcile partial effect')
             if (outcome is Observation.APPLIED and policy.pending is Effect.RESTORE_OLD
                     and self._receipts(row, generation=row.generation, version_id=row.old_version_id) != policy.required):
                 raise Refused('old credential restoration requires addressed receipts')

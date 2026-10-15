@@ -176,6 +176,21 @@ def enum_field(enum, *, null=False, maximum=32):
     return models.CharField(max_length=maximum, choices=[(x.value, x.value) for x in enum], null=null)
 
 
+def rotation_enum_constraints():
+    result = []
+    for field, enum in (('pending', Effect), ('retryable', Effect),
+                        ('original_failure', Effect), ('compensation_failure', Effect),
+                        ('original_reason', FailureReason), ('compensation_reason', FailureReason)):
+        result.append(models.CheckConstraint(condition=(Q(**{field + '__isnull': True})
+            | Q(**{field + '__in': tuple(item.value for item in enum)})), name='rotation_' + field + '_enum'))
+    for prefix in ('original', 'compensation'):
+        result.append(models.CheckConstraint(condition=(
+            Q(**{prefix + '_failure__isnull': True, prefix + '_reason__isnull': True})
+            | Q(**{prefix + '_failure__isnull': False, prefix + '_reason__isnull': False})),
+            name='rotation_' + prefix + '_reason_pair'))
+    return result
+
+
 class CredentialRotation(Record):
     secret = models.ForeignKey(Secret, on_delete=models.PROTECT)
     old_version = models.ForeignKey(SecretVersion, on_delete=models.PROTECT, related_name='+')
@@ -214,7 +229,7 @@ class CredentialRotation(Record):
             models.CheckConstraint(condition=Q(state__in=tuple(s.value for s in Stage)), name='rotation_known_state'),
             models.CheckConstraint(condition=~Q(old_version=models.F('new_version')), name='rotation_distinct_versions'),
             models.CheckConstraint(condition=Q(resolved=False) | Q(state__in=('retired', 'compensated')), name='rotation_resolution_terminal'),
-        ]
+        ] + rotation_enum_constraints()
 
 
 class RotationRecipient(Immutable):
