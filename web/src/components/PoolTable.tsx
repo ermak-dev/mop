@@ -14,10 +14,10 @@ import { EmptyNote, SectionTitle } from "./Section";
 import { align, TableHead } from "./TableHead";
 
 export const COLS = {
-  name: { label: "папет" }, role: { label: "Role" }, node: { label: "узел" },
-  state: { label: "статус" }, branch: { label: "ветка" },
-  owner: { label: "пользователь" }, llm: { label: "модель" },
-  disk: { label: "место", right: true },
+  name: { label: "папет", width: 168 }, role: { label: "Role", width: 120 }, node: { label: "узел", width: 88 },
+  state: { label: "статус", width: 200 }, branch: { label: "ветка", width: 200 },
+  owner: { label: "пользователь", width: 150 }, llm: { label: "модель", width: 150 },
+  disk: { label: "место", right: true, width: 100 },
 };
 
 export function projectNote(counts: Counts): string {
@@ -63,18 +63,18 @@ function Row({ p, role, onOpen, selected }: {
         onOpen(p.name);
       } : undefined}>
       <Table.Td>
-        {/* точка корзины перед именем, в одну строку: узкая колонка иначе
-            переносила имя под точку. Имя -- кнопка при наличии карточки
+        {/* Точка остаётся рядом с именем; длинное имя переносится внутри
+            фиксированной колонки, не расширяя её (#666). Имя -- кнопка при наличии карточки
             (#463): открытие доступно и с клавиатуры (Tab + Enter). */}
         <Group gap={6} wrap="nowrap">
           <Badge size="xs" circle color={color} />
           {onOpen ? (
             <Text component="button" span size="sm" title="карточка папета"
-                  style={{ whiteSpace: "nowrap", background: "none", border: 0,
+                  style={{ minWidth: 0, overflowWrap: "anywhere", background: "none", border: 0,
                            padding: 0, cursor: "pointer", textAlign: "left", font: "inherit" }}
                   onClick={event => { if (event.detail === 0 || !window.getSelection()?.toString()) onOpen(p.name); }}>{p.name}</Text>
           ) : (
-            <Text span size="sm" style={{ whiteSpace: "nowrap" }}>{p.name}</Text>
+            <Text span size="sm" style={{ minWidth: 0, overflowWrap: "anywhere" }}>{p.name}</Text>
           )}
         </Group>
       </Table.Td>
@@ -162,8 +162,9 @@ export function PoolTable({ projects, sessions, masters, onOpen, session, select
           {origins(group).map((origin) => (
             <Text key={origin} size="sm" c="dimmed"><Code>{origin}</Code></Text>
           ))}
-          <Table.ScrollContainer minWidth={900}>
-            <Table striped highlightOnHover withTableBorder>
+          <Table.ScrollContainer minWidth={Object.values(COLS).reduce((sum, col) => sum + col.width, 0)}>
+            <Table striped highlightOnHover withTableBorder style={{ tableLayout: 'fixed', overflowWrap: 'anywhere' }}>
+              <colgroup>{Object.entries(COLS).map(([key, col]) => <col key={key} style={{ width: col.width }} />)}</colgroup>
               <TableHead cols={Object.values(COLS)} />
               <Table.Tbody>{group.map((entry) => entry.source === "local"
                 ? <LocalRow key={entry.id} entry={entry} />

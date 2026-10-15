@@ -23,6 +23,21 @@ const PROJECTS: Project[] = [{
   ],
 }];
 
+// HYPOTHESIS: авторазмер таблицы отдаёт место длинному имени и сдвигает первые колонки.
+// SOLUTION: фиксированные колонки; первые три занимают 376px + рамку 2px.
+// RESULT: проверка упала без фиксированной раскладки, после colgroup все 24 прошли.
+// STATUS: FIXED — see #666
+test('#666 the first three columns fit the default roster, later columns remain available', () => {
+  renderUi(<PoolTable projects={PROJECTS} />);
+  const table = screen.getByRole('table');
+  expect(table).toHaveStyle({ tableLayout: 'fixed' });
+  const columns = [...table.querySelectorAll('col')];
+  expect(columns).toHaveLength(Object.keys(COLS).length);
+  expect(columns.slice(0, 3).map(col => col.style.width)).toEqual(['168px', '120px', '88px']);
+  expectHead(Object.values(COLS));
+  expect(within(screen.getAllByRole('row')[1]).getAllByRole('cell')).toHaveLength(8);
+});
+
 test("projectNote names the buckets in order", () => {
   expect(projectNote(PROJECTS[0].counts)).toBe("1 свободен, 1 занят");
   expect(projectNote({ puppets: 0, free: 0, busy: 0, sick: 0, silent: 0, down: 0 })).toBe("");

@@ -1,6 +1,12 @@
 .hybrid-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
-.hybrid-navigation { flex-shrink: 0; border-bottom: 1px solid var(--mantine-color-default-border); }
-.hybrid-navigation .mantine-Tabs-list { border: 0; }
+.hybrid-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; flex-shrink: 0; min-width: 0; padding: 4px 8px; border-bottom: 1px solid var(--mantine-color-default-border); }
+.hybrid-navigation .mantine-Tabs-list { border: 0; flex-wrap: nowrap; flex-shrink: 0; }
+.hybrid-navigation .mantine-Tabs-tab { padding: 8px; font-size: var(--mantine-font-size-xs); }
+.hybrid-navigation .hybrid-target { flex: 1 1 120px; min-width: 0; overflow-wrap: anywhere; font-size: var(--mantine-font-size-sm); line-height: 1.3; }
+.hybrid-actions { display: flex; align-items: center; flex-shrink: 0; }
+.hybrid-metadata { min-width: 0; }
+.hybrid-metadata .mantine-Checkbox-label { padding-inline-start: 6px; overflow-wrap: anywhere; }
+.hybrid-navigation > .mantine-ActionIcon-root { flex-shrink: 0; }
 .hybrid-panes { flex: 1; min-height: 0; min-width: 0; }
 .hybrid-chat-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 .hybrid-history { flex: 1; min-height: 0; overflow: auto; padding: 16px; }

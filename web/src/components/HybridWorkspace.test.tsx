@@ -6,6 +6,7 @@ import { act, createEvent, fireEvent, screen, waitFor } from '@testing-library/r
 import { afterEach, expect, test, vi } from 'vitest';
 const { readFileSync } = await vi.importActual<{ readFileSync: (path: string, encoding: string) => string }>('node:fs');
 import { renderUi } from '../test-utils';
+import { MantineProvider } from '@mantine/core';
 import { HybridWorkspace } from './HybridWorkspace';
 const terminals = vi.hoisted(() => [] as Array<{ options: Record<string, unknown>; dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>);
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
@@ -88,12 +89,58 @@ test('#661 metadata is opt-in and can be hidden again without hiding conversatio
   expect(screen.getByText('hello')).toBeVisible();
 });
 
-test('#661 puppet role is only displayed with metadata enabled', async () => {
+// HYPOTHESIS: ключ всей панели сбрасывает выбор вида вместе с приватной сессией.
+// SOLUTION: настройки остаются снаружи, приватное тело получает ключ цели и зрителя.
+// RESULT: до реализации новые проверки падают на потере вида и утечке черновика.
+// STATUS: FIXED — see #666
+test('#666 metadata controls chat only; role remains visible independently', async () => {
   wire(); renderUi(<HybridWorkspace session={admin} target="p" role="builder" />);
   await screen.findByText('hello');
+  expect(screen.getByText('p (builder)')).toBeVisible();
+  const checkbox = screen.getByRole('checkbox', { name: 'Отображать метаданные' });
+  fireEvent.click(checkbox);
   expect(screen.queryByText('Role: builder')).toBeNull();
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  expect(checkbox).toBeVisible();
+  expect(await screen.findByRole('region', { name: 'Терминал: управление' })).toBeVisible();
+  fireEvent.click(checkbox);
+  expect(screen.getByRole('region', { name: 'Терминал: управление' })).toBeVisible();
+  fireEvent.click(checkbox);
+  expect(screen.getByText('p (builder)')).toBeVisible();
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  expect(checkbox).toBeChecked();
+});
+
+test('#666 switching targets preserves both tab directions and metadata, not history/draft/writer', async () => {
+  const api = wire(); const view = open(); await ready();
   fireEvent.click(screen.getByRole('checkbox', { name: 'Отображать метаданные' }));
-  expect(screen.getByText('Role: builder')).toBeVisible();
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  api.setPage({ ...history, records: [{ type: 'user', uuid: 'new', message: { content: 'new private history' } }] });
+  view.rerender(<MantineProvider><HybridWorkspace session={admin} target="q" /></MantineProvider>);
+  expect(screen.getByRole('tab', { name: 'Терминал' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.queryByText('hello')).toBeNull();
+  await waitFor(() => expect(api.posts.filter(([url]) => url === '/api/puppet/p/term/writer/close')).toHaveLength(1));
+  expect(terminals[0].dispose).toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  expect(input()).toHaveValue('');
+  expect(screen.getByRole('checkbox', { name: 'Отображать метаданные' })).toBeChecked();
+  expect(await screen.findByText('new private history')).toBeVisible();
+  fireEvent.change(input(), { target: { value: 'q draft' } });
+  view.rerender(<MantineProvider><HybridWorkspace session={admin} target="p" /></MantineProvider>);
+  expect(screen.getByRole('tab', { name: 'Чат' })).toHaveAttribute('aria-selected', 'true');
+  expect(input()).toHaveValue('');
+  expect(screen.getByRole('checkbox', { name: 'Отображать метаданные' })).toBeChecked();
+});
+
+test.each([
+  { session: { login: 'other', role: 'admin' as const }, target: 'p' },
+  { session: { login: 'anton', role: 'user' as const }, target: 'p' },
+])('#666 changing viewer identity clears private state: %j', async next => {
+  const api = wire(); const view = open(); await ready();
+  view.rerender(<MantineProvider><HybridWorkspace {...next} /></MantineProvider>);
+  expect(input()).toHaveValue('');
+  expect(screen.queryByText('hello')).toBeNull();
+  await waitFor(() => expect(api.posts.filter(([url]) => url.endsWith('/close'))).toHaveLength(1));
 });
 
 test('#661 Enter sends CLI input, Ctrl+Enter inserts a newline at the selection, IME never sends', async () => {
