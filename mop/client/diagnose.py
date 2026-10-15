@@ -1,8 +1,9 @@
 """Офлайн-сводка ВЫБРАННОГО клиентского сервера (#536): библиотека.
 
 Ни сети, ни вопросов, ни записей: что уже лежит у человека, то и названо.
-Статусы -- классификация creds.snapshot (#533): human -> complete, machine
--> machine, остаток пары -> partial, пусто -> empty. Отказ решателя
+Статусы -- классификация creds.snapshot (#533, #662): human -> complete,
+machine -> machine, каталог без целого connection.json -> empty (пара
+operator.json+client.json про человека больше не вход). Отказ решателя
 (broken/conflict) -- тоже отказ сводки: замалчивать порчу значило бы
 «всё в порядке» про каталог, в который потом не пустят. Секреты (пароли,
 proxy-ключи) в сводку не попадают: слой -- статус и метаданные, не содержимое.
@@ -18,13 +19,14 @@ joined-каталог, либо отказ про неоднозначность
 (status из нового каталога, format из старого). Схема -- версия
 ВАЛИДИРОВАННОГО connection.json (у решателя она одна: CONNECTION_
 VERSION), у остальных форматов файла с версией нет и схема -- None.
-Формат называет ПОЛОВИНЫ по отдельности: машинный operator.json --
+Формат называет лежащие половины по отдельности: машинный operator.json --
 "service operator" (машинность называет сам снимок -- второго чтения
-содержимого нет), человеческая половина -- "legacy operator"/"legacy
-client", целая прежняя пара -- "legacy pair", connection.json --
-"connection". Второго парсера нет: presence-проба тех же имён, что знает
-решатель. Значения полей -- белый список: новый ключ согласуется, а не
-приезжает с данными (#533).
+содержимого нет), клиентский порт машинного входа -- "service operator +
+client", человеческие остатки прежней пары -- "legacy operator"/"legacy
+client" (входом они больше не являются, но факт их лежания честно
+называется), connection.json -- "connection". Второго парсера нет:
+presence-проба тех же имён, что знает решатель. Значения полей --
+белый список: новый ключ согласуется, а не приезжает с данными (#533).
 """
 import os
 
@@ -66,10 +68,11 @@ def _format(kind, files):
     """Формат ЛЕЖАЩЕГО профиля по пробам и классификации СНИМКА.
 
     Машинность называет сам снимок (kind == machine) -- второго чтения
-    содержимого нет; человеческие половины различаются presence-пробой:
-    целая прежняя пара -- "legacy pair", operator.json без client.json --
-    "legacy operator", client.json без operator.json -- "legacy client",
-    connection.json -- "connection"."""
+    содержимого нет; человеческие остатки прежней пары различаются
+    presence-пробой: operator.json без client.json -- "legacy operator",
+    client.json без operator.json -- "legacy client", обе половины --
+    "legacy pair" (входом это больше не является, #662, но лежание
+    называется честно), connection.json -- "connection"."""
     conn, op, client = (files[creds.CONNECTION_FILE], files[creds.OPERATOR_FILE],
                         files[creds.CLIENT_FILE])
     if conn:
@@ -87,13 +90,14 @@ def report():
     """Сводка выбранного сервера. -> {server, source, directory, status,
     schema, format}.
 
-    status: complete | partial | empty | machine. broken/conflict/unreadable
+    status: complete | empty | machine. Каталог с остатками прежней пары
+    без целого connection.json -- empty (#662): broken/conflict/unreadable
     каталог -- исключение (ProfileError от снимка), не строка: отказ
     передаётся вызывающему как отказ, а не печатается как один из вариантов
     «всё в порядке». schema -- только у валидированного connection.json
-    (версия решателя), у остальных -- None: легаси-пара не выдаёт себя за
-    схему v1. Формат и статус -- ОДНА генерация каталога: пробы до/после
-    снимка, расхождение -- отказ, не смесь поколений."""
+    (версия решателя), у остальных -- None: прежние половины не выдают
+    себя за схему v1. Формат и статус -- ОДНА генерация каталога: пробы
+    до/после снимка, расхождение -- отказ, не смесь поколений."""
     host, source = _select()
     directory = creds.server_dir(host)
     before = _present(directory)
@@ -107,7 +111,7 @@ def report():
                            f"diagnosing: run mop diagnose again")
     fmt = _format(kind, after)
     status = {"human": "complete", "machine": "machine",
-              "partial": "partial", None: "empty"}[kind]
+              None: "empty"}[kind]
     schema = creds.CONNECTION_VERSION if fmt == "connection" else None
     return {"server": host, "source": source, "directory": directory,
             "status": status, "schema": schema, "format": fmt}

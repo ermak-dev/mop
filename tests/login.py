@@ -55,9 +55,12 @@ def check_complete_395(c):
     c.expect("#405 proxy settings do not need a second prompt", asked, [])
 
     # На старом входе шина уже работает: донастроить только прокси, пароль
-    # оператора и TLS-пин при отказе нового ключа не трогать.
+    # оператора и TLS-пин при отказе нового ключа не трогать. #662: старый
+    # вход -- это connection.json; каталог с одной половиной прежней пары
+    # входом не считается.
     old = os.path.join(root, "servers", "old.test")
-    creds.write_operator(old, "alice", "old-bus")
+    creds.write_connection(old, "alice", "old-bus", "443",
+                           "https://old.test/llm", "old-key")
     with patched(join, ask=lambda *a, **k: c.fail("#405 proxy must not prompt"),
                  _still_valid=lambda *a: True,
                  _login=lambda *a: c.fail("#395 valid bus login must not ask for password"),
@@ -69,11 +72,10 @@ def check_complete_395(c):
             c.fail("#395 wrong proxy key must refuse")
         except RuntimeError:
             pass
-    c.expect("#395 failed proxy verification leaves old bus login", creds.operator(old),
-             {"user": "alice", "password": "old-bus"})
-    c.check("#395 failed proxy verification leaves no new profile",
-            not os.path.exists(os.path.join(old, creds.CONNECTION_FILE)),
-            os.listdir(old))
+    c.expect("#395 failed proxy verification keeps the old profile whole",
+             creds.human_profile(old),
+             {"user": "alice", "password": "old-bus", "https_port": "443",
+              "proxy_url": "https://old.test/llm", "proxy_key": "old-key"})
 
     # При повторном входе всё проверяется, но не спрашивается заново.
     with patched(join, ask=lambda *a, **k: c.fail("#395 complete join must not prompt"),
@@ -274,8 +276,11 @@ def check_login_port_and_server_427(c):
         c.expect("#427 empty explicit port refuses", run(["--server", "srv.test", "alice",
                                                           "--https-port="]), 1)
         c.expect("#427 empty port never connects", calls, [])
-        creds.write_client(os.path.join(root, "srv.test"), "7443",
-                           "https://srv.test:7443/llm", "fake-key")
+        # Сохранённый порт подсказывает целый профиль (#662: половина
+        # client.json подсказкой больше не служит -- кладём вход целиком).
+        creds.write_connection(os.path.join(root, "srv.test"),
+                               "alice", "bus-x", "7443",
+                               "https://srv.test:7443/llm", "fake-key")
         calls.clear()
         c.expect("#427 saved port succeeds", run(["--server", "srv.test", "alice"]), 0)
         c.expect("#427 saved port reused", calls[-1][3] if calls else None, "7443")
@@ -286,8 +291,9 @@ def check_login_port_and_server_427(c):
         calls.clear()
         c.expect("#427 one joined server chosen", run(["alice"]), 0)
         c.expect("#427 one joined server address", calls[-1][0] if calls else None, "srv.test")
-        creds.write_client(os.path.join(root, "other.test"), "443",
-                           "https://other.test/llm", "fake-key")
+        creds.write_connection(os.path.join(root, "other.test"),
+                               "bob", "bus-y", "443",
+                               "https://other.test/llm", "fake-key")
         calls.clear()
         c.expect("#427 two joined servers refuse", run(["alice"]), 1)
         c.expect("#427 ambiguity never connects", calls, [])

@@ -445,21 +445,32 @@ def check_human_login_549(c):
     c.expect("#549 a whole human login returns the full profile",
              got, {"user": "alice", "password": "bus-pw", "https_port": "8443",
                    "proxy_url": "https://srv.test:8443/llm", "proxy_key": "key-alice"})
-    # Прежняя пара -- тоже целый вход: helper не выбирает формат.
+    # Прежняя пара про человека больше не вход (#662): ремонт один --
+    # полный `mop login`, и он перезаписывает каталог целиком.
     pair = os.path.join(root, "pair.test")
     creds.write_operator(pair, "bob", "bus-pw")
     creds.write_client(pair, "443", "https://pair.test/llm", "key-bob")
-    c.expect("#549 the legacy pair is a whole human login too",
-             creds.human_login(pair, "pair.test")["user"], "bob")
+    pair_error = None
+    try:
+        creds.human_login(pair, "pair.test")
+        c.fail("#662 the legacy pair is no login", "no refusal")
+    except RuntimeError as e:
+        pair_error = str(e)
+        c.check("#662 the legacy pair refuses with the no-login repair",
+                "no login" in pair_error and "mop login" in pair_error, pair_error)
+    c.check("#662 the legacy pair leaks no secrets",
+            not any(s in pair_error for s in ("bus-pw", "key-bob")), pair_error)
 
     # Каждый отказ -- свой текст, как у потребителей до #549.
     cases = []
     machine = os.path.join(root, "machine.test")
     creds.write_operator(machine, creds.SERVICE, "bus-pw")
     cases.append(("machine", machine, "no human login for machine.test"))
+    # #662: половины прежней пары -- тоже «нет входа», не «неполный»: пара
+    # больше не читается, ремонт один -- полный вход.
     half = os.path.join(root, "half.test")
     creds.write_client(half, "443", "https://half.test/llm", "key-half")
-    cases.append(("partial", half, "incomplete login for half.test"))
+    cases.append(("empty", half, "no login for half.test"))
     cases.append(("empty", os.path.join(root, "empty.test"), "no login for empty.test"))
     for kind, directory, want in cases:
         try:

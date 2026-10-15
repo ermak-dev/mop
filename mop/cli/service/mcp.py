@@ -8,10 +8,11 @@ settings; the available tools depend on the session's access.
 #   * кред оператора + MOP_PROJECT -> мастер проекта: канал и управление, но
 #     только своим срезом пула (`mop master` ставит проект);
 #   * кред оператора без проекта -> оператор: то же самое, но по всему пулу;
-#   * кред `puppet-<проект>` -> узел: один канал, ростер -- опросом самой шины;
 #   * принципал роли `grant-<id>` (#585) -> папет с ролью: инструменты -- по
 #     capabilities его бандла, адрес -- имя джоба. Каталог -- не граница
-#     прав: её держат сервер и узел по резолверу.
+#     прав: её держат сервер и узел по резолверу;
+#   * папетные креды проекта и отсутствие кредов -> неподдерживаемый
+#     говорящий (#662): инструментов нет, подписок нет, fail closed.
 #
 # Управление -- сами командлеты: командлет с объявлением `MCP = {...}`
 # становится инструментом, своей реализации операций здесь нет.
@@ -104,17 +105,26 @@ def is_master():
 MASTER = is_master()
 # Принципал роли -- не мастер (#585): grant-<id> не puppet-<проект>, и
 # прежнее `not is_puppet` выдавало ему весь каталог и owner человеком.
-KIND = channel.actor(channel.bus_user())
+# Неподдерживаемый говорящий (#662: папетные креды проекта, нет кредов) --
+# None: сервер поднимается, но без инструментов и подписок, fail closed.
+def _kind_of(user):
+    try:
+        return channel.actor(user)
+    except ValueError:
+        return None
+
+
+KIND = _kind_of(channel.bus_user())
 BUNDLE, NO_BUNDLE = channel.own_bundle() if KIND == channel.GRANT else (None, None)
 CAPS = BUNDLE.manifest.capabilities if BUNDLE else None
 
 
 def kind():
-    """Вид говорящего этого процесса. MASTER -- прежний шов профиля
-    человека/узла; роль -- только по кредам."""
+    """Вид говорящего этого процесса: человек или принципал роли (#662:
+    легаси-узел -- не вид, каталог инструментов пуст)."""
     if KIND == channel.GRANT:
         return channel.GRANT
-    return channel.HUMAN if MASTER else channel.LEGACY
+    return channel.HUMAN if MASTER else None
 
 
 def master_id(user):
@@ -198,8 +208,9 @@ def me():
 
 def node_of(name):
     """Узел папета: у человека и роли -- глаголом alloc сервиса кластера
-    (роль -- если он ей выдан), у узла -- опросом агентов."""
-    return channel.puppet_node(name, kind() != channel.LEGACY)
+    (роль -- если он ей выдан; #662: легаси-опрос агентов ушел вместе с
+    легаси-говорящим)."""
+    return channel.puppet_node(name, True)
 
 
 def on_inbox(m):
@@ -343,7 +354,6 @@ def send(to: str, message: str, priority: str = "next",
             # аренды не берут (channel.send_fields).
             v = channel.send_to_puppet(
                 node, to, message, priority, wait_seconds, notify=notify_when_idle,
-                via=channel.send_channel(who),
                 **channel.send_fields(who, me(), MY_INBOX, force, bus.login()))
         elif kind_ == "local":
             v = channel.send_local(where, message, priority, wait_seconds,
@@ -490,11 +500,10 @@ def command_tool(name, words, path, decl):
 
 def command_tools():
     """Объявленные командлеты -- инструменты. У мастера -- все, у роли --
-    назвавшие свои глаголы в пределах её capabilities (#585), у узла --
-    никаких: управление ему не положено, и его креды в сервис кластера не
-    пишут."""
-    if kind() == channel.LEGACY:
-        return
+    назвавшие свои глаголы в пределах её capabilities (#585).
+    Неподдерживаемому говорящему (#662: папетные креды, нет кредов) --
+    никаких: управление ему не положено, и его креды в сервис кластера
+    не пишут."""
     found = {}
     for name, words, path in cli.tool_commands(cli.scan(), cli.verbs()):
         decl = cli.declared(path)
@@ -558,7 +567,7 @@ def watch_inbox():
     права называться живым адресом — папет получит честное «нет на шине»
     вместо доставленного в никуда."""
     who = kind()
-    if who == channel.LEGACY or not channel.master_socket():
+    if who is None or not channel.master_socket():
         return
     bus.ERROR_LISTENERS.append(on_bus_error)
     try:

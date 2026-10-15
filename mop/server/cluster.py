@@ -524,16 +524,18 @@ def _delegated(project, req, ctx):
 
 
 def _role_launch(req):
-    """Путь роли глагола add (#582). -> None (легаси: полей роли нет) |
-    _Launch | {"error": ...}. Источник бандла -- каталог сервера: клиент
-    называет имя роли, digest и инкарнацию выбирает сервер, и попытка их
-    подложить -- отказ до ворот проекта. Выключенная настройка закрывает
-    путь роли целиком: полусобранный сервер протокол не рекламирует."""
+    """Путь роли глагола add (#582, #662 -- единственный). -> _Launch |
+    {"error": ...}. Источник бандла -- каталог сервера: клиент называет
+    имя роли, digest и инкарнацию выбирает сервер, и попытка их подложить
+    -- отказ до ворот проекта. Запрос без полей роли -- отказ с указанием
+    души: легаси-пути больше нет. Выключенная настройка закрывает путь
+    роли целиком: полусобранный сервер протокол не рекламирует."""
     if not any(k in req for k in ("soul", "soul_digest", "soul_inc")):
-        return None
+        return {"error": "this server creates role puppets only: pass "
+                         "soul=<role> (the CLI sends it with --role)"}
     if not config.get("MOP_SOUL_ROLES"):
         return {"error": "soul roles are off on this server "
-                         "(MOP_SOUL_ROLES empty): the legacy add only"}
+                         "(MOP_SOUL_ROLES empty)"}
     if "soul_digest" in req or "soul_inc" in req:
         return {"error": "add takes a role name, not a digest or an "
                          "incarnation: the server pins both (#579)"}
@@ -636,10 +638,11 @@ def _revoke_soul(project, name):
 
 def _add(project, req):
     origin = req.get("origin")
-    # Роль (#582): add с душой резервирует имя, инкарнацию и принципала
-    # ДО Nomad (grants.prepare) и подтверждает после (activate): отказ
-    # Nomad оставляет резерв, ретрай того же request_id поднимает
-    # сохранённого принципала, а не второго на то же имя.
+    # Роль (#582, #662 -- единственный путь): add с душой резервирует имя,
+    # инкарнацию и принципала ДО Nomad (grants.prepare) и подтверждает
+    # после (activate): отказ Nomad оставляет резерв, ретрай того же
+    # request_id поднимает сохранённого принципала, а не второго на то же
+    # имя. Запрос без полей роли -- отказ здесь же, до всех ворот.
     launch = _role_launch(req)
     if isinstance(launch, dict):
         return launch
@@ -668,7 +671,7 @@ def _add(project, req):
         # Реплей сверяется и выбирается ДО квоты (#582): успешный запуск,
         # занявший последний слот, обязан реплеиться без отказа -- квота
         # считает НОВЫХ папетов, а не подтверждение своего резерва.
-        if launch is not None and launch.record:
+        if launch.record:
             # Ретрай: имя и инкарнация -- из резерва, не новые (#579);
             # чужая регистрация на этом имени -- громкий отказ.
             name, soul_inc = launch.record["job"], launch.record["soul_inc"]
@@ -682,9 +685,8 @@ def _add(project, req):
             why = over_limit(target.name, _live_count(target.name), target.limit)
             if why:
                 return {"error": why}
-            name = (next_name(target.name) if launch is None else
-                   next_name(target.name, reserving=True))
-            soul_inc = soul.incarnation() if launch is not None else None
+            name = next_name(target.name, reserving=True)
+            soul_inc = soul.incarnation()
         # workspace -- до регистрации: первый подъём обязан его увидеть.
         # Актёров различает не запрет, а путь (#582): ЧЕЛОВЕК, заводящий
         # роль, согласовывает политику своим текстом -- метка согласования
@@ -693,13 +695,9 @@ def _add(project, req):
         # наследует закреплённый снапшот родителя ниже, и попытка прислать
         # YAML отклонена в _delegated ДО ворот проекта.
         delegated = req.get("_delegated_by")
-        marker = None
-        if launch is None:
-            marker = store_workspace(bootstrap.ROOT, name, req)
-        elif delegated is None:
+        if delegated is None:
             # Новый грант -- только верифицированному человеку (#582):
-            # анонимная заявка роли не заводит принципала. Легаси-add
-            # (без роли) совместимость сохраняет -- его джобы не гранты.
+            # анонимная заявка роли не заводит принципала.
             who, verified = lease.caller(req)
             if not verified:
                 return {"error": "a role add needs a verified human caller: "
@@ -716,40 +714,33 @@ def _add(project, req):
             # ДО Nomad -- ретрай наследует закреплённое, не свежее: копия
             # кладётся только когда резерва ещё не было (свежий запуск),
             # ретрай уже держит её под своим именем.
-            if not (launch and launch.record):
+            if not launch.record:
                 why = bootstrap.copy_approval(
                     bootstrap.ROOT, req.get("_parent_job") or "", name)
                 if why:
                     return {"error": why}
-        principal = None
-        if launch is not None:
-            # Резерв ДО Nomad: что бы ни случилось с регистрацией, принципал,
-            # имя и инкарнация уже сохранены -- ретрай поднимет их. Тот же
-            # request_id с другой полезной нагрузкой (#581) откажет здесь.
-            # Владелец -- человек (делегированный: хозяин родителя из
-            # реестра), актёр -- отдельным полем: происхождение не право.
-            principal = grants.prepare(
-                target.name, role=launch.role, digest=launch.bundle.digest,
-                manifest=launch.bundle.manifest.to_dict(),
-                prompt=launch.bundle.prompt,
-                owner=(req.get("_owner") if delegated is not None else
-                       (lease.caller(req)[0] or project)),
-                request_id=launch.request_id, job=name, soul_inc=soul_inc,
-                intent=launch.intent(req), root=SOUL_ROOT,
-                actor=delegated)["principal"]
+        # Резерв ДО Nomad: что бы ни случилось с регистрацией, принципал,
+        # имя и инкарнация уже сохранены -- ретрай поднимет их. Тот же
+        # request_id с другой полезной нагрузкой (#581) откажет здесь.
+        # Владелец -- человек (делегированный: хозяин родителя из
+        # реестра), актёр -- отдельным полем: происхождение не право.
+        principal = grants.prepare(
+            target.name, role=launch.role, digest=launch.bundle.digest,
+            manifest=launch.bundle.manifest.to_dict(),
+            prompt=launch.bundle.prompt,
+            owner=(req.get("_owner") if delegated is not None else
+                   (lease.caller(req)[0] or project)),
+            request_id=launch.request_id, job=name, soul_inc=soul_inc,
+            intent=launch.intent(req), root=SOUL_ROOT,
+            actor=delegated)["principal"]
         _api().register(spec.job_spec(
             name, origin, branch=req.get("branch"),
-            **(launch.triple(soul_inc) if launch is not None else {})))
-        if principal is not None:
-            grants.activate(principal, root=SOUL_ROOT)
-    # Метка (#334) -- только когда клиент прислал происхождение: без неё
-    # ответ байт в байт прежний. Роль (#582) эхом несёт тройку: клиент
-    # неполного ответа сверяется, а не пересоздаёт.
-    out = {"ok": True, "name": name, "origin": origin,
-           **({"bootstrap_marker": marker} if marker else {})}
-    if launch is not None:
-        out.update(launch.triple(soul_inc))
-    return out
+            **launch.triple(soul_inc)))
+        grants.activate(principal, root=SOUL_ROOT)
+    # Роль (#582) эхом несёт тройку: клиент неполного ответа сверяется,
+    # а не пересоздаёт.
+    return {"ok": True, "name": name, "origin": origin,
+            **launch.triple(soul_inc)}
 
 
 def _kept_meta(name):

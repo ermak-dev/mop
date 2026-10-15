@@ -11,168 +11,22 @@ registration names the created puppet and does not create another.
 
 Any other role of the catalogue launches the same way: `mop <role>`. A
 role whose name is a mop command or a reserved bus name is refused before
-anything is allocated.
-
-The legacy local session stays an explicit choice:
-mop master --local [git-origin] [claude options]
-launches claude on this machine as before. Only origin belongs to it;
-everything else goes to claude as-is (`mop master --local --continue`
-resumes the master's last session), and a flag that takes a VALUE goes
-after `--` (`mop master --local -- --model opus`). As before, a master
-sees and reaches only its own project's puppets. Bus and proxy
-credentials arrive with `mop login --server ADDRESS LOGIN`, started
-automatically if either record is missing; without a terminal or an
-unambiguous server it refuses before launching claude. The Nomad token
-stays on the server; the session uses the selected server's LLM proxy
-from connection.json written by mop login (the legacy operator/client
-pair is still read for compatibility).
+anything is allocated. The local claude launch is gone: a master is a
+pooled puppet; for claude outside the pool there is `mop code`.
 """
-import json
-import os
-import sys
-
 from mop.cli import lib
-from mop.cli.core import _common, _launch
-from mop.cli.pool import login
-from mop.common import config, puppets
+from mop.cli.core import _launch
 
-# Скилл едет в пакете (#351): у клиента, поставленного из git, config.PROJECT
-# -- site-packages, и skills/ рядом с ним нет. В клоне skills/master --
-# переходный симлинк сюда же, и прежние ссылки ~/.claude/skills/master
-# резолвятся в тот же файл.
-SKILL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.realpath(__file__)))), "skills", "master")
-SKILL_LINK = os.path.expanduser("~/.claude/skills/master")
-
-
-# Скилл /master -- интерфейс мастер-сессии, как ~/bin/mop. Сам он живёт в
-# репозитории, снаружи только симлинк: правка через ~/.claude попадала бы в
-# тот же файл, но проходила бы мимо истории. Ставим здесь, а не плейбуком:
-# машина оператора ansible не видит.
-def link_skill():
-    if os.path.realpath(SKILL_LINK) == SKILL:
-        return
-    os.makedirs(os.path.dirname(SKILL_LINK), exist_ok=True)
-    if os.path.lexists(SKILL_LINK):
-        os.remove(SKILL_LINK)
-    os.symlink(SKILL, SKILL_LINK)
-    print(f"skill /master -> {SKILL}")
-
-
-# --strict-mcp-config не добавляем: у оператора есть свои серверы, и мастер-шелл
-# не повод их отбирать.
-def mcp_command(bin_dir=lib.BIN, python=sys.executable):
-    """Чем мастер-сессия поднимает свой MCP-сервер -> (команда, аргументы).
-    Чистая функция (#351). У клона -- его bin/mop: сервер остаётся на дереве
-    той копии, из которой подняли мастера. У пакета bin/ нет, и его зовёт
-    тот же интерпретатор, что запустил mop, -- в venv пакета он и найдёт."""
-    argv = lib.self_argv(bin_dir, python)
-    return argv[0], [*argv[1:], "mcp"]
-
-
-def mcp_config():
-    command, args = mcp_command()
-    return json.dumps({"mcpServers": {"mop": {
-        "type": "stdio",
-        "command": command,
-        "args": args,
-    }}})
-
-
-def claude_args(args):
-    """Разделить свои аргументы и чужие. -> (origin | None, опции для claude).
-
-    Чужое узнаётся по дефису, а `--` отдаёт claude весь хвост дословно — без
-    него флаг со значением неотличим от origin, и «--model opus» тихо ушёл бы
-    искать проект «opus»."""
-    if "--" in args:
-        cut = args.index("--")
-        args, tail = args[:cut], args[cut + 1:]
-    else:
-        tail = []
-    mine = [a for a in args if not a.startswith("-")]
-    return mine, [a for a in args if a.startswith("-")] + tail
-
-
-def claude_argv(passthru, settings_path=None):
-    """Аргументы запуска claude -> список. Чистая функция (#419): сборка
-    argv в одном месте, как code.claude_argv. Настройки отзыва -- один
-    --settings до пасстру (почему одним -- там же), settings_path --
-    memfd-путь подготовленных настроек."""
-    settings = ["--settings", settings_path] if settings_path \
-        else list(_common.FEEDBACK_SETTINGS)
-    return ["claude", "--dangerously-skip-permissions",
-            "--mcp-config", mcp_config(),
-            *settings, *passthru]
-
-
-def _main(argv):
-    mine, passthru = claude_args(argv)
-    if len(mine) > 1:
-        lib.usage(__doc__)
-    # Origin, в котором нет ни хоста, ни пути, — почти наверняка значение
-    # чужого флага, приехавшее сюда позиционно. Отказ обязан назвать причину
-    # и выход: иначе дальше будет «нет кредов проекта opus», и искать
-    # опечатку придётся в совсем другом месте.
-    hint = (f"Pass claude options that take a value after --: "
-            f"mop master -- {' '.join(passthru + mine)}" if mine else __doc__)
-    origin = lib.origin(mine[0] if mine else None, hint)
-    project = puppets.project_of(origin)
-    if not lib.project_ready(project):
-        # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS,
-        # и папет к шине не подключится. Говорим прямо, а не запускаем ansible
-        # за спиной оператора: на узел ведёт одна дорога, и это deploy на
-        # сервере; сюда его плоды привозит join.
-        lib.usage(f"no bus credentials on this machine.\n"
-                  f"Log in as yourself: mop login <login>. The project "
-                  f"must be registered (mop project add {origin}) and yours "
-                  f"in the server's identity provider (mop server user, or the directory)")
-    link_skill()
-
-    # URL и ключ -- из joined-конфига выбранного сервера; `mop code`
-    # использует тот же источник без MCP и папетов.
-    env = _common.launch_env(project=project)
-    # Настройки отзыва (#419): слияние пользовательского --settings с
-    # feedbackDrafts=off, итог -- memfd-путём; отказ -- явно (как у
-    # `mop code`, общее в _common.feedback_settings).
-    try:
-        value, passthru = _common.feedback_settings(passthru)
-    except ValueError as e:
-        lib.usage(str(e))
-    path, _fd = _common.feedback_fd(value)
-    print(f"master of project {project} ({origin})"
-          + (f" + claude {' '.join(passthru)}" if passthru else ""))
-    os.execvpe("claude", claude_argv(passthru, path), env)
-
-
-# Вход -- до lib.cluster: без профиля сервера (connection.json) тот не
-# найдёт выбранный сервер.
-_local_launch = lib.cluster(_main)
-
-# Прежний локальный запуск (#586, docs/SOUL.md «Переход и откат»): явной
-# опцией, без молчаливого fallback: живые локальные мастера не трогаются,
-# и оператор сам выбирает, когда переходить.
-LOCAL = "--local"
 ANNOUNCE = "mop master: launching role master as a new pooled puppet"
 
 
-def local(argv):
-    """argv -> (локальный ли запуск, argv без --local). Чистая функция.
-    Опция -- только до `--`: дальше хвост claude, и его не трогаем."""
-    cut = argv.index("--") if "--" in argv else len(argv)
-    head = argv[:cut]
-    return LOCAL in head, [a for a in head if a != LOCAL] + argv[cut:]
-
-
 def main(argv):
-    is_local, argv = local(argv)
-    if is_local:
-        if len(claude_args(argv)[0]) > 1:
-            lib.usage(__doc__)
-        login.ensure()
-        return _local_launch(argv)
     # Явный алиас мастер-роли (#586): тот же общий лаунчер, что `mop <роль>`,
     # и строка о том, что именно запускается.
     print(ANNOUNCE, flush=True)
     return _launch.launch("master", argv,
-                          hint=f"claude options for a local session: mop master {LOCAL} -- …")
+                          hint="claude outside the pool: mop code")
+
+
+# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
+main = lib.cluster(main)

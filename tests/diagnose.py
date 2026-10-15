@@ -122,14 +122,14 @@ def check_client_side_536(c):
             got["source"] == "clone", got)
 
     # Схема НЕ объявляется там, где файла с версией нет: пустой каталог,
-    # машинный (operator.json без версии) и легаси-пара (client.json без
+    # машинный (operator.json без версии) и прежняя пара (client.json без
     # версии) не выдают себя за connection v1.
     for label, make in (("empty", lambda d: creds.make_dir(d)),
                         ("machine", lambda d: creds.write_operator(
                             d, creds.SERVICE, "service-secret")),
                         ("legacy", lambda d: put_legacy(d, ALICE))):
-        # legacy-пара -- «human» классификатором (valid вход), но формат
-        # её файлов -- не connection.json.
+        # legacy-пара -- лежащий артефакт (#662): статус empty («нет
+        # входа»), формат честно называет лежащие половины.
         target = os.path.join(root, f"{label}.test")
         make(target)
         with patched(creds, ROOT=root), \
@@ -137,13 +137,13 @@ def check_client_side_536(c):
             got = client_report()
         c.check(f"#536 a {label} directory carries no schema claim",
                 got["schema"] is None, got)
-    # Валидная легаси-пара -- по-прежнему целый вход человека (snapshot
-    # возвращал human и до #533), статус не «partial»:
+    # Прежняя пара -- не вход (#662): empty с честным именем формата, не
+    # «partial» и не «complete».
     with patched(creds, ROOT=root), \
             context.use(context.resolve({"server": "legacy.test"}, {}, {})):
         got = client_report()
-    c.check("#536 a legacy pair is a complete login of the old format",
-            got["status"] == "complete" and got["format"] == "legacy pair", got)
+    c.check("#662 a legacy pair is no login, named by its format",
+            got["status"] == "empty" and got["format"] == "legacy pair", got)
 
     # Два joined-каталога без явного выбора -- отказ, не первый попавший.
     two = os.path.join(tempfile.mkdtemp(prefix="mop-diag3-"), "servers")
@@ -165,8 +165,8 @@ def check_status_and_hygiene_536(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-st-"), "servers")
     cases = [
         ("complete", lambda d: put_connection(d, ALICE)),
-        ("partial", lambda d: creds.write_operator(d, ALICE[0], ALICE[1])),
         ("empty", lambda d: creds.make_dir(d)),
+        ("empty", lambda d: creds.write_operator(d, ALICE[0], ALICE[1])),
         ("machine", lambda d: creds.write_operator(d, creds.SERVICE, "service-secret")),
     ]
     for want, make in cases:
@@ -253,13 +253,13 @@ def check_client_cli_536(c):
         text = sys.stdout.getvalue()
     c.check("#536 a machine status is explicitly not-ready",
             rc == 0 and "machine" in text and "not-ready" in text, text)
-    # Формат файла назван по факту: connection.json -- v1, легаси-пара -- не
-    # выдаёт себя за схему.
+    # #662: прежняя пара -- не вход (empty), формат назван, схема не
+    # claimed.
     with patched(creds, ROOT=root), patched(sys, stdout=io.StringIO()), \
             context.use(context.resolve({"server": "old.test"}, {}, {})):
         rc = client_main([])
         text = sys.stdout.getvalue()
-    c.check("#536 a legacy pair prints its format, not a schema claim",
+    c.check("#662 a legacy pair prints its format, not a schema claim",
             rc == 0 and "legacy pair" in text and "schema version 1" not in text, text)
     # --json: стабильная форма без секретов.
     with patched(creds, ROOT=root), patched(sys, stdout=io.StringIO()), \

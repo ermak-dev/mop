@@ -61,10 +61,11 @@ from . import identity, playvars
 # На сервере: файлы проектов и ключ к телам.
 ROOT = paths.local(paths.BOOTSTRAP)
 # На сервере: пароли папетов, по одному на проект. Их заводит сам сервер
-# (`mop server cluster users`, #116) и раздаёт в ответе на bootstrap: узел
-# перестаёт хранить кред проекта, у которого на нём сейчас никто не живёт
-# (#83). Каталог отдельный от servers/<адрес>/ намеренно — тот про то, что
-# держит ОПЕРАТОР, и пароль папета оператору не положен (creds.pick).
+# (`mop server cluster users`, #116); каталог отдельный от servers/<адрес>/
+# намеренно — тот про то, что держит ОПЕРАТОР, и пароль папета оператору
+# не положен (creds.pick). С #662 ответ bootstrap'а проектный кред не
+# несёт (роль -- только принципалом своего гранта), каталог остаётся
+# хранилищем паролей пользователей шины и корнем хранилища душ.
 PUPPET_CREDS = paths.local("puppets")
 KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
@@ -901,38 +902,6 @@ def _puppets_here():
         return []
 
 
-def puppet_creds(project, root=None):
-    """Кред папета проекта для ответа узлу, либо None — пароля нет."""
-    path = os.path.join(root or PUPPET_CREDS, creds.puppet_pass_file(project))
-    try:
-        with open(path) as f:
-            password = f.read().strip()
-    except OSError:
-        return None
-    if not password:
-        return None
-    return creds.bus_config(config.get("MOP_SERVER_LAN"),
-                            config.get("MOP_NATS_PORT"), project, password,
-                            user=creds.puppet_user(project))
-
-
-def with_creds(out, got, project):
-    """Ответ bootstrap'а с кредом папета. Чистая функция.
-
-    Нет пароля проекта — отказ, а не ответ без кредов (#114): других дорог
-    креду в тело больше нет, прогон не кладёт `bus-<проект>.json` на узлы, и
-    папет без шины читался бы мастером как живой, но молчащий. Отказ прогона
-    главнее: кред к упавшему bootstrap'у не приклеиваем. Упавший прогон
-    несёт ok False, а не error (#349): прежде кред клеился и к нему, и
-    journal() печатал его вместе с ответом. Упавший старт шину не открывает."""
-    if out.get("error") or not out.get("ok"):
-        return out
-    if not got:
-        return {"error": f"no bus password for project {project} on the server "
-                         f"-- register it: mop project add <origin>"}
-    return {**out, "bus": got}
-
-
 def owner_identity(req):
     """Глагол identity (#167): логин -> имя и почта из провайдера личностей
     сервера, для git identity в клоне папета.
@@ -1056,33 +1025,27 @@ def answer(project, req, _send=None):
             why = refusal(req, project)
             if why:
                 return {"error": why}
-            # Ролевой джоб -- выдают индивидуальный кред принципала, и
-            # ворота строже (#581/#603): анонимный легаси-путь ролевому
-            # имени -- отказ без фактов, узловому -- проверка назначения
-            # и приватного ответа, ДО прогона. Прогон тот же: секреты и
-            # рамка sandbox едут и роли. Легаси-имя (привязки нет) живёт
-            # прежним путём с проектным кредом (переход #603).
+            # Душа обязательна у каждого джоба (#662): классификация -- по
+            # ФАКТИЧЕСКОЙ Meta (#581), и Meta без ЦЕЛОЙ тройки -- сломанный
+            # джоб, громкий отказ fail-closed ДО прогона. Прежнего
+            # легаси-пути с проектным кредом нет: сервер такие джобы не
+            # создаёт, и архив старой привязки имени ничего не наследует
+            # (#658 -- binding_named строг целиком).
             from . import grants
-            soul_root = _soul_root()
-            # Классификация -- по ФАКТИЧЕСКОЙ Meta джоба (#581): тройка
-            # роли в Nomad делает джоб ролевым, что бы ни держал реестр
-            # (привязка стёрта/битая -- отказ в воротах, не легаси-путь);
-            # Архив старой роли не назначает роль новому legacy-джобу:
-            # исключение требует зарегистрированный origin того же проекта.
             meta = _job_meta(req.get("name") or "")
-            legacy = (not meta.soul and bool(meta.origin)
-                      and driver.project_of(meta.origin) == project)
-            is_role = bool(meta.soul and meta.soul_digest and meta.soul_inc) \
-                or grants.binding_named(project, req.get("name") or "",
-                                        root=soul_root, include_revoked=not legacy)
-            if is_role:
-                bound = role_gates(req.get("name") or "",
-                                   req.get("_caller") or "",
-                                   req.get("_reply"), project, root=soul_root,
-                                   jobs=lambda name: meta,
-                                   assigned=_assigned_node)
-                if bound.get("error"):
-                    return bound
+            if not (meta.soul and meta.soul_digest and meta.soul_inc):
+                raise ValueError(
+                    f"{req.get('name')}: job Meta carries no whole role "
+                    f"triple (soul, soul_digest, soul_inc) -- a job "
+                    f"without a soul is a broken job")
+            bound = role_gates(req.get("name") or "",
+                               req.get("_caller") or "",
+                               req.get("_reply"), project,
+                               root=_soul_root(),
+                               jobs=lambda name: meta,
+                               assigned=_assigned_node)
+            if bound.get("error"):
+                return bound
             # `put` снят (#133): workspace кладут глаголы жизненного цикла
             # папета у сервиса кластера, а в этот субъект пишут и узлы.
             # Сдавшийся ключ (#345) -- без прогона: ansible не переигрывается,
@@ -1093,16 +1056,13 @@ def answer(project, req, _send=None):
                 return gave_up_reply(prev)
             # Роль играет с закреплённым бандлом (#592/#581): allowlist
             # секретов -- из доверенного хранения сервера, не из тела.
-            pinned = None
-            if is_role:
-                pinned = grants.load_bundle(bound.get("soul_digest"),
-                                            root=soul_root)
-                if pinned is None:
-                    return {"error": f"{req.get('name')}: the pinned bundle "
-                                     f"is unreadable -- refusing to play "
-                                     f"the role with the whole store"}
-            out = play(req, project, bundle=pinned) if is_role \
-                else play(req, project)
+            pinned = grants.load_bundle(bound.get("soul_digest"),
+                                        root=_soul_root())
+            if pinned is None:
+                return {"error": f"{req.get('name')}: the pinned bundle "
+                                 f"is unreadable -- refusing to play "
+                                 f"the role with the whole store"}
+            out = play(req, project, bundle=pinned)
             # Итог -- рядом с отправленным (#334): `mop update` ждёт его. Не
             # записался -- подсказка пропала, а прогон и кред важнее.
             try:
@@ -1112,32 +1072,26 @@ def answer(project, req, _send=None):
             if rec.get("gave_up"):
                 ask_give_up(req["name"])
                 return {**out, "gave_up": True, "failures": rec["failures"]}
-            if is_role:
-                # Кред роли едет тем же ответом, что и легаси-кред папета:
-                # разговора два не нужно. Индивидуальный принципал вместо
-                # проектного -- ролевая надстройка (#590), отказ -- отказ.
-                # Только при успешном прогоне (#590): упавший ansible --
-                # узел без рабочего workspace, и пароль принципала с душой
-                # ему не выдаются; причина провала сохраняется как есть.
-                if not out.get("ok"):
-                    return out
-                # Прогон идёт минуты (#581): привязку проверяет и ПОСЛЕ
-                # него -- отзыв, приехавший за время ansible, не выдаёт
-                # кредов уже поднятому телу.
-                fresh = grants.binding(bound.get("principal"),
-                                       root=soul_root)
-                if not fresh or not fresh.get("active") \
-                        or fresh.get("revoked_at"):
-                    return {"error": f"{req.get('name')}: the binding was "
-                                     f"revoked while the play ran -- no "
-                                     f"credentials"}
-                role = role_reply(bound, project, root=soul_root)
-                if role.get("error"):
-                    return role
-                return {**out, **role}
-            # Кред папета едет тем же ответом: узел уже позвал нас, и
-            # второго разговора ради одного файла не нужно.
-            return with_creds(out, puppet_creds(project), project)
+            # Кред роли едет тем же ответом (#590). Только при успешном
+            # прогоне: упавший ansible -- узел без рабочего workspace, и
+            # пароль принципала с душой ему не выдаются; причина провала
+            # сохраняется как есть.
+            if not out.get("ok"):
+                return out
+            # Прогон идёт минуты (#581): привязку проверяет и ПОСЛЕ
+            # него -- отзыв, приехавший за время ansible, не выдаёт
+            # кредов уже поднятому телу.
+            fresh = grants.binding(bound.get("principal"),
+                                   root=_soul_root())
+            if not fresh or not fresh.get("active") \
+                    or fresh.get("revoked_at"):
+                return {"error": f"{req.get('name')}: the binding was "
+                                 f"revoked while the play ran -- no "
+                                 f"credentials"}
+            role = role_reply(bound, project, root=_soul_root())
+            if role.get("error"):
+                return role
+            return {**out, **role}
         if verb == "identity":
             return owner_identity(req)
         if verb == "resolve":

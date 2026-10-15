@@ -28,6 +28,30 @@ TEXT = """
 """
 
 
+def role_bundle():
+    """Минимальный живой бандл роли: (манифест-словарь, промпт, digest).
+    Душа обязательна у каждого джоба (#662), и проверкам ответа
+    bootstrap'а нужен прошедший ворота Meta-тройку и реестр."""
+    from mop.common import soul
+    manifest = {"soul": "puppet", "version": 1,
+                "runtime": {"driver": "any", "receives_dispatch": False},
+                "capabilities": {"node_verbs": [], "cluster_verbs": [],
+                                 "dispatch": False, "spawn": []},
+                "prompt": "soul.md"}
+    prompt = b"# prompt\n"
+    return manifest, prompt, soul.digest(manifest, prompt)
+
+
+def role_meta_job():
+    """JobMeta ролевого джоба проекта proj (git@example:team/proj.git):
+    источник -- тот же манифест, что и бандл роли."""
+    from mop.common.domain import JobMeta
+    manifest, _prompt, digest = role_bundle()
+    return JobMeta("git@example:team/proj.git", None, None,
+                   manifest["soul"], digest,
+                   "00000000-0000-0000-0000-000000000345")
+
+
 def check_identity_167(c):
     """HYPOTHESIS (#167): коммит папета подписан тем, кого назвал мастер
     разовым `git -c`, а не человеком, которого проверила шина. Агент узла
@@ -133,19 +157,39 @@ def check_result_334(c):
              (got["ok"], got["played"], got["rc"], got["seconds"], got["last"]),
              (True, False, None, None, None))
 
-    # Прогон по запросу узла пишет итог сам -- и когда кред не нашёлся:
-    # прогон уже был.
-    from mop.common.domain import JobMeta
-    with patched(bootstrap, ROOT=root, play=lambda req, project: dict(failed),
-                 puppet_creds=lambda project: None,
-                 _job_meta=lambda n: JobMeta(None, None)):
-        bootstrap.answer("proj", {"verb": "bootstrap", "name": name})
+    # Прогон по запросу узла пишет итог сам: ролевой джоб, ворота роли
+    # проходит (свой узел, приватный ответ).
+    from _lib import patched as _patched
+    from mop.common import busnames
+    from mop.server import grants
+    grant_root = tempfile.mkdtemp(prefix="mop-test-bootstrap-334g-")
+    manifest, prompt, digest = role_bundle()
+    meta = role_meta_job()
+    rec334 = grants.prepare("proj", manifest["soul"], digest, manifest, prompt,
+                            "anton", "req-334", name, meta.soul_inc, "fixture",
+                            root=grant_root)
+    grants.activate(rec334["principal"], root=grant_root)
+
+    def play(req, project, **kw):
+        return dict(failed)
+    ask334 = {"verb": "bootstrap", "name": name,
+              "_caller": "node-wate", "_reply": "_MOP_REPLY.node-wate.a"}
+    with patched(bootstrap, ROOT=root, play=play,
+                 _soul_root=lambda: grant_root,
+                 _assigned_node=lambda n: "wate",
+                 _owner_profile=lambda login: {"login": login, "name": "A",
+                                               "email": "a@example.dev"},
+                 _job_meta=lambda n: meta):
+        bootstrap.answer("proj", dict(ask334))
     c.expect("#334 answer(bootstrap) writes the result of its play",
              (bootstrap.read_result(root, name) or {}).get("task"), "env file")
-    with patched(bootstrap, ROOT=root, play=lambda req, project: dict(ok),
-                 puppet_creds=lambda project: None,
-                 _job_meta=lambda n: JobMeta(None, None)):
-        bootstrap.answer("other", {"verb": "bootstrap", "name": name})
+    with patched(bootstrap, ROOT=root, play=play,
+                 _soul_root=lambda: grant_root,
+                 _assigned_node=lambda n: "wate",
+                 _owner_profile=lambda login: {"login": login, "name": "A",
+                                               "email": "a@example.dev"},
+                 _job_meta=lambda n: meta):
+        bootstrap.answer("other", dict(ask334))
     c.expect("#334 a refused request (foreign project) plays nothing and writes nothing",
              (bootstrap.read_result(root, name) or {}).get("task"), "env file")
 
@@ -289,14 +333,29 @@ def check_give_up_345(c):
     bootstrap.note_sent(root, name, prov, now=4)
     plays, later = [], []
 
-    def play(req, project):
+    def play(req, project, **kwargs):
         plays.append(req["name"])
         return dict(failed)
     from mop.common.domain import JobMeta
-    with patched(bootstrap, ROOT=root, play=play, puppet_creds=lambda project: None,
+    from mop.server import grants
+    grant_root = tempfile.mkdtemp(prefix="mop-test-bootstrap-581-")
+    manifest, prompt, digest = role_bundle()
+    inc = "00000000-0000-0000-0000-000000000345"
+    rec = grants.prepare("proj", manifest["soul"], digest, manifest, prompt,
+                         "anton", "req-345", name, inc, "fixture",
+                         root=grant_root)
+    grants.activate(rec["principal"], root=grant_root)
+    meta = JobMeta("git@example:team/proj.git", None, None,
+                   manifest["soul"], digest, inc)
+    with patched(bootstrap, ROOT=root, play=play,
                  _later=lambda delay, fn: later.append((delay, fn)),
-                 _job_meta=lambda n: JobMeta(None, None)):
-        replies = [bootstrap.answer("proj", {"verb": "bootstrap", "name": name}) for _ in range(4)]
+                 _soul_root=lambda: grant_root,
+                 _assigned_node=lambda name: "wate",
+                 _job_meta=lambda n: meta):
+        asks = [{"verb": "bootstrap", "name": name,
+                 "_caller": "node-wate", "_reply": "_MOP_REPLY.node-wate.a"}
+                for _ in range(4)]
+        replies = [bootstrap.answer("proj", dict(r)) for r in asks]
     c.expect("#345 three plays, the fourth request plays nothing", len(plays), 3)
     c.expect("#345 replies: gave_up only from the third on",
              [bool(r.get("gave_up")) for r in replies], [False, False, True, True])
@@ -857,6 +916,78 @@ prompt: soul.md
         c.fail("#592 a secrets-less bundle must still play", e)
 
 
+def check_roleless_refused_662(c):
+    """HYPOTHESIS (#662): ответ bootstrap'а без тройки в Meta шёл по
+    легаси-пути: with_creds(puppet_creds(project)) выдавал кред проекта
+    чужому имени. SOLUTION: роль обязательна у каждого джоба: Meta без
+    тройки -- сломанный джоб, отказ fail-closed до прогона; путь
+    проектных кредов из ответа умер вместе с with_creds/puppet_creds."""
+    from mop.common.domain import JobMeta
+    from mop.server import grants
+    name = "pu-proj-1"
+    root = tempfile.mkdtemp(prefix="mop-test-bootstrap-662-")
+    manifest, prompt, digest = role_bundle()
+    inc = "00000000-0000-0000-0000-000000000662"
+    plays = []
+
+    def play(req, project, **kw):
+        plays.append(req["name"])
+        return {"ok": True, "played": True, "rc": 0, "seconds": 1.0}
+
+    grant_root = tempfile.mkdtemp(prefix="mop-test-bootstrap-662g-")
+    rec = grants.prepare("proj", manifest["soul"], digest, manifest, prompt,
+                         "anton", "req-662", name, inc, "fixture",
+                         root=grant_root)
+    grants.activate(rec["principal"], root=grant_root)
+    meta = JobMeta("git@example:team/proj.git", None, None,
+                   manifest["soul"], digest, inc)
+    good = {"verb": "bootstrap", "name": name, "address": "192.0.2.10",
+            "_caller": "node-wate", "_reply": "_MOP_REPLY.node-wate.a"}
+
+    # Ролевой джоб: бандл в прогон, ответ несёт душу и кред принципала.
+    with patched(bootstrap, ROOT=root, play=play, _soul_root=lambda: grant_root,
+                 _assigned_node=lambda n: "wate",
+                 _owner_profile=lambda login: {"login": login, "name": "A",
+                                               "email": "a@example.dev"},
+                 _job_meta=lambda n: meta):
+        out = bootstrap.answer("proj", dict(good))
+    c.check("#662 a role job still plays and gets its principal credential",
+            out.get("ok") is True and plays == [name]
+            and (out.get("bus") or {}).get("user") == rec["principal"]
+            and (out.get("soul") or {}).get("role") == manifest["soul"], out)
+
+    # Meta без тройки -- сломанный джоб, не легаси: отказ до прогона.
+    for label, broken in (("an empty Meta", JobMeta(None, None)),
+                          ("a legacy Meta with an origin",
+                           JobMeta("git@example:team/proj.git", None))):
+        plays.clear()
+        with patched(bootstrap, ROOT=root, play=play, _soul_root=lambda: grant_root,
+                     _job_meta=lambda n: broken):
+            denied = bootstrap.answer("proj", dict(good))
+        c.check(f"#662 {label} is refused loudly, never a legacy bootstrap",
+                bool(denied.get("error")) and plays == []
+                and "bus" not in denied and "soul" not in denied, denied)
+    # Половина тройки -- тот же отказ (существующее fail-closed живо):
+    # JobMeta.from_job сам отказывает сборке, и отказ едет наружу.
+    plays.clear()
+
+    def half_meta(name):
+        raise ValueError("JobMeta.soul='puppet': the role triple comes "
+                         "whole (soul, soul_digest, soul_inc) or not at all")
+    with patched(bootstrap, ROOT=root, play=play, _soul_root=lambda: grant_root,
+                 _job_meta=half_meta):
+        denied = bootstrap.answer("proj", dict(good))
+    c.check("#662 a half role triple is still a broken job",
+            bool(denied.get("error")) and plays == [] and "bus" not in denied,
+            denied)
+    # Легаси-хвост умер: путь проектного креда из ответа не существует.
+    c.check("#662 the legacy project-credential tail is gone from the module",
+            not hasattr(bootstrap, "with_creds")
+            and not hasattr(bootstrap, "puppet_creds"),
+            [n for n in ("with_creds", "puppet_creds")
+             if hasattr(bootstrap, n)])
+
+
 def main():
     c = Checks()
     check_journal_no_secrets_349(c)
@@ -924,36 +1055,13 @@ def main():
         if a == "-e" and " " in argv[i + 1] and not argv[i + 1].lstrip().startswith("{"):
             c.fail("a bare -e value with spaces is split by ansible", repr(argv[i + 1]))
 
-    # HYPOTHESIS (#114): ответ bootstrap без кредов — не отказ, потому что
-    # узел держал `bus-<проект>.json` от прогона; снимаем файл — и папет
-    # поднимается без шины, читаясь мастером как живой, но молчащий.
-    # SOLUTION: сервер отказывает в bootstrap громко, с именем проекта.
-    # STATUS: FIXED — see #114
-    creds = {"url": "nats://s:4222", "user": "puppet-proj", "password": "p"}
-    try:
-        got = bootstrap.with_creds({"ok": True}, creds, "proj")
-        c.check("with_creds must carry the credentials",
-                not (got.get("bus") != creds or got.get("error")), got)
-        got = bootstrap.with_creds({"ok": True}, None, "proj")
-        c.check("with_creds: no password for the project must be a refusal naming it",
-                not (not got.get("error") or "proj" not in got["error"]), got)
-        # Отказ прогона главнее: кред к упавшему bootstrap не приклеиваем.
-        got = bootstrap.with_creds({"error": "play failed"}, creds, "proj")
-        c.check("with_creds must keep the play's error",
-                not (got.get("bus") or got.get("error") != "play failed"), got)
-        # HYPOTHESIS (#349): упавший прогон несёт ok False, а не error, и
-        # with_creds клеил к нему кред вопреки своему docstring'у -- а
-        # journal() печатал ответ целиком. SOLUTION: кред -- только ok True;
-        # упавший старт шину не открывает (узел выходит на not ok раньше,
-        # чем читает bus). STATUS: FIXED — see #349
-        failed = {"ok": False, "played": True, "rc": 2, "tail": "fatal"}
-        got = bootstrap.with_creds(failed, creds, "proj")
-        c.expect("#349 with_creds: a failed play gets no credentials", got, failed)
-        got = bootstrap.with_creds(failed, None, "proj")
-        c.expect("#349 with_creds: a failed play without a project password stays the "
-                 "play's failure", got, failed)
-    except AttributeError:
-        c.fail("bootstrap.with_creds is missing")
+    # HYPOTHESIS (#662): Джоб без тройки роли в Meta bootstrap'а --
+    # прежний легаси-путь с проектным кредом (with_creds/puppet_creds):
+    # джоб без души получал шину проекта. SOLUTION: тройка обязательна:
+    # такой Meta -- громкий отказ fail-closed, ДО прогона, без кредов;
+    # with_creds и puppet_creds умерли вместе с легаси-путём. STATUS: RED
+    # — see #662
+    check_roleless_refused_662(c)
 
     # HYPOTHESIS (#128): bootstrap играется, только если у проекта есть
     # задачи, и секретов проекта не знает. SOLUTION: рамка играется, если

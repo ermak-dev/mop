@@ -5,16 +5,16 @@
   сессия рядом  имя или pid сессии claude этого хоста: прямо в её сокет;
   мастер        всё остальное: его инбокс на шине `<логин>.<хост>-<pid>` (#213).
 
-Говорящих три вида (#585, docs/SOUL.md): человек, легаси-папет проекта
-(`puppet-<проект>`) и делегированный принципал роли (`grant-<id>`). Роль
--- папет: её адрес -- имя джоба, а не инбокс процесса MCP, и сколько бы
-процессов MCP ни жило в теле, адрес у тела один.
+Говорящих два вида (#585, #662, docs/SOUL.md): человек и делегированный
+принципал роли (`grant-<id>`). Легаси-папет проекта (`puppet-<проект>`)
+говорящим больше не считается. Роль -- папет: её адрес -- имя джоба,
+а не инбокс процесса MCP, и сколько бы процессов MCP ни жило в теле,
+адрес у тела один.
 
 Жил во фронтенде MCP, а потолок ожидания и тексты отказа -- ещё и копией в
 `mop send` (#148). Здесь вердикт доставки -- данные; фронтенды его только
 рисуют. Протокол сокета -- mop/session.py (CHANNEL.md), субъекты -- BUS.md.
 """
-import functools
 import os
 import re
 
@@ -31,21 +31,24 @@ def clamp_wait(seconds):
     return min(max(seconds or 0, 0), MAX_WAIT)
 
 
-# ─── кто говорит (#585) ──────────────────────────────────────────────────
+# ─── кто говорит (#585, #662) ────────────────────────────────────────────
 # Вид говорящего -- по имени на шине, а не по флагу и не по имени роли:
-# человек (свой логин в субъекте, аренда при send, #161/#207), легаси-папет
-# проекта (публикует только node.*.msg, natsconf.puppet_permissions) и
-# принципал роли (свой токен, права -- из реестра на сервере, #579).
-HUMAN, LEGACY, GRANT = "human", "legacy", "grant"
+# человек (свой логин в субъекте, аренда при send, #161/#207) и принципал
+# роли (свой токен, права -- из реестра на сервере, #579). Легаси-папет
+# проекта (puppet-<проект>) -- больше не говорящий (#662): таких кредов у
+# MCP-процесса не бывает, и классификация отказывает, а не выдаёт канал.
+HUMAN, GRANT = "human", "grant"
 
 
 def actor(user):
-    """Имя на шине -> HUMAN | LEGACY | GRANT. Без кредов -- легаси: так
-    профиль узла и читался всегда (mcp.is_master)."""
+    """Имя на шине -> HUMAN | GRANT. Папетные креды проекта и их отсутствие
+    -- отказ (#662): молчаливый «легаси» выдавал бы неподдерживаемому
+    вызывающему канал и каталог инструментов наугад."""
     if soul.is_grant(user):
         return GRANT
     if not user or busnames.is_puppet(user):
-        return LEGACY
+        raise ValueError(f"{user!r}: unsupported speaker — a human or a role "
+                         f"principal only (grant-<id>)")
     return HUMAN
 
 
@@ -61,14 +64,14 @@ def human_login():
     """Владелец задания (#161) -- только человек. bus.login() отдаёт и
     grant-<id>: is_machine нового префикса не знает, и до общего
     разделения логина и токена вызывающего (#585, C1) отсекаем здесь --
-    иначе имя принципала поехало бы в owner ложной привязкой аренды."""
-    return bus.login() if actor(bus_user()) == HUMAN else None
-
-
-def send_channel(kind):
-    """Канал send к агенту узла. Легаси-папету шина пускает только .msg:
-    rpc с его кредами -- permissions violation (живой send pu2 -> pu4)."""
-    return "msg" if kind == LEGACY else "rpc"
+    иначе имя принципала поехало бы в owner ложной привязкой аренды.
+    Неподдерживаемый говорящий (#662) владельцем не становится: actor
+    отказывает, и отказ здесь -- None, не исключение: спрашивают все, кто
+    хочет знать, есть ли у сообщения владелец."""
+    try:
+        return bus.login() if actor(bus_user()) == HUMAN else None
+    except ValueError:
+        return None
 
 
 def send_fields(kind, me, inbox, force, owner):
@@ -77,11 +80,11 @@ def send_fields(kind, me, inbox, force, owner):
     send). reply_to остаётся транспортом вестей (notify) в инбокс процесса,
     адрес роли для ответа -- имя джоба (from_name), а не инбокс. Служебное
     получатель всё равно срезает (#584); не слать его -- не надеяться на
-    срезание."""
+    срезание. Доставка -- единым каналом rpc (#662: msg-канал легаси-папета
+    ушел вместе с его видом говорящего)."""
     if kind == GRANT:
         return {"from_name": me, "reply_to": inbox}
-    return {"from_name": me, "owner": owner if kind == HUMAN else None,
-            "force": force, "reply_to": inbox}
+    return {"from_name": me, "owner": owner, "force": force, "reply_to": inbox}
 
 
 # ─── тело роли: кто я и где стою ─────────────────────────────────────────
@@ -204,7 +207,6 @@ HAND_TOOLS = {"agents": {"cluster_verbs": ("roster",), "node_verbs": ("states",)
               "slash": {"node_verbs": ("type",), "cluster_verbs": ("alloc",)},
               "dispatch": {"cluster_verbs": ("alloc", "roster"),
                           "node_verbs": ("states",), "dispatch": True}}
-CHANNEL_TOOLS = ("agents", "send", "tail")
 
 
 def _permits(caps, need):
@@ -216,16 +218,15 @@ def _permits(caps, need):
 def tools_for(kind, caps, decls):
     """Вид говорящего, capabilities бандла, {имя: объявление MCP
     командлета} -> имена инструментов. Человек -- всё, как прежде, кроме
-    dispatch (у него send с арендой); легаси-папет -- канал; роль -- по
-    capabilities, командлет -- только назвавший свои глаголы (молчащее
-    объявление роли не открывает); роль без бандла -- ничего. Обнаружение
-    адресатов (agents) -- читающий глагол кластера roster, выданный
-    декларативно, а не тайком всем ролям."""
+    dispatch (у него send с арендой); роль -- по capabilities, командлет --
+    только назвавший свои глаголы (молчащее объявление роли не открывает);
+    роль без бандла -- ничего; неизвестный вид -- ничего (#662: легаси-канал
+    ушел, несуществующий говорящий не получает инструментов наугад).
+    Обнаружение адресатов (agents) -- читающий глагол кластера roster,
+    выданный декларативно, а не тайком всем ролям."""
     if kind == HUMAN:
         return (set(HAND_TOOLS) - {"dispatch"}) | set(decls)
-    if kind == LEGACY:
-        return set(CHANNEL_TOOLS)
-    if caps is None:
+    if kind != GRANT or caps is None:
         return set()
     out = {n for n, need in HAND_TOOLS.items() if _permits(caps, need)}
     return out | {n for n, d in decls.items() if _declares(d) and _permits(caps, d)}
@@ -366,16 +367,15 @@ def my_name(master, master_id):
 
 
 def send_to_puppet(node, name, message, priority="next", wait=0, notify=None,
-                   via="rpc", **fields):
+                   **fields):
     """Доставка через агента узла. -> вердикт | bus.BusError.
 
     Тонкая обёртка (#459): тело -- общая операция ops.send_to_puppet
     (#458), транспорт -- bus.request этого слоя. Ожидание простоя целиком
     на узле; notify=None -- поле в запрос не идёт вовсе; остальные поля
-    (owner, force, from_name, reply_to) едут агенту как есть. via --
-    канал агента (send_channel): rpc идёт прежним вызовом, без поля."""
-    transport = bus.request if via == "rpc" else functools.partial(bus.request, channel=via)
-    return ops.send_to_puppet(transport, node, name, message,
+    (owner, force, from_name, reply_to) едут агенту как есть. Канал один
+    -- rpc (#662: msg-канал легаси-папета ушел)."""
+    return ops.send_to_puppet(bus.request, node, name, message,
                               priority=priority, wait=wait, notify=notify,
                               **fields)
 

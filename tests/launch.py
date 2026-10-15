@@ -568,11 +568,11 @@ def check_reserved_586(c):
 # SOLUTION: `mop master` -- явный алиас мастер-роли через общий лаунчер,
 # пишет, что запускает; прежний локальный запуск -- `mop master --local`.
 def check_master_alias_586(c):
+    # #662: у алиаса нет ни своего os/exec, ни локального лаунчера --
+    # только общий лаунчер роли; exec-контроль прежний: ничего локального.
     execs = []
     pool = Pool()
-    with patched(master, link_skill=lambda: None), \
-            patched(master.os, execvpe=lambda *a: execs.append(a)):
-        out, err, code = launch(["master"], pool)
+    out, err, code = launch(["master"], pool)
     c.expect("#586 mop master launches the role", (code, err), (0, ""))
     c.expect("#586 mop master never execs a local claude", execs, [])
     add = pool.adds[0] if pool.adds else {}
@@ -580,18 +580,12 @@ def check_master_alias_586(c):
     c.check("#586 mop master says what it launches",
             "role master" in out and "pooled puppet" in out, out)
 
-    execs, calls = [], []
+    # #662: локальный запуск снят (breaking change): --local больше не
+    # опция, запуск локального claude невозможен из этой команды.
     pool = Pool()
-    with patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
-            patched(master._common, session_env=lambda: {}), \
-            patched(master.lib, origin=lambda *a: ORIGIN, project_ready=lambda *a: True), \
-            patched(master.os, execvpe=lambda *a: execs.append(a)):
-        out, err, code = launch(["master", "--local", "--", "--model", "opus"], pool,
-                                login_calls=calls)
-    c.expect("#586 --local keeps the local launcher", len(execs), 1)
-    c.check("#586 --local passes claude options through",
-            execs and execs[0][1][-2:] == ["--model", "opus"], execs)
-    c.expect("#586 --local allocates nothing", pool.calls, [])
+    out, err, code = launch(["master", "--local", "--", "--model", "opus"], pool)
+    c.check("#662 --local is refused before anything is allocated",
+            code != 0 and not pool.calls, (code, out, err))
 
 
 # HYPOTHESIS: `mop attach` и лаунчер собирают ssh каждый своей копией, и

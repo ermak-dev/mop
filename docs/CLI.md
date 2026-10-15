@@ -13,7 +13,7 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [git-origin] [--role <role>]
+create a puppet: mop add [git-origin] --role <role>
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>; placement over the pool and the
@@ -21,16 +21,15 @@ picked automatically: <project>-<number>; placement over the pool and the
 a terminal it shows the current step. The new puppet is in mop list.
 Use mop models to see model IDs offered by the selected proxy.
 
---role names the new puppet's role instead of a legacy puppet: the
-creation carries a request_id, the answer is checked against the server's
-echo of the role triple (a server without the role protocol refuses before
-anything is created). A role principal (a grant master) must name the role
-and sends no bootstrap policy of its own: the child inherits the parent's
-approved snapshot.
+--role names the new puppet's role (soul name): the creation carries a
+request_id, the answer is checked against the server's echo of the role
+triple. A role principal (a grant master) names the role and sends no
+bootstrap policy of its own: the child inherits the parent's approved
+snapshot. A roleless add is gone: every puppet carries a soul.
 
---request-id retries an earlier unknown outcome under its id (with --role):
-the server reconciles to the job it reserved instead of creating a second
-one; a changed payload under the same id is refused before any effect.
+--request-id retries an earlier unknown outcome under its id: the server
+reconciles to the job it reserved instead of creating a second one; a
+changed payload under the same id is refused before any effect.
 ```
 
 #### mop attach
@@ -94,14 +93,15 @@ mop diagnose: offline summary of the selected server login
 Prints which server the next command would talk to, where that choice
 came from (command line, environment, clone binding, or the sole joined
 directory), where its login directory is, and whether the login is whole:
-complete, partial (a leftover half of the old pair), empty or a machine
-service identity. No network, no prompts, no writes; the login's secrets
-are never shown. The schema line names the version of a validated
+complete, empty (no whole connection.json; leftovers of the old
+operator.json+client.json pair are no login) or a machine service
+identity. No network, no prompts, no writes; the login's secrets are
+never shown. The schema line names the version of a validated
 connection.json only; other formats carry no schema claim.
 
 Broken or conflicting directories refuse with exit code 1 -- the refusal
-is the diagnosis. partial/empty/machine are informational: exit code 0
-with an explicit not-ready line, not a success message.
+is the diagnosis. empty/machine are informational: exit code 0 with an
+explicit not-ready line, not a success message.
 ```
 
 #### mop landing
@@ -148,21 +148,8 @@ registration names the created puppet and does not create another.
 
 Any other role of the catalogue launches the same way: `mop <role>`. A
 role whose name is a mop command or a reserved bus name is refused before
-anything is allocated.
-
-The legacy local session stays an explicit choice:
-mop master --local [git-origin] [claude options]
-launches claude on this machine as before. Only origin belongs to it;
-everything else goes to claude as-is (`mop master --local --continue`
-resumes the master's last session), and a flag that takes a VALUE goes
-after `--` (`mop master --local -- --model opus`). As before, a master
-sees and reaches only its own project's puppets. Bus and proxy
-credentials arrive with `mop login --server ADDRESS LOGIN`, started
-automatically if either record is missing; without a terminal or an
-unambiguous server it refuses before launching claude. The Nomad token
-stays on the server; the session uses the selected server's LLM proxy
-from connection.json written by mop login (the legacy operator/client
-pair is still read for compatibility).
+anything is allocated. The local claude launch is gone: a master is a
+pooled puppet; for claude outside the pool there is `mop code`.
 ```
 
 #### mop models
