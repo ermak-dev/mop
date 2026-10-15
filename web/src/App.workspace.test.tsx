@@ -89,6 +89,71 @@ test('#664 clicking row cells selects one nonmodal screen panel and switches its
   expect(screen.getByTestId('pool')).toBeVisible();
 });
 
+// HYPOTHESIS: remount по цели сбрасывает общие настройки панели (#666).
+// Настройки вида должны переживать выбор, а приватное содержимое — нет.
+// RESULT: три новые проверки сначала упали, затем прошли с сохранением старых.
+// STATUS: FIXED — see #666
+test('#666 switching puppets preserves view and metadata without carrying private session state', async () => {
+  state.snapshot!.projects[0].puppets[0].soul = 'puppet';
+  state.snapshot!.projects[0].puppets[1].soul = 'builder';
+  renderUi(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'one' }));
+  await screen.findByText('conversation one');
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ввод человека в CLI' }), { target: { value: 'private draft from one' } });
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Отображать метаданные' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
+  fireEvent.click(screen.getByText('node-two'));
+  await screen.findByRole('complementary', { name: 'экран two' });
+  expect(screen.getByRole('tab', { name: 'Терминал' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('checkbox', { name: 'Отображать метаданные' })).toBeChecked();
+  expect(screen.queryByText('conversation one')).toBeNull();
+  expect(screen.queryByText('Role: builder')).toBeNull();
+  fireEvent.click(screen.getByRole('tab', { name: 'Чат' }));
+  expect(await screen.findByText('conversation two')).toBeVisible();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Отображать метаданные' }));
+  fireEvent.click(screen.getByText('node-one'));
+  expect(screen.getByRole('tab', { name: 'Чат' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('checkbox', { name: 'Отображать метаданные' })).not.toBeChecked();
+  expect(screen.getByRole('textbox', { name: 'Ввод человека в CLI' })).toHaveValue('');
+});
+
+test('#666 tabs, puppet identity and all panel controls share one compact toolbar', async () => {
+  state.snapshot!.projects[0].puppets[0].soul = 'puppet';
+  renderUi(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'one' }));
+  const navigation = screen.getByRole('tablist', { name: 'Рабочая область сессии' }).closest('.hybrid-navigation')! as HTMLElement;
+  expect(within(navigation).getByText('one (puppet)')).toBeVisible();
+  expect(within(navigation).getByRole('button', { name: 'Правка' })).toBeVisible();
+  expect(within(navigation).getByRole('checkbox', { name: 'Отображать метаданные' })).toBeVisible();
+  expect(within(navigation).getByRole('button', { name: 'Закрыть' })).toBeVisible();
+  const ordered = [within(navigation).getByRole('tablist'), within(navigation).getByText('one (puppet)'),
+    within(navigation).getByRole('button', { name: 'Правка' }), within(navigation).getByRole('checkbox', { name: 'Отображать метаданные' }),
+    within(navigation).getByRole('button', { name: 'Закрыть' })];
+  for (let index = 1; index < ordered.length; index++) expect(ordered[index - 1].compareDocumentPosition(ordered[index]) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  expect(screen.queryByText('экран one')).toBeNull();
+  fireEvent.click(within(navigation).getByRole('checkbox', { name: 'Отображать метаданные' }));
+  expect(screen.queryByText('Role: puppet')).toBeNull();
+  expect(within(navigation).getByText('one (puppet)')).toBeVisible();
+});
+
+test('#666 splitter width persists across selection and panel close/reopen', async () => {
+  renderUi(<App />);
+  expect(screen.queryByRole('separator')).toBeNull();
+  fireEvent.click(await screen.findByRole('button', { name: 'one' }));
+  const separator = screen.getByRole('separator');
+  expect(separator).toHaveAttribute('aria-orientation', 'vertical');
+  const start = Number(separator.getAttribute('aria-valuenow'));
+  fireEvent.keyDown(separator, { key: 'ArrowRight' });
+  const resized = Number(separator.getAttribute('aria-valuenow'));
+  expect(resized).toBeGreaterThan(start);
+  fireEvent.click(screen.getByText('node-two'));
+  expect(screen.getByRole('separator')).toHaveAttribute('aria-valuenow', String(resized));
+  fireEvent.click(screen.getByRole('button', { name: 'Закрыть' }));
+  expect(screen.queryByRole('separator')).toBeNull();
+  fireEvent.click(screen.getByText('node-one'));
+  expect(screen.getByRole('separator')).toHaveAttribute('aria-valuenow', String(resized));
+});
+
 test('#664 switching the screen closes the old edit wizard without opening one for the new target', async () => {
   renderUi(<App />);
   fireEvent.click(await screen.findByRole('button', { name: 'one' }));

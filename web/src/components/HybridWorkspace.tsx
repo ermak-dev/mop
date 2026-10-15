@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
+import type { ReactNode } from 'react';
 import type { Terminal } from '@xterm/xterm';
-import { Box, Button, Checkbox, Group, Tabs, Text, Textarea } from '@mantine/core';
+import { Box, Button, Checkbox, Tabs, Text, Textarea } from '@mantine/core';
 import type { Session } from '../useSession';
 import { useHybridHistory } from '../useHybridHistory';
 import { useHybridTerminal } from '../useHybridTerminal';
@@ -11,10 +12,41 @@ import { HybridTerminal } from './HybridTerminal';
 import { PuppetTailSnapshot } from './PuppetTailSnapshot';
 import './hybridWorkspace.css';
 
-export function HybridWorkspace({ session, target, role }: { session: Session; target: string; role?: string | null }) {
+export function HybridWorkspace({ session, target, role, actions, close }: {
+  session: Session;
+  target: string | null;
+  role?: string | null;
+  actions?: ReactNode;
+  close?: ReactNode;
+}) {
   const workspaceId = useId();
   const [tab, setTab] = useState<string | null>('chat');
   const [showMetadata, setShowMetadata] = useState(false);
+  return <Tabs id={workspaceId} value={tab} onChange={setTab} keepMounted keepMountedMode="display-none" className="hybrid-workspace">
+    <div role="toolbar" aria-label="Рабочая область" className="hybrid-navigation">
+      <Tabs.List aria-label="Рабочая область сессии">
+        <Tabs.Tab value="chat">Чат</Tabs.Tab><Tabs.Tab value="terminal" aria-controls={`${workspaceId}-panel-terminal`}>Терминал</Tabs.Tab>
+      </Tabs.List>
+      <Text component="h2" fw={600} m={0} className="hybrid-target">{target}{role ? ` (${role})` : ''}</Text>
+      <div className="hybrid-actions">{actions}</div>
+      <div className="hybrid-metadata">
+        <Checkbox size="xs" label="Отображать метаданные" checked={showMetadata} onChange={event => setShowMetadata(event.currentTarget.checked)} />
+      </div>
+      {close}
+    </div>
+    {/* Настройки и движки операций живут с панелью, приватные данные — только с целью. */}
+    {target && <HybridSession key={JSON.stringify([session.login, session.role, target])}
+      session={session} target={target} workspaceId={workspaceId} showTerminal={tab === 'terminal'} showMetadata={showMetadata} />}
+  </Tabs>;
+}
+
+function HybridSession({ session, target, workspaceId, showTerminal, showMetadata }: {
+  session: Session;
+  target: string;
+  workspaceId: string;
+  showTerminal: boolean;
+  showMetadata: boolean;
+}) {
   const [attached, setAttached] = useState(false);
   const [draft, setDraft] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
@@ -63,7 +95,6 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
     // Потерянное подключение не перехватывает writer повторно без открытия диалога.
     if (tail.loaded && tail.mode === 'screen' && !tail.error && !tail.blocked && !attached && !authLost && !history.denied) setAttached(true);
   }, [tail.loaded, tail.mode, tail.error, tail.blocked, attached, authLost, history.denied]);
-  const showTerminal = tab === 'terminal';
   const showSnapshot = !authLost && !history.denied && (
     terminal.phase === 'disconnected' || terminal.phase === 'unknown'
     || (!attached && (tail.mode === 'initialization' || !tail.loaded || !!tail.error))
@@ -82,14 +113,7 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
       else setNotice('Отправка не подтверждена. Черновик сохранён; перед повтором проверьте терминал.');
     } finally { sending.current = false; }
   };
-  return <Tabs id={workspaceId} value={tab} onChange={setTab} keepMounted keepMountedMode="display-none" className="hybrid-workspace">
-    <Group justify="space-between" gap="xs" px="md" className="hybrid-navigation">
-      <Tabs.List aria-label="Рабочая область сессии">
-        <Tabs.Tab value="chat">Чат</Tabs.Tab><Tabs.Tab value="terminal" aria-controls={`${workspaceId}-panel-terminal`}>Терминал</Tabs.Tab>
-      </Tabs.List>
-      <Checkbox label="Отображать метаданные" checked={showMetadata} onChange={event => setShowMetadata(event.currentTarget.checked)} />
-    </Group>
-    {showMetadata && role && <Text size="xs" c="dimmed" px="md" py="xs">Role: {role}</Text>}
+  return <>
     {terminal.error && <Text role="alert" c="red" size="sm" px="md" py="xs">{terminal.error}</Text>}
     <div className="hybrid-panes" style={{ display: 'flex' }}>
       <Tabs.Panel value="chat" className="hybrid-chat-pane">
@@ -126,5 +150,5 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
         <PuppetTailSnapshot tail={tail} visible={showTerminal && showSnapshot} refresh={refreshTail} />
       </div>
     </div>
-  </Tabs>;
+  </>;
 }

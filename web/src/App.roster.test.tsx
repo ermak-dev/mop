@@ -178,13 +178,13 @@ test("#588 the common managed screen identifies its role", async () => {
   fireEvent.click(screen.getByRole("button", { name: "pu-sample-2" }));
   await waitFor(() => expect(screen.getByTestId("puppet-card")).toBeInTheDocument());
   const card = screen.getByTestId("puppet-card");
-  expect(within(card).queryByText("Role: master")).toBeNull();
+  expect(within(card).getByText("pu-sample-2 (master)")).toBeVisible();
   fireEvent.click(within(card).getByRole("checkbox", { name: "Отображать метаданные" }));
-  expect(within(card).getByText("Role: master")).toBeInTheDocument();
+  expect(within(card).queryByText("Role: master")).toBeNull();
 });
 
 // #664: клик по любой ячейке заменил отдельную иконку экрана;
-// метка роли по-прежнему передаётся в метаданные панели.
+// метка роли видна в панели независимо от метаданных чата (#666).
 test("#664 the row selection keeps the role in the screen panel", async () => {
   auth.current = { login: "viewer", role: "admin" };
   await mount();
@@ -192,8 +192,8 @@ test("#664 the row selection keeps the role in the screen panel", async () => {
   const row = screen.getByRole('button', { name: 'pu-sample-2' }).closest('tr')!;
   fireEvent.click(within(row).getByText('node-a'));
   const card = await screen.findByTestId("puppet-card");
-  expect(within(card).queryByText("Role: master")).toBeNull();
+  expect(within(card).getByText("pu-sample-2 (master)")).toBeVisible();
   fireEvent.click(within(card).getByRole("checkbox", { name: "Отображать метаданные" }));
-  expect(within(card).getByText("Role: master")).toBeInTheDocument();
+  expect(within(card).queryByText("Role: master")).toBeNull();
   expect(within(card).getByRole("tab", { name: "Чат" })).toHaveAttribute("aria-selected", "true");
 });

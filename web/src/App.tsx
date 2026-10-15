@@ -9,6 +9,7 @@ import { useJournal } from "./useJournal";
 import { useHashPage } from "./useHashPage";
 import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
+import { DashboardSplit } from "./components/DashboardSplit";
 import { PuppetCard } from "./components/PuppetCard";
 import { AddBox } from "./components/AddBox";
 import { NodesPanel } from "./components/NodesPanel";
@@ -140,7 +141,7 @@ export default function App() {
           : <Text c="dimmed">снимок ещё не пришёл</Text>}
       </Group>
       {page === 'main' && snapshot?.load && <LoadBar load={snapshot.load} />}
-      <div className={`dashboard-body${target ? ' has-screen' : ''}`}>
+      <DashboardSplit open={!!target} main={
         <main className="dashboard-main">
           {page === 'journal' ? (
             <JournalPage journal={journal.journal} error={journal.error} open={() => {}}
@@ -160,9 +161,10 @@ export default function App() {
             </>}
           </Stack>}
         </main>
+      } screen={
         <PuppetCard key={identity} session={session} role={selected?.role} rows={screenRows}
           target={target} onClose={closePuppet} />
-      </div>
+      } />
     </div>
   );
 }
