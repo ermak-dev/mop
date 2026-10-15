@@ -118,7 +118,10 @@ class DatabaseWrapper(PostgreSQLWrapper):
             # connection_class — поддержанный параметр psycopg_pool, не
             # несуществующий connection_factory параметр psycopg.connect.
             options['pool'] = {**({} if pool is True else pool), 'connection_class': BoundedConnection}
-        super().__init__({**settings_dict, 'OPTIONS': options}, alias)
+        # ConnectionHandler и test database creation меняют этот же dict
+        # до первого соединения; wrapper должен видеть выбранную ими БД.
+        settings_dict['OPTIONS'] = options
+        super().__init__(settings_dict, alias)
 
     def _rollback(self):
         try:

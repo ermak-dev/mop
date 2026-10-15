@@ -25,6 +25,10 @@ from mop.server.controller.runtime import Runtime
 # Обычный atomic тоже ограничен на driver boundary; native observer не наследует
 # policy holder и измеряет время настоящего server-side lock.
 class TransportDeadline(TransactionTestCase):
+    # Как соседние классы: migration seeds восстанавливаются сериализацией,
+    # иначе post_migrate после flush дублирует content types следующего класса.
+    serialized_rollback = True
+
     def test_acknowledged_query_and_lost_commit_are_bounded_without_proxy_disconnect(self):
         from django.test import override_settings
         from _controller_transport import Blackhole
@@ -646,7 +650,8 @@ from django.db import connection, connections
 from django.contrib.auth import get_user_model
 connections.databases['default']['NAME'] = sys.argv[2]
 connection.ensure_connection()
-print(json.dumps({'pid': os.getpid(), 'db_pid': connection.connection.info.backend_pid}), flush=True)
+print(json.dumps({'pid': os.getpid(), 'db_pid': connection.connection.info.backend_pid,
+                  'database': connection.connection.info.dbname}), flush=True)
 sys.stdin.readline()
 try:
     count = get_user_model().objects.filter(pk=sys.argv[3], first_name='1').update(first_name='2')
@@ -663,6 +668,7 @@ finally:
             identities = [json.loads(child.stdout.readline()) for child in children]
             self.assertEqual(len({item['pid'] for item in identities}), 2)
             self.assertEqual(len({item['db_pid'] for item in identities}), 2)
+            self.assertEqual({item['database'] for item in identities}, {connection.settings_dict['NAME']})
             for child in children:
                 child.stdin.write('go\n')
                 child.stdin.flush()

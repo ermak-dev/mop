@@ -78,6 +78,9 @@ from mop.server.controller import runtime
 runtime.configure()
 from django.db import connections
 connections.databases['default']['NAME'] = sys.argv[2]
+connections['default'].ensure_connection()
+if connections['default'].connection.info.dbname != sys.argv[2]:
+    raise SystemExit('restart probe connected to the wrong database')
 results = {}
 try:
     for name in ('verify_installation', 'initialize'):

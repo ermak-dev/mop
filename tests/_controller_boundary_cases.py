@@ -98,6 +98,20 @@ class Materialization(unittest.TestCase):
         self.assertEqual(copy, [[1], [1]])
         self.assertIsNot(copy[0], copy[1])
 
+    def test_backend_retains_django_connection_settings_before_first_connection(self):
+        # HYPOTHESIS: копия всего settings_dict отделяет wrapper от
+        # ConnectionHandler и fresh-process probe попадает не в test database.
+        # SOLUTION: сохранить ссылку на настройки Django, копировать только OPTIONS.
+        # RESULT: unit red и реальный process-CAS red, затем проверена выбранная БД.
+        import copy
+        from django.conf import settings
+        from mop.server.controller.postgresql.base import DatabaseWrapper
+        config = copy.deepcopy(settings.DATABASES['default'])
+        wrapper = DatabaseWrapper(config, 'settings_identity_probe')
+        config['NAME'] = 'explicit-target-before-connect'
+        self.assertEqual(wrapper.settings_dict['NAME'], 'explicit-target-before-connect')
+        self.assertIsNone(wrapper.connection)
+
     def test_only_owned_runtime_exposes_the_database_bridge(self):
         from mop.server.controller import runtime
         self.assertFalse(hasattr(runtime, 'database_call'), 'unowned database bridge remains public')
