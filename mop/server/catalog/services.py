@@ -128,6 +128,8 @@ class Catalog:
             except PermissionError:
                 continue
             result.append(snapshot(row))
+        # Отзыв, замеченный при обходе, не превращается в частичный private result.
+        self._authorize(actor, 'catalog.view_project', projects=tuple(row.id for row in result))
         return tuple(result)
 
     def replace_project_origin(self, actor, project_id, origin, *, expected_revision):
@@ -148,7 +150,7 @@ class Catalog:
         value = project_limit(limit)
         with transaction.atomic():
             row = m.Project.objects.select_for_update().get(pk=project_id)
-            self._authorize(actor, 'catalog.change_project', projects=(row.id,))
+            self._authorize(actor, 'catalog.set_project_limit', projects=(row.id,))
             expected(row, expected_revision)
             row.puppet_limit = value
             row.revision += 1

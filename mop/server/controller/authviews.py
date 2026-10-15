@@ -26,7 +26,7 @@ from .authentication import actor_for_request
 class FiniteSerializer(serializers.Serializer):
     def to_internal_value(self, data):
         if not hasattr(data, 'keys') or set(data.keys()) - set(self.fields):
-            raise serializers.ValidationError('unknown fields')
+            raise serializers.ValidationError({'non_field_errors': ['unknown fields']})
         return super().to_internal_value(data)
 
 
