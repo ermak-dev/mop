@@ -19,6 +19,7 @@ import unittest
 from unittest.mock import patch
 
 import hermetic  # noqa: F401
+from _lib import patched_env
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 # Отсутствующая возможность — намеренный red, не сбой окружения/зависимостей.
@@ -504,7 +505,7 @@ class ControlClient(unittest.TestCase):
                                                  n in ("os", "mop.common.config", "mop.common.creds")) for n in names))
         self.assertNotIn("execute", dir(self.client))
         self.assertNotIn("call", dir(self.client))
-        with patch.dict(os.environ, {"HTTPS_PROXY": "https://evil.example", "MOP_SERVER_LAN": "evil"}):
+        with patched_env(HTTPS_PROXY="https://evil.example", MOP_SERVER_LAN="evil"):
             self.queue(operation=operation())
             self.client.operation("o_789")
         self.assertEqual(self.fixture.connections[-1].args[0], "controller.example")
