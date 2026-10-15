@@ -54,23 +54,35 @@ stages: [test, deploy]
     SETUP:
       value: |
         apt-get update -qq
-        apt-get install -y -qq --no-install-recommends git openssl jq >/dev/null
-        pip install -q --root-user-action=ignore --disable-pip-version-check jinja2 $(python3 -c "exec(open('mop/common/deps.py').read()); print(' '.join(PIP))")
+        apt-get install -y -qq --no-install-recommends git openssl jq postgresql-client >/dev/null
+        pip install -q --root-user-action=ignore --disable-pip-version-check jinja2 '.[server]'
+        for attempt in $(seq 1 60); do
+          pg_isready -h postgres -U mop_ci && break
+          test "$attempt" -lt 60
+          sleep 1
+        done
         useradd --home-dir /tmp/ci-home ci
         install -d -o ci -m 0700 /tmp/ci-home
         chown -R ci /io
         exec su ci -s /bin/bash -c "$TESTS"
       expand: false
   script:
-    # Кэш pip -- именованный том docker, а не каталог checkout'а: его
-    # переживает и чистка checkout'а, и смена задачи.
+    # Отдельная сеть и БД каждой задачи: никаких credentials установки.
+    - docker network create "mop-ci-$CI_JOB_ID"
     - >-
-      docker run --rm
+      docker run -d --name "mop-ci-db-$CI_JOB_ID"
+      --network "mop-ci-$CI_JOB_ID" --network-alias postgres
+      -e POSTGRES_DB=mop_ci -e POSTGRES_USER=mop_ci
+      -e POSTGRES_PASSWORD=isolated-test-only "$POSTGRES_IMAGE"
+    - >-
+      docker run --rm --network "mop-ci-$CI_JOB_ID"
       -v "$CI_PROJECT_DIR:/io" -w /io
       -v mop-ci-pip:/root/.cache/pip
-      -e MOP_TESTS_STRICT -e TESTS
+      -e MOP_TESTS_STRICT -e TESTS -e MOP_TEST_POSTGRES_HOST=postgres
       "$PYTHON_IMAGE" bash -euc "$SETUP"
   after_script:
+    - docker rm -f "mop-ci-db-$CI_JOB_ID" || true
+    - docker network rm "mop-ci-$CI_JOB_ID" || true
     # И при отказе: контейнер оставил checkout чужим (ci, root), и
     # следующая задача раннера его бы не вычистила -- отдаём пользователю
     # раннера, как rugent.
@@ -79,7 +91,14 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
-    PYTHON_IMAGE: python:3.12-slim
+    PYTHON_IMAGE: python:3.12-slim-trixie
+    POSTGRES_IMAGE: postgres:16-bookworm
+
+controller:pg17:
+  extends: .tests
+  variables:
+    PYTHON_IMAGE: python:3.13-slim-trixie
+    POSTGRES_IMAGE: postgres:17-bookworm
 
 # Дашборд (#297): собранный web/dist лежит в репозитории, потому что на
 # серверах node нет и rumop раскатывается с сервера вручную. Задача собирает

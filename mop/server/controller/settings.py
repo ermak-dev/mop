@@ -1,0 +1,60 @@
+"""Настройки framework до ORM-конфигурации предметных модулей."""
+import os
+from .bootstrap import load, private_bytes
+
+if 'DJANGO_ALLOW_ASYNC_UNSAFE' in os.environ:
+    raise RuntimeError('DJANGO_ALLOW_ASYNC_UNSAFE is forbidden')
+BOOTSTRAP = load(os.environ.get('MOP_CONTROLLER_BOOTSTRAP', ''))
+if 'django_key' not in BOOTSTRAP:
+    raise RuntimeError('bootstrap Django signing key is required')
+SECRET_KEY = private_bytes(BOOTSTRAP['django_key']).decode('ascii')
+DEBUG = False
+ALLOWED_HOSTS = []
+ROOT_URLCONF = 'mop.server.controller.urls'
+ASGI_APPLICATION = 'mop.server.controller.asgi.application'
+INSTALLED_APPS = [
+    'django.contrib.auth', 'django.contrib.contenttypes', 'django.contrib.sessions',
+    'django.contrib.messages', 'django.contrib.staticfiles', 'django.contrib.admin',
+    'rest_framework', 'rest_framework.authtoken', 'channels',
+    'mop.server.controller',
+]
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates',
+              'APP_DIRS': True, 'OPTIONS': {'context_processors': [
+                  'django.template.context_processors.request',
+                  'django.contrib.auth.context_processors.auth',
+                  'django.contrib.messages.context_processors.messages']}}]
+DATABASES = {'default': dict(BOOTSTRAP['database'])}
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+USE_TZ = True
+TIME_ZONE = 'UTC'
+STATIC_URL = '/static/'
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Strict'
+CSRF_COOKIE_SECURE = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_SSL_REDIRECT = True
+X_FRAME_OPTIONS = 'DENY'
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+        'rest_framework.authentication.SessionAuthentication'],
+    'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+    'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+}
