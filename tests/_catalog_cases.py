@@ -253,6 +253,20 @@ class CatalogCases(TransactionTestCase):
             self.api.observe_image(self.actor, n.id, p.id, foreign.id, available=True,
                 source='scheduler:meta', observed_at=timezone.now(), receipt='forged', expected_revision=state.revision)
 
+    def test_scope_checks_existing_identity_and_old_and_new_references(self):
+        p, q, n = self.project(), self.project('beta'), self.node()
+        denied = services.Catalog(authorizer=Allow(set()))
+        with self.assertRaises(PermissionError):
+            denied.register_project(self.actor, p.origin)
+        n = self.api.set_node_projects(self.actor, n.id, (p.id, q.id), expected_revision=n.revision)
+        with self.assertRaises(PermissionError):
+            services.Catalog(authorizer=Allow({p.id})).set_node_projects(
+                self.actor, n.id, (p.id,), expected_revision=n.revision)
+        self.assertEqual(models.NodeProject.objects.filter(node_id=n.id).count(), 2)
+        snap = self.pin(q)
+        with self.assertRaises(PermissionError):
+            services.Catalog(authorizer=Allow({p.id})).get_policy(self.actor, snap.id)
+
     def test_client_binding_is_durable_metadata_not_presence(self):
         p = self.project()
         client = self.api.register_client(self.actor, label='workstation')
