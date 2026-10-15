@@ -176,6 +176,43 @@ class Materialization(unittest.TestCase):
             del connections[alias]
             del connections.databases[alias]
 
+    def test_adapter_shutdown_budget_does_not_wait_for_cancellation_acknowledgement(self):
+        from mop.server.controller.runtime import Runtime
+        async def run():
+            release = asyncio.Event()
+            class Resource:
+                calls = 0
+                closed = False
+                async def start(self):
+                    pass
+                async def aclose(self):
+                    self.calls += 1
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        await release.wait()
+                    self.closed = True
+            resource = Resource()
+            runtime = Runtime(adapters=(resource,))
+            await runtime.start()
+            closing = asyncio.create_task(runtime.aclose(timeout=.02))
+            try:
+                done, _ = await asyncio.wait([closing], timeout=.15)
+                self.assertIn(closing, done, 'shutdown waits forever for adapter cancellation acknowledgement')
+                with self.assertRaisesRegex(RuntimeError, 'shutdown incomplete'):
+                    await closing
+                self.assertFalse(runtime._closed)
+                self.assertFalse(resource.closed)
+                release.set()
+                await runtime.aclose(timeout=1)
+                self.assertTrue(resource.closed)
+                self.assertEqual(resource.calls, 1)
+            finally:
+                release.set()
+                await asyncio.gather(closing, return_exceptions=True)
+                await runtime.aclose()
+        asyncio.run(run())
+
     def test_cancelled_cpu_callback_keeps_capacity_and_shutdown_is_honest(self):
         import threading
         from mop.server.controller.runtime import Runtime, Backpressure
