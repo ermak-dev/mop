@@ -40,7 +40,7 @@ def self_argv(bin_dir=None, python=None):
     launcher = os.path.join(BIN if bin_dir is None else bin_dir, "mop")
     if os.path.exists(launcher):
         return [launcher]
-    return [sys.executable if python is None else python, "-m", "mop.cli"]
+    return [sys.executable if python is None else python, "-P", "-m", "mop.cli"]
 
 
 # Цвета и отказ строкой -- в mop.cli.term (#320): их берёт и сборка

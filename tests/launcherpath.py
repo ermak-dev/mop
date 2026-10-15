@@ -11,6 +11,7 @@ from pathlib import Path
 
 import hermetic
 from _lib import Checks
+from mop.cli import lib
 
 
 def main():
@@ -29,6 +30,12 @@ def main():
         r = subprocess.run([str(launcher), 'help'], cwd=cwd, env=env,
                            capture_output=True, text=True, timeout=30)
         c.check('#660 launcher executes its own package from a shadowing cwd',
+                r.returncode == 0 and 'fixture-cwd-package-selected' not in r.stdout + r.stderr
+                and 'manage the pool' in r.stdout, (r.returncode, r.stdout, r.stderr))
+        env['PYTHONPATH'] = str(root)
+        r = subprocess.run([*lib.self_argv(bin_dir=str(Path(tmp, 'no-launcher'))), 'help'],
+                           cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+        c.check('#660 installed-package subprocess also rejects cwd shadowing',
                 r.returncode == 0 and 'fixture-cwd-package-selected' not in r.stdout + r.stderr
                 and 'manage the pool' in r.stdout, (r.returncode, r.stdout, r.stderr))
         bindir = Path(tmp, 'bin')
