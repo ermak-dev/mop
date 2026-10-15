@@ -1,5 +1,5 @@
 // #469: адресный send, один POST, payload не в URL/storage, честный исход.
-// #489: те же гарантии проверяются через поле в диалоге экрана.
+// #661: канал убран из рабочего окна; гарантии SendForm проверяются отдельно.
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { MantineProvider } from "@mantine/core";
@@ -28,16 +28,7 @@ const route = (post: () => Promise<Response>, get: () => Promise<Response>) =>
   vi.fn(async (url: string | URL, init?: RequestInit) =>
     init?.method === "POST" ? post() : String(url).endsWith("/tail")
       ? ({ ok: true, json: async () => ({ lines: ["screen"] }) }) as Response : get());
-const open = () => {
-  const fetchTail = vi.mocked(fetch);
-  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
-    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
-    : fetchTail(url, init));
-  const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "Экран" }));
-  fireEvent.click(screen.getByText('Сообщение папету через канал', { selector: 'summary' }));
-  return view;
-};
+const open = () => renderUi(<SendForm session={ADMIN} target={CARD.name} />);
 const typeAndSend = async () => {
   fireEvent.change(await screen.findByLabelText("Сообщение"), { target: { value: "привет" } });
   fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -61,7 +52,7 @@ test("sendWord names the outcome for a human", () => {
   expect(sendWord("running")).toBe("Идёт");
 });
 
-test("#469 the row offers send to the admin and posts the narrow schema", async () => {
+test("#469 standalone send posts the narrow admin schema", async () => {
   const fetchMock = route(async () => ok202("op-1"), async () => opJson("succeeded"));
   vi.stubGlobal("fetch", fetchMock);
   open();
@@ -144,7 +135,8 @@ test.each(["logout", "target"])("#469 late verdict after %s lands nowhere", asyn
   vi.stubGlobal("fetch", fetchMock);
   const view = open();
   await typeAndSend();
-  view.rerender(<MantineProvider><PoolTable projects={change === "target" ? [] : projects}
+  // #661: смена контекста проверяется без удалённой панели канала.
+  view.rerender(<MantineProvider><SendForm target={change === "target" ? "pu-mop-2" : CARD.name}
     session={change === "logout" ? { login: null, role: null } : ADMIN} /></MantineProvider>);
   await act(async () => { release(ok202("op-1")); });
   expect(screen.queryByTestId("send-verdict")).toBeNull();

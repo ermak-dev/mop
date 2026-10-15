@@ -11,17 +11,20 @@ import { afterEach, expect, test, vi } from "vitest";
 import { PuppetCard } from "./PuppetCard";
 import { renderUi } from "../test-utils";
 
+// #661: снимок открывается автоматически при инициализации; отдельной кнопки нет.
 const ADMIN = { login: "anton", role: "admin" as const };
 const tailOk = (lines: string[], truncated = false) =>
-  ({ ok: true, status: 200, json: async () => ({ lines, truncated }) }) as Response;
+  ({ ok: true, status: 200, json: async () => ({ source: 'initialization', lines, truncated }) }) as Response;
 const open = () => {
   const fetchTail = vi.mocked(fetch);
-  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => String(url).includes('/history')
-    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) })
-    : fetchTail(url, init));
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (String(url).includes('/history')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ epoch: 'e', session_id: 's', cursor: 'c', records: [], reset: false, partial: false, has_more: false }) });
+    if (String(url).includes('/read?')) return new Promise<Response>(() => {});
+    if (String(url).endsWith('/close')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) } as Response);
+    return fetchTail(url, init);
+  });
   const view = renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
   fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   return view;
 };
 
@@ -50,7 +53,6 @@ test("viewer has an accessible close button", async () => {
   const onClose = vi.fn();
   renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={onClose} />);
   fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   const closer = screen.getByRole("button", { name: "Закрыть" });
   closer.focus();
   expect(document.activeElement).toBe(closer);
@@ -97,7 +99,6 @@ test("#487 switching sources never displays the old response", async () => {
   await waitFor(() => expect(mock).toHaveBeenCalled());
   view.rerender(<MantineProvider><PuppetCard session={ADMIN} target="pu-mop-2" onClose={() => {}} /></MantineProvider>);
   fireEvent.click(screen.getByRole('tab', { name: 'Терминал' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Последние строки' }));
   await screen.findByText("new screen");
   await act(async () => { release(tailOk(["old screen"])); });
   expect(screen.queryByText("old screen")).toBeNull();

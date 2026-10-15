@@ -172,7 +172,10 @@ test("#588 the common managed screen identifies its role", async () => {
   await screen.findByText("viewer");
   fireEvent.click(screen.getByRole("button", { name: "pu-sample-2" }));
   await waitFor(() => expect(screen.getByTestId("puppet-card")).toBeInTheDocument());
-  expect(within(screen.getByTestId("puppet-card")).getByText("Role: master")).toBeInTheDocument();
+  const card = screen.getByTestId("puppet-card");
+  expect(within(card).queryByText("Role: master")).toBeNull();
+  fireEvent.click(within(card).getByRole("checkbox", { name: "Отображать метаданные" }));
+  expect(within(card).getByText("Role: master")).toBeInTheDocument();
 });
 
 // HYPOTHESIS: #578 доносит роль через клик по имени, но не через иконку экрана.
@@ -186,6 +189,8 @@ test("#594 the row screen action keeps the role in the chat header", async () =>
   const actions = screen.getByRole("group", { name: "действия pu-sample-2" });
   fireEvent.click(within(actions).getByRole("button", { name: "Экран" }));
   const card = await screen.findByTestId("puppet-card");
+  expect(within(card).queryByText("Role: master")).toBeNull();
+  fireEvent.click(within(card).getByRole("checkbox", { name: "Отображать метаданные" }));
   expect(within(card).getByText("Role: master")).toBeInTheDocument();
   expect(within(card).getByRole("tab", { name: "Чат" })).toHaveAttribute("aria-selected", "true");
 });
