@@ -158,6 +158,14 @@ class TransportDeadline(TransactionTestCase):
                         get_user_model().objects.exists()
 
     def observe_lock_deadline(self, atomic):
+        import psycopg
+        from psycopg import sql
+        config = connection.settings_dict
+        observer = psycopg.connect(host=config['HOST'], port=config['PORT'], dbname=config['NAME'],
+                                   user=config['USER'], password=config['PASSWORD'], connect_timeout=5,
+                                   options='-c lock_timeout=2000 -c statement_timeout=5000',
+                                   **{key: value for key, value in config['OPTIONS'].items()
+                                      if key.startswith('ssl')})
         user = get_user_model().objects.create(username='deadline-lock')
         locked, finished = threading.Event(), threading.Event()
         errors = []
@@ -179,13 +187,19 @@ class TransportDeadline(TransactionTestCase):
         try:
             self.assertTrue(locked.wait(3))
             start = time.monotonic()
-            with transaction.atomic():
-                get_user_model().objects.select_for_update().get(pk=user.pk)
+            # Независимый native observer не наследует deadline holder: иначе
+            # истечение его собственного таймера маскировало бы время locks.
+            with observer.cursor() as cursor:
+                pk = sql.Identifier(get_user_model()._meta.pk.column)
+                cursor.execute(sql.SQL('SELECT {pk} FROM {table} WHERE {pk} = %s FOR UPDATE').format(
+                    pk=pk, table=sql.Identifier(get_user_model()._meta.db_table)), (user.pk,))
+                self.assertEqual(cursor.fetchone(), (user.pk,))
             elapsed = time.monotonic() - start
             self.assertLess(elapsed, .65, 'independent connection observed a lock past transaction deadline')
             self.assertTrue(finished.wait(1))
             self.assertTrue(errors)
         finally:
+            observer.close()
             thread.join(5)
             self.assertFalse(thread.is_alive())
 
