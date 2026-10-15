@@ -3,7 +3,6 @@ from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
-from uuid import UUID
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
@@ -34,6 +33,7 @@ class Wire:
         self.attribute = 'entryUUID'
         self.code = 0
         self.failure = None
+        self.cleanup_failure = None
         self.searches = []
         self.binds = []
         self.duplicates = False
@@ -69,7 +69,8 @@ class Wire:
                         self.response.append(dict(entry, dn='uid=other,dc=example'))
                 return True
             def unbind(self):
-                pass
+                if wire.cleanup_failure:
+                    raise wire.cleanup_failure
         return Connection()
 
 
@@ -109,10 +110,13 @@ class AdapterContracts(SimpleTestCase):
         cfg = SimpleNamespace(**(vars(configuration()) | {'subject_attribute': 'objectGUID'}))
         cfg.nested_ad = True
         self.wire.attribute = 'objectGUID'
-        for text in (UID_A, UID_B):
-            self.wire.subjects = [UUID(text).bytes_le]
+        for text, wire_hex in ((UID_A, '33221100554477668899aabbccddeeff'),
+                               (UID_B, '443322116655887799aabbccddeeff00')):
+            self.wire.subjects = [bytes.fromhex(wire_hex)]
             account, = self.adapter.lookup(cfg, 'person')
             self.assertEqual(account.subject, text)
+            encoded = ''.join('\\' + wire_hex[i:i + 2] for i in range(0, 32, 2))
+            self.assertIn('(objectGUID=' + encoded + ')', [s[1] for s in self.wire.searches])
         group_search = next(s for s in self.wire.searches if s[0] == cfg.group_base)
         self.assertIn('(member:1.2.840.113556.1.4.1941:=' + DN + ')', group_search[1])
         self.assertIn('(uniqueMember=' + DN + ')', group_search[1])
@@ -128,6 +132,13 @@ class AdapterContracts(SimpleTestCase):
                         self.adapter.check_password(configuration(), DN, 'test-password')
                     self.assertNotIn('private-context', str(raised.exception))
                     self.assertNotIn('test-password', str(raised.exception))
+
+    def test_connection_cleanup_transport_failure_is_sanitized(self):
+        self.wire.cleanup_failure = TimeoutError('private-context test-password')
+        with self.assertRaises(DirectoryUnavailable) as raised:
+            self.adapter.check_password(configuration(), DN, 'test-password')
+        self.assertNotIn('private-context', str(raised.exception))
+        self.assertNotIn('test-password', str(raised.exception))
 
     def test_timeout_is_sanitized_and_unbound_secret_precedes_network(self):
         self.wire.failure = TimeoutError('private-context test-password')
