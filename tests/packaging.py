@@ -83,24 +83,20 @@ def check_console_351(c):
 # [python, -m, mop.cli, mcp]; скилл переехал в mop/skills/master и едет в
 # пакете, на старом месте -- переходный симлинк.
 # STATUS: FIXED — see #351
+# #662: mcp_command ушёл вместе с локальным мастером; старт MCP-сервера
+# задаёт спека роли, и клиентский конфиг ему не нужен.
 def check_master_mcp_351(c):
     import tempfile
-    from mop.cli.core import master
-    fn = getattr(master, "mcp_command", None)
-    if not c.check("#351 master.mcp_command exists", fn is not None):
-        return
+    from mop.cli import lib
     with tempfile.TemporaryDirectory() as d:
         clone = os.path.join(d, "bin")
         os.makedirs(clone)
         launcher = os.path.join(clone, "mop")
         open(launcher, "w").close()
-        c.expect("#351 a clone: its own bin/mop",
-                 fn(clone, "/venv/bin/python"), (launcher, ["mcp"]))
-        c.expect("#351 a package: the interpreter that runs mop",
-                 fn(os.path.join(d, "nowhere"), "/venv/bin/python"),
-                 ("/venv/bin/python", ["-P", "-m", "mop.cli", "mcp"]))
-    got = master.mcp_config()
-    c.check("#351 mcp_config carries mcp_command", '"mcp"' in got)
+        c.expect("#351 a clone launches itself",
+                 lib.self_argv(bin_dir=clone), [launcher])
+    # #662: mcp_config ушёл вместе с локальным мастером; сервер MCP
+    # поднимает спека роли и mcp-командлет, а не клиентский конфиг.
 
 
 # ── #368: MCP-инструменты и перезапуск --from-ci зовут себя и из пакета ──
@@ -175,12 +171,12 @@ def check_self_argv_368(c):
 
 
 def check_master_skill_351(c):
-    from mop.cli.core import master
     pkg = os.path.join(ROOT, "mop")
+    skill = os.path.join(pkg, "skills", "master")
     c.expect("#351 the skill lives inside the package",
-             os.path.realpath(master.SKILL), os.path.join(pkg, "skills", "master"))
+             os.path.realpath(skill), skill)
     c.check("#351 the skill file is there",
-            os.path.isfile(os.path.join(master.SKILL, "SKILL.md")))
+            os.path.isfile(os.path.join(skill, "SKILL.md")))
     old = os.path.join(ROOT, "skills", "master")
     c.check("#351 the old path is a transition symlink",
             os.path.islink(old) and os.path.realpath(old) == os.path.join(pkg, "skills", "master"))

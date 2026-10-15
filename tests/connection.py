@@ -11,11 +11,13 @@ HYPOTHESIS (#533): последовательные записи login.complete 
 models, doctor) читают каталог по частям и принимают смесь за вход.
 SOLUTION: один атомарный writer -- connection.json {version, bus, https_port,
 proxy} после обеих сетевых проверок; один решатель creds.human_profile для
-всех читателей; legacy-пара читается только целиком и только пока нет нового
-файла; machine operator.json (service) рядом с человеческим connection.json --
-явный конфликт для всех, без выбора стороны; частичный legacy восстанавливается
-только полным повторным входом.
-STATUS: в работе (#533): прогон до исправления обязан быть красным.
+всех читателей; machine operator.json (service) рядом с человеческим
+connection.json -- явный конфликт для всех, без выбора стороны.
+#662: прежняя пара operator.json+client.json про человека больше не вход и
+не подсказка -- решатель её не читает, ремонт один, полный вход;
+put_legacy остаётся для сценариев, где пара -- лежащий на диске артефакт,
+который новые читатели обязаны отвергнуть.
+STATUS: FIXED — see #533
 """
 import io
 import json
@@ -142,9 +144,10 @@ def check_mixed_write_533(c):
     root = tempfile.mkdtemp(prefix="mop-conn-533-")
     dest = os.path.join(root, "srv.test")
 
-    # Прерванный повторный вход нового человека: саботаж второго writer
-    # (operator.json на базовой реализации, в новой он не вызывается).
-    put_legacy(dest, ALICE)
+    # Прерванный повторный вход нового человека: саботаж writer'а
+    # (в базовой реализации это была вторая запись пары, в новой writer
+    # один и не вызывается -- проверка держит оба мира).
+    put_connection(dest, ALICE)
     c.expect("#533 the old login is whole before the attempt",
              effective(dest), profile_of(ALICE))
     outcome = []
@@ -281,53 +284,47 @@ def check_reader_new_533(c):
            lambda: profile(a), "does not match version")
 
 
-# ── решатель: legacy-пара и её остатки ──────────────────────────────────
+# ── решатель: прежняя пара -- лежащий артефакт, не вход (#662) ──────────
 def check_reader_legacy_533(c):
     profile = getattr(creds, "human_profile", None)
     if not c.check("#533 human_profile exists", profile is not None):
         return
     root = tempfile.mkdtemp(prefix="mop-conn-legacy-")
 
+    # Целая прежняя пара -- не вход: решатель её не читает, ремонт один --
+    # полный `mop login`. Молча собрать профиль из половин значило бы
+    # вернуть смешанные входы, против которых и был #533.
     full = os.path.join(root, "full.test")
     put_legacy(full, ALICE)
-    c.expect("#533 a legacy pair still reads as a whole profile",
-             profile(full), profile_of(ALICE))
+    c.expect("#662 a legacy pair is not a profile", profile(full), None)
+    c.expect("#662 a legacy pair is no login for the resolver",
+             creds.snapshot(full), (None, None))
     with patched(creds, ROOT=root), \
             context.use(context.resolve({"server": "full.test"}, {}, {})), \
             config.client_sources():
-        c.expect("#533 the bus still runs on a legacy login",
-                 bus.server_config("full.test")["url"], "wss://full.test:443/nats")
-
-    # Новый файл старше пары: лежит и парой, и новым -- читается только новый.
+        refute(c, "#662 the bus refuses a legacy pair as no login",
+               lambda: bus.server_config("full.test"), "no bus credentials",
+               "mop login")
+    # Новый файл делает каталог входом; пара рядом -- мёртвый груз, не тень.
     put_connection(full, BOB)
-    c.expect("#533 a new file shadows the legacy pair", profile(full), profile_of(BOB))
+    c.expect("#533 a new file stands alone over a legacy pair",
+             profile(full), profile_of(BOB))
 
+    # Половины пары -- тот же «нет входа», каждая в одиночку.
     op_only = os.path.join(root, "op.test")
     creds.write_operator(op_only, ALICE[0], ALICE[1])
-    # Половина -- не профиль решателя (None), а отказ «неполный вход» --
-    # работа consumer'ов (#533): bus проверен ниже, запускатели -- своими
-    # текстами в check_service_conflict_533.
-    c.expect("#533 an operator-only legacy half is not a profile",
+    c.expect("#662 an operator-only half is not a profile",
              profile(op_only), None)
     cl_only = os.path.join(root, "cl.test")
     creds.write_client(cl_only, ALICE[2], ALICE[3], ALICE[4])
-    c.expect("#533 a client-only legacy half is not a profile",
+    c.expect("#662 a client-only half is not a profile",
              profile(cl_only), None)
-    # Половина -- не вход и для шины: отказ «неполный вход», не конфиг из
-    # того, что лежит (имя без пароля -- вход неизвестно кого).
     with patched(creds, ROOT=root), \
             context.use(context.resolve({"server": "op.test"}, {}, {})), \
             config.client_sources():
-        refute(c, "#533 the bus refuses an incomplete login",
-               lambda: bus.server_config("op.test"), "incomplete login", "mop login")
-
-    # Порченая пара -- отказ, как сегодня у client(): не «нет входа».
-    broken = os.path.join(root, "broken.test")
-    put_legacy(broken, ALICE)
-    with open(os.path.join(broken, creds.CLIENT_FILE), "w", encoding="utf-8") as f:
-        f.write('{"proxy_key": "x"}')
-    refute(c, "#533 a broken legacy pair refuses",
-           lambda: profile(broken), "legacy pair")
+        refute(c, "#662 the bus refuses a half as no login",
+               lambda: bus.server_config("op.test"), "no bus credentials",
+               "mop login")
 
 
 # ── машинный operator.json: конфликт и служебный путь ───────────────────
@@ -435,7 +432,7 @@ def check_human_login_refuses_machine_533(c):
             os.listdir(dest))
 
 
-# ── частичный legacy восстановим полным входом ──────────────────────────
+# ── каталог без целого входа восстановим полным входом (#662) ───────────
 def check_recover_533(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-recover-"), "servers")
     calls = []
@@ -445,9 +442,11 @@ def check_recover_533(c):
         put_connection(directory, (who, "fresh-bus", port,
                                    f"https://{host}/llm", "fresh-key"))
 
-    # Операторская половина: пароль мог устареть, поэтому вход полный --
-    # с проверкой шины, получением настроек и пробой ключа (вcomplete здесь
-    # заглушен, но контракт -- полный вход, не дописывание пары).
+    # Операторская половина прежней пары: подсказкой больше не читается
+    # (#662) -- вход полный: проверка шины, свежие настройки, проба ключа
+    # (complete здесь заглушен, но контракт -- полный вход, не дописывание).
+    # Имя -- из контекста команды, порт -- из окружения или 443: старый
+    # порт половины не подсказывается.
     op_only = os.path.join(root, "srv.test")
     creds.write_operator(op_only, "alice", "stale-bus")
     with patched(creds, ROOT=root), patched(join, complete=finish, git=lambda *a: None), \
@@ -455,14 +454,15 @@ def check_recover_533(c):
             context.use(context.resolve({"server": "srv.test", "user": "alice"}, {}, {})), \
             patched_env(MOP_BUS_PASSWORD="fresh-bus"):
         join.ensure()
-    c.expect("#533 an operator half is recovered by a full login",
+    c.expect("#662 an operator half is recovered by a full login",
              calls, [("srv.test", "alice", op_only, "443")])
     got = getattr(creds, "human_profile", lambda *a: None)(op_only) or {}
     c.expect("#533 after recovery the profile is whole", got.get("proxy_key"), "fresh-key")
     c.expect("#533 the stale half is not kept as a profile source",
              got.get("password"), "fresh-bus")
 
-    # Прокс-половина: логин приходит контекстом, пароль спрашивается входом.
+    # Прокс-половина: логин приходит контекстом, пароль спрашивается входом;
+    # старый порт половины подсказкой не читается -- порт по умолчанию.
     calls.clear()
     cl_only = os.path.join(root, "half.test")
     creds.write_client(cl_only, "7443", "https://half.test/llm", "old-key")
@@ -471,27 +471,30 @@ def check_recover_533(c):
             context.use(context.resolve({"server": "half.test", "user": "bob"}, {}, {})), \
             patched_env(MOP_BUS_PASSWORD="fresh-bus"):
         join.ensure()
-    c.expect("#533 a client half is recovered by a full login",
-             calls, [("half.test", "bob", cl_only, "7443")])
+    c.expect("#662 a client half is recovered by a full login",
+             calls, [("half.test", "bob", cl_only, "443")])
     got = getattr(creds, "human_profile", lambda *a: None)(cl_only) or {}
     c.expect("#533 the old proxy key is not trusted", got.get("proxy_key"), "fresh-key")
     c.expect("#533 the recovered profile carries the context login",
              got.get("user"), "bob")
 
-    # Операторская половина без терминала: имя известно из остатка, пароль
-    # сохранён -- восстановление без единого вопроса (#533: подсказки из
-    # ОДНОГО снимка, имя не теряется).
+    # Операторская половина без терминала и без имени в контексте: имя из
+    # остатка больше не подсказывается (#662), ensure отказывает с ремонтом,
+    # а не угадывает неизвестно кого.
     calls.clear()
     op_quiet = os.path.join(root, "quiet.test")
     creds.write_operator(op_quiet, "alice", "stale-bus")
-    with patched(creds, ROOT=root), patched(join, complete=finish, git=lambda *a: None), \
-            patched(context, clone_binding=lambda: {}), \
+    with patched(creds, ROOT=root), \
             context.use(context.resolve({"server": "quiet.test"}, {}, {})), \
             patched_env(MOP_BUS_PASSWORD="fresh-bus"), \
             patched(sys, stdin=io.StringIO()):
-        join.ensure()
-    c.expect("#533 an operator half recovers its own user without asking",
-             calls, [("quiet.test", "alice", op_quiet, "443")])
+        try:
+            join.ensure()
+            c.fail("#662 a half without a known login must refuse", "recovered")
+        except RuntimeError as e:
+            c.check("#662 the refusal names the full login repair",
+                    "no login" in str(e) and "mop login" in str(e), str(e))
+    c.check("#662 the unasked recovery never connects", not calls, calls)
 
     # Прокс-половина с явным именем и паролем из окружения: полный вход без
     # вопросов и без чтения старого ключа.
@@ -510,8 +513,8 @@ def check_recover_533(c):
             patched_env(MOP_BUS_PASSWORD="fresh-bus"), \
             patched(sys, stdin=io.StringIO()):
         join.ensure()
-    c.expect("#533 a client half with an explicit login goes in full",
-             calls, [("half2.test", "bob", cl2, "9443")])
+    c.expect("#662 a client half with an explicit login goes in full",
+             calls, [("half2.test", "bob", cl2, "443")])
 
     # Готовый вход не трогается: повторный ensure молчит.
     calls.clear()
@@ -880,10 +883,10 @@ def check_hints_from_snapshot_533(c):
 # ── прямой complete на остатке: подсказка из ЕГО снимка, не параметр ────
 def check_complete_partial_hint_533(c):
     # complete -- существующая точка входа (тесты и будущие командлеты зовут
-    # его напрямую). Подсказка прежнего пароля приходит из ЕГО собственной
-    # классификации на входе фазы, а не необязательным параметром: параметр
-    # со значением по умолчанию None -- обход проверки, если звавший забыл
-    # его передать (#533).
+    # его напрямую). Прежний пароль больше не подсказывается из половины
+    # пары (#662): каталог без целого профиля -- вход с нуля, пароль
+    # спрашивается у шины (_login), а не проверяется по лежащему огрызку
+    # (_still_valid) -- огрызок мог быть чьим угодно.
     root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-cph-"), "servers")
     dest = os.path.join(root, "srv.test")
     creds.write_operator(dest, "alice", "stale-bus")
@@ -895,10 +898,9 @@ def check_complete_partial_hint_533(c):
                  _probe=lambda *a, **kw: None), \
             patched_env(MOP_BUS_PASSWORD="fresh-bus"):
         join.complete("srv.test", "alice", dest, "443")
-    c.check("#533 a direct complete re-checks the stored half password",
-            calls == [("_still_valid", {"user": "alice", "password": "stale-bus",
-                                        "https_port": None})],
-            calls)
+    c.check("#662 a direct complete over a bare half asks the bus, "
+            "not the stored leftover",
+            calls == [("_login", "alice")], calls)
 
 
 # ── writer меняет ТОЛЬКО connection.json; соседи -- нетронуты ──────────

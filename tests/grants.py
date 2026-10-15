@@ -981,27 +981,24 @@ def check_issue(c):
         c.check("#581 a Meta incarnation the registry does not hold "
                 "is refused",
                 bool(wrong.get("error")) and "bus" not in wrong, wrong)
-        # 7. Легаси-имя без привязки: прежний путь, проектный кред --
-        #    переход жив (#603), легаси-джобы стартуют как раньше.
-    creds_dir = tempfile.TemporaryDirectory()
-    with open(os.path.join(creds_dir.name, creds.puppet_pass_file("mop")),
-              "w") as f:
-        f.write("project-password\n")
-    with patched(bootstrap, PUPPET_CREDS=creds_dir.name):
-        with patched(bootstrap, ROOT=root.name, play=ok_play,
-                     _job_meta=jobs_ok, _assigned_node=assigned_ok,
-                     _soul_root=lambda: root.name,
-                     _owner_profile=owner_probe):
-            legacy = bootstrap.answer("mop", {"verb": "bootstrap",
-                                              "name": "pu-mop-42",
-                                              "address": "10.0.0.1",
-                                              "_caller": node,
-                                              "_reply": reply_ok})
-    c.check("#581 a legacy name keeps the legacy bootstrap path "
-            "with project creds",
-            not legacy.get("error") and "soul" not in legacy
-            and (legacy.get("bus") or {}).get("user") == "puppet-mop", legacy)
-    creds_dir.cleanup()
+        # 7. #662: имя без привязки -- сломанный джоб, не легаси-путь:
+        #    души обязательны, проектного креда в ответе больше нет
+        #    вовсе (with_creds/puppet_creds удалены).
+    with patched(bootstrap, ROOT=root.name, play=ok_play,
+                 _job_meta=jobs_ok, _assigned_node=assigned_ok,
+                 _soul_root=lambda: root.name,
+                 _owner_profile=owner_probe):
+        legacy = bootstrap.answer("mop", {"verb": "bootstrap",
+                                          "name": "pu-mop-42",
+                                          "address": "10.0.0.1",
+                                          "_caller": node,
+                                          "_reply": reply_ok})
+    c.check("#662 a name without a role triple is refused, never a "
+            "legacy bootstrap with project creds",
+            bool(legacy.get("error")) and "soul" not in legacy
+            and "bus" not in legacy
+            and not hasattr(bootstrap, "with_creds")
+            and not hasattr(bootstrap, "puppet_creds"), legacy)
 
 
 def handmade(c, mod, role=MASTER, digest=None, prompt=None, job="pu-mop-7",
@@ -1376,8 +1373,7 @@ def check_strict_meta_581(c):
         c.check("#581 a Meta triple of another role or digest does not "
                 "match the binding",
                 bool(alien.get("error")) and "bus" not in alien, alien)
-        # 5a. HYPOTHESIS (#581, ревью проектов): ворота сверяли тройку,
-        # но не ФАКТИЧЕСКИЙ проект Meta: та же тройка на чужом origin
+        # 5a. HYPOTHESIS (#581, ревью проектов): ворота сверяли тройку,        # но не ФАКТИЧЕСКИЙ проект Meta: та же тройка на чужом origin
         # проходит именем -- project_of(origin) иного проекта не равен
         # проекту маршрута, а привязка выбиралась по имени джоба.
         # SOLUTION: проект тройки обязан быть проектом маршрута И
@@ -1447,6 +1443,33 @@ def check_strict_meta_581(c):
                     "of an empty soul",
                     bool(nobundle.get("error")) and "bus" not in nobundle
                     and "soul" not in nobundle, nobundle)
+
+        # 9. #662/#658: имя с отозванной привязкой не «наследует» роль
+        #    и не открывает легаси-путь: тройка обязательна у каждого
+        #    джоба, binding_named строг по умолчанию (весь архив -- так
+        #    же), параметр include_revoked ушёл вместе с легаси-путём.
+        #    Реестр корня -- от шага 8 (os.replace): живой принципал
+        #    здесь -- rec2, метой к нему -- meta2.
+        mod.revoke(rec2["principal"], root=root.name)
+        with patched(bootstrap, _job_meta=lambda name: JobMeta(origin, None),
+                     play=ok_play, ROOT=root.name,
+                     _assigned_node=lambda name: "pve1",
+                     _soul_root=lambda: root.name,
+                     _owner_profile=owner_probe):
+            legacy = bootstrap.answer("mop", dict(req))
+        c.check("#662 a revoked role never downgrades its name to a "
+                "legacy bootstrap",
+                bool(legacy.get("error")) and "bus" not in legacy
+                and "soul" not in legacy, legacy)
+        c.check("#662 binding_named stays strict, the include_revoked "
+                "parameter is gone",
+                mod.binding_named("mop", "pu-mop-9", root=root.name)
+                is True
+                and "include_revoked" not in
+                mod.binding_named.__code__.co_varnames,
+                mod.binding_named.__code__.co_varnames)
+
+
 def check_target_node_581(c):
     """HYPOTHESIS (#581): resolve без принципала (режим только-цели #584)
     отдаёт узлу состояние ЛЮБОЙ цели проекта: узел читает привязку до

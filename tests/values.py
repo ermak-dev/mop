@@ -275,16 +275,35 @@ def project_forms():
                                                                     "value": 1}))
         out["registry_file"] = open(snap_path).read()
         cluster._live_count = lambda target: 5
-        cluster.next_name = lambda target: f"pu-{target}-6"
+        cluster.next_name = lambda target, reserving=False: f"pu-{target}-6"
         cluster.store_workspace = lambda root, name, req: None
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
-            cred=None: {"Job": {"ID": name, "origin": origin}}
+            **role: {"Job": {"ID": name, "origin": origin}}
+        # Роль (#662): add всегда ролевой -- швы среды держат и путь роли:
+        # настройка включена, каталог настоящий, реестр привязок -- свой.
+        souls = tempfile.mkdtemp(prefix="mop-test-204s-")
+        _real_get = cluster.config.get
+
+        def setting(name, default=None):
+            if name == "MOP_SOUL_ROLES":
+                return "1"
+            return _real_get(name, default)
         # Nomad -- поддельный, параметром (#275): что зарегистрировано, видно
         # по его вызовам.
         fake = FakeNomad()
-        with cluster.using(fake):
-            out["add_over"] = dump(cluster._add("rugent", {"origin": RUGENT}))
-            out["add_free"] = dump(cluster._add("mop", {"origin": MOP}))
+        role_add = {"soul": "puppet", "request_id": "a" * 32,
+                    "_caller": "ermak"}
+        with cluster.using(fake), \
+                patched(cluster, SOUL_ROOT=souls), \
+                patched(cluster, SOUL_CATALOGUE=(os.path.join(
+                    os.path.dirname(HERE), "mop", "skills"),)), \
+                patched(cluster.config, get=setting), \
+                patched(cluster.soul, incarnation=lambda:
+                        "00000000-0000-0000-0000-000000000204"):
+            out["add_over"] = dump(cluster._add("rugent",
+                                                {"origin": RUGENT, **role_add}))
+            out["add_free"] = dump(cluster._add("mop",
+                                                {"origin": MOP, **role_add}))
         registered = [call[1] for call in fake.calls if call[0] == "register"]
         out["registered"] = dump(registered)
     # Взгляд читателя (#534): прежняя среда фикстуры -- пара с голым именем

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Автовход перед запуском сессий без живой шины: python3 tests/autologin.py."""
 import io
+import json
 import os
 import subprocess
 import sys
@@ -16,11 +17,12 @@ from mop.common import config, context, creds  # noqa: E402
 
 
 # HYPOTHESIS: master отказывает до тела командлета, code доходит до exec
-# без входа, а при одном старом operator.json клиент не дополнен прокси.
+# без входа, а каталог с одним operator.json не дополнялся прокси.
 # SOLUTION: общая локальная проверка обоих файлов; полный вход не трогать,
-# частичный дополнить через complete, не угадывать при двух серверах.
+# каталог без целого входа восстановить полным complete (#662: половины
+# прежней пары подсказкой не читаются), не угадывать при двух серверах.
 # RESULT: master/code не запускают сессию без входа, полный вход не трогают,
-# частичный дополняют, неоднозначность и no-TTY отказывают до exec.
+# неполный восстанавливают, неоднозначность и no-TTY отказывают до exec.
 # STATUS: FIXED — see #408
 def check_ensure_408(c):
     ensure = getattr(login, "ensure", None)
@@ -37,14 +39,23 @@ def check_ensure_408(c):
         return None
     def finish(host, who, directory, port, **kw):
         calls.append((host, who, directory, port))
-        creds.write_operator(directory, who, "bus-password")
-        creds.write_client(directory, port, f"https://{host}/llm", "proxy-key")
+        put_connection(directory, (who, "bus-password", port,
+                                   f"https://{host}/llm", "proxy-key"))
+    def put_connection(directory, row):
+        creds.make_dir(directory)
+        path = os.path.join(directory, creds.CONNECTION_FILE)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1,
+                       "bus": {"user": row[0], "password": row[1]},
+                       "https_port": row[2],
+                       "proxy": {"url": row[3], "key": row[4]}}, f)
+        os.chmod(path, 0o600)
     with patched(creds, ROOT=root), patched(login, complete=finish, git=fake_git), \
             patched_env(MOP_BUS_PASSWORD="bus-password"), \
             patched(context, clone_binding=lambda: {}), \
             context.use(context.resolve({"server": "srv.test", "user": "alice"}, {}, {})):
         ensure()
-        c.expect("#408 fresh login completes both credentials", calls,
+        c.expect("#408 fresh login completes the whole profile", calls,
                  [("srv.test", "alice", dest, "443")])
         c.expect("#408 auto-login binds its project clone", bindings,
                  [("config", "--local", "mop.server", "srv.test"),
@@ -52,17 +63,18 @@ def check_ensure_408(c):
         calls.clear()
         ensure()
         c.expect("#408 complete login does not prompt or reconnect", calls, [])
-        os.remove(os.path.join(dest, creds.CLIENT_FILE))
+        os.remove(os.path.join(dest, creds.CONNECTION_FILE))
+        creds.write_operator(dest, "alice", "bus-password")
         ensure()
-        c.expect("#408 operator-only login fetches proxy config", calls,
+        c.expect("#408 a half-leftover directory is recovered in full", calls,
                  [("srv.test", "alice", dest, "443")])
     other = os.path.join(root, "other.test")
     creds.write_operator(other, "bob", "bus-password")
-    os.remove(os.path.join(dest, creds.CLIENT_FILE))
+    os.remove(os.path.join(dest, creds.CONNECTION_FILE))
     with patched(creds, ROOT=root), context.use(context.resolve({}, {}, {})):
         try:
             ensure()
-            c.fail("#408 two partial logins require --server")
+            c.fail("#408 two leftover logins require --server")
         except RuntimeError as e:
             c.check("#408 ambiguity is explicit", "server" in str(e).lower(), str(e))
         os.remove(os.path.join(other, creds.OPERATOR_FILE))
@@ -71,12 +83,14 @@ def check_ensure_408(c):
         # .git/config репозитория cwd (раннер `mop dev test` -- это корень
         # рабочей копии): после проверок #529 настоящий клон получил
         # mop.server=srv.test и mop.user=alice. Здесь интерес -- выбор
-        # единственного прежнего operator, не привязка: git -- как у всех
-        # сценариев ensure выше.
+        # единственного оставшегося каталога, не привязка: git -- как у
+        # всех сценариев ensure выше. Имя -- из контекста: остаток пары
+        # подсказкой больше не служит (#662).
         with patched(login, complete=finish, git=fake_git), \
                 patched_env(MOP_BUS_PASSWORD="bus-password"):
-            ensure()
-        c.expect("#408 sole previous operator is selected", calls[-1][0], "srv.test")
+            with context.use(context.resolve({"user": "alice"}, {}, {})):
+                ensure()
+        c.expect("#408 the sole leftover server is selected", calls[-1][0], "srv.test")
 
     empty = os.path.join(tempfile.mkdtemp(prefix="mop-empty-login-"), "servers")
     with patched(creds, ROOT=empty), patched(sys, stdin=io.StringIO("")), \
@@ -93,20 +107,11 @@ def check_launchers_408(c):
     def missing():
         calls.append("login")
         raise RuntimeError("mop login required")
+    # #662: локальный запуск мастера снят; порядок входа у `mop master`
+    # проверяет tests/launch.py (лаунчер роли), здесь остался только code.
     with patched(login, ensure=missing), patched(config, require=lambda *a: calls.append("require")), \
-            patched(master.lib, origin=lambda *a: "git@h:g/mop.git",
-                    project_ready=lambda *a: True), \
-            patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
-            patched(master._common, session_env=lambda: {}), \
-            patched(master.os, execvpe=lambda *a: calls.append("master exec")):
-        # #586: прежний локальный запуск -- явный `mop master --local`; у
-        # лаунчера роли свой порядок (tests/launch.py), вход и там до сети.
-        try:
-            master.main(["--local"])
-        except RuntimeError:
-            pass
-        c.expect("#408 master logs in before cluster precheck and exec", calls, ["login"])
-        calls.clear()
+            patched(code._common, feedback_fd=lambda *a: ("/proc/self/fd/3", 3)), \
+            patched(code.os, execvpe=lambda *a: calls.append("code exec")):
         try:
             code.main([])
         except RuntimeError:

@@ -171,23 +171,23 @@ def complete(host, login, dest, https):
     классификация одна на весь вход: machine (service) и испорченный/
     неизвестный connection.json закрыты человеку ДО сети и записи -- первый
     вход молча сменил бы личность сервисов, второй -- перезаписал бы чужой
-    формат. После классификации половины НЕ перечитываются: два чтения
-    увидели бы два поколения каталога. Подсказка из остатка -- не доверие:
-    пароль используется только после обычной проверки шиной (_still_valid)."""
+    формат. После классификации файл НЕ перечитывается: два чтения увидели
+    бы два поколения каталога."""
     if not creds.valid_https_port(https):
         raise ValueError("server HTTPS port must be between 1 and 65535")
     try:
         kind, profile = creds.snapshot(dest)
     except creds.ProfileError as e:
         # Испорченный/неизвестный новый файл не перезаписывается и не
-        # читается как legacy: чинить его может только человек, а не вход.
+        # читается как вход: чинить его может только человек, а не вход.
         raise RuntimeError(str(e)) from e
     if kind == "machine":
         # Служебный каталог: конфликт и здесь, до сети, TLS-пина и записи.
         raise RuntimeError("machine service identity and a human login conflict: "
                            "use a separate operator account or connection directory")
-    if kind != "human" and kind != "partial":
-        # Пустой каталог -- ни профиля, ни подсказки: полный вход с нуля.
+    if kind != "human":
+        # Нет целого профиля -- вход с нуля (#662: остатки прежней пары
+        # подсказкой не читаются, пароль спрашивается у человека).
         profile = None
     pin = _pinned(creds.cafile(dest))
     try:
@@ -230,10 +230,9 @@ def _bind(host, user):
 def ensure():
     """Дополнить отсутствующий вход перед запуском master или code.
 
-    Частичный остаток прежней пары (#533) -- не вход: восстановление одно,
-    полный повторный вход (проверка шины, свежий proxy-конфиг, проба ключа),
-    а не дописывание недостающей половины. Остаток годен только как подсказка
-    выбора адреса и логина -- не как профиль."""
+    Каталог без целого connection.json -- не вход (#662: остатки прежней
+    пары подсказкой не читаются): восстановление одно, полный повторный
+    вход (проверка шины, свежий proxy-конфиг, проба ключа)."""
     ctx = context.current()
     host = ctx.server
     if not host:
@@ -252,10 +251,10 @@ def ensure():
         else:
             raise RuntimeError("no server and no terminal: run mop login --server ADDRESS")
     dest = creds.server_dir(host)
-    # Один снимок на весь ensure (#533): классификация, подсказки и пароль
-    # для complete -- из одного поколения каталога, без поштучных чтений
-    # половин (два чтения видели бы два поколения, а битый operator.json
-    # молча терял имя на полпути к отказу).
+    # Один снимок на весь ensure (#533): классификация и решение -- из
+    # одного поколения каталога, без поштучных чтений (два чтения видели
+    # бы два поколения, а битый operator.json молча терял имя на полпути
+    # к отказу).
     try:
         kind, hints = creds.snapshot(dest)
     except creds.ProfileError as e:
@@ -267,17 +266,14 @@ def ensure():
     if kind == "machine":
         raise RuntimeError("machine service identity and a human login conflict: "
                            "use a separate operator account or connection directory")
-    # partial (остаток пары) или пустой каталог: полный вход. Остаток --
-    # подсказки имени/порта и проверки прежнего пароля, не доверие.
-    user, port_hint = ((hints or {}).get("user"),
-                       (hints or {}).get("https_port")) if kind == "partial" \
-        else (None, None)
-    user = creds.pick_login(ctx.user, user, None)
+    # Нет целого профиля -- полный вход с нуля (#662: подсказок из остатка
+    # прежней пары больше нет).
+    user = creds.pick_login(ctx.user, None, None)
     if not user:
         if not sys.stdin.isatty():
             raise RuntimeError(f"no login for {host}: run mop login --server {host}")
         user = ask(f"login on {host}: ")
-    https = _https_port(None, {"https_port": port_hint} if port_hint else None)
+    https = _https_port(None, None)
     with context.use(context.resolve({"server": host}, {}, {})):
         complete(host, user, dest, https)
     _bind(host, user)
@@ -322,10 +318,9 @@ def main(argv):
         with context.use(context.resolve({"server": host}, {}, {})):
             dest = creds.server_dir(host)
             # Подсказки -- из ОДНОГО снимка каталога (#533): целый профиль
-            # знает логин и порт сам; остаток пары подсказывает то, что в
-            # нём лежит. Явные аргументы и контекст старше любой подсказки.
-            # broken/conflict отказывают ЗДЕСЬ, до сети, вопросов и чтения
-            # legacy-половин: вход такой каталог не ремонтирует.
+            # знает логин и порт сам. Явные аргументы и контекст старше
+            # любой подсказки. broken/conflict отказывают ЗДЕСЬ, до сети,
+            # вопросов и записи: вход такой каталог не ремонтирует.
             try:
                 kind, who = creds.snapshot(dest)
             except creds.ProfileError as e:
@@ -335,14 +330,15 @@ def main(argv):
                 lib.fail("machine service identity and a human login conflict: "
                          "use a separate operator account or connection directory")
                 return 1
-            # kind здесь human | partial | None: профиль и остаток несут
-            # подсказки, пустой каталог -- нет.
+            # kind здесь human | None: профиль несёт подсказки, каталог без
+            # целого входа -- нет (#662: остатки прежней пары молча не
+            # читаются).
             hint = who or {}
             login = creds.pick_login(login or ctx.user, hint.get("user"), None)
             if not login:
                 login = ask(f"login on {host}: ")
-            # Порт -- подсказка из профиля или остатка; машинный каталог
-            # своего порта не хранит.
+            # Порт -- подсказка из целого профиля; каталог без входа и
+            # машинный каталог своего порта не хранят.
             https = _https_port(explicit_https,
                                 {"https_port": hint["https_port"]}
                                 if hint.get("https_port") else None)

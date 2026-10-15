@@ -862,18 +862,45 @@ def check_bootstrap_334(c):
             "tasks": 2, "present": True}
     text = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
     own = {"ID": "pu-mop-1", "Version": 3, "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    soul662 = tempfile.mkdtemp(prefix="mop-test-cluster-334s-")
+    from mop.common import config as _config
+    _real_get334 = cluster.config.get
+
+    def _setting334(name, default=None):
+        if name == "MOP_SOUL_ROLES":
+            return "1"
+        return _real_get334(name, default)
+
+    def _env334(**kw):
+        # Спека роли -- как у настоящего add (#662): тройка в окружении.
+        base = {"PU_NAME": "pu-mop-1", "PU_ORIGIN": "git@h:g/mop.git",
+                "PU_SOUL": "puppet", "PU_SOUL_DIGEST": "d" * 64,
+                "PU_SOUL_INC": "00000000-0000-0000-0000-000000000334",
+                "PU_CARRY": "PU_NAME,PU_ORIGIN"}
+        base.update(kw)
+        return base
     with patched(cluster.projects, SNAPSHOT_DIR=reg334), \
             patched(bootstrap, ROOT=root), \
             patched(cluster.spec, job_spec=lambda *a, **kw: {"Job": {"ID": a[0]}},
                     respec=lambda name, meta, cont=False, node=None: {"Job": {"ID": name}}), \
-            patched(cluster, _live_count=lambda target: 0, next_name=lambda target: "pu-mop-1",
-                    _cred_for=lambda *a, **kw: (None, None)):
+            patched(cluster, _live_count=lambda target: 0,
+                    next_name=lambda target, reserving=False: "pu-mop-1",
+                    SOUL_ROOT=soul662,
+                    SOUL_CATALOGUE=(os.path.join(_config.PROJECT, "mop", "skills"),),
+                    task_env=_env334), \
+            patched(cluster.config, get=_setting334):
         with cluster.using(FakeNomad()):
-            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "workspace": text,
-                                       "bootstrap_sent": prov})
+            got = cluster._add("mop", {"origin": "git@h:g/mop.git",
+                                       "soul": "puppet",
+                                       "request_id": "a" * 32,
+                                       "workspace": text,
+                                       "bootstrap_sent": prov,
+                                       "_caller": "anton"})
         sent = bootstrap.read_sent(root, "pu-mop-1") or {}
-        c.check("#334 add stores the provenance and returns its marker",
-                got.get("bootstrap_marker") and got["bootstrap_marker"] == sent.get("marker")
+        # Метки в ответе add больше нет (#662): человеческий add роли
+        # кладёт текст и происхождение, итог ждёт `mop update`/узел.
+        c.check("#334 add stores the workspace and provenance of its registration",
+                got.get("ok") is True
                 and sent.get("commit") == prov["commit"], (got, sent))
         with cluster.using(FakeNomad(jobs={"pu-mop-1": dict(own)})):
             got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
@@ -899,10 +926,15 @@ def check_bootstrap_334(c):
                  (got, bootstrap.read_sent(root, "pu-mop-1")),
                  ({"ok": True, "name": "pu-mop-1", "node": None}, None))
         with cluster.using(FakeNomad()):
-            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "workspace": text})
-        c.expect("#334 add without provenance: today's reply, nothing stored",
-                 (got, bootstrap.read_sent(root, "pu-mop-1")),
-                 ({"ok": True, "name": "pu-mop-1", "origin": "git@h:g/mop.git"}, None))
+            # Без текста политики (#617): роль без workspace -- легальный
+            # случай, политики нет, отправленного нет.
+            got = cluster._add("mop", {"origin": "git@h:g/mop.git",
+                                       "soul": "puppet",
+                                       "request_id": "b" * 32,
+                                       "_caller": "anton"})
+        c.check("#334 a role add without policy text registers and stores no sent",
+                got.get("ok") is True
+                and bootstrap.read_sent(root, "pu-mop-1") is None, got)
 
         # Глагол: свой папет -- запись, чужой -- отказ.
         bootstrap.note_result(root, "pu-mop-1", {"ok": True, "played": True, "rc": 0,
@@ -1063,11 +1095,20 @@ def check_update_origin_365(c):
         keep_add = cluster.VERBS["add"]
         cluster.VERBS["add"] = dataclasses.replace(keep_add, fn=lambda project, req: seen.append(req) or {"ok": True})
         try:
-            c.expect("#365 add through answer: its own origin passes",
-                     (cluster.answer("mop", {"verb": "add", "origin": mine}), len(seen)), ({"ok": True}, 1))
+            # #662: add с полями роли -- за стабом, видеть надо проход
+            # и ровно один вызов, не форму ответа.
+            c.check("#365 add through answer: its own origin passes",
+                    (cluster.answer("mop", {"verb": "add", "origin": mine,
+                                            "soul": "puppet",
+                                            "request_id": "a" * 32,
+                                            "_caller": "anton"}).get("ok"),
+                     len(seen)) == (True, 1), (seen,))
             c.check("#365 add of another project's origin: refused",
-                    "belongs to project rugent" in (cluster.answer("mop", {"verb": "add", "origin":
-                                                                   "git@h:g/rugent.git"}).get("error") or ""))
+                    "belongs to project rugent" in (cluster.answer(
+                        "mop", {"verb": "add", "origin":
+                                "git@h:g/rugent.git", "soul": "puppet",
+                                "request_id": "c" * 32,
+                                "_caller": "anton"}).get("error") or ""))
         finally:
             cluster.VERBS["add"] = keep_add
 
@@ -1320,7 +1361,21 @@ class _Registry534:
             return _real_write_snapshot(
                 snapshot, os.path.join(self.dir, "projects.json") if path is None else path, *a, **k)
 
+        from mop.common import config as _config
+        _real_get = cluster.config.get
+
+        def setting(name, default=None):
+            # #662: add ролевой, настройка роли нужна среде реестра тоже.
+            if name == "MOP_SOUL_ROLES":
+                return "1"
+            return _real_get(name, default)
+        souls_dir = os.path.join(self.dir, "souls")
+        os.makedirs(souls_dir, exist_ok=True)
         with patched(cluster, _users_apply=apply_fn, nomad_jobs=self._jobs), \
+                patched(cluster, SOUL_ROOT=souls_dir,
+                        SOUL_CATALOGUE=(os.path.join(_config.PROJECT,
+                                                     "mop", "skills"),)), \
+                patched(cluster.config, get=setting), \
                 patched(_natsconf, reload=self._reload, read_users=read_users,
                         write=conf_write, USERS=users_path,
                         read_base=lambda: {"service": "pw"}), \
@@ -2176,17 +2231,84 @@ def _add_env_567(entries, api):
                                     else {"origin": o, "limit": l}
                                     for o, l in entries]}, f)
 
-        def stub_spec(name, origin, cont=False, branch=None, node=None):
-            return {"Job": {"ID": name, "Meta": {"origin": origin, "branch": branch}}}
+        def stub_spec(name, origin, cont=False, branch=None, node=None,
+                      soul=None, soul_digest=None, soul_inc=None):
+            # #662: спека настоящего add всегда несёт тройку роли; заглушка
+            # повторяет её Meta, а имя -- с резервом (reserving), как add.
+            return {"Job": {"ID": name, "Meta": {
+                "origin": origin, "branch": branch, "soul": soul,
+                "soul_digest": soul_digest, "soul_inc": soul_inc}}}
         cv = contextvars.ContextVar("nomad_api", default=api)
+        from mop.common import config as _config
+        _real_get = cluster.config.get
+
+        def setting(name, default=None):
+            # Шов -- только роль (#662): add всегда ролевой, без настройки
+            # путь закрыт и гонка не воспроизводится.
+            if name == "MOP_SOUL_ROLES":
+                return "1"
+            return _real_get(name, default)
+        souls = tempfile.mkdtemp(prefix="mop-test-567s-")
+
+        def stub_env(name, origin, **kw):
+            # Окружение задачи спеки роли: тройка на месте (#582).
+            return {"PU_NAME": name, "PU_ORIGIN": origin,
+                    "PU_SOUL": "puppet", "PU_SOUL_DIGEST": "d" * 64,
+                    "PU_SOUL_INC": "00000000-0000-0000-0000-000000000567"}
         with patched(cluster.projects, SNAPSHOT_DIR=d), \
                 patched(_bootstrap, ROOT=boot), \
-                patched(cluster.spec, job_spec=stub_spec), \
-                patched(cluster, _API=cv):
+                patched(cluster.spec, job_spec=stub_spec, task_env=stub_env), \
+                patched(cluster, _API=cv, SOUL_ROOT=souls,
+                        SOUL_CATALOGUE=(os.path.join(_config.PROJECT,
+                                                     "mop", "skills"),)), \
+                patched(cluster.config, get=setting):
             yield boot
     finally:
         shutil.rmtree(d, ignore_errors=True)
         shutil.rmtree(boot, ignore_errors=True)
+
+
+def check_add_roleless_refused_662(c):
+    """#662: поля роли у add обязательны. Запрос без тройки -- громкий
+    отказ ДО ворот проекта: ни джоба, ни workspace, ни записи реестра
+    привязок. Отказ называет soul=<роль>. Живой _answer (refusal/add) не
+    трогаем: у него своя проверка (#365)."""
+    import uuid as _uuid
+    import contextvars
+    api = FakeNomad()
+    d = tempfile.mkdtemp(prefix="mop-test-662r-")
+    boot = tempfile.mkdtemp(prefix="mop-test-662w-")
+    g = tempfile.mkdtemp(prefix="mop-test-662g-")
+    try:
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            json.dump({"version": 1,
+                       "projects": [{"origin": ALPHA567}]}, f)
+
+        def stub_spec(name, origin, **kw):
+            return {"Job": {"ID": name, "Meta": {"origin": origin}}}
+        cv = contextvars.ContextVar("nomad_api", default=api)
+        with patched(cluster.projects, SNAPSHOT_DIR=d), \
+                patched(_bootstrap, ROOT=boot), \
+                patched(cluster, SOUL_ROOT=g), \
+                patched(cluster.spec, job_spec=stub_spec), \
+                patched(cluster, _API=cv):
+            got = cluster.answer("alpha", {"verb": "add", "origin": ALPHA567,
+                                           "_caller": "anton"})
+            seeded = cluster.answer("alpha", {"verb": "add", "origin": ALPHA567,
+                                              "_caller": "anton",
+                                              "workspace": PLAYS567["one"]})
+        c.check("#662 a roleless add is refused with the soul= pointer",
+                bool(got.get("error")) and "soul=" in got.get("error", "")
+                and "role puppets only" in got.get("error", "")
+                and not api.jobs, got)
+        c.check("#662 a roleless add never reaches the gates (no job, no workspace)",
+                bool(seeded.get("error")) and not api.jobs
+                and not [f for f in os.listdir(boot) if f.startswith("pu-")],
+                (seeded, sorted(os.listdir(boot))))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(boot, ignore_errors=True)
+        shutil.rmtree(g, ignore_errors=True)
 
 
 def check_add_race_567(c):
@@ -2211,10 +2333,15 @@ def check_add_race_567(c):
         return out
 
     def two(origin=ALPHA567):
+        # #662: add всегда ролевой; два запроса -- разные request_id, роли
+        # одного каталога, политика -- своим текстом (верифицированный
+        # человек), как у настоящего `mop add --role`.
         return {"one": {"origin": origin, "branch": BRANCH567["one"],
-                        "workspace": PLAYS567["one"]},
+                        "workspace": PLAYS567["one"], "soul": "puppet",
+                        "request_id": "1" * 32, "_caller": "anton"},
                 "two": {"origin": origin, "branch": BRANCH567["two"],
-                        "workspace": PLAYS567["two"]}}
+                        "workspace": PLAYS567["two"], "soul": "puppet",
+                        "request_id": "2" * 32, "_caller": "anton"}}
 
     # 1. Гонка без ворот: барьер держит регистрации до всех чтений -- оба
     # add видят пустой список, берут одно имя, вторая регистрация затирает
@@ -2302,8 +2429,12 @@ def check_add_race_567(c):
 
     fake = _OnceBroken()
     with _add_env_567([(ALPHA567, None)], fake):
-        broken = cluster.answer("alpha", {"verb": "add", "origin": ALPHA567})
-        again = adds({"one": {"origin": ALPHA567}})
+        broken = cluster.answer("alpha", {"verb": "add", "origin": ALPHA567,
+                                          "soul": "puppet",
+                                          "request_id": "6" * 32,
+                                          "_caller": "anton"})
+        again = adds({"one": {"origin": ALPHA567, "soul": "puppet",
+                              "request_id": "7" * 32, "_caller": "anton"}})
         if again is None:
             return
         c.check("#567 a failed registration does not lock the project forever",
@@ -2320,14 +2451,18 @@ def check_add_race_567(c):
         held = cluster._project_gate("alpha")
         held.acquire()
         try:
-            out = adds({"one": {"origin": BETA567}}, project="beta")
+            out = adds({"one": {"origin": BETA567, "soul": "puppet",
+                                "request_id": "8" * 32,
+                                "_caller": "anton"}}, project="beta")
             if out is None:
                 return
             c.check("#567 another project works while this gate is held",
                     out["one"].get("ok"), str(out))
         finally:
             held.release()
-        mine = adds({"one": {"origin": ALPHA567}})
+        mine = adds({"one": {"origin": ALPHA567, "soul": "puppet",
+                             "request_id": "9" * 32,
+                             "_caller": "anton"}})
         if mine is None:
             return
         c.check("#567 the gated project passes after the gate is released",
@@ -2341,11 +2476,15 @@ def check_add_race_567(c):
     # регистрировал джоба снятому проекту. Среда -- только реестр и его
     # соседи: ростер обязан видеть настоящего Nomad-заглушку, поэтому
     # patched_env с его пустым nomad_jobs здесь не годится.
-    def stub_spec(name, origin, cont=False, branch=None, node=None):
+    def stub_spec(name, origin, cont=False, branch=None, node=None,
+                  soul=None, soul_digest=None, soul_inc=None):
         # Type=service: ростер различает папетов от sysbatch по типу джоба
-        # (puppets.visible), без него delete не увидит живого.
+        # (puppets.visible), без него delete не увидит живого. Тройка
+        # роли -- как у настоящего add (#662: он всегда ролевой).
         return {"Job": {"ID": name, "Type": "service",
-                        "Meta": {"origin": origin}}}
+                        "Meta": {"origin": origin, "soul": soul,
+                                 "soul_digest": soul_digest,
+                                 "soul_inc": soul_inc}}}
 
     def registry_env_567(limits):
         """Реестр в своём каталоге, ростер и bootstrap -- заглушками.
@@ -2370,17 +2509,30 @@ def check_add_race_567(c):
 
         @contextlib.contextmanager
         def inner():
+            from mop.common import config as _config
+            _real_get = cluster.config.get
+
+            def setting(name, default=None):
+                if name == "MOP_SOUL_ROLES":
+                    return "1"
+                return _real_get(name, default)
+            souls = tempfile.mkdtemp(prefix="mop-test-567s2-")
             try:
                 with patched(_projects, SNAPSHOT_DIR=d,
                              SNAPSHOT=os.path.join(d, "projects.json")), \
                         patched(_natsconf, read_users=read_users,
                                 read_base=lambda: {"service": "pw"}), \
                         patched(cluster, _users_apply=apply_stub), \
-                        patched(_bootstrap, ROOT=boot):
+                        patched(_bootstrap, ROOT=boot), \
+                        patched(cluster, SOUL_ROOT=souls,
+                                SOUL_CATALOGUE=(os.path.join(
+                                    _config.PROJECT, "mop", "skills"),)), \
+                        patched(cluster.config, get=setting):
                     yield boot
             finally:
                 shutil.rmtree(d, ignore_errors=True)
                 shutil.rmtree(boot, ignore_errors=True)
+                shutil.rmtree(souls, ignore_errors=True)
         return inner(), boot
 
     # add раньше: delete отказывает живому джобу.
@@ -2388,7 +2540,10 @@ def check_add_race_567(c):
     with ctx, patched(cluster.spec, job_spec=stub_spec):
         fake = FakeNomad()
         got = cluster.answer("mop", {"verb": "add", "origin": MOP534,
-                                     "workspace": PLAYS567["one"]}, api=fake)
+                                     "workspace": PLAYS567["one"],
+                                     "soul": "puppet",
+                                     "request_id": "d" * 32,
+                                     "_caller": "anton"}, api=fake)
         c.check("#567 add of a registered project answers ok", got.get("ok"), str(got))
         drop = cluster.answer("admin", {"verb": "project_delete", "name": "mop"}, api=fake)
         c.check("#567 delete refuses while the project has a live puppet",
@@ -2405,7 +2560,10 @@ def check_add_race_567(c):
         c.check("#567 delete of an empty project answers ok", drop.get("ok"), str(drop))
         before = set(os.listdir(boot))
         ans = cluster.answer("mop", {"verb": "add", "origin": MOP534,
-                                     "workspace": PLAYS567["two"]}, api=fake)
+                                     "workspace": PLAYS567["two"],
+                                     "soul": "puppet",
+                                     "request_id": "0" * 32,
+                                     "_caller": "anton"}, api=fake)
         written = sorted(set(os.listdir(boot)) - before)
         c.check("#567 an add after delete refuses instead of registering",
                 "error" in ans, f"answer: {ans}")
@@ -2488,8 +2646,12 @@ def check_add_limit_interleaving_567(c):
     def job(i):
         return {"ID": f"pu-mop-{i}", "Status": "run", "Meta": {"origin": MOP534}}
 
-    def stub_spec(name, origin, cont=False, branch=None, node=None):
-        return {"Job": {"ID": name, "Type": "service", "Meta": {"origin": origin}}}
+    def stub_spec(name, origin, cont=False, branch=None, node=None,
+                  soul=None, soul_digest=None, soul_inc=None):
+        return {"Job": {"ID": name, "Type": "service",
+                        "Meta": {"origin": origin, "soul": soul,
+                                 "soul_digest": soul_digest,
+                                 "soul_inc": soul_inc}}}
 
     real_gate = cluster._project_gate
 
@@ -2516,7 +2678,9 @@ def check_add_limit_interleaving_567(c):
             def run_add():
                 out["add"] = cluster.answer(
                     "mop", {"verb": "add", "origin": MOP534,
-                            "workspace": PLAYS567["one"]}, api=fake)
+                            "workspace": PLAYS567["one"],
+                            "soul": "puppet", "request_id": "e" * 32,
+                            "_caller": "anton"}, api=fake)
 
             def run_limit():
                 out["limit"] = cluster.answer(
@@ -2602,7 +2766,10 @@ def check_add_limit_interleaving_567(c):
                                f"limit: {lim}"):
                     return
                 add = cluster.answer("mop", {"verb": "add", "origin": MOP534,
-                                             "workspace": PLAYS567["two"]}, api=fake)
+                                             "workspace": PLAYS567["two"],
+                                             "soul": "puppet",
+                                             "request_id": "f" * 32,
+                                             "_caller": "anton"}, api=fake)
                 written = sorted(p for p in os.listdir(boot)
                                  if p.startswith("pu-"))
             c.check("#567 the add decided after the save refuses on the ceiling",
@@ -2781,6 +2948,7 @@ def main():
                   check_nomad_api_275, check_stderr_verb_333,
                   check_update_origin_365, check_nodes_api_375,
                   check_registry_verbs_534, check_concurrent_534,
+                  check_add_roleless_refused_662,
                   check_add_race_567, check_add_limit_interleaving_567,
                   check_alloc_errors_572, check_alloc_error_stops_delete_572,
                   ):

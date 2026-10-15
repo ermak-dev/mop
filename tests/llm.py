@@ -230,19 +230,15 @@ def check_client_model_discovery_426(c):
                         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="0",
                         MOP_426_UNRELATED="kept"), \
             config.client_sources(), \
-            patched(master.lib, origin=lambda *a: "git@h:g/cloudpub.git",
-                    project_ready=lambda *a: True), \
-            patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
             patched(code.login, ensure=lambda: None), \
             patched(_common, feedback_fd=lambda *a: ("/proc/self/fd/3", 3)), \
-            patched(master.os, execvpe=fake_exec):
+            patched(code.os, execvpe=fake_exec):
         for host in ("a.test", "b.test"):
             creds.write_connection(os.path.join(root, host), "user", "bus-pw", "443",
                                    f"https://{host}:443/llm", f"{host}-fake-key")
             with context.use(context.resolve({"server": host}, {}, {})):
                 code.main(["--model", "gpt-example"])
-                master._main(["--", "--model", "gpt-example"])
-            for binary, args, env in captured[-2:]:
+            for binary, args, env in captured[-1:]:
                 c.expect(f"#426/#547 {host} gateway is the canonical origin",
                          env.get("ANTHROPIC_BASE_URL"), f"https://{host}:443")
                 c.expect(f"#426 {host} selected client key", env.get(llm.AUTH_VAR),
@@ -269,32 +265,27 @@ def check_client_model_discovery_426(c):
              | {"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"})
 
 
-# HYPOTHESIS (#440): claude_argv() верен, но _main срезает имя программы
-# перед execvpe; флаг обхода становится argv[0], который Claude не разбирает.
-# SOLUTION: передать полный argv с именем claude, как делает mop code.
-# RESULT: сначала две проверки падали (argv[0] был флагом, argv[1] --mcp-config),
-# после правки флаг остался первым разбираемым аргументом.
-# STATUS: FIXED — see #440
+# #662: локальный запуск мастера снят; контракт полного argv с именем
+# claude у единственного локального exec (mop code) проверяет свой блок
+# ниже (#440-инвариант сохранён там, где exec ещё есть).
 def check_master_exec_argv_440(c):
-    from mop.cli.core import _common, master
+    from mop.cli.core import code
     called = []
 
     def fake_exec(binary, args, env):
         called.append((binary, args))
 
-    with patched(master.lib, origin=lambda *a: "git@h:g/cloudpub.git",
-                 project_ready=lambda *a: True), \
-            patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
-            patched(_common, launch_env=lambda project=None: {"MOP_PROJECT": project},
+    with patched(code.login, ensure=lambda: None), \
+            patched(code._common, launch_env=lambda: {},
                     feedback_fd=lambda *a: ("/proc/self/fd/3", 3)), \
-            patched(master.os, execvpe=fake_exec):
-        master._main([])
+            patched(code.os, execvpe=fake_exec):
+        code.main([])
 
     binary, args = called[0]
-    c.expect("#440 master executes claude", binary, "claude")
+    c.expect("#440 code executes claude", binary, "claude")
     c.expect("#440 executable occupies argv[0]", args[0], "claude")
-    c.expect("#440 bypass is parsed as argv[1]", args[1],
-             "--dangerously-skip-permissions")
+    c.check("#440 bypass is parsed as a flag",
+            "--dangerously-skip-permissions" in args, args)
 
 
 # HYPOTHESIS (#547): окружение папета строится из MOP_PROXY_URL как есть:
@@ -545,8 +536,6 @@ def main():
             session.get("DISABLE_FEEDBACK_COMMAND") == "1", session)
     c.check("mop code passes feedbackDrafts=off to claude (#419)",
             carries(code.claude_argv(["--continue"])), code.claude_argv(["--continue"]))
-    c.check("mop master passes feedbackDrafts=off to claude (#419)",
-            carries(master.claude_argv([])), master.claude_argv([]))
     # HYPOTHESIS (правка #419, край пасстру): claude 2.1.287 не мержит
     # повторные --settings -- побеждает последний (проверено на живом
     # бинарнике: env из первого значения пропадает), а всё после `--`
@@ -578,10 +567,6 @@ def main():
             carries(code.claude_argv(dash))
             and code.claude_argv(dash).index("--") > code.claude_argv(dash).index(want_args[0]),
             code.claude_argv(dash))
-    c.check("mop master feedback settings stay effective before -- (#419)",
-            carries(master.claude_argv(dash))
-            and master.claude_argv(dash).index("--") > master.claude_argv(dash).index(want_args[0]),
-            master.claude_argv(dash))
     # HYPOTHESIS (правка #419, требование «везде» + законный пасстру):
     # claude повторные --settings не мержит (последний побеждает целиком),
     # и наш off ДО пользовательского значения молча включал черновики,
@@ -733,10 +718,6 @@ def main():
             argv[argv.index("--settings"):argv.index("--settings") + 2]
             == ["--settings", "/proc/self/fd/3"]
             and argv.index("--settings") < argv.index("--continue")
-            and argv.count("--settings") == 1, argv)
-    argv = master.claude_argv(["--", "--model", "opus"], "/proc/self/fd/3")
-    c.check("mop master: settings flag before -- (#419)",
-            argv.index("--settings") < argv.index("--")
             and argv.count("--settings") == 1, argv)
     argv = code.claude_argv(["--dangerously-skip-permissions", "--continue"],
                             "/proc/self/fd/3")

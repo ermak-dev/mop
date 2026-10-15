@@ -76,10 +76,10 @@ def _mop_listing():
         return None
 
 
-# ── 1. легаси-пара -> решатель -> новый файл затеняет пару ───────────────
-# HYPOTHESIS (#541 B1): решатель и его потребители расщепляют профиль на
-# половины, и цепочка «пара читается целиком, новый вход затеняет пару,
-# ENV сессии и конфигины шины видят НОВОЕ» нигде не собрана: юнит-проверки
+# ── 1. прежняя пара -- лежащий артефакт; новый файл -- единственный вход ─
+# HYPOTHESIS (#541 B1, #662): решатель и его потребители расщепляют профиль
+# на половины, и цепочка «пара не читается, connection.json -- вход,
+# ENV сессии и конфиг шины видят НОВОЕ» нигде не собрана: юнит-проверки
 # держат каждую часть по отдельности, стык не покрыт.
 # RESULT: на влитом дереве цепочка зелёная целиком; порча ниже
 # (_poisoned_profile под check_poisons_reproduce_defects) роняет именно
@@ -89,12 +89,12 @@ def check_pair_to_connection(c):
         dest = os.path.join(root, "srv.test")
         put_legacy(dest, ALICE)
         kind, got = creds.snapshot(dest)
-        c.expect("#541 a legacy pair still reads as one whole profile",
-                 (kind, got), ("human", profile_of(ALICE)))
-        # Новый вход одним файлом: та же пара половин больше не источник.
+        c.expect("#662 a legacy pair is no login for the resolver",
+                 (kind, got), (None, None))
+        # Новый вход одним файлом: лежащая пара больше не источник.
         creds.write_connection(dest, *BOB)
         kind, got = creds.snapshot(dest)
-        c.expect("#541 connection.json shadows the pair",
+        c.expect("#541 connection.json stands alone over the pair",
                  (kind, got), ("human", profile_of(BOB)))
         # Потребители видят НОВОЕ, каждый через тот же снимок.
         with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN="srv.test"):
@@ -120,26 +120,32 @@ def check_two_servers(c):
         put_legacy(old, ALICE)
         creds.write_connection(new, *BOB)
         with patched(creds, ROOT=root):
-            c.expect("#541 the legacy server still resolves on its own",
-                     creds.snapshot(old), ("human", profile_of(ALICE)))
+            c.expect("#662 the pair-only server has no login",
+                     creds.snapshot(old), (None, None))
             c.expect("#541 the connection server still resolves on its own",
                      creds.snapshot(new), ("human", profile_of(BOB)))
             c.expect("#541 joined_dirs sees both, no cross-blending",
                      creds.joined_dirs(), ["new.test", "old.test"])
-            # Потребители выбирают сервер именем, не полным путём: каждый
-            # получает свою учётку и свой ключ, чужого -- нет. URL здесь
-            # не сверяется: у ALICE адрес чужого authority (srv.test при
-            # сервере old.test), и контракт #547 честно пропускает его
-            # как есть -- свойство этого сценария -- раздельность учёток.
-            for host, row in (("old.test", ALICE), ("new.test", BOB)):
-                with patched_env(MOP_SERVER_LAN=host):
-                    env = cli_common.session_env()
-                    c.expect(f"#541 session_env on {host} carries that server's key",
-                             env.get(llm.AUTH_VAR), row[4])
-                    cfg = bus.server_config(host)
-                    c.expect(f"#541 the bus config on {host} carries that "
-                             f"server's identity",
-                             (cfg["user"], cfg["password"]), (row[0], row[1]))
+            # Потребители выбирают сервер именем, не полным путём: сервер
+            # с целым входом получает свою учётку и свой ключ, сервер с
+            # одной лежащей парой -- отказ «нет входа», не чужой профиль.
+            with patched_env(MOP_SERVER_LAN=new):
+                env = cli_common.session_env()
+                c.expect("#541 session_env on new.test carries that server's key",
+                         env.get(llm.AUTH_VAR), BOB[4])
+                cfg = bus.server_config(new)
+                c.expect("#541 the bus config on new.test carries that "
+                         f"server's identity",
+                         (cfg["user"], cfg["password"]), (BOB[0], BOB[1]))
+            with patched_env(MOP_SERVER_LAN=old):
+                try:
+                    bus.server_config(old)
+                    c.fail("#662 the pair-only server refuses for the bus",
+                           "no refusal")
+                except RuntimeError as e:
+                    c.check("#662 the pair-only refusal names the full login",
+                            "no bus credentials" in str(e) and
+                            "mop login" in str(e), str(e))
 
 
 # ── 3. битый connection.json / половина пары -- отказ без fallback ───────
@@ -178,10 +184,10 @@ def check_refusals_no_fallback(c):
         with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN="half.test"):
             try:
                 cli_common.session_env()
-                c.fail("#541 a lone client half refuses in session_env", "no refusal")
+                c.fail("#662 a lone client half refuses in session_env", "no refusal")
             except RuntimeError as e:
-                c.check("#541 the half refusal names the incomplete login",
-                        "incomplete" in str(e), str(e))
+                c.check("#662 the half refusal names the no-login repair",
+                        "no login" in str(e) and "mop login" in str(e), str(e))
 
 
 # ── 4. служебный operator.json рядом с человеческим входом -- конфликт ──

@@ -11,6 +11,7 @@ mop/common/ops.py (#458) и рисуют результат; channel.send_to_pup
 STATUS: FIXED — see #459
 """
 import os
+import uuid
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -53,17 +54,21 @@ def main():
     from mop.cli.core import add as cli_add
     verdict = ops.outcome(ops.REGISTERED, "pu-mop-9", marker="m1")
     calls = Calls(verdict, "add")
+    INCARNATION = "%s" % uuid.uuid5(uuid.NAMESPACE_DNS, "cli-ops-459")
     with patched(_common, workspace_text=lambda o: ("text", {"source": "origin"}),
                  sent_line=lambda s: ""), \
             patched(lib, project_ready=lambda p: True, note=lambda *a: None), \
+            patched(cli_add.roles, protocol=lambda reply: True), \
             patched(bus, login=lambda: "ermak"), \
             patched(bus, call_cluster=lambda verb, **kw: {
                 "name": "pu-mop-9", "bootstrap_marker": "m1",
+                "ok": True, "soul": "puppet", "soul_digest": "a" * 64,
+                "soul_inc": INCARNATION,
                 "alloc": {"ClientStatus": "running",
                           "TaskStates": {"claude": {"State": "running"}}},
                 "result": {"sent": "m1", "played": True, "ok": True}}), \
             patched(ops, add=calls):
-        code = cli_add._add("git@h:g/mop.git", "mop", False, Progress())
+        code = cli_add._add("git@h:g/mop.git", "mop", False, Progress(), "puppet")
     c.check("#459 add calls the shared operation",
             calls.seen and calls.seen[0][0] == "add", calls.seen)
     if calls.seen:
@@ -82,14 +87,17 @@ def main():
                  sent_line=lambda s: ""), \
             patched(lib, project_ready=lambda p: True, note=lambda *a: None,
                     fail=said.append), \
+            patched(cli_add.roles, protocol=lambda reply: True), \
             patched(bus, login=lambda: "ermak"), \
             patched(bus, call_cluster=lambda verb, **kw: {
                 "name": "pu-mop-9", "bootstrap_marker": "m2",
+                "ok": True, "soul": "puppet", "soul_digest": "a" * 64,
+                "soul_inc": INCARNATION,
                 "alloc": {"ClientStatus": "running",
                           "TaskStates": {"claude": {"State": "running"}}},
                 "result": {"sent": "m2", "played": True, "ok": True}}), \
             patched(ops, add=calls):
-        code = cli_add._add("git@h:g/mop.git", "mop", False, Progress())
+        code = cli_add._add("git@h:g/mop.git", "mop", False, Progress(), "puppet")
     c.check("#459 a refused shared operation fails the commandlet",
             code != 0 and said and "no space" in said[0], (code, said))
 

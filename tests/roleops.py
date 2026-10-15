@@ -311,16 +311,18 @@ def main():
     finally:
         g.__exit__(None, None, None)
 
-    # ── 3. Человек: явная роль и прежний путь без изменений ───────────────
-    # HYPOTHESIS: у человека add без роли -- байт в байт прежний вызов
-    # ops.add с политикой; с --role -- та же политика плюс поля роли.
+    # ── 3. Человек: роль обязательна, --request-id только с ней ─────────
+    # HYPOTHESIS (#662): add без роли у клиента -- прежний легаси-вызов
+    # ops.add с политикой и без полей роли. SOLUTION: роль обязательна:
+    # без --role командлет отказывает ДО шины (usage), с --role -- та же
+    # политика плюс поля роли.
     api, g, principal, parent = grant_env()
     try:
         w = drive(cli_add, [], api, "anton")
-        add = w.sent("add")
-        c.check("#618 human legacy add still sends the policy and no role",
-                add.get("workspace") == PLAY
-                and "soul" not in add and "request_id" not in add, add)
+        c.check("#662 a roleless add is refused before the bus",
+                not getattr(w, "adds", 0)
+                and "role" in f"{w.code} {w.out} {w.err}",
+                (getattr(w, "adds", 0), w.code, w.out, w.err))
         w = drive(cli_add, ["--role", "master"], api, "anton")
         add = w.sent("add")
         c.check("#618 human add --role sends policy plus role fields",

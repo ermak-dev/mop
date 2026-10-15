@@ -8,6 +8,7 @@
 """
 import json
 import os
+import uuid
 import sys
 import tempfile
 
@@ -467,6 +468,7 @@ def check_reference_committed_350(c):
 # STATUS: FIXED — see #432
 import ast
 import os
+import uuid
 
 
 def _owned_help():
@@ -915,14 +917,14 @@ CONCISE_431 = {
         ("gone", "the token is kept by the cluster service"),
     ),
     "mop.cli.core.master": (
-        # #586: голый `mop master` -- лаунчер мастер-роли, прежний
-        # локальный запуск -- явный --local с прежним пасстру.
+        # #662: `mop master` -- только лаунчер мастер-роли; локальный
+        # запуск claude снят (breaking change, установки пересоздаются).
         ("syntax", "mop master [git-origin]"),
-        ("syntax", "mop master --local [git-origin] [claude options]"),
-        ("keeps", "resumes the master's last session"),
-        ("keeps", "a master sees and reaches only its own project's puppets"),
+        ("keeps", "a new puppet of the project is registered"),
+        ("gone", "--local"),
+        ("gone", "resumes the master's last session"),
+        ("gone", "goes to claude as-is"),
         ("gone", "one master: a master sees"),
-        ("keeps", "`mop login --server ADDRESS LOGIN`"),
         ("gone", "mop/common/creds.py"),
         ("gone", "mop mcp, spawned"),
     ),
@@ -974,8 +976,11 @@ CONCISE_431 = {
         ("gone", "registry"),
     ),
     "mop.cli.core.add": (
-        ("syntax", "mop add [git-origin]"),
+        # #662: безролевой add снят (breaking change): только --role.
+        ("syntax", "mop add [git-origin] --role <role>"),
+        ("keeps", "the creation carries a request_id"),
         ("gone", "Nomad decides placement"),
+        ("gone", "instead of a legacy puppet"),
     ),
     "mop.cli.core.tail": (
         ("syntax", "mop tail <name> [-n N] [-f]"),
@@ -3481,14 +3486,22 @@ def check_add_failure_377(c):
         said = []
 
         def call_cluster(verb, alloc=alloc, **kw):
-            return {"name": "pu-mop-9"} if verb == "add" else {"alloc": alloc}
+            if verb == "ping":
+                return {"soul_protocol": {"version": 1, "request_id": True}}
+            if verb == "add":
+                return {"name": "pu-mop-9", "ok": True, "soul": "puppet",
+                        "soul_digest": "a" * 64,
+                        "soul_inc": "%s" % uuid.uuid5(uuid.NAMESPACE_DNS, "377")}
+            return {"alloc": alloc}
         with patched(bus, call_cluster=call_cluster), \
-                patched(_common,
-                        workspace_text=lambda o: ("", None), sent_line=lambda s: ""), \
-                patched(lib, fail=said.append), patched(_common.ops.time, sleep=lambda s: None), \
+                patched(_common, workspace_text=lambda o: ("", None),
+                        sent_line=lambda s: ""), \
+                patched(add.roles, protocol=lambda reply: True), \
+                patched(lib, fail=said.append), \
+                patched(_common.ops.time, sleep=lambda s: None), \
                 patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
             try:
-                code = add._add("git@h:g/mop.git", "mop", False, P())
+                code = add._add("git@h:g/mop.git", "mop", False, P(), "puppet")
             except Exception as e:
                 c.fail(f"#377 mop add, {what}: a refusal, not a trace",
                        f"{type(e).__name__}: {e}")

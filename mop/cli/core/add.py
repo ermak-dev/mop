@@ -1,4 +1,4 @@
-"""create a puppet: mop add [git-origin] [--role <role>]
+"""create a puppet: mop add [git-origin] --role <role>
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>; placement over the pool and the
@@ -6,16 +6,15 @@ picked automatically: <project>-<number>; placement over the pool and the
 a terminal it shows the current step. The new puppet is in mop list.
 Use mop models to see model IDs offered by the selected proxy.
 
---role names the new puppet's role instead of a legacy puppet: the
-creation carries a request_id, the answer is checked against the server's
-echo of the role triple (a server without the role protocol refuses before
-anything is created). A role principal (a grant master) must name the role
-and sends no bootstrap policy of its own: the child inherits the parent's
-approved snapshot.
+--role names the new puppet's role (soul name): the creation carries a
+request_id, the answer is checked against the server's echo of the role
+triple. A role principal (a grant master) names the role and sends no
+bootstrap policy of its own: the child inherits the parent's approved
+snapshot. A roleless add is gone: every puppet carries a soul.
 
---request-id retries an earlier unknown outcome under its id (with --role):
-the server reconciles to the job it reserved instead of creating a second
-one; a changed payload under the same id is refused before any effect.
+--request-id retries an earlier unknown outcome under its id: the server
+reconciles to the job it reserved instead of creating a second one; a
+changed payload under the same id is refused before any effect.
 """
 
 import uuid
@@ -29,10 +28,10 @@ from mop.common import bus, context, ops, puppets, soul
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
 MCP = {"annotations": "destructive", "node_verbs": [], "cluster_verbs": ['add', 'alloc', 'bootstrap_result', 'ping'], "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
-    {"name": "role", "type": "string", "flag": "--role",
-     "help": "role of the new puppet (soul name); required for a role principal"},
+    {"name": "role", "type": "string", "flag": "--role", "required": True,
+     "help": "role of the new puppet (soul name)"},
     {"name": "request_id", "type": "string", "flag": "--request-id",
-     "help": "id of an earlier unknown-outcome creation; the retry reconciles to the reserved job (with --role)"},
+     "help": "id of an earlier unknown-outcome creation; the retry reconciles to the reserved job"},
     ]}
 
 
@@ -41,16 +40,12 @@ def main(argv):
     rid, argv = lib.parse_value(argv, "--request-id", once=True)
     if len(argv) > 1:
         lib.usage(__doc__)
-    if rid and not role:
-        lib.usage("a request_id retries a role creation: "
-                  "mop add [git-origin] --role <role> --request-id <id>")
+    if not role:
+        lib.usage("a puppet is created with a role: "
+                  "mop add [git-origin] --role <role>")
     if rid and not soul.HEX32.match(rid):
         raise RuntimeError(f"--request-id {rid!r}: 32 lower-case hex "
                            "characters (the id an unknown outcome printed)")
-    grant = bus.principal()
-    if grant and not role:
-        lib.usage("a role principal names the role of the puppet it adds: "
-                  "mop add [git-origin] --role <role>")
     origin = lib.origin(argv[0] if argv else None, __doc__)
     project = puppets.project_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
@@ -75,20 +70,12 @@ def _add(origin, project, named, p, role=None, rid=None):
     серверу ДО создания (roles.protocol); грант-мастер политику не читает
     и не везет -- ребёнок наследует одобренный снапшот родителя (#582),
     человек со своей политикой заводит как сегодня."""
-    if role:
-        try:
-            reconciles = roles.protocol(bus.call_cluster("ping"))
-        except ValueError as e:
-            raise RuntimeError(f"mop add --role {role}: {e}") from None
-        request_id = rid or uuid.uuid4().hex
-        return _role_add(origin, role, request_id, reconciles, p)
-    p.step("registering")
-    text, sent = _common.workspace_text(origin)
-    print(_common.sent_line(sent), flush=True)
-    v = ops.add(bus.call_cluster, origin, (text, sent),
-                branch=context.current().branch,
-                step=lambda s: p.step(s), place_wait=120)
-    return _common.render(v, p)
+    try:
+        reconciles = roles.protocol(bus.call_cluster("ping"))
+    except ValueError as e:
+        raise RuntimeError(f"mop add --role {role}: {e}") from None
+    request_id = rid or uuid.uuid4().hex
+    return _role_add(origin, role, request_id, reconciles, p)
 
 
 def _role_add(origin, role, request_id, reconciles, p):

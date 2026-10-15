@@ -444,8 +444,12 @@ def check_add_pending_before_nomad_582(c):
             answer(api2, "alpha", {"verb": "add", "origin": ALPHA,
                                    "soul": "puppet", "request_id": "solo-1",
                                    "_caller": "anton"})
-            thief = answer(api2, "alpha", {"verb": "add", "origin": ALPHA,
-                                           "_caller": "anton"})
+            # Чужая регистрация на зарезервированном имени (#662: add
+            # сам такое имя не выберет -- резерв виден заявкам роли), как
+            # джоб, посаженный в Nomad мимо сервиса.
+            api2.jobs["pu-alpha-1"] = {"ID": "pu-alpha-1", "Status": "run",
+                                       "Type": "service",
+                                       "Meta": {"origin": ALPHA}}
             api2.broken = True
             again = answer(api2, "alpha", {"verb": "add", "origin": ALPHA,
                                            "soul": "puppet",
@@ -454,8 +458,7 @@ def check_add_pending_before_nomad_582(c):
             c.check("#582 a reserved name taken by another registration "
                     "is a loud refusal on retry",
                     "error" in again and "pu-alpha-1" in again.get("error", "")
-                    and thief.get("name") == "pu-alpha-1"
-                    and len(_principals(g2)) == 1, (thief, again))
+                    and len(_principals(g2)) == 1, again)
 
 
 def check_add_request_payload_582(c):
@@ -496,8 +499,21 @@ def check_add_source_gates_582(c):
                 "the protocol", "soul_protocol" not in ping, ping.get("soul_protocol"))
         legacy = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                        "_caller": "anton"})
-        c.check("#582 legacy add works with the role path off",
-                legacy.get("ok") and not _principals(g), legacy)
+        c.check("#662 a roleless add is refused with the role pointer",
+                bool(legacy.get("error")) and not api.jobs
+                and not _principals(g)
+                and all(w in legacy.get("error", "")
+                        for w in ("role puppets only", "soul=")),
+                legacy)
+        off = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                    "_caller": "anton", "workspace":
+                                    "- name: play\n  tasks: []\n"})
+        c.check("#662 a roleless add with workspace text is refused before "
+                "any effect",
+                bool(off.get("error")) and not api.jobs
+                and not any(f.endswith("-tasks.yml")
+                            for f in os.listdir(bootstrap.ROOT)),
+                off)
     api = FakeNomad()
     with soul_env(api) as g:
         unknown = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
@@ -521,17 +537,30 @@ def check_add_source_gates_582(c):
                 ping.get("soul_protocol"))
 
 
-def check_add_legacy_untouched_582(c):
-    """Легаси-add при включённой настройке -- прежний путь байт в байт:
-    ни тройки, ни принципала, ни записи реестра."""
+def check_add_roleless_refused_662(c):
+    """HYPOTHESIS (#662): add без полей роли -- прежний легаси-путь:
+    джоб без тройки, workspace-marker старины, ни принципала, ни реестра.
+    SOLUTION: поля роли обязательны: запрос без них -- громкий отказ с
+    указанием soul=<роль>, ДО ворот проекта (ни джоба, ни реестра, ни
+    workspace). Сервер создаёт только ролевых папетов."""
     api = FakeNomad()
     with soul_env(api) as g:
         got = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                     "_caller": "anton"})
-        meta = (api.jobs.get(got.get("name")) or {}).get("Meta") or {}
-        c.check("#582 a legacy add registers no soul and no grant",
-                got.get("ok") and "soul" not in meta and not _principals(g)
-                and "soul" not in got, (got, meta))
+        c.check("#662 a roleless add is refused with the soul= pointer",
+                bool(got.get("error")) and "soul=" in got.get("error", "")
+                and "role puppets only" in got.get("error", "")
+                and not api.jobs and not _principals(g), got)
+        # Отказ -- до ворот проекта: workspace текста легаси-пути не
+        # пишется вовсе.
+        before = sorted(os.listdir(bootstrap.ROOT))
+        seeded = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
+                                       "_caller": "anton", "workspace":
+                                       "- name: play\n  tasks: []\n"})
+        after = sorted(os.listdir(bootstrap.ROOT))
+        c.check("#662 a roleless add stores no workspace on the way out",
+                bool(seeded.get("error"))
+                and after == before, (seeded, before, after))
 
 
 def check_add_delegated_582(c):
@@ -695,15 +724,16 @@ def check_add_delegated_582(c):
                 "error" in foreign and "beta" in (foreign.get("error") or "")
                 and len(api.jobs) == 1, foreign)
 
-    # Человек сохраняет сегодняшний путь: легаси-add со своим текстом
-    # (источник согласования -- сам человек, канал легаси-rpc).
+    # Человек без полей роли -- отказ #662: путь только ролевой, текст
+    # легаси-пути больше никуда не кладётся.
     api = FakeNomad()
     with soul_env(api) as g:
         human = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                       "_caller": "anton",
                                       "workspace": "- name: play\n  tasks: []\n"})
-        c.check("#582 the human keeps today's legacy workspace path",
-                human.get("ok") and len(api.jobs) == 1, human)
+        c.check("#662 a roleless add with workspace text is refused",
+                bool(human.get("error")) and "soul=" in human.get("error", "")
+                and len(api.jobs) == 0, human)
 
 
 def check_add_delegated_gates_582(c):
@@ -1306,7 +1336,7 @@ def check_add_workspace_boundary_582(c):
         fenced = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                        "soul": "puppet", "request_id": "r3",
                                        "_caller": "grant-" + "a" * 32})
-        c.check("#582 a grant principal does not reach the legacy add "
+        c.check("#582 a grant principal does not reach the human add "
                 "at all (#603 fence)",
                 "error" in fenced
                 and "role subject" in fenced.get("error", "")
@@ -1314,8 +1344,9 @@ def check_add_workspace_boundary_582(c):
         legacy = answer(api, "alpha", {"verb": "add", "origin": ALPHA,
                                        "_caller": "anton",
                                        "workspace": "- name: play\n  tasks: []\n"})
-        c.check("#582 the human keeps today's legacy workspace path",
-                legacy.get("ok") and len(api.jobs) == 2, legacy)
+        c.check("#662 a roleless add with workspace text is refused",
+                bool(legacy.get("error")) and "soul=" in legacy.get("error", "")
+                and len(api.jobs) == 1, legacy)
 
 
 def check_add_quota_counts_roles_582(c):
@@ -1553,7 +1584,7 @@ def main():
                check_respec_keeps_triple_582,
                check_add_soul_582, check_add_pending_before_nomad_582,
                check_add_request_payload_582, check_add_source_gates_582,
-               check_add_legacy_untouched_582, check_add_delegated_582,
+               check_add_roleless_refused_662, check_add_delegated_582,
                check_add_delegated_gates_582,
                check_seam_adoption_582,
                check_role_channel_verbs_582,

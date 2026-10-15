@@ -9,9 +9,14 @@
 из окружения (оно старше привязки клона) переключает адрес шины и каталог
 кредов разом. Без привязки выбирается единственный joined-сервер. В каталоге лежит ровно то, что машине положено:
 
-    operator.json               кто эта машина на шине: человек после
-                                `mop join`, на сервере -- service (#104)
-    client.json                 закрытые настройки прокси для этого сервера
+    connection.json             весь вход человека одной атомарной записью
+                                (#533, #662 -- единственный клиентский
+                                профиль)
+    operator.json               машинный вход сервисов сервера (service,
+                                #104); на машине человека не пишется
+    client.json                 порт клиента для машинного входа сервисов;
+                                пару с operator.json про человека решатель
+                                больше не читает (#662)
     tls.pem                     самоподписанный сертификат TLS-прокси (#97)
     bootstrap.json              management-токен Nomad, только на контроллере
 
@@ -41,7 +46,8 @@ OPERATOR_FILE = "operator.json"
 CLIENT_FILE = "client.json"
 # Атомарный клиентский профиль (#533): весь вход человека одной записью --
 # версия, креды шины, порт и прокси. Прежняя пара operator.json+client.json
-# писалась двумя записями, и отказ между ними смешивал несвязанные входы.
+# писалась двумя записями, и отказ между ними смешивал несвязанные входы;
+# с #662 решатель её не читает -- это единственный клиентский профиль.
 CONNECTION_FILE = "connection.json"
 CONNECTION_VERSION = 1
 ADMIN = busnames.ADMIN   # псевдопроект оператора: проекта нет
@@ -92,10 +98,10 @@ def _runtime_grant_host():
 def joined_host():
     """Единственный joined-сервер клиента; несколько требуют явного выбора.
 
-    Joined -- след входа: целый профиль (#533: connection.json или целая
-    legacy-пара), машинный вход или остаток половины как подсказка адреса
-    для повторного login. Профиль из остатка не собирается: запускатели
-    откажут сами, внятно. Явное подключение роли (#650) уже содержит
+    Joined -- след входа: целый профиль (#533: connection.json) или
+    машинный вход. Прежняя пара operator.json+client.json про человека
+    больше не вход (#662): её каталог -- «нет входа», ремонт один --
+    полный `mop login`. Явное подключение роли (#650) уже содержит
     сервер: его адрес не выбирается из человеческих каталогов."""
     runtime = _runtime_grant_host()
     if runtime:
@@ -487,15 +493,14 @@ def _read_connection(directory):
 def snapshot(directory):
     """ОДИН снимок каталога сервера: каждый файл читается один раз (#533).
     -> ("human", профиль) | ("machine", {user, password, https_port|None}) |
-    ("partial", {user, password, https_port} -- только поля, что лежат) |
     (None, None). Конфликт machine operator + человеческий профиль и битые
     записи -- ProfileError с типом причины.
 
     Единственный решатель для шины и login: два отдельных чтения увидели бы
-    два поколения каталога, если writer заменил файл между ними. Половины
-    прежней пары -- тоже снимок: consumer'ы отказывают «не полный вход», а
-    login берёт из остатка подсказки (имя/порт) и идёт ПОЛНЫМ входом --
-    старый proxy-ключ остатка не доверяется."""
+    два поколения каталога, если writer заменил файл между ними. Каталог
+    без целого connection.json -- не вход (#662: прежняя пара
+    operator.json+client.json про человека больше не читается, половины --
+    не подсказка): ремонт один, полный `mop login`."""
     conn = _read_connection(directory)
     op = _operator_strict(directory)
     if op is not None and busnames.is_machine(op["user"]):
@@ -511,28 +516,7 @@ def snapshot(directory):
                            "https_port": joined["https_port"] if joined else None}
     if conn is not None:
         return "human", conn
-    try:
-        joined = client(directory)
-    except ValueError as e:
-        # Битая запись -- отказ, не «нет входа»: ошибки client() несут свой
-        # смысл, ремонт называем здесь.
-        raise ProfileError("broken", f"cannot use the legacy pair in {directory}: "
-                          f"{e}") from None
-    if joined is not None and op is not None:
-        return "human", {"user": op["user"], "password": op["password"],
-                         "https_port": joined["https_port"],
-                         "proxy_url": joined["proxy_url"],
-                         "proxy_key": joined["proxy_key"]}
-    # Половина прежней пары -- не вход: пароль без прокси-настроек запускал
-    # бы сессию без модели, прокси без пароля -- вход неизвестно кого.
-    # Половина -- ПОДСКАЗКА (имя/порт, проверка прежнего пароля), не
-    # профиль: пароль без проверки шиной не используется, старый ключ
-    # прокси не доверяется.
-    if op is None and joined is None:
-        return None, None
-    return "partial", {"user": op["user"] if op else None,
-                       "password": op["password"] if op else None,
-                       "https_port": joined["https_port"] if joined else None}
+    return None, None
 
 
 def human_profile(directory):
@@ -568,17 +552,13 @@ def human_login(directory, host):
                            f"directory): use a separate operator account "
                            f"or connection directory, run mop login "
                            f"--server {host} <login>")
-    if kind == "partial":
-        raise RuntimeError(f"incomplete login for {host}: re-run "
-                           f"mop login --server {host}")
     raise RuntimeError(f"no login for {host}: run mop login --server {host}")
 
 
 def joined_dirs(root=None):
-    """Каталоги серверов, где есть след входа: целый профиль, машинный вход
-    или ОСТАТОК прежней пары (#533). Остаток -- только подсказка выбора
-    адреса для повторного login (main/ensure): профелем он не становится,
-    и запускатели без полного входа откажут.
+    """Каталоги серверов, где есть след входа: целый профиль или машинный
+    вход (#533, #662). Остатков прежней пары больше нет: вход без целого
+    connection.json -- не вход, его ремонт один -- полный `mop login`.
 
     След -- наличие файла, не содержимое: сломанный каталог остаётся
     кандидатом, «не могу разобрать» не значит «выбор вслепую»; явный

@@ -461,27 +461,34 @@ def main():
 
     before_file = bus.FILE  # до первого ролевого запуска: подмена видна
 
-    # Легаси (контроль): джоб без тройки -- прежний путь байт в байт.
+    # #662: легаси-путь лаунчера умер. Джоб без тройки -- не «папет с
+    # проектным кредом», а джоб без души: сервер такой не создаёт, и
+    # лаунчер его не поднимает. Отказ -- до bootstrap-спроса и до модели.
     body = Body()
     code, out, log, transport = launch(body, legacy_reply(), {})
-    c.expect("#590 legacy: a job without a role launches", code, 0)
-    c.expect("#590 legacy: the project credential lands where it always did",
-             creds_in(body, project_path), legacy_reply()["bus"])
-    c.check("#590 legacy: no role directory appears",
-            not any("/souls/" in p for p in body.files), sorted(body.files))
-    c.check("#590 legacy: the password is not printed", PROJECT_SECRET not in out, out)
-    c.check("#590 legacy: the bootstrap ask rides the anonymous server.rpc",
-            bool(transport.asked(busnames.server("mop")))
-            and not transport.asked(busnames.server(
-                "mop", caller=busnames.node_user(NODE_USER[5:]))),
-            transport.log)
+    c.check("#662 a job without a role triple refuses before the bootstrap ask",
+            isinstance(code, str) and code.startswith("role delivery of ")
+            and not launched(log) and not transport.log
+            and project_path not in body.files, (code, out, brief(log)))
+    c.check("#662 the refusal names the missing soul, not the project credential",
+            isinstance(code, str) and "soul" in code.lower()
+            and PROJECT_SECRET not in str(code) + out,
+            (code, out))
+    # Носитель тройки -- окружение задачи: пустая PU-тройка при живой
+    # автореке -- противоречие (проверено выше), а полноты нет вовсе --
+    # битый джоб #662, каким бы ни был ответ сервера.
+    body = Body()
+    code, out, log, transport = launch(body, legacy_reply(), {})
+    c.check("#662 a roleless job never receives the project credential",
+            project_path not in body.files
+            and not any("/souls/" in p for p in body.files),
+            sorted(body.files))
 
     # Легаси-джоб, которому сервер прислал роль, -- рассогласование: отказ.
-    body = Body()
-    code, out, log, transport = launch(body, {**legacy_reply(), "soul": payload(
-        "puppet", digest, INC, GRANT, manifest, prompt)}, {})
-    c.check("#590 a legacy job refuses a role payload", refused(code), code)
-    c.check("#590 a legacy job with a role payload never launches", not launched(log), brief(log))
+    # #662: легаси-джоба больше нет вовсе, но отказ这条 ветки -- защита от
+    # рассинхрона сервера и Meta; теперь её достигнуть нельзя снизу
+    # (expected_role None не доходит до delivery), проверка снята вместе
+    # с deliver_legacy.
 
     env = meta_env("puppet", digest, INC)
     good = reply_for(payload("puppet", digest, INC, GRANT, manifest, prompt),
@@ -663,14 +670,9 @@ def main():
             refused(acode) and "node credential" in acode and not launched(alog),
             (acode, brief(alog)))
 
-    legacy_body = Body()
-    lcode, lout, llog, _ = launch(legacy_body, legacy_reply(), {})
-    c.check("#590 legacy: no soul environment is carried",
-            not any(_export(wrapper_script(legacy_body), k)
-                    for k in ("PU_SOUL", "PU_SOUL_DIGEST", "PU_SOUL_INC",
-                              "PU_SOUL_DIR", "MOP_SOUL_DIR", "PU_NODE")),
-            wrapper_script(legacy_body))
-    c.expect("#590 legacy still launches", lcode, 0)
+    # #662: легаси-джоба нет -- врапер души у каждого старта, и отдельного
+    # «легаси-врапера без ролевых полей» не существует: деградационной
+    # проверки не на чем держать.
 
     # Identity хозяина: отказ глагола -- отказ старта, без метки.
     for mode, why in (("error", "another owner"), ("raise", "did not answer")):
@@ -705,8 +707,9 @@ def main():
                 and not any(p.endswith("ready.json") for p in body.files),
                 (code, brief(log)))
 
-    # Маршрут спроса bootstrap: роль -- именованный канал узла, легаси --
-    # прежний анонимный server.rpc; дверь в обоих исходах закрывается.
+    # Маршрут спроса bootstrap: роль -- именованный канал узла, дверь
+    # закрывается в обоих исходах. #662: анонимного легаси-маршрута нет --
+    # спрос ровно один, узловой.
     class D2:
         def __init__(self):
             self.doors = []
@@ -718,24 +721,17 @@ def main():
             self.doors.append(on)
             return {}
     d2 = D2()
-    ok_reply = {"ok": True, "played": False}
-    transport = FakeBus(identity={}, bootstrap=dict(ok_reply))
+    transport = FakeBus(identity={}, bootstrap=dict({"ok": True, "played": False}))
     with transport:
-        run.bootstrap_sandbox(d2, NAME, "mop", node_qualified=True)
+        run.bootstrap_sandbox(d2, NAME, "mop")
         subj = busnames.server("mop", caller=busnames.node_user(NODE_USER[5:]))
         c.check("#590 a role ask goes to the node-qualified server.rpc",
                 [(a["verb"], a["name"], a["address"])
                  for _, a in transport.asked(subj)]
                 == [("bootstrap", NAME, "10.0.0.9")], transport.log)
+        c.check("#662 the anonymous server.rpc carries no bootstrap ask",
+                not transport.asked(busnames.server("mop")), transport.log)
         c.expect("#590 the door still closes for a role ask", d2.doors, [True, False])
-        transport.log.clear()
-        run.bootstrap_sandbox(d2, NAME, "mop")
-        c.check("#590 a legacy job asks the anonymous server.rpc as before",
-                bool(transport.asked(busnames.server("mop")))
-                and not transport.asked(busnames.server(
-                    "mop", caller=busnames.node_user(NODE_USER[5:]))),
-                transport.log)
-        c.expect("#590 the door still closes for the legacy ask", d2.doors[-2:], [True, False])
 
     # Вторая роль того же проекта на том же доме (host): свои файлы, без
     # коллизии с первой.

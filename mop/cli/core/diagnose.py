@@ -3,14 +3,15 @@
 Prints which server the next command would talk to, where that choice
 came from (command line, environment, clone binding, or the sole joined
 directory), where its login directory is, and whether the login is whole:
-complete, partial (a leftover half of the old pair), empty or a machine
-service identity. No network, no prompts, no writes; the login's secrets
-are never shown. The schema line names the version of a validated
+complete, empty (no whole connection.json; leftovers of the old
+operator.json+client.json pair are no login) or a machine service
+identity. No network, no prompts, no writes; the login's secrets are
+never shown. The schema line names the version of a validated
 connection.json only; other formats carry no schema claim.
 
 Broken or conflicting directories refuse with exit code 1 -- the refusal
-is the diagnosis. partial/empty/machine are informational: exit code 0
-with an explicit not-ready line, not a success message.
+is the diagnosis. empty/machine are informational: exit code 0 with an
+explicit not-ready line, not a success message.
 """
 import json
 import sys
@@ -25,7 +26,6 @@ MCP = {"annotations": "readonly", "args": [
 
 
 NOT_READY = {
-    "partial": "incomplete login: re-run mop login --server {server}",
     "empty": "no login: run mop login --server {server}",
     "machine": "machine service identity: use a separate operator account "
                "or connection directory, not-ready for a human login",

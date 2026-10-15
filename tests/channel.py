@@ -366,7 +366,8 @@ def check_role_channel_585(c):
     папет (puppet-<проект>) шлёт send в node.<n>.rpc, куда его креды не
     пишут (natsconf.puppet_permissions -- только .msg): живой peer-send
     pu2/pu4 упал permissions violation.
-    SOLUTION: channel.actor -- три вида говорящего (human/legacy/grant);
+    SOLUTION: channel.actor -- два вида говорящего (human/grant, #662);
+    легаси-папет проекта -- больше не говорящий (отказ);
     легаси -- канал msg; grant -- адрес = имя джоба, без owner/force/
     reply_to, свой узел из окружения тела, адресат -- verb peers своего
     узла, каталог инструментов -- из capabilities бандла; dispatch --
@@ -378,22 +379,11 @@ def check_role_channel_585(c):
     with patched(bus, config=lambda *a: {"user": GRANT}):
         c.expect("#585 a grant is not a master profile", mcp.is_master(), False)
 
-    # Легаси-папет: send -- канал msg, остальное прежнее.
-    with Stubs() as s:
-        s.put(mcp, "MASTER", False)
-        s.put(mcp, "KIND", "legacy")
-        s.put(bus, "gather", lambda verb, **kw: [{"node": "n1", "puppets": {PUPPET: {}}}])
-        s.put(bus, "login", lambda: None)
-        s.answers["request"] = {"msg_id": "m1"}
-        with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]):
-            s.put(session, "sessions", lambda: [dict(SESS, cwd="/p/pu-mop-4")])
-            got = mcp.send(PUPPET, "hi")
-        c.expect("#585 legacy send delivered", got, "pu-mop-9: delivered (msg_id=m1)")
-        kw = s.calls[-1][3]
-        c.expect("#585 legacy send goes over msg, which its creds may publish",
-                 kw.get("channel"), "msg")
-        c.expect("#585 legacy send carries no owner", kw.get("owner"), None)
-        c.expect("#585 legacy send names its clone", kw.get("from_name"), "pu-mop-4")
+    # Неподдерживаемый говорящий (#662): папетные креды проекта и их
+    # отсутствие -- больше не вид говорящего. Ни канала msg, ни каталога
+    # инструментов: процесс поднимается пустым, fail closed.
+    c.expect("#662 an unsupported speaker carries no tools",
+             channel.tools_for(None, None, {}), set())
     # Человек -- байт в байт прежний запрос (характеристика выше): без channel.
 
     # Грант: адрес -- имя джоба, ни владельца, ни force; reply_to -- только
@@ -441,8 +431,15 @@ def check_role_api_585(c):
         c.fail("#585 channel.actor exists", str(e))
         return False
     c.expect("#585 grant is its own actor", actor(GRANT), channel.GRANT)
-    c.expect("#585 legacy puppet creds", actor("puppet-mop"), channel.LEGACY)
-    c.expect("#585 no creds read as legacy", actor(None), channel.LEGACY)
+    # #662: папетные креды проекта и отсутствие кредов -- не говорящий:
+    # классификация отказывает, а не выдаёт легаси-канал.
+    for bad in ("puppet-mop", None):
+        try:
+            actor(bad)
+            c.fail(f"#662 puppet creds ({bad!r}) are no speaker", "no refusal")
+        except ValueError as e:
+            c.check(f"#662 puppet creds ({bad!r}) are refused",
+                    "unsupported" in str(e), str(e))
     c.expect("#585 a person", actor("anton"), channel.HUMAN)
     with patched(bus, config=lambda *a: {"user": GRANT}):
         c.expect("#585 a grant is no human owner", channel.human_login(), None)
@@ -528,8 +525,8 @@ def check_role_api_585(c):
     hand = channel.HAND_TOOLS
     c.expect("#585 a human keeps every tool",
              channel.tools_for(channel.HUMAN, None, decls), (set(hand) | set(decls)) - {"dispatch"})
-    c.expect("#585 legacy puppet: the channel only",
-             channel.tools_for(channel.LEGACY, None, decls), {"agents", "send", "tail"})
+    c.expect("#662 an unknown speaker carries no tools",
+             channel.tools_for("legacy", None, decls), set())
     decls["profile"] = {"cluster_verbs": []}
     # Пресет-«рабочий без alloc»: send/tail не видны -- их нечем
     # маршрутизировать (node_of идёт alloc); профиль остаётся.
@@ -895,9 +892,14 @@ def main():
         c.expect("mcp local dead", mcp.send("s1", "hi"), "s1: inbox not listening — session is dead")
         s.alive = True
         # Несколько сессий с одним именем -- стоп, а не мастер: молча взять
-        # первую значит однажды написать не тому.
-        c.expect("mcp local ambiguous", mcp.send("twins", "hi"),
-                 "send: 'twins' matches several sessions: twins[1], twins[2] — specify pid")
+        # первую значит однажды написать не тому. #662: без кредов инструмент
+        # не регистрируется (нет оболочки loud), поэтому сырая функция
+        # обязана поднять Ambiguous -- зарегистрированная отдаст её текстом.
+        try:
+            mcp.send("twins", "hi")
+            c.fail("mcp local ambiguous", "routed on")
+        except session.Ambiguous as e:
+            c.check("mcp local ambiguous stops the send", "twins" in str(e), str(e))
 
         # Мастер -- всё остальное.
         s.answers["ask"] = {"msg_id": "m3"}
@@ -1127,6 +1129,7 @@ def main():
     # сессии -- и ничего похожего на адрес. Адрес мастера берётся только из
     # таблицы мастеров в agents или из конверта письма.
     import re
+    import inspect
     with patched(mcp, MASTER=True):
         text, _, code = run_command(mcp.main, ["--check"])
     c.expect("--check succeeds", code, 0)
@@ -1136,9 +1139,11 @@ def main():
              re.findall(r"\b[\w-]+\.[\w-]+-\d+\b", text), [])
     c.expect("--check prints no .inbox subject", ".inbox" in text, False)
     c.expect("--check does not print its own MASTER_ID", mcp.MASTER_ID in text, False)
-    described = {t.name: t.description for t in mcp.app._tool_manager.list_tools()}
+    # #662: без кредов инструменты не регистрируются (fail closed), поэтому
+    # описание читается из блока декоратора, где оно объявлено.
+    agents_decl = inspect.getsource(mcp.agents).split("def ", 1)[0]
     c.expect("agents says where a master's address comes from",
-             "only from the masters table" in (described.get("agents") or ""), True)
+             "only from the masters table" in agents_decl, True)
     # RESULT: красный на старом --check (адрес master.<хост>-<pid> и .inbox в
     # выводе), зелёный после.
     # STATUS: FIXED — see #226
@@ -1196,7 +1201,14 @@ def main():
     # инструмента и последствиях force, не о транспортном механизме.
     # RESULT: модель получает короткие действия без потери ограничения.
     # STATUS: FIXED — see #434
-    shown = {t.name: t.description for t in mcp.app._tool_manager.list_tools()}
+    # #662: без кредов инструменты не регистрируются вовсе (fail closed),
+    # поэтому описания читаются из блока декоратора -- там они объявлены.
+    import inspect
+
+    def decl_text(name):
+        src = inspect.getsource(getattr(mcp, name))
+        return src.split("def ", 1)[0]
+    shown = {name: decl_text(name) for name in ("agents", "send", "tail")}
     for name in ("agents", "send", "tail"):
         c.check(f"#434 {name} still described", bool(shown.get(name)))
         c.check(f"#434 {name} hides transport internals", not any(
@@ -1207,8 +1219,7 @@ def main():
     c.check("#434 agents retains free-work rule", all(
         word in shown["agents"] for word in ("free", "unsaved")))
     # В профиле папета slash не зарегистрирован: читаем объявление инструмента.
-    import inspect
-    slash_source = inspect.getsource(mcp.slash)
+    slash_source = decl_text("slash")
     c.check("#434 slash omits transport implementation", "skipSlashCommands" not in slash_source)
     c.check("#434 slash retains allowed-command list and force", all(
         word in slash_source for word in ("SLASH_ALLOWED", "force=true")))
