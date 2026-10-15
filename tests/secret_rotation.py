@@ -178,6 +178,35 @@ class RotationTests(unittest.TestCase):
             self.assertNotIn("receiver/inc-1", str(caught.exception))
         self.assertNotIn("node-a", repr(pending))
 
+    def test_original_and_compensation_reasons_are_retained_without_raw_errors(self):
+        r = self.r
+        self.assertTrue(hasattr(r, "FailureReason"), "rotation must retain both safe failure reasons")
+        failed = self.apply("record", self.apply("begin_delivery"), outcome=r.Outcome.REJECTED,
+                            reason=r.FailureReason.PRECONDITION)
+        restoring = self.apply("begin_compensation", failed)
+        unknown = self.apply("record", restoring, outcome=r.Outcome.UNKNOWN)
+        self.assertEqual(unknown.original_reason, r.FailureReason.PRECONDITION)
+        observed = self.apply("reconcile", unknown, outcome=r.Observation.APPLIED)
+        revoking = self.apply("begin_new_revocation", observed)
+        partial = self.apply("record", revoking, outcome=r.Outcome.REJECTED,
+                             reason=r.FailureReason.UNAVAILABLE)
+        self.assertEqual(partial.original_reason, r.FailureReason.PRECONDITION)
+        self.assertEqual(partial.compensation_reason, r.FailureReason.UNAVAILABLE)
+        from dataclasses import replace
+        for changes in ({"original_reason": None}, {"compensation_reason": None},
+                        {"original_reason": "synthetic credential: do not echo"}):
+            with self.assertRaises(r.RotationError):
+                replace(partial, **changes)
+        pending = self.apply("begin_delivery")
+        for outcome in (r.Outcome.APPLIED, r.Outcome.UNKNOWN):
+            with self.assertRaises(r.RotationError):
+                self.apply("record", pending, outcome=outcome, reason=r.FailureReason.REFUSED,
+                           receipts=pending.required if outcome is r.Outcome.APPLIED else frozenset())
+        with self.assertRaises(r.RotationError) as caught:
+            self.apply("record", pending, outcome=r.Outcome.REJECTED,
+                       reason="synthetic credential: do not echo")
+        self.assertNotIn("synthetic credential", str(caught.exception))
+
     def test_restored_snapshots_reject_inconsistent_safety_facts(self):
         from dataclasses import replace
         r = self.r

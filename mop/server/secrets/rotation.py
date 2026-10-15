@@ -65,6 +65,14 @@ class Outcome(Enum):
     UNKNOWN = "unknown"
 
 
+class FailureReason(Enum):
+    """Категория подтверждённого отказа без эффекта, не сырое сообщение адаптера."""
+
+    REFUSED = "refused"
+    PRECONDITION = "precondition_failed"
+    UNAVAILABLE = "unavailable_before_effect"
+
+
 class Observation(Enum):
     APPLIED = "applied"
     ABSENT = "absent"
@@ -101,8 +109,11 @@ def _recipients(value, *, required=False):
 class Rotation:
     """Immutable снимок политики; хранение, auth и внешние порты остаются снаружи.
 
-    original_failure/compensation_failure — конечные безопасные категории
-    отказа этапа. Не принимать exception/message с plaintext в эти поля.
+    original_failure/compensation_failure обозначают этапы отказа,
+    original_reason/compensation_reason сохраняют обе конечные категории причин.
+    Не принимать exception/message с plaintext в эти поля. Если приложению
+    нужны подробности, оно отдельно сохраняет безопасную диагностику адаптера
+    вместе со снимком, но не секрет и не исходное исключение.
     """
 
     required: frozenset[str] = field(repr=False)
@@ -113,6 +124,8 @@ class Rotation:
     retryable: Effect | None = None
     original_failure: Effect | None = None
     compensation_failure: Effect | None = None
+    original_reason: FailureReason | None = None
+    compensation_reason: FailureReason | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "required", _recipients(self.required, required=True))
@@ -132,6 +145,11 @@ class Rotation:
                 raise RotationError("reconciliation requires pending intent")
         elif effect is not None and self.state is not _EFFECT_STAGE[effect]:
             raise RotationError("rotation stage does not match effect")
+        for failure, reason in ((self.original_failure, self.original_reason),
+                                (self.compensation_failure, self.compensation_reason)):
+            if ((failure is None) != (reason is None)
+                    or (reason is not None and type(reason) is not FailureReason)):
+                raise RotationError("rotation failure requires a safe reason category")
         self._validate_facts(effect)
 
     def _validate_facts(self, effect):
@@ -228,11 +246,13 @@ class Rotation:
                             receipts=receipts if effect is Effect.DELIVER else self.receipts)
 
     def record(self, *, expected_revision: int, outcome: Outcome,
-               receipts: frozenset[str] = frozenset()) -> "Rotation":
+               receipts: frozenset[str] = frozenset(), reason: FailureReason | None = None) -> "Rotation":
         """Подтвердить сохранённое намерение; crash/timeout оставляют его для сверки."""
         self._expected(expected_revision)
         if type(outcome) is not Outcome:
             raise RotationError("invalid rotation effect outcome")
+        if reason is not None and (type(reason) is not FailureReason or outcome is not Outcome.REJECTED):
+            raise RotationError("safe failure reason is only valid for a confirmed rejection")
         if self.pending is None or self.state is Stage.RECONCILING:
             raise RotationError("rotation has no recordable effect; reconcile pending uncertainty")
         receipts = _recipients(receipts)
@@ -242,9 +262,12 @@ class Rotation:
             raise RotationError("unconfirmed effect cannot carry delivery confirmation")
         if outcome is Outcome.UNKNOWN:
             return self._change(state=Stage.RECONCILING)
+        reason = reason or FailureReason.REFUSED
         if self.pending in _COMPENSATIONS:
-            return self._change(state=Stage.PARTIAL, compensation_failure=self.pending, pending=None)
-        return self._change(state=Stage.FAILED, original_failure=self.pending, pending=None)
+            return self._change(state=Stage.PARTIAL, compensation_failure=self.pending,
+                                compensation_reason=reason, pending=None)
+        return self._change(state=Stage.FAILED, original_failure=self.pending,
+                            original_reason=reason, pending=None)
 
     def reconcile(self, *, expected_revision: int, outcome: Observation,
                   receipts: frozenset[str] = frozenset(), quiescent: bool = False) -> "Rotation":
