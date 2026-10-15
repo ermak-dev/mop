@@ -14,6 +14,9 @@ from django.utils import timezone
 # FEATURE: #633 — единая identity, live credential и scope без HTTP в use case.
 # HYPOTHESIS: у foundation нет Access и auth endpoints.
 # SOLUTION: стандартный Django Auth + source provenance + единый evaluator.
+# RED: PG16/17 29338/29339 — нет schema/routes; 29380/29381 — stale query/limit.
+# RED: 29404/29405 — transport/Admin; 29424/29425 — смена external subject.
+# RESULT: schema, live credential, scope и source projection проверяются реальной БД.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class AuthenticationBoundary(TransactionTestCase):
     def test_login_requires_csrf_even_for_anonymous_browser(self):

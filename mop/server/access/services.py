@@ -61,7 +61,9 @@ def _principal(user):
 def _binding_values(principal, identity):
     return dict(principal_id=principal.pk, principal_revision=principal.revision,
         principal_kind=principal.kind, bound_node_id=principal.bound_node_id,
-        identity_id=identity.pk if identity else None, identity_source_id=identity.source_id if identity else None)
+        identity_id=identity.pk if identity else None, identity_source_id=identity.source_id if identity else None,
+        identity_digest=salted_hmac('mop.access.identity-binding', ':'.join((str(identity.pk),
+            str(identity.source_id), identity.source.kind, identity.external_subject)), algorithm='sha256').hexdigest() if identity else '')
 
 
 def _check_binding(binding, principal, identity):

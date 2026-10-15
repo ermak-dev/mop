@@ -80,6 +80,7 @@ class CredentialBinding(Identifier):
     bound_node = models.ForeignKey('catalog.Node', null=True, on_delete=models.PROTECT)
     identity = models.ForeignKey(LoginIdentity, null=True, on_delete=models.PROTECT)
     identity_source = models.ForeignKey(IdentitySource, null=True, on_delete=models.PROTECT)
+    identity_digest = models.CharField(max_length=64, blank=True, default='')
     token_user = models.OneToOneField(settings.AUTH_USER_MODEL, null=True, on_delete=models.CASCADE, related_name='+')
     token_digest = models.CharField(max_length=64, blank=True)
     session = models.OneToOneField('sessions.Session', null=True, on_delete=models.CASCADE)

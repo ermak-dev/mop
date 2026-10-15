@@ -24,6 +24,11 @@ The HTTP composition root binds these routes:
 | `GET /api/v1/identity` | Current identity metadata only, never a credential reference or permission snapshot |
 | `GET /api/v1/projects[/{uuid}]` | Catalog read use cases with the bound Access authorizer; foreign detail is 404, in-scope missing action is 403 |
 
+Project lists filter before counts and pagination. `page_size` is 1..500 (default
+100); the signed, five-minute `next_cursor` is bound to credential, current scoped
+projection and installation epoch, not a stored permission grant. A changed scope
+or invalid cursor returns 410 with `reset_required`, never an unfiltered next page.
+
 DRF TokenAuthentication remains standard: one token per User, no automatic expiry
 and no per-device logout. Only explicit issuance/rotation responses contain its
 key. The framework Token table is the API/STORAGE credential-storage exception;
@@ -34,7 +39,11 @@ Django Session, never an additional plaintext token store. ActorContext contains
 only immutable IDs/kind/owner/node references, never token/session keys or grants.
 
 `token_context`, `session_context`, `current_actor` and `Access.authorize` reload
-current User, identity source, credential generation, session hash/expiry and scope.
+current User, identity source/subject fingerprint, credential generation, session
+hash/expiry and scope. A changed external subject/provider invalidates old bindings;
+a new request cannot silently rebind an existing token. Migration
+`access.0002_identity_binding_subject` deliberately leaves existing binding fingerprints
+empty, requiring authorized reauthentication/rotation rather than adopting a new identity.
 Action permissions use a fresh User, not a retained `_perm_cache`. Every consumer
 must reauthorize before execution/retry/delivery and after a wait. A context is not
 a transferable JSON credential; its construction belongs to the trusted boundary.

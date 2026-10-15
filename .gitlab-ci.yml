@@ -99,8 +99,8 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
-    # Узкий цикл foundation; финальный SHA возвращает полный строгий suite.
-    TESTS: bin/mop dev test controller controller_boundary controller_bootstrap controller_packaging controller_layers layers cli packaging ci tests_lib -v
+    # Финальный issue SHA проверяет весь строгий suite, включая Access runner.
+    TESTS: bin/mop dev test -v
     PYTHON_IMAGE: python:3.12-slim-trixie
     POSTGRES_IMAGE: postgres:16-bookworm
     POSTGRES_MAJOR: "16"
@@ -108,8 +108,8 @@ test:py3.12:
 controller:pg17:
   extends: .tests
   variables:
-    # Только red-фаза; перед приёмкой здесь снова полный строгий прогон.
-    TESTS: bin/mop dev test controller -v
+    # Тот же полный строгий suite на втором поддержанном PostgreSQL.
+    TESTS: bin/mop dev test -v
     PYTHON_IMAGE: python:3.13-slim-trixie
     POSTGRES_IMAGE: postgres:17-bookworm
     POSTGRES_MAJOR: "17"
