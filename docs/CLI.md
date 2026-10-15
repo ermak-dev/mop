@@ -771,8 +771,8 @@ check, not a verdict: the watchdog keeps the clone and says so.
 run a command in an existing body: mop driver exec <name> -- <command> [args...]
 
 Operator-only, run on the node. Uses the node's driver and an existing body,
-not a Claude prompt or a second session. Arguments are passed without a
-shell; a nonzero child exit remains nonzero. Does not copy or display any
+not a Claude prompt or a second session. Arguments remain literal through
+the driver's remote shell; a nonzero child exit remains nonzero. Does not copy or display any
 credentials and does not create, restart or stop the body.
 ```
 
