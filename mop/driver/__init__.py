@@ -236,21 +236,28 @@ def project_of_name(name):
     return name[len(PREFIX):].rsplit("-", 1)[0]
 
 
-# Где папет живёт в теле. Один путь и у мастера (mcp, delete называют его
-# человеку), и у узла (агент меряет и пробует), и у врапера в спеке: врапер
-# своих путей не собирает, job_spec отдаёт ему эти в окружении задачи (#155).
-HOME = config.get("MOP_HOME")
-# Ключ LLM-прокси на узле: его раздаёт сервис кластера (#391).
-SECRETS_FILE = paths.under(HOME, paths.SECRETS_ENV)
+# Где папет живёт в теле. Один путь и у мастера, и у узла, и у врапера
+# (#155). Каталогу нужен project_of, но не пути старого runtime: настройку
+# читаем лишь при явном обращении к пути (#634). Атрибуты остаются строками
+# и допускают прежние подмены HOME/SECRETS_FILE/SERVER_PUB в потребителях.
+def _home():
+    return globals()["HOME"] if "HOME" in globals() else config.get("MOP_HOME")
 
 
-# Публичный ключ сервера на узле: его впускают в тело на время bootstrap'а
-# (#62). Кладёт `mop server deploy` (роль bus).
-SERVER_PUB = paths.under(HOME, "bootstrap.pub")
+def __getattr__(name):
+    if name == "HOME":
+        return _home()
+    if name == "SECRETS_FILE":
+        # Ключ LLM-прокси на узле: его раздаёт сервис кластера (#391).
+        return paths.under(_home(), paths.SECRETS_ENV)
+    if name == "SERVER_PUB":
+        # Публичный ключ сервера на время bootstrap'а (#62), кладёт deploy.
+        return paths.under(_home(), "bootstrap.pub")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def clone_dir(name):
-    return f"{HOME}/puppets/{name}"
+    return f"{_home()}/puppets/{name}"
 
 
 # Подготовка клона в теле (#247): снять старую сессию, освободить каталог,
@@ -318,12 +325,12 @@ fi
 """
 
 def target_dir(name):
-    return f"{HOME}/.cache/target-{name}"
+    return f"{_home()}/.cache/target-{name}"
 
 
 def project_creds(project):
     """Кред шины проекта в теле: его кладёт `mop driver run` на подъёме."""
-    return paths.under(HOME, f"bus-{project}.json")
+    return paths.under(_home(), f"bus-{project}.json")
 
 
 # Раскладка роли в теле (#603, форма #590): бандл -- подкаталогом ровно из
@@ -341,12 +348,12 @@ def soul_dir(name, inc):
     инкарнации каждого папета: у host дом общий, и две роли одного проекта
     не делят файл, а старая инкарнация того же имени не читается новой.
     Имя и инкарнацию проверяет звавший (valid_name, JobMeta)."""
-    return paths.under(HOME, "souls", name, inc)
+    return paths.under(_home(), "souls", name, inc)
 
 
 def project_secrets_dir(project):
     """Секреты проекта в теле (#127): их кладёт bootstrap при каждом старте."""
-    return paths.under(HOME, "project-secrets", project)
+    return paths.under(_home(), "project-secrets", project)
 
 
 class Tmux:
