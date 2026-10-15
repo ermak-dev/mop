@@ -166,6 +166,24 @@ class Boundary(unittest.TestCase):
                 _tool('pg_dump', config, major=16)
             self.assertEqual(run.call_count, 1)
 
+    def test_orm_inputs_do_not_cross_the_thread_boundary(self):
+        from django.contrib.auth import get_user_model
+        from django.db import connection
+        from mop.server.controller.runtime import Runtime, database_call
+        async def run():
+            runtime = Runtime()
+            try:
+                for value in (get_user_model()(username='unsaved'),
+                              get_user_model().objects.all(), connection):
+                    for call in (database_call, runtime.database):
+                        with self.assertRaisesRegex(TypeError, 'materialized'):
+                            await call(lambda item: True, value)
+                        with self.assertRaisesRegex(TypeError, 'materialized'):
+                            await call(lambda **kwargs: True, item=value)
+            finally:
+                await runtime.aclose()
+        asyncio.run(run())
+
     def test_lazy_values_do_not_cross_await(self):
         from django.contrib.auth import get_user_model
         from mop.server.controller.runtime import database_call

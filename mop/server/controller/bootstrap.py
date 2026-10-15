@@ -84,8 +84,10 @@ def load(path):
         root = private_bytes(data.get('root_key', ''))
         if len(root) < 32:
             raise RuntimeError('bootstrap root key must contain at least 32 bytes')
-    if 'django_key' in data and len(private_bytes(data['django_key'])) < 50:
-        raise RuntimeError('bootstrap Django signing key must contain at least 50 bytes')
+    if 'django_key' in data:
+        signing_key = private_bytes(data['django_key'])
+        if len(signing_key) < 50 or not signing_key.isascii():
+            raise RuntimeError('bootstrap Django signing key must contain at least 50 ASCII bytes')
     return Bootstrap(data)
 
 

@@ -79,6 +79,7 @@ async def database_call(function, *args, **kwargs):
     executor. Этот helper пригоден для редких событий долгого consumer; Channels
     закрывает устаревшие соединения перед пробуждением, finally — после него.
     """
+    args, kwargs = materialized(args), materialized(kwargs)
     call = database_sync_to_async(_database_invoke, thread_sensitive=True)
     return await _quiescent(asyncio.create_task(call(function, args, kwargs)))
 
@@ -163,6 +164,7 @@ class Runtime:
         return await _quiescent(task)
 
     async def database(self, function, *args, **kwargs):
+        args, kwargs = materialized(args), materialized(kwargs)
         call = database_sync_to_async(_database_invoke, thread_sensitive=False, executor=self._executor)
         return await self._submit('blocking', self._blocking, self._blocking_capacity,
                                   lambda: call(function, args, kwargs))

@@ -114,15 +114,12 @@ def restore(path, using='default'):
     with os.fdopen(fd, 'rb') as source:
         _tool('pg_restore', connection.settings_dict, major=connection.pg_version // 10000, input=source,
               extra=('--single-transaction', '--exit-on-error', '--no-owner', '--no-acl'))
-    try:
-        verify_installation(using)
-    except Exception:
-        # Не включаем dispatcher при несовпадении schema/identity/root.
-        # Частичную/непроверенную БД оператор не принимает за чистую установку.
-        raise
+    # Сначала fence новой timeline: даже отказ проверки root не должен
+    # оставлять разрешение dispatch из восстановленного dump (#632).
     with transaction.atomic(using=using):
         row = Installation.objects.using(using).select_for_update().get(pk=1)
         row.epoch = uuid.uuid4()
         row.effects_enabled = False
         row.save(using=using, update_fields=['epoch', 'effects_enabled'])
+    verify_installation(using)
     return {'epoch': str(row.epoch), 'effects_enabled': False}

@@ -118,6 +118,15 @@ class BootstrapTests(unittest.TestCase):
             self.assertLessEqual(db['OPTIONS']['pool']['max_size'], 8)
         sys.modules.pop('mop.server.controller.settings', None)
 
+    def test_binary_django_signing_key_is_a_safe_bootstrap_refusal(self):
+        key = self.directory / 'binary.key'
+        key.write_bytes(b'\xff' * 64)
+        key.chmod(0o600)
+        self.data['django_key'] = str(key)
+        self.write()
+        with self.assertRaisesRegex(RuntimeError, 'Django signing'):
+            load(self.path)
+
     def test_no_fallback_for_missing_file(self):
         with self.assertRaisesRegex(RuntimeError, 'bootstrap'):
             load(self.directory / 'absent')

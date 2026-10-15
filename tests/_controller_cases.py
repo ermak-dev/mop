@@ -174,6 +174,64 @@ class Foundation(TransactionTestCase):
             errors = run_checks(databases=['default'])
             self.assertIn('controller.E002', {error.id for error in errors})
 
+    def test_runtime_db_principal_has_crud_but_no_schema_or_admin_rights(self):
+        import copy
+        import uuid
+        import psycopg
+        from psycopg import sql
+        from django.conf import settings
+        from django.core.checks import run_checks
+        from django.db import ProgrammingError
+        from django.test import override_settings
+        role = 'runtime_' + uuid.uuid4().hex
+        password = uuid.uuid4().hex
+        config = copy.deepcopy(connection.settings_dict)
+        params = {'host': config['HOST'], 'port': config['PORT'], 'user': config['USER'],
+                  'password': config['PASSWORD'], 'dbname': config['NAME']}
+        with psycopg.connect(**params, autocommit=True) as provisioner:
+            provisioner.execute(sql.SQL('CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}').format(
+                sql.Identifier(role), sql.Literal(password)))
+            allowed = type(self).databases
+            type(self).databases = allowed | {'runtime'}
+            config.update(USER=role, PASSWORD=password)
+            connections.databases['runtime'] = config
+            try:
+                provisioner.execute(sql.SQL('GRANT CONNECT ON DATABASE {} TO {}').format(
+                    sql.Identifier(config['NAME']), sql.Identifier(role)))
+                for privilege in ('GRANT USAGE ON SCHEMA public TO {}',
+                                  'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}',
+                                  'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}'):
+                    provisioner.execute(sql.SQL(privilege).format(sql.Identifier(role)))
+                with override_settings(BOOTSTRAP=dict(settings.BOOTSTRAP, role='web')):
+                    self.assertEqual(run_checks(databases=['runtime']), [])
+                get_user_model().objects.using('runtime').create(username='restricted-runtime-write')
+                self.assertTrue(get_user_model().objects.filter(username='restricted-runtime-write').exists())
+                with self.assertRaises(ProgrammingError) as error:
+                    with connections['runtime'].cursor() as cursor:
+                        cursor.execute('CREATE TABLE mop_permission_probe (id integer)')
+                self.assertEqual(error.exception.__cause__.sqlstate, '42501')
+                # NOINHERIT не запрещает SET ROLE в роль владельца таблицы.
+                owner = role + '_owner'
+                provisioner.execute(sql.SQL('CREATE ROLE {} NOLOGIN').format(sql.Identifier(owner)))
+                try:
+                    provisioner.execute('CREATE TABLE mop_permission_probe (id integer)')
+                    provisioner.execute(sql.SQL('ALTER TABLE mop_permission_probe OWNER TO {}').format(sql.Identifier(owner)))
+                    provisioner.execute(sql.SQL('GRANT {} TO {}').format(sql.Identifier(owner), sql.Identifier(role)))
+                    with override_settings(BOOTSTRAP=dict(settings.BOOTSTRAP, role='web')):
+                        errors = run_checks(databases=['runtime'])
+                        self.assertIn('controller.E004', {error.id for error in errors})
+                finally:
+                    provisioner.execute(sql.SQL('DROP OWNED BY {} CASCADE').format(sql.Identifier(owner)))
+                    provisioner.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(owner)))
+            finally:
+                connections['runtime'].close()
+                connections['runtime'].close_pool()
+                del connections['runtime']
+                del connections.databases['runtime']
+                type(self).databases = allowed
+                provisioner.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
+                provisioner.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
+
     def test_short_transaction_rolls_back_before_over_budget_commit(self):
         from mop.server.controller.runtime import short_transaction
         with self.assertRaisesRegex(TimeoutError, 'transaction'):
@@ -325,6 +383,107 @@ class Foundation(TransactionTestCase):
             await lifespan.wait()
             self.assertTrue(io.closed)
             self.assertEqual(runtime.pending, 0)
+        async_to_sync(run)()
+
+    def test_cas_on_independent_os_processes_and_backend_connections(self):
+        import json
+        from pathlib import Path
+        import subprocess
+        import sys
+        row = get_user_model().objects.create(username='process-cas', first_name='1')
+        code = '''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from mop.server.controller.runtime import configure
+configure()
+from django.db import connection, connections
+from django.contrib.auth import get_user_model
+connections.databases['default']['NAME'] = sys.argv[2]
+connection.ensure_connection()
+print(json.dumps({'pid': os.getpid(), 'db_pid': connection.connection.info.backend_pid}), flush=True)
+sys.stdin.readline()
+try:
+    count = get_user_model().objects.filter(pk=sys.argv[3], first_name='1').update(first_name='2')
+    print(json.dumps({'count': count}), flush=True)
+finally:
+    connections.close_all()
+'''
+        root = str(Path(__file__).resolve().parents[1])
+        children = [subprocess.Popen([sys.executable, '-I', '-c', code, root,
+                                      connection.settings_dict['NAME'], str(row.pk)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        try:
+            identities = [json.loads(child.stdout.readline()) for child in children]
+            self.assertEqual(len({item['pid'] for item in identities}), 2)
+            self.assertEqual(len({item['db_pid'] for item in identities}), 2)
+            for child in children:
+                child.stdin.write('go\n')
+                child.stdin.flush()
+            results = []
+            for child in children:
+                stdout, stderr = child.communicate(timeout=15)
+                self.assertEqual(child.returncode, 0, stderr)
+                results.append(json.loads(stdout)['count'])
+            self.assertCountEqual(results, [0, 1])
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+
+    def test_installation_singleton_constraint_is_enforced_by_database(self):
+        from mop.server.controller.models import Installation
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Installation.objects.create(id=2, identity='invalid-second-installation', root_digest='0' * 64)
+        self.assertFalse(Installation.objects.exists())
+
+    def test_observed_threads_and_database_connections_are_bounded_and_drained(self):
+        import psycopg
+        from mop.server.controller.runtime import Runtime, close_pools
+        config = connection.settings_dict
+        connections.close_all()
+        connection.close_pool()
+        params = {'host': config['HOST'], 'port': config['PORT'], 'user': config['USER'],
+                  'password': config['PASSWORD'], 'dbname': 'postgres', 'autocommit': True}
+        threads, lock = set(), threading.Lock()
+        def service():
+            with lock:
+                threads.add(threading.get_ident())
+            with transaction.atomic():
+                return get_user_model().objects.count()
+        async def run():
+            admin = await psycopg.AsyncConnection.connect(**params)
+            runtime = Runtime(blocking_limit=4, queue_limit=64)
+            samples = []
+            stop = asyncio.Event()
+            async def count():
+                cursor = await admin.execute('SELECT count(*) FROM pg_stat_activity WHERE datname = %s',
+                                             (config['NAME'],))
+                return (await cursor.fetchone())[0]
+            async def observe():
+                while not stop.is_set():
+                    samples.append(await count())
+                    await asyncio.sleep(.002)
+            observer = asyncio.create_task(observe())
+            try:
+                await asyncio.gather(*(runtime.database(service) for _ in range(48)))
+                stop.set()
+                await observer
+                await runtime.aclose()
+                await database_call(close_pools)
+                self.assertEqual(await count(), 0)
+                self.assertGreater(max(samples), 0)
+                self.assertLessEqual(max(samples), 8)
+                self.assertLessEqual(len(threads), 4)
+                self.assertEqual(runtime.pending, 0)
+            finally:
+                stop.set()
+                await observer
+                await runtime.aclose()
+                await database_call(close_pools)
+                await admin.close()
         async_to_sync(run)()
 
     def test_unique_constraint_on_independent_connections(self):
