@@ -27,7 +27,13 @@ class Packaging(unittest.TestCase):
 
     def test_controller_dispatch_does_not_initialize_old_environment(self):
         from mop import cli
+        from unittest.mock import patch
         self.assertTrue(cli.client_command('mop.cli.server.controller'))
+        with patch.object(cli, 'environment', side_effect=AssertionError('old environment read')), \
+                patch.object(cli, 'command', return_value=lambda argv: 0):
+            with self.assertRaises(SystemExit) as result:
+                cli.main(['server', 'controller', 'check'])
+            self.assertEqual(result.exception.code, 0)
 
 if __name__ == '__main__':
     unittest.main()

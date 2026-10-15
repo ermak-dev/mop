@@ -17,6 +17,8 @@ class Bootstrap(dict):
 
 def private_bytes(path):
     """Открыть принадлежащий процессу файл без symlink и публичного доступа."""
+    if not isinstance(path, (str, os.PathLike)):
+        raise RuntimeError('bootstrap path must be an absolute filesystem path')
     path = Path(path)
     if not path.is_absolute():
         raise RuntimeError('bootstrap paths must be absolute')
@@ -55,7 +57,7 @@ def load(path):
     identity = data['installation_id']
     if not isinstance(identity, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', identity):
         raise RuntimeError('bootstrap installation identity is invalid')
-    if data['role'] not in {'maintenance', 'web', 'worker', 'gateway'}:
+    if not isinstance(data['role'], str) or data['role'] not in {'maintenance', 'web', 'worker', 'gateway'}:
         raise RuntimeError('bootstrap process role is invalid')
     db = data['database']
     required_db = {'ENGINE', 'NAME', 'HOST', 'PORT', 'USER', 'PASSWORD', 'OPTIONS'}
@@ -65,9 +67,13 @@ def load(path):
         raise RuntimeError('controller runtime requires PostgreSQL 16 or 17')
     if any(not isinstance(db[k], str) or not db[k] for k in required_db - {'OPTIONS'}):
         raise RuntimeError('bootstrap database coordinates are invalid')
+    if not db['PORT'].isdigit() or not 1 <= int(db['PORT']) <= 65535:
+        raise RuntimeError('bootstrap database port is invalid')
     opts = db['OPTIONS']
     if not isinstance(opts, dict) or set(opts) - {'sslmode', 'sslrootcert', 'sslcert', 'sslkey'}:
         raise RuntimeError('bootstrap database TLS keys are invalid')
+    if any(not isinstance(value, str) or not value or '\x00' in value for value in opts.values()):
+        raise RuntimeError('bootstrap database TLS values are invalid')
     if opts.get('sslmode') not in {'verify-full', 'disable'}:
         raise RuntimeError('bootstrap database requires verify-full TLS or explicit isolated-test disable')
     if opts.get('sslmode') == 'verify-full' and not opts.get('sslrootcert'):

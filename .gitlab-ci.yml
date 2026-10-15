@@ -97,6 +97,8 @@ test:py3.12:
 controller:pg17:
   extends: .tests
   variables:
+    # Только red-фаза; перед приёмкой здесь снова полный строгий прогон.
+    TESTS: bin/mop dev test controller -v
     PYTHON_IMAGE: python:3.13-slim-trixie
     POSTGRES_IMAGE: postgres:17-bookworm
 

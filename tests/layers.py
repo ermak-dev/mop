@@ -104,27 +104,60 @@ def layer_of(name):
     return None
 
 
+FRAMEWORKS = ('django', 'channels', 'rest_framework', 'psycopg', 'psycopg_pool')
+SUBJECTS = {
+    'catalog': set(), 'access': {'catalog', 'secrets'}, 'secrets': {'catalog'},
+    'preparation': {'catalog', 'access', 'secrets'},
+    'operations': {'catalog', 'access', 'secrets', 'preparation'},
+    'sessions': {'catalog', 'access'},
+}
+
+
 def imports_of(path, name, known):
-    """Модули пакета, которые импортирует файл, где угодно в тексте."""
-    tree = ast.parse(open(path).read())
-    pkg = name if os.path.basename(path) == "__init__.py" else name.rsplit(".", 1)[0]
-    out = set()
+    """Статические, TYPE_CHECKING и literal dynamic imports (#632)."""
+    with open(path) as stream:
+        tree = ast.parse(stream.read())
+    pkg = name if os.path.basename(path) == '__init__.py' else name.rsplit('.', 1)[0]
+    out, loaders, libraries = set(), {'__import__'}, set()
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
-                if a.name.startswith("mop"):
-                    out.add(a.name)
+                out.add(a.name)
+                if a.name == 'importlib':
+                    libraries.add(a.asname or a.name)
         elif isinstance(n, ast.ImportFrom):
             if n.level:
-                base = ".".join(pkg.split(".")[:len(pkg.split(".")) - n.level + 1])
-                base = base + ("." + n.module if n.module else "")
-            elif n.module and n.module.startswith("mop"):
-                base = n.module
+                base = '.'.join(pkg.split('.')[:len(pkg.split('.')) - n.level + 1])
+                base += '.' + n.module if n.module else ''
             else:
-                continue
+                base = n.module or ''
             for a in n.names:
-                out.add(f"{base}.{a.name}" if f"{base}.{a.name}" in known else base)
-    return {m for m in out if m in known and m != name}
+                full = f'{base}.{a.name}'
+                out.add(full if full in known else base)
+                if base == 'importlib' and a.name == 'import_module':
+                    loaders.add(a.asname or a.name)
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        dynamic = isinstance(n.func, ast.Name) and n.func.id in loaders or (
+            isinstance(n.func, ast.Attribute) and n.func.attr == 'import_module'
+            and isinstance(n.func.value, ast.Name) and n.func.value.id in libraries)
+        if dynamic:
+            if n.args and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str):
+                target = n.args[0].value
+                if target.startswith('.'):
+                    import importlib.util
+                    target = importlib.util.resolve_name(target, pkg)
+                out.add(target)
+            elif name.split('.')[2:3] and name.split('.')[2] in SUBJECTS:
+                out.add('forbidden.dynamic_import')
+    prefixes = ('mop', *FRAMEWORKS, 'forbidden')
+    return {m for m in out if m != name and m.split('.')[0] in prefixes}
+
+
+def subject_of(name):
+    parts = name.split('.')
+    return parts[2] if parts[:2] == ['mop', 'server'] and len(parts) > 2 and parts[2] in SUBJECTS else None
 
 
 def violations(c, mods):
@@ -140,6 +173,17 @@ def violations(c, mods):
         if not c.check(f"{name}: no layer in tests/layers.py", not (me is None)):
             continue
         for dep in sorted(imports_of(path, name, mods) | DYNAMIC.get(name, set())):
+            if dep.split('.')[0] in FRAMEWORKS:
+                c.check(f'{name}: server framework import {dep}', me == SERVER)
+                continue
+            if dep == 'forbidden.dynamic_import':
+                c.fail(f'{name}: nonliteral dynamic import hides a subject dependency')
+                continue
+            owner, target = subject_of(name), subject_of(dep)
+            if owner:
+                allowed = dep.startswith('mop.common') or dep == 'mop' or (
+                    target is not None and (target == owner or target in SUBJECTS[owner]))
+                c.check(f'{name}: forbidden subject dependency {dep}', allowed)
             if dep.startswith("mop.cli") and name in ("mop.cli", "mop.cli.__main__"):
                 continue
             it = layer_of(dep)

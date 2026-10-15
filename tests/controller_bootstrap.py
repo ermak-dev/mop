@@ -79,6 +79,28 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'root'):
             load(self.path)
 
+    def test_port_and_tls_values_are_validated_before_connect(self):
+        self.data['database']['PORT'] = 'not-a-port'
+        self.write()
+        with self.assertRaisesRegex(RuntimeError, 'port'):
+            load(self.path)
+        self.data['database']['PORT'] = '5432'
+        self.data['database']['OPTIONS']['sslrootcert'] = ['private-value']
+        self.write()
+        with self.assertRaisesRegex(RuntimeError, 'TLS'):
+            load(self.path)
+
+    def test_malformed_types_fail_with_safe_reason(self):
+        original = dict(self.data)
+        for key, value in (('role', ['private-value']), ('root_key', 42),
+                           ('django_key', ['private-value'])):
+            with self.subTest(key=key):
+                self.data = dict(original, **{key: value})
+                self.write()
+                with self.assertRaises(RuntimeError) as error:
+                    load(self.path)
+                self.assertNotIn('private-value', str(error.exception))
+
     def test_no_fallback_for_missing_file(self):
         with self.assertRaisesRegex(RuntimeError, 'bootstrap'):
             load(self.directory / 'absent')
