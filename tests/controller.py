@@ -39,7 +39,7 @@ def main():
         # hermetic гоняет clean/hostile одновременно: у каждого своя БД.
         settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = 'test_mop_' + uuid.uuid4().hex
         runner = DiscoverRunner(verbosity=2, interactive=False)
-        return int(bool(runner.run_tests(['_controller_cases', '_catalog_cases', '_access_cases'])))
+        return int(bool(runner.run_tests(['_controller_cases', '_catalog_cases', '_access_cases', '_ldap_cases'])))
 
 if __name__ == '__main__':
     sys.exit(main())
