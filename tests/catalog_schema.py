@@ -33,6 +33,9 @@ def main():
 
 # BUG: custom action names не создают назначаемых Django Permission.
 # HYPOTHESIS: Meta.permissions отсутствуют, а limit скрыт за change_project.
+# SOLUTION: Meta + AlterModelOptions, frozen mapping и отдельный limit action.
+# RESULT: metadata и migration state совпадают, каждый action имеет назначаемые права.
+# STATUS: FIXED — see #634
 CUSTOM_PERMISSIONS = {
     'project': {'configure_project', 'set_project_limit'},
     'node': {'configure_node', 'record_node_application', 'observe_node'},

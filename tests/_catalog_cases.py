@@ -29,6 +29,9 @@ class Allow:
 
 # BUG: non-superuser не может получить незарегистрированные custom actions.
 # HYPOTHESIS: post_migrate создаёт только default permissions; limit выдаётся как change_project.
+# SOLUTION: обычная migration регистрирует custom права; authorizer получает явный tuple.
+# RESULT: реальные User/Group проверяют каждый дополнительный gate, не is_staff/superuser.
+# STATUS: FIXED — see #634
 class CatalogPermissionCases(TransactionTestCase):
     def user(self):
         from django.contrib.auth import get_user_model
