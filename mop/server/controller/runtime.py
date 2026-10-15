@@ -213,8 +213,38 @@ def _maintenance_role():
         raise RuntimeError('this action requires the separate maintenance DB principal')
 
 
+def _guard_row(using, *, lock=False):
+    from django.db import DatabaseError
+    from .models import RestoreGuard
+    if lock and not connections[using].in_atomic_block:
+        raise RuntimeError('restore guard locking requires an application transaction')
+    rows = RestoreGuard.objects.using(using)
+    if lock:
+        rows = rows.select_for_update()
+    try:
+        return rows.get(pk=1)
+    except RestoreGuard.DoesNotExist as exc:
+        raise RuntimeError('controller restore guard is missing; maintenance required') from exc
+    except DatabaseError as exc:
+        raise RuntimeError(f'controller restore guard is unavailable: {type(exc).__name__}; maintenance required') from exc
+
+
+def require_restore_ready(using='default', *, lock=False):
+    """Дешёвый fence для startup/admission/claims; не разрешает effects сам по себе.
+
+    lock=True вызывается внутри короткой транзакции перед project/resource locks.
+    Внешний I/O под этой блокировкой запрещён. Поколение проверяется потребителем
+    вместе с epoch; восстановление требует остановленных служб.
+    """
+    guard = _guard_row(using, lock=lock)
+    if guard.state != 'ready':
+        raise RuntimeError('controller restore guard is not ready; maintenance recovery required')
+    return str(guard.generation)
+
+
 def installation_snapshot(using='default'):
     from .models import Installation
+    require_restore_ready(using)
     value = Installation.objects.using(using).values('identity', 'epoch', 'effects_enabled').first()
     if value is None:
         raise RuntimeError('controller installation is not initialized')
@@ -228,7 +258,8 @@ def _schema_ready(using):
         raise RuntimeError('controller schema requires migrations')
 
 
-def verify_installation(using='default'):
+def _verify_installation_state(using='default'):
+    """Проверка содержимого, в том числе пока guard ещё закрыт для restore."""
     from django.conf import settings
     from .bootstrap import root_digest
     from .models import Installation
@@ -240,7 +271,12 @@ def verify_installation(using='default'):
         raise RuntimeError('controller installation identity does not match bootstrap')
     if settings.BOOTSTRAP['role'] == 'maintenance' and row.root_digest != root_digest(settings.BOOTSTRAP):
         raise RuntimeError('controller root key does not match initialized trust')
-    return installation_snapshot(using)
+    return {'identity': row.identity, 'epoch': str(row.epoch), 'effects_enabled': row.effects_enabled}
+
+
+def verify_installation(using='default'):
+    require_restore_ready(using)
+    return _verify_installation_state(using)
 
 
 def initialize(using='default'):
@@ -251,8 +287,15 @@ def initialize(using='default'):
     _schema_ready(using)
     digest = root_digest(settings.BOOTSTRAP)
     with short_transaction(using):
-        Installation.objects.using(using).get_or_create(
-            pk=1, defaults={'identity': settings.BOOTSTRAP['installation_id'], 'root_digest': digest})
+        guard = _guard_row(using, lock=True)
+        exists = Installation.objects.using(using).filter(pk=1).exists()
+        if guard.state == 'uninitialized' and not exists:
+            Installation.objects.using(using).create(
+                pk=1, identity=settings.BOOTSTRAP['installation_id'], root_digest=digest)
+            guard.state = 'ready'
+            guard.save(using=using, update_fields=['state'])
+        elif guard.state != 'ready' or not exists:
+            raise RuntimeError('controller restore guard requires maintenance recovery, not initialization')
     return verify_installation(using)
 
 

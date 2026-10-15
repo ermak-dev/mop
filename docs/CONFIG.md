@@ -224,14 +224,62 @@ pretend a still-running effect released its slot.
 
 `backup --file /private/new.dump` creates a new private PostgreSQL custom-format
 archive using `pg_dump`; `restore --file /private/backup.dump` uses `pg_restore`
-against an **empty** configured target, with services stopped. Matching PostgreSQL
-client tools of the same major must be installed by provisioning and selected
-in the process PATH (CI tests matching clients 16 and 17). Mismatched tools are
-refused: a newer dump tool can introduce settings an older server cannot restore. Passwords travel through a transient private passfile, not argv.
-Root-key recovery material is separately protected and is not in the dump.
-Restore checks schema, identity and root custody, changes the database epoch and
-keeps effects disabled. #625/#639 own reconciliation before dispatch can reopen;
-foundation provides no bypass to enable it. No old-data import exists.
+against an **empty** configured target, with services stopped. A completely empty
+target is provisioned by standard Django migrations; an already migrated but
+uninitialized controller target is also accepted. Existing installation/domain
+data or unrelated tables are refused. Matching PostgreSQL client tools of the
+same major must be installed by provisioning and selected in the process PATH
+(CI tests matching clients 16 and 17). Mismatched tools are refused: a newer dump
+tool can introduce settings an older server cannot restore. Passwords travel
+through a transient private passfile, not argv. Root-key recovery material is
+separately protected and is not in the dump. Treat archives as authorized
+maintenance input, not uploads from untrusted API users: PostgreSQL archives can
+execute database code under the maintenance principal.
+
+The ORM-owned `RestoreGuard` singleton holds current target maintenance state and
+an independent generation, with no foreign key into archived tables. Its entire
+table (schema and data) is deliberately excluded from every backup. This is not
+legacy import, a file marker or a second installation/configuration authority.
+Standard migrations create its uninitialized row; only initialization of a truly
+new installation can make that row ready. A missing guard row/table is a refusal,
+not permission for `initialize` to recreate it around existing data.
+
+Restore commits a new, dirty guard generation **before** invoking archive tools.
+The archive's table of contents is checked for forbidden guard entries before
+execution; the public schema itself is not dropped. Archive migration history
+must exactly match the controller's migrated target. Older/newer or otherwise
+incompatible schema archives are explicitly refused, not restored under a
+fabricated current migration ledger. Supporting schema-upgrading restore later
+requires an explicit recovery procedure; ordinary `migrate`/`initialize` do not
+clear a failed restore. No ad hoc schema creation or migration faking is used.
+
+After archive COMMIT the guard still denies startup, even though the archive may
+contain an old epoch with effects enabled. Restore commits a fresh installation
+epoch and disables effects, verifies schema, identity and root custody, then
+clears only the same guard generation. Crashes or failures before/during/after
+archive COMMIT, failed validation and stale restorers leave it dirty across
+process restarts. Keep services stopped and use a fresh empty target for a new
+restore attempt; do not delete/reset the guard as a repair shortcut. Successful
+restore still leaves effects disabled. #625/#639 own reconciliation before
+dispatch can reopen; foundation provides no bypass to enable it. No old-data
+import exists.
+
+`runtime.require_restore_ready(using='default', lock=False)` is the cheap
+single-row readiness query for future admission/claim consumers. It returns the
+current guard generation or refuses missing/uninitialized/dirty state. With
+`lock=True` it must run inside the caller's short SQL transaction, before
+project/resource locks, so a restore cannot arm concurrently with that admission
+or claim commit. #644 must provision runtime SELECT on the guard and only the
+column UPDATE privilege needed for row locking (the constrained singleton `id`),
+not writes to its state/generation or INSERT/DELETE. Guard writes belong to
+maintenance. `verify_installation` checks the guard at startup; health snapshots
+also check it. #625/#639 must call the cheap API in admission and claim
+transactions, bind/check the returned generation and current installation epoch,
+and revalidate before external dispatch and after waits. Readiness does not
+mean `effects_enabled`, authorize a caller, reconcile claims or stop an already
+running external effect. No external I/O runs while holding the guard row lock;
+restore still requires quiescent services. These are required integration hooks,
+not a claim that the foundation implements #625.
 
 ## Initial client connection is not a local settings registry
 

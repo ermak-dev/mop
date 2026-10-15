@@ -197,6 +197,15 @@ class RestoreSafety(TransactionTestCase):
         RestoreGuard.objects.all().delete()
         self.assert_restart_denied('default')
 
+    def test_uninitialized_guard_cannot_legitimize_an_existing_installation(self):
+        from mop.server.controller.models import RestoreGuard
+        original = initialize()
+        RestoreGuard.objects.filter(pk=1).update(state='uninitialized')
+        with self.assertRaisesRegex(RuntimeError, 'restore|guard|maintenance'):
+            initialize()
+        self.assertEqual(RestoreGuard.objects.get(pk=1).state, 'uninitialized')
+        self.assertEqual(str(Installation.objects.get(pk=1).epoch), original['epoch'])
+
     def test_missing_guard_table_is_not_repaired_by_initialize(self):
         from mop.server.controller.models import RestoreGuard
         with self.target(migrate=True) as target:
