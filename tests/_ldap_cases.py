@@ -1,5 +1,4 @@
 """LDAP boundary: поддельный transport, настоящие ORM identity и PostgreSQL."""
-from dataclasses import replace
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -143,7 +142,7 @@ class AdapterContracts(SimpleTestCase):
 class DirectoryIdentityContracts(TransactionTestCase):
     def setUp(self):
         from mop.server.access import models as m
-        from mop.server.catalog.models import Project, ClientRegistration
+        from mop.server.catalog.models import Project
         self.m = m
         self.source = m.IdentitySource.objects.create(name='directory', kind='ldap', priority=-1)
         m.DirectoryConfiguration.objects.create(source=self.source, url='ldaps://directory.invalid',
