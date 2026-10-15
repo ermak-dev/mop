@@ -177,6 +177,20 @@ class CatalogCases(TransactionTestCase):
         with self.assertRaises(IntegrityError), transaction.atomic():
             models.InstallationSetting.objects.create(installation_id=1, key='effect_limit', value_kind='bool', bool_value=True)
 
+    def test_settings_types_and_exact_application_receipts(self):
+        initial = self.api.get_installation_settings(self.actor)
+        newer = self.api.set_installation_settings(self.actor,
+            {'log_level': 'info', 'telemetry_enabled': False}, expected_revision=initial.revision)
+        self.assertEqual(dict(newer.values), {'log_level': 'info', 'telemetry_enabled': False})
+        self.assertIsNone(newer.applied_revision)
+        self.assertFalse(self.api.record_settings_application(self.actor, target_revision=initial.revision, receipt='old'))
+        self.assertTrue(self.api.record_settings_application(self.actor, target_revision=newer.revision, receipt='exact'))
+        self.assertEqual(self.api.get_installation_settings(self.actor).applied_revision, newer.revision)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'telemetry_enabled': 1}, expected_revision=newer.revision)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'log_level': 'anything'}, expected_revision=newer.revision)
+
     def test_settings_concurrent_batch_cas_is_aggregate_not_per_key(self):
         before = self.api.get_installation_settings(self.actor)
         def change(i):
