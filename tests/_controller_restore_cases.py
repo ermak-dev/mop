@@ -98,6 +98,25 @@ finally:
         for reason in json.loads(child.stdout).values():
             self.assertRegex(reason, 'restore|guard|maintenance')
 
+    def test_restore_refuses_an_ambient_transaction_before_archive_io(self):
+        # Arm внутри чужого atomic был бы лишь savepoint, не durable COMMIT.
+        with self.archive() as archive, self.target(migrate=True) as target:
+            @contextmanager
+            def manual_transaction():
+                connections[target].set_autocommit(False)
+                try:
+                    yield
+                finally:
+                    connections[target].rollback()
+                    connections[target].set_autocommit(True)
+            for mode in ('atomic', 'manual'):
+                outer = transaction.atomic(using=target) if mode == 'atomic' else manual_transaction()
+                with self.subTest(mode=mode), outer, patch.object(
+                        archive_tools, '_private_path', side_effect=AssertionError('archive I/O under ambient SQL transaction')) as path_io:
+                    with self.assertRaisesRegex(RuntimeError, 'transaction|autocommit'):
+                        archive_tools.restore(archive, using=target)
+                    path_io.assert_not_called()
+
     def test_restore_crashes_before_during_and_after_archive_commit_stay_fenced(self):
         tool = archive_tools._tool
         with self.archive() as archive:
