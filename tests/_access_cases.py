@@ -411,6 +411,30 @@ class AccessContracts(TransactionTestCase):
             self.s.Access().authorize(self.s.token_context(self.token), 'catalog.view_project',
                 project_ids=(self.project.pk,))
 
+    def test_limit_action_is_distinct_from_generic_configuration_permission(self):
+        from mop.server.catalog.services import Catalog
+        self.m.AllProjectMembership.objects.create(user=self.user, source=self.source)
+        self.permission('catalog.change_project')
+        api = Catalog(authorizer=self.s.Access())
+        with self.assertRaises(self.s.Denied):
+            api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1)
+        self.permission('catalog.set_project_limit')
+        self.assertEqual(api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1).puppet_limit, 2)
+
+    def test_catalog_query_cannot_return_private_rows_after_actor_revoked_mid_query(self):
+        from mop.server.catalog.services import Catalog
+        api_access = self.s.Access()
+        user_id = self.user.pk
+        class RevokeAfterFirstProject:
+            revoked = False
+            def authorize(self, actor, action, **refs):
+                api_access.authorize(actor, action, **refs)
+                if refs.get('project_ids') and not self.revoked:
+                    self.revoked = True
+                    get_user_model().objects.filter(pk=user_id).update(is_active=False)
+        with self.assertRaises(self.s.Denied):
+            Catalog(authorizer=RevokeAfterFirstProject()).list_projects(self.actor)
+
     def test_local_admin_binding_is_idempotent_without_password_reset(self):
         from mop.server.controller.runtime import initialize, create_admin
         from mop.server.access.services import bind_local_identity
