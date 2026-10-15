@@ -5,7 +5,7 @@ import type { Session } from '../useSession';
 import { useHybridHistory } from '../useHybridHistory';
 import { useHybridTerminal } from '../useHybridTerminal';
 import { usePuppetTail } from '../usePuppetCard';
-import { humanInput } from '../hybridProtocol';
+import { encodeInput, humanInput, STOP } from '../hybridProtocol';
 import { HybridChat } from './HybridChat';
 import { HybridTerminal } from './HybridTerminal';
 import { PuppetTailSnapshot } from './PuppetTailSnapshot';
@@ -99,6 +99,12 @@ export function HybridWorkspace({ session, target, role }: { session: Session; t
             <Textarea className="hybrid-input" aria-label="Ввод человека в CLI" placeholder="Сообщение или /команда" autosize minRows={2} maxRows={6} value={draft}
               onChange={event => setDraft(event.currentTarget.value)}
               onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (terminal.canInput && !event.repeat && !event.nativeEvent.isComposing && event.keyCode !== 229) void terminal.send(encodeInput(STOP));
+                  return;
+                }
                 if (event.key !== 'Enter' || event.nativeEvent.isComposing || event.keyCode === 229) return;
                 event.preventDefault();
                 if (event.ctrlKey) {
