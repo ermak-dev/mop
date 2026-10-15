@@ -729,7 +729,7 @@ def _add(project, req):
             # Владелец -- человек (делегированный: хозяин родителя из
             # реестра), актёр -- отдельным полем: происхождение не право.
             principal = grants.prepare(
-                project, role=launch.role, digest=launch.bundle.digest,
+                target.name, role=launch.role, digest=launch.bundle.digest,
                 manifest=launch.bundle.manifest.to_dict(),
                 prompt=launch.bundle.prompt,
                 owner=(req.get("_owner") if delegated is not None else
@@ -864,6 +864,7 @@ def _delete(project, req):
     работает рецикл: джоб останавливается, рабочая копия сносится, и та же
     спека поднимается обратно."""
     name = req["name"]
+    target_project = req.get("_target_project") or project
     _api().deregister(name, purge=bool(req.get("purge", True)))
     # Снятый насовсем папет уносит свой workspace (#133); рецикл (purge=False)
     # его сохраняет -- update следом положит свежий. Метка согласования
@@ -875,7 +876,7 @@ def _delete(project, req):
     # кредов на несуществующий джоб нет. Рецикл (purge=False) душу
     # сохраняет -- папет вернётся с той же инкарнацией.
     if req.get("purge", True):
-        _revoke_soul(project, name)
+        _revoke_soul(target_project or project, name)
     return {"ok": True, "name": name}
 
 
@@ -1578,6 +1579,7 @@ def _answer(project, req):
                 return {"error": why}
             if vrow.acting and name and not exists:
                 return {"error": f"no job {name} in the cluster"}
+            req["_target_project"] = puppets.project_of(origin) if origin else project
             try:
                 return vrow.fn(project, req)
             except KeyError as e:
@@ -1615,6 +1617,7 @@ def _answer(project, req):
         return {"error": why}
     if spec.acting and name and not exists:
         return {"error": f"no job {name} in the cluster"}
+    req["_target_project"] = puppets.project_of(origin) if origin else project
     try:
         return spec.fn(project, req)
     except KeyError as e:
