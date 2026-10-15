@@ -506,6 +506,65 @@ class AccessContracts(TransactionTestCase):
         self.assertEqual(fresh.post('/api/v1/auth/token/revoke', {}, secure=True).status_code, 200)
         self.assertEqual(fresh.get('/api/v1/identity', secure=True).status_code, 401)
 
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_standard_user_admin_creation_binds_local_identity(self):
+        self.user.is_staff = self.user.is_superuser = True
+        self.user.save()
+        client = Client()
+        self.assertTrue(client.login(username='human', password='test-password-only'))
+        response = client.post('/admin/auth/user/add/', {'username': 'created-human',
+            'usable_password': 'true', 'password1': 'a-long-distinct-passphrase-633',
+            'password2': 'a-long-distinct-passphrase-633', '_save': 'Save'}, secure=True)
+        self.assertEqual(response.status_code, 302)
+        user = get_user_model().objects.get(username='created-human')
+        self.assertTrue(self.m.Principal.objects.filter(user=user, kind='human').exists())
+        self.assertEqual(self.m.LoginIdentity.objects.get(user=user).source.kind, 'local')
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_browser_logout_records_only_safe_credential_event(self):
+        client = Client()
+        self.assertTrue(client.login(username='human', password='test-password-only'))
+        actor = self.s.session_context(client.session.session_key)
+        key = client.session.session_key
+        self.assertEqual(client.post('/api/v1/auth/logout', {}, secure=True).status_code, 200)
+        events = tuple(self.m.CredentialEvent.objects.filter(user=self.user, action='session_logged_out').values_list('action', flat=True))
+        self.assertEqual(events, ('session_logged_out',))
+        self.assertNotIn(key, repr(events))
+        with self.assertRaises(self.s.Denied):
+            self.s.current_actor(actor)
+
+    def test_waiting_delivery_rechecks_before_returning_private_output(self):
+        from threading import Event
+        pending, release = Event(), Event()
+        def delivery():
+            close_old_connections()
+            try:
+                self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
+                pending.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError('test delivery was not released')
+                self.s.Access().authorize(self.actor, 'catalog.view_project', project_ids=(self.project.pk,))
+                return 'private-output'
+            finally:
+                close_old_connections()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(delivery)
+            self.assertTrue(pending.wait(timeout=5))
+            self.user.user_permissions.clear()
+            release.set()
+            with self.assertRaises(self.s.Denied):
+                future.result(timeout=10)
+
+    def test_real_ldap_adapter_refuses_unbound_secret_before_network(self):
+        from unittest.mock import patch
+        from mop.server.access.directory import Configuration, DirectoryUnavailable
+        from mop.server.access.ldap import LdapDirectory
+        configuration = Configuration(self.source.pk, 1, 'ldaps://directory.invalid',
+            'cn=reader', 'protected:test', 'dc=example', 'dc=example', 'uid', False, False, '')
+        with patch('socket.create_connection', side_effect=AssertionError('network before secret binding')):
+            with self.assertRaises(DirectoryUnavailable):
+                LdapDirectory().lookup(configuration, 'human')
+
     def test_local_admin_binding_is_idempotent_without_password_reset(self):
         from mop.server.controller.runtime import initialize, create_admin
         from mop.server.access.services import bind_local_identity
