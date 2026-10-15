@@ -22,6 +22,8 @@ from mop.server.controller.runtime import Runtime
 # HYPOTHESIS: driver wait должен иметь клиентский deadline и fence соединение.
 # SOLUTION: bounded psycopg wait и абсолютный transaction deadline; COMMIT
 # теряет только ответ, не превращается в подтверждённый rollback при cleanup.
+# Обычный atomic тоже ограничен на driver boundary; native observer не наследует
+# policy holder и измеряет время настоящего server-side lock.
 class TransportDeadline(TransactionTestCase):
     def test_acknowledged_query_and_lost_commit_are_bounded_without_proxy_disconnect(self):
         from django.test import override_settings

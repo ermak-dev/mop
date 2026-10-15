@@ -35,31 +35,41 @@ def materialized(value):
 
 
 def _snapshot(value, ancestors):
-    if value is None or isinstance(value, (str, bytes, bool, int, float, Decimal, date, datetime, UUID)):
+    kind = type(value)
+    # isinstance() читает __class__ у Django lazy proxy и тем самым запускает
+    # его loader. Только обычные scalar/container значения проходят без hooks.
+    if value is None or kind in (str, bytes, bool, int, float, Decimal, date, datetime, UUID):
         return value
     identity = id(value)
     if identity in ancestors:
         raise TypeError('database boundary requires acyclic materialized values')
     ancestors.add(identity)
     try:
-        if isinstance(value, dict):
-            if any(not isinstance(key, (str, int)) for key in value):
-                raise TypeError('database boundary requires materialized dictionary keys')
-            return {key: _snapshot(item, ancestors) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            items = [_snapshot(item, ancestors) for item in value]
-            return items if isinstance(value, list) else tuple(items)
-        if is_dataclass(value) and not isinstance(value, type) and value.__dataclass_params__.frozen:
+        if is_dataclass(kind):
+            if not kind.__dataclass_params__.frozen:
+                raise TypeError('database boundary requires materialized frozen dataclasses')
             try:
                 values = {field.name: _snapshot(object.__getattribute__(value, field.name), ancestors)
-                          for field in fields(value)}
+                          for field in fields(kind)}
             except AttributeError:
                 raise TypeError('database boundary requires all dataclass fields to be materialized') from None
             # replace() повторяет factory/post_init и теряет состояние init=False.
-            copy = object.__new__(type(value))
-            for name, item in values.items():
-                object.__setattr__(copy, name, item)
+            # Встроенные базовые типы с непрозрачным состоянием нельзя копировать
+            # через object.__new__: явно отказываем, а не теряем это состояние.
+            try:
+                copy = object.__new__(kind)
+                for name, item in values.items():
+                    object.__setattr__(copy, name, item)
+            except (TypeError, AttributeError):
+                raise TypeError('database boundary requires materialized plain frozen dataclasses') from None
             return copy
+        if kind is dict:
+            if any(type(key) not in (str, int, bool) for key in value):
+                raise TypeError('database boundary requires materialized dictionary keys')
+            return {key: _snapshot(item, ancestors) for key, item in value.items()}
+        if kind in (list, tuple):
+            items = [_snapshot(item, ancestors) for item in value]
+            return items if kind is list else tuple(items)
         raise TypeError('database boundary requires materialized values, not live ORM or I/O objects')
     finally:
         ancestors.remove(identity)
@@ -83,7 +93,7 @@ def _observe(task):
 
 @contextmanager
 def short_transaction(using='default', budget=10):
-    """Rollback до COMMIT при превышении бюджета. Никакого внешнего I/O.
+    """Deadline до COMMIT; при сетевом отказе соединение fenced. Без внешнего I/O.
 
     Служба берёт project rows по id, resource/aggregate rows по (kind, id).
     IntegrityError/CAS/lock timeout выходят вызывающему; автоматического retry
@@ -128,6 +138,7 @@ class Runtime:
         self._stopped = False
         self._closed = False
         self._cleanup = None
+        self._closing_adapter = None
 
     @property
     def pending(self):
@@ -196,24 +207,37 @@ class Runtime:
                 # Не закрывать adapters под ещё живым эффектом и не освобождать
                 # его слот. Следующий shutdown может дождаться quiescence.
                 raise RuntimeError('controller shutdown incomplete: work is still running')
-        errors = []
         while self._started_adapters:
-            adapter = self._started_adapters.pop()
+            if self._closing_adapter is None:
+                self._closing_adapter = asyncio.ensure_future(self._started_adapters[-1].aclose())
+                self._closing_adapter.add_done_callback(_observe)
+            # wait_for отменяет coroutine и ждёт acknowledgement без верхней
+            # границы. Здесь cleanup остаётся owned и продолжается при retry.
+            _, pending = await asyncio.wait((self._closing_adapter,), timeout=timeout)
+            if pending:
+                raise RuntimeError('controller shutdown incomplete: adapter cleanup is still running')
             try:
-                await asyncio.wait_for(adapter.aclose(), timeout=timeout)
+                self._closing_adapter.result()
             except Exception as exc:
-                errors.append(type(exc).__name__)
+                self._closing_adapter = None
+                raise RuntimeError('controller adapter shutdown failed: ' + type(exc).__name__) from None
+            self._closing_adapter = None
+            self._started_adapters.pop()
         if self._cleanup is None:
             self._cleanup = asyncio.get_running_loop().run_in_executor(self._executor, close_pools)
             self._cleanup.add_done_callback(_observe)
         _, pending = await asyncio.wait((self._cleanup,), timeout=timeout)
         if pending:
             raise RuntimeError('controller shutdown incomplete: database cleanup is still running')
-        self._cleanup.result()
+        try:
+            self._cleanup.result()
+        except Exception:
+            # Пул сохранил живых workers; после их stop следующий drain может
+            # повторить cleanup, а не навсегда читать старую failed future.
+            self._cleanup = None
+            raise
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._closed = True
-        if errors:
-            raise RuntimeError('controller adapter shutdown failed: ' + ', '.join(errors))
 
 
 def _maintenance_role():

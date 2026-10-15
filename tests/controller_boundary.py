@@ -46,6 +46,8 @@ def main():
 # HYPOTHESIS: копировать нужно все поля без __init__/__post_init__, с поиском циклов.
 # SOLUTION: object.__new__ + снимок всех полей; caller cancellation не отменяет
 # owned задачу, не отдаёт её слот и не задерживает самого caller до конца CPU.
+# Точные типы не запускают lazy proxy; cleanup futures и реальные pool workers
+# остаются owned до stop, а ошибка/timeout не превращаются в closed=True.
 class Materialization(unittest.TestCase):
     def test_all_frozen_fields_are_checked_without_reinitialization(self):
         from dataclasses import dataclass, field
@@ -233,6 +235,8 @@ class Materialization(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'adapter shutdown failed') as error:
                     await runtime.aclose()
                 self.assertNotIn('private', str(error.exception))
+                import traceback
+                self.assertNotIn('private adapter detail', ''.join(traceback.format_exception(error.exception)))
                 self.assertFalse(runtime._closed)
                 self.assertFalse(resource.closed)
                 await runtime.aclose()
