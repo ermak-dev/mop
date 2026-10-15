@@ -10,13 +10,13 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def requirements(path=os.path.join(HERE, "mop", "common", "deps.py")):
+def requirements(group="client", path=os.path.join(HERE, "mop", "common", "deps.py")):
     scope = {}
     with open(path) as f:
         exec(f.read(), scope)
-    return list(scope["PIP"])
+    return list(scope[{"client": "PIP", "server": "SERVER"}[group]])
 
 
 if __name__ == "__main__":
     from setuptools import setup
-    setup(install_requires=requirements())
+    setup(install_requires=requirements(), extras_require={"server": requirements("server")})
