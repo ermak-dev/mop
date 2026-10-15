@@ -380,9 +380,9 @@ class Catalog:
             project.revision += 1
             project.save(update_fields=['revision'])
             result = snapshot(row)
-        return self._reveal_policy(result)
+        return self._reveal_policy(actor, result)
 
-    def _reveal_policy(self, result):
+    def _reveal_policy(self, actor, result):
         if not result.confidential:
             return result
         if self._protection is None:
@@ -391,12 +391,13 @@ class Catalog:
             digest=result.digest, reference=result.protection_reference)
         if type(content) is not bytes or hashlib.sha256(content).hexdigest() != result.digest:
             raise ProtectionUnavailable('protected policy digest mismatch')
+        self._authorize(actor, 'catalog.view_projectpolicysnapshot', projects=(result.project_id,))
         return Snapshot(tuple((key, content if key == 'content' else value) for key, value in result.fields))
 
     def get_policy(self, actor, policy_id):
         row = m.ProjectPolicySnapshot.objects.get(pk=policy_id)
         self._authorize(actor, 'catalog.view_projectpolicysnapshot', projects=(row.project_id,))
-        return self._reveal_policy(snapshot(row))
+        return self._reveal_policy(actor, snapshot(row))
 
     def create_image_revision(self, actor, project_id, policy_id, *, source):
         text(source, 'image source')

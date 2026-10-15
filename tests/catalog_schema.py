@@ -27,6 +27,40 @@ def main():
     changes = MigrationAutodetector(loader.project_state(), ProjectState.from_apps(apps),
         NonInteractiveMigrationQuestioner()).changes(graph=loader.graph)
     assert not changes, f'Catalogue models require migrations: {changes}'
+    protection_reauthorizes_after_external_wait()
+
+
+def protection_reauthorizes_after_external_wait():
+    # HYPOTHESIS: decrypt может ждать provider; прежний scope к возврату устареет.
+    import hashlib
+    import uuid
+    from unittest.mock import patch
+    from mop.server.catalog.models import ProjectPolicySnapshot
+    from mop.server.catalog.services import Catalog
+    from django.db import connection
+    class Authority:
+        revoked = False
+        def authorize(self, *args, **kwargs):
+            if self.revoked:
+                raise PermissionError('scope revoked while waiting')
+    authority = Authority()
+    class Protector:
+        def reveal(self, ciphertext, **kwargs):
+            assert not connection.in_atomic_block, 'external protection runs inside SQL transaction'
+            authority.revoked = True
+            return b'private bytes'
+    row = ProjectPolicySnapshot(project_id=uuid.uuid4(), sequence=1,
+        content=b'ciphertext', confidential=True, protection_reference='secret:version',
+        digest=hashlib.sha256(b'private bytes').hexdigest(), source_commit='a'*40,
+        source_ref='main', provenance='test', cpu=100, memory_mb=256, disk_mb=1024)
+    api = Catalog(authorizer=authority, protection=Protector())
+    with patch.object(ProjectPolicySnapshot.objects, 'get', return_value=row):
+        try:
+            api.get_policy('trusted-actor', row.id)
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('private policy disclosed after scope revocation during protection I/O')
 
 
 if __name__ == '__main__':
