@@ -275,4 +275,4 @@ class SecretAudit(Immutable):
     class Meta(Record.Meta):
         constraints = [models.CheckConstraint(condition=Q(action__in=(
             'create', 'stage', 'update', 'bind', 'revoke', 'rotation_stage', 'rotation_begin',
-            'rotation_record', 'rotation_reconcile', 'rotation_activate', 'receipt')), name='secret_audit_action')]
+            'rotation_record', 'rotation_reconcile', 'rotation_activate', 'receipt', 'proxy_issue')), name='secret_audit_action')]

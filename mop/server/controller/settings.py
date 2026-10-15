@@ -18,7 +18,7 @@ INSTALLED_APPS = [
     'mop.server.controller.adminapps.ControllerAdminConfig',
     'rest_framework', 'rest_framework.authtoken', 'channels',
     'mop.server.controller.apps.ControllerConfig', 'mop.server.catalog',
-    'mop.server.access', 'mop.server.secrets',
+    'mop.server.access', 'mop.server.secrets', 'mop.server.gateway',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

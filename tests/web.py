@@ -2218,13 +2218,14 @@ def check_hash_echo_523(c):
             else:
                 c.expect(f"#523 no bcrypt module: the hash is not recognized ({tag})",
                          (got["action"], got.get("status")), ("refuse", 403))
-            # PATCH: поле снимается, остальное проходит пассом
+            # PATCH: поле снимается из сериализованных bytes, не только из dict (#647).
             body = _json523.dumps({"management": {"secret-key": HASH,
                                                   "disable-auto-update-panel": True}}).encode()
             got = fn("PATCH", "/v8/management/config", body, src)
             if hash_ok:
                 c.check(f"#523 PATCH with the hash drops the field ({tag})",
-                        got["action"] == "pass", got)
+                        got["action"] == "inject"
+                        and "secret-key" not in _json523.loads(got["body"])["management"], got)
             else:
                 c.expect(f"#523 no bcrypt module: PATCH is not weakened ({tag})",
                          (got["action"], got.get("status")), ("refuse", 403))

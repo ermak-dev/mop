@@ -217,10 +217,46 @@ def reveal(provider, envelope, aad):
 
 class SecretStore:
     def __init__(self, *, provider: CryptoProvider, authorizer: Authorizer | None = None,
-                 delivery_gate: DeliveryGate | None = None):
+                 delivery_gate: DeliveryGate | None = None, controller_gate=None):
         self.provider = provider
         self.authorizer = authorizer if authorizer is not None else Deny()
         self.delivery_gate = delivery_gate if delivery_gate is not None else Deny()
+        self.controller_gate = controller_gate if controller_gate is not None else Deny()
+
+    def _proxy_selection(self, actor):
+        # Только root-bound gate выбирает конкретный installation secret.
+        secret_id = self.controller_gate.resolve(actor)
+        if type(secret_id) is not uuid.UUID:
+            raise Refused('invalid proxy management secret selection')
+        row = m.Secret.objects.select_related('installation', 'active_version').filter(pk=secret_id).first()
+        if row is None:
+            raise Refused('proxy management secret is missing')
+        available(row)
+        if (row.installation_id != 1 or row.project_id is not None or row.purpose != 'proxy'
+                or row.kind != 'variable' or row.active_version_id is None
+                or row.active_version.secret_id != row.pk):
+            raise Refused('proxy management secret scope or purpose mismatch')
+        return row
+
+    @storage_errors
+    def proxy_management_current(self, actor, version_id):
+        row = self._proxy_selection(actor)
+        return row.active_version_id == version_id
+
+    @storage_errors
+    def issue_proxy_management(self, actor):
+        """Узкий внутренний consumer, не plaintext GET или metadata permission."""
+        outside_transaction()
+        row = self._proxy_selection(actor)
+        pin = row.id, row.revision, row.active_version_id
+        value = self._decrypt(row, row.active_version)
+        with transaction.atomic():
+            m.Secret.objects.select_for_update().get(pk=row.pk)
+            current = self._proxy_selection(actor)
+            if pin != (current.id, current.revision, current.active_version_id):
+                raise Conflict('proxy management secret changed during issuance')
+            audit(actor, 'proxy_issue', current)
+        return AddressedSecret(row.id, row.active_version_id, row.name, row.kind, value)
 
     @storage_errors
     def metadata(self, actor, secret_id):

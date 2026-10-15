@@ -11,7 +11,13 @@ from .views import Health
 from django.views.decorators.cache import never_cache
 from . import authviews as auth
 
-urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
+from mop.server.gateway.views import gateway_view
+
+urlpatterns = [
+    path('llm/management.html', gateway_view),
+    path('llm/raw/management.html', gateway_view),
+    path('v8/management/<path:resource>', gateway_view),
+    path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
     path('api/v1/auth/login', never_cache(auth.Login.as_view())),
     path('api/v1/auth/logout', never_cache(auth.Logout.as_view())),
