@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/poolStore.ts", "src/poolStore.test.ts"]
+}

@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 from _lib import Checks  # noqa: E402
@@ -70,6 +71,19 @@ def main():
                  build.diff_trees(a, os.path.join(d, "none")),
                  ["assets/x.js", "assets/y.css", "assets/z.svg", "index.html"])
     check_no_bus_302(c)
+    # HYPOTHESIS: прямой вызов vite обходит prebuild и проверки store (#627).
+    # SOLUTION: npm lifecycle проверяет чистое ядро перед сборкой; старый
+    # общий typecheck не включаем в dist-gate побочным эффектом этой задачи.
+    # RESULT: поведенческий red подтверждён, gate идёт через build:dist.
+    # STATUS: FIXED — see #627
+    calls = []
+    with patch.object(build, "tool", side_effect=lambda name: name), \
+            patch.object(build, "run", side_effect=lambda argv, cwd: calls.append((argv, cwd))):
+        build.build("/tmp/store-gate-output")
+    c.expect("#627 build enters npm lifecycle after declared dependency install", calls, [
+        (["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"], build.WEB),
+        (["npm", "run", "build:dist", "--", "--outDir", "/tmp/store-gate-output", "--emptyOutDir"], build.WEB),
+    ])
     return c.report("webbuild")
 
 
