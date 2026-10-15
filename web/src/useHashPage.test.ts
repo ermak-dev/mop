@@ -27,6 +27,19 @@ test("opening the page on #journal starts on the journal", () => {
   expect(renderHook(() => useHashPage()).result.current.page).toBe("journal");
 });
 
+// HYPOTHESIS: новые вкладки должны переживать reload и back/forward.
+// STATUS: FIXED — see #664.
+test.each(['nodes', 'tokens'] as const)('#664 #%s opens its own page and supports navigation', async page => {
+  window.location.hash = `#${page}`;
+  const view = renderHook(() => useHashPage());
+  expect(view.result.current.page).toBe(page);
+  await act(async () => { view.result.current.go('main'); });
+  expect(view.result.current.page).toBe('main');
+  await act(async () => { view.result.current.go(page); });
+  expect(view.result.current.page).toBe(page);
+  expect(window.location.hash).toBe(`#${page}`);
+});
+
 test("the browser back returns to the main page", () => {
   window.location.hash = "";
   const view = renderHook(() => useHashPage());

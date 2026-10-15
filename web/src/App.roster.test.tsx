@@ -62,7 +62,7 @@ async function mount() {
   await act(async () => { view = renderUi(<App />); });
   return view!;
 }
-const rows = () => within(screen.getByTestId("pool")).getAllByRole("row").slice(1);
+const rows = () => within(screen.getByTestId("pool")).getAllByRole("row").filter(row => row.hasAttribute('data-source'));
 
 test("#588 canonical sessions form one roster, without a separate masters section", async () => {
   await mount();
@@ -86,15 +86,19 @@ test("#619 canonical pending session displays the placement reason", async () =>
   expect(pending.queryByText("поднимается")).not.toBeInTheDocument();
 });
 
-test("#588 role filter changes visible entries, not capacity counters", async () => {
+test("#664 project filter changes visible entries, not capacity counters", async () => {
+  const next = snapshot();
+  next.sessions.push({ ...managed('pu-other-1', 'puppet'), project: 'other' });
+  pool.snapshot = next;
   await mount();
   const counts = screen.getByTestId("chips").textContent;
-  fireEvent.change(screen.getByRole("combobox", { name: "Role" }), { target: { value: "role:master" } });
+  expect(screen.queryByRole('combobox', { name: 'Role' })).toBeNull();
+  fireEvent.change(screen.getByRole("combobox", { name: "Проект" }), { target: { value: "other" } });
   expect(rows()).toHaveLength(1);
-  expect(within(rows()[0]).getByText("pu-sample-2")).toBeInTheDocument();
+  expect(within(rows()[0]).getByText("pu-other-1")).toBeInTheDocument();
   expect(screen.getByTestId("chips").textContent).toBe(counts);
-  fireEvent.change(screen.getByRole("combobox", { name: "Role" }), { target: { value: "" } });
-  expect(rows()).toHaveLength(5);
+  fireEvent.change(screen.getByRole("combobox", { name: "Проект" }), { target: { value: "" } });
+  expect(rows()).toHaveLength(6);
 });
 
 test("#588 unmanaged locals have no Nomad actions even for an admin viewer", async () => {
@@ -161,9 +165,10 @@ test("#588 a new declarative role needs no UI-specific enum", async () => {
   next.sessions.push(managed("pu-sample-4", "reviewer"));
   pool.snapshot = next;
   await mount();
-  fireEvent.change(screen.getByRole("combobox", { name: "Role" }), { target: { value: "role:reviewer" } });
-  expect(rows()).toHaveLength(1);
-  expect(within(rows()[0]).getByText("pu-sample-4")).toBeInTheDocument();
+  expect(rows()).toHaveLength(6);
+  const reviewer = rows().find(row => within(row).queryByText('pu-sample-4'))!;
+  expect(within(reviewer).getByText('reviewer')).toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: 'Role' })).toBeNull();
 });
 
 test("#588 the common managed screen identifies its role", async () => {
@@ -178,16 +183,14 @@ test("#588 the common managed screen identifies its role", async () => {
   expect(within(card).getByText("Role: master")).toBeInTheDocument();
 });
 
-// HYPOTHESIS: #578 доносит роль через клик по имени, но не через иконку экрана.
-// SOLUTION: оба пути передают метку роли одной карточке с чатом.
-// RESULT: RED без роли, GREEN через иконку и клик по имени.
-// STATUS: FIXED — see #594
-test("#594 the row screen action keeps the role in the chat header", async () => {
+// #664: клик по любой ячейке заменил отдельную иконку экрана;
+// метка роли по-прежнему передаётся в метаданные панели.
+test("#664 the row selection keeps the role in the screen panel", async () => {
   auth.current = { login: "viewer", role: "admin" };
   await mount();
   await screen.findByText("viewer");
-  const actions = screen.getByRole("group", { name: "действия pu-sample-2" });
-  fireEvent.click(within(actions).getByRole("button", { name: "Экран" }));
+  const row = screen.getByRole('button', { name: 'pu-sample-2' }).closest('tr')!;
+  fireEvent.click(within(row).getByText('node-a'));
   const card = await screen.findByTestId("puppet-card");
   expect(within(card).queryByText("Role: master")).toBeNull();
   fireEvent.click(within(card).getByRole("checkbox", { name: "Отображать метаданные" }));

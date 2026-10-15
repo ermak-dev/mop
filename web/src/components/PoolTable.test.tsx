@@ -1,5 +1,8 @@
 // Папеты по проектам (#298): секция на проект, колонки и корзины со старой страницы.
-import { screen, within } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
+import { MantineProvider } from "@mantine/core";
+import { vi } from "vitest";
+import { roster } from "../roster";
 import { expectHead, renderUi } from "../test-utils";
 import { COLS, PoolTable, projectNote } from "./PoolTable";
 import type { Project, Puppet } from "../types";
@@ -153,6 +156,171 @@ const UNKNOWN: Project[] = [{
     kind: "free", bucket: "free", detail: null, branch: "master",
     owner: "", llm: "claude", origin: "git@h:g/mop.git", disk_kb: null }],
 }];
+
+// HYPOTHESIS: фильтр роли скрывает проекты, а открытие привязано только к имени.
+// SOLUTION: фильтровать канонический ростер по проекту, открывать управляемую
+// строку только администратору, исключая интерактивные элементы и выделение.
+// RESULT: до правки 9 проверок красные; после правки 20 проверок зелёные.
+// Дополнительно воспроизведён клик по имени после выделения текста;
+// защита имени от выделения проверена отдельным красным прогоном.
+// STATUS: FIXED — see #664
+const LOCAL = {
+  source: "local" as const, id: "local-only", project: "local-only", user: "anton",
+  role: null, role_source: "legacy" as const, unmanaged: true as const,
+  conversation: null, display: "local workspace", cwd: "/workspace",
+  addresses: ["anton.local-1"], identified: true,
+};
+
+const managedRow = (name = "pu-mop-1") => screen.getByText(name).closest("tr")!;
+
+test("#664 project options use canonical roster strings, including local-only projects", () => {
+  const sessions = [...roster(PROJECTS).map((entry) => ({ ...entry, project: "canonical-project" })), LOCAL];
+  renderUi(<PoolTable projects={PROJECTS} sessions={sessions} session={ADMIN} />);
+  const filter = screen.getByRole("combobox", { name: "Проект" });
+  expect(filter).toHaveValue("");
+  expect(within(filter).getAllByRole("option").map((option) => [
+    (option as HTMLOptionElement).value, option.textContent,
+  ])).toEqual([["", "Все проекты"], ["canonical-project", "canonical-project"], ["local-only", "local-only"]]);
+  expect(screen.queryByRole("combobox", { name: "Role" })).not.toBeInTheDocument();
+  expect(screen.getAllByRole("columnheader", { name: "Role" })).toHaveLength(2);
+  fireEvent.change(filter, { target: { value: "local-only" } });
+  expect(screen.getByText("local workspace")).toBeInTheDocument();
+  expect(screen.queryByText("pu-mop-1")).not.toBeInTheDocument();
+  fireEvent.change(filter, { target: { value: "canonical-project" } });
+  expect(screen.getByText("pu-mop-1")).toBeInTheDocument();
+  expect(screen.queryByText("local workspace")).not.toBeInTheDocument();
+});
+
+test("#664 a selected project stays selected when snapshots remove its last entry", () => {
+  const { rerender } = renderUi(<PoolTable projects={PROJECTS} sessions={[...roster(PROJECTS), LOCAL]} />);
+  const filter = screen.getByRole("combobox", { name: "Проект" });
+  fireEvent.change(filter, { target: { value: "local-only" } });
+  rerender(<MantineProvider><PoolTable projects={PROJECTS} sessions={roster(PROJECTS)} /></MantineProvider>);
+  expect(screen.getByRole("combobox", { name: "Проект" })).toHaveValue("local-only");
+  expect(screen.getByRole("option", { name: "local-only" })).toHaveValue("local-only");
+  expect(screen.queryByText("pu-mop-1")).not.toBeInTheDocument();
+  expect(screen.getByText("No sessions match this project")).toBeInTheDocument();
+});
+
+test("#664 legacy local-only projects are filterable without canonical sessions", () => {
+  renderUi(<PoolTable projects={PROJECTS} masters={[{
+    project: "legacy-project", master: "anton.local-2", user: "anton",
+    session: "legacy workspace", cwd: "/legacy", puppets: [],
+  }]} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Проект" }), { target: { value: "legacy-project" } });
+  expect(screen.getByText("legacy workspace")).toBeInTheDocument();
+  expect(screen.queryByText("pu-mop-1")).not.toBeInTheDocument();
+});
+
+test("#664 every noninteractive part of a managed row opens its name once", () => {
+  const onOpen = vi.fn();
+  renderUi(<PoolTable projects={PROJECTS} session={ADMIN} onOpen={onOpen} selected="pu-mop-1" />);
+  const row = managedRow();
+  const cells = within(row).getAllByRole("cell");
+  for (const target of [within(row).getByText("hyper"), within(row).getByText("свободен"), cells[5], row]) {
+    onOpen.mockClear();
+    fireEvent.click(target);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith("pu-mop-1");
+  }
+  expect(row).toHaveAttribute("aria-selected", "true");
+  expect(managedRow("pu-mop-2")).toHaveAttribute("aria-selected", "false");
+  expect(row).toHaveAttribute("data-selected", "true");
+  expectHead(Object.values(COLS));
+  expect(screen.queryByRole("columnheader", { name: "действия" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Restart|Delete|Escape/ })).not.toBeInTheDocument();
+});
+
+test("#664 Enter and Space on a focused row open, other keys do not", () => {
+  const onOpen = vi.fn();
+  renderUi(<PoolTable projects={PROJECTS} session={ADMIN} onOpen={onOpen} />);
+  const row = managedRow();
+  expect(row).toHaveAttribute("tabindex", "0");
+  row.focus();
+  expect(row).toHaveFocus();
+  fireEvent.keyDown(row, { key: "Enter" });
+  fireEvent.keyDown(row, { key: " " });
+  fireEvent.keyDown(row, { key: "ArrowDown" });
+  expect(onOpen.mock.calls).toEqual([["pu-mop-1"], ["pu-mop-1"]]);
+});
+
+test("#664 interactive descendants and selected text do not bubble into row opening", () => {
+  const onOpen = vi.fn();
+  renderUi(<PoolTable projects={PROJECTS} session={ADMIN} onOpen={onOpen} />);
+  const row = managedRow();
+  const name = within(row).getByRole("button", { name: "pu-mop-1" });
+  fireEvent.click(name);
+  expect(onOpen).toHaveBeenCalledExactlyOnceWith("pu-mop-1");
+  onOpen.mockClear();
+  fireEvent.keyDown(name, { key: "Enter" });
+  fireEvent.keyDown(name, { key: " " });
+  // Делегирование не должно зависеть от нынешнего содержимого ячеек.
+  for (const tag of ["button", "a", "input", "select", "textarea"] as const) {
+    const element = document.createElement(tag);
+    if (tag === "a") element.setAttribute("href", "#details");
+    row.cells[2].append(element);
+    fireEvent.click(element);
+    fireEvent.keyDown(element, { key: "Enter" });
+    fireEvent.keyDown(element, { key: " " });
+    element.remove();
+  }
+  expect(onOpen).not.toHaveBeenCalled();
+  const text = within(row).getByText("hyper");
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  expect(window.getSelection()!.toString()).toBe("hyper");
+  try {
+    fireEvent.click(text, { detail: 1 });
+    fireEvent.click(name, { detail: 1 });
+    expect(onOpen).not.toHaveBeenCalled();
+  } finally {
+    window.getSelection()!.removeAllRanges();
+  }
+});
+
+test('#664 keyboard activation ignores unrelated text selection', () => {
+  const onOpen = vi.fn();
+  renderUi(<><p>selected conversation text</p><PoolTable projects={PROJECTS} session={ADMIN} onOpen={onOpen} /></>);
+  const range = document.createRange();
+  range.selectNodeContents(screen.getByText('selected conversation text'));
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  try {
+    fireEvent.click(within(managedRow()).getByRole('button', { name: 'pu-mop-1' }), { detail: 0 });
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith('pu-mop-1');
+  } finally { window.getSelection()!.removeAllRanges(); }
+});
+
+test.each([undefined, { login: null, role: null }, { login: 'reader', role: 'user' } as Session,
+  { login: "reader", role: "guest" } as unknown as Session, { login: "operator", role: "operator" } as unknown as Session])(
+  "#664 nonadmin viewer %j cannot open even when given a callback", (session) => {
+    const onOpen = vi.fn();
+    renderUi(<PoolTable projects={PROJECTS} session={session} onOpen={onOpen} />);
+    const row = managedRow();
+    fireEvent.click(row);
+    fireEvent.click(within(row).getByText("pu-mop-1"));
+    fireEvent.keyDown(row, { key: "Enter" });
+    fireEvent.keyDown(row, { key: " " });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(row).not.toHaveAttribute("tabindex");
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+  },
+);
+
+test("#664 legacy local rows never open or gain action cells for admins", () => {
+  const onOpen = vi.fn();
+  renderUi(<PoolTable projects={[]} sessions={[LOCAL]} session={ADMIN} onOpen={onOpen} />);
+  const row = screen.getByText("local workspace").closest("tr")!;
+  fireEvent.click(row);
+  fireEvent.click(within(row).getByText("local workspace"));
+  fireEvent.keyDown(row, { key: "Enter" });
+  fireEvent.keyDown(row, { key: " " });
+  expect(onOpen).not.toHaveBeenCalled();
+  expect(row).not.toHaveAttribute("tabindex");
+  expect(within(row).getAllByRole("cell")).toHaveLength(Object.keys(COLS).length);
+  expectHead(Object.values(COLS));
+});
 
 test("#509 the row draws no verdict card: terminals ride balloons now", () => {
   renderUi(<PoolTable projects={UNKNOWN} session={ADMIN} />);

@@ -115,7 +115,7 @@ test("#622 the terminal offers a snapshot but no second log dialog or stderr req
   vi.stubGlobal("fetch", fetchMock);
   open();
   await screen.findByText("screen");
-  expect(screen.getByRole("dialog", { name: "экран pu-mop-1" })).toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "экран pu-mop-1" })).toBeInTheDocument();
   // @ts-expect-error #507: пропа which у карточки больше нет
   renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" which="stderr" onClose={() => {}} />);
   expect(screen.queryByRole("dialog", { name: /лог/ })).toBeNull();
