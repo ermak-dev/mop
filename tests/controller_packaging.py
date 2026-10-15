@@ -48,6 +48,24 @@ class Packaging(unittest.TestCase):
             self.assertEqual(cli.main(['--server', 'old.invalid', 'server', 'controller', 'check']), 1)
             command.assert_not_called()
 
+    def test_hermetic_failure_keeps_the_actual_child_failure(self):
+        from unittest.mock import Mock, patch
+        class Collector:
+            def __init__(self):
+                self.messages = []
+            def check(self, message, condition):
+                self.messages.append(message)
+        failure = 'AssertionError: exact failing invariant\n' + '\n'.join('trailer' for _ in range(12))
+        child = Mock(returncode=1)
+        child.communicate.return_value = (failure, None)
+        collector = Collector()
+        with patch.object(hermetic, 'hostile_home', return_value=('/fixture', {})), \
+                patch.object(hermetic, 'hostile_repo', return_value='/fixture'), \
+                patch.object(hermetic, 'files', return_value=['/fixture/tests/controller.py']), \
+                patch.object(hermetic.subprocess, 'Popen', return_value=child):
+            hermetic.check_runs(collector)
+        self.assertTrue(all('exact failing invariant' in message for message in collector.messages))
+
     def test_controller_dispatch_does_not_initialize_old_environment(self):
         from mop import cli
         from unittest.mock import patch
