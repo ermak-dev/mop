@@ -283,6 +283,7 @@ class SecretCases(TransactionTestCase):
 
     # HYPOTHESIS: bind под parent lock не проверяет frozen recipient set.
     # Новый binding после stage получает старый ключ без участия в ротации.
+    # SOLUTION: no_rotation под существующим parent lock, общим с stage.
     def test_unresolved_credential_rotation_refuses_late_binding_without_old_key_issuance(self):
         a = self.secret('PROXY', project_id=None, purpose='proxy', kind='credential')
         new = self.api.stage(self.actor, a.id, b'new-key', expected_revision=1)
@@ -350,6 +351,7 @@ class SecretCases(TransactionTestCase):
                 self.assertEqual(svc.metadata(self.actor, r.id).required, frozenset(map(str, bound)))
 
     # HYPOTHESIS: ручной autocommit=False пропускает provider внутри caller SQL.
+    # SOLUTION: общий entry guard проверяет atomic и get_autocommit всех aliases.
     def test_all_provider_entries_refuse_manual_and_atomic_transactions_before_io(self):
         a = self.secret('CONFIG')
         b = self.binding(a)

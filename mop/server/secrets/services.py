@@ -148,7 +148,8 @@ def expected(row, revision):
 
 
 def outside_transaction():
-    if any(connections[alias].in_atomic_block for alias in connections):
+    if any(connections[alias].in_atomic_block or not connections[alias].get_autocommit()
+           for alias in connections):
         raise TransactionBoundary('secret provider requires an outer transaction-free boundary')
 
 
@@ -336,6 +337,7 @@ class SecretStore:
             secret = m.Secret.objects.select_for_update().get(pk=secret_id)
             expected(secret, expected_revision)
             available(secret)
+            no_rotation(secret)
             binding = m.SecretBinding(secret=secret, node_id=node_id, client_id=client_id,
                 controller=controller, role=role, digest=digest, incarnation=incarnation,
                 grant_id=grant_id, assignment_id=assignment_id)

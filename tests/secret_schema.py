@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class Schema(unittest.TestCase):
     # HYPOTHESIS: in_atomic_block не видит ручной set_autocommit(False).
     # Проверяем все aliases без настройки Django/подключения к реальной установке.
+    # SOLUTION: общий guard отказывает также при get_autocommit() == False.
+    # RESULT: red на обоих manual aliases; после fix все четыре schema checks green.
+    # STATUS: FIXED — see #637.
     def test_provider_guard_rejects_manual_transaction_on_any_connection(self):
         from types import SimpleNamespace
         tree = ast.parse((ROOT / 'mop/server/secrets/services.py').read_bytes())
