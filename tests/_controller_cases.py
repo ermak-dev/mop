@@ -302,7 +302,12 @@ class Foundation(TransactionTestCase):
     def test_failed_root_verification_cannot_leave_restored_effects_enabled(self):
         self._backup_restore_case(root_mismatch=True)
 
-    def _backup_restore_case(self, root_mismatch=False):
+    def test_archive_commit_crash_cannot_reopen_old_timeline_after_restart(self):
+        # BUG: pg_restore COMMIT предшествует fence; авария возвращает старую authority.
+        # HYPOTHESIS: guard вне архива должен переживать COMMIT и новый startup.
+        self._backup_restore_case(archive_commit_crash=True)
+
+    def _backup_restore_case(self, root_mismatch=False, archive_commit_crash=False):
         import copy
         import tempfile
         from pathlib import Path
@@ -331,6 +336,30 @@ class Foundation(TransactionTestCase):
                     backup(archive)
                     self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
                     self.assertNotIn(b'never-in-tool-argv', archive.read_bytes())
+                    if archive_commit_crash:
+                        from unittest.mock import patch
+                        from mop.server.controller import backup as backup_module
+                        from mop.server.controller.runtime import initialize as restart_initialize
+                        tool = backup_module._tool
+                        def crash_after_archive_commit(command, *args, **kwargs):
+                            result = tool(command, *args, **kwargs)
+                            if command == 'pg_restore' and '--single-transaction' in kwargs.get('extra', ()):
+                                raise SystemExit('injected crash after archive commit before fence')
+                            return result
+                        with patch.object(backup_module, '_tool', crash_after_archive_commit):
+                            with self.assertRaisesRegex(SystemExit, 'after archive commit'):
+                                restore(archive, using='restored')
+                        # Подтверждение окна: реально восстановленная БД, не fake restore.
+                        row = Installation.objects.using('restored').get()
+                        self.assertTrue(row.effects_enabled)
+                        self.assertEqual(str(row.epoch), original['epoch'])
+                        connections['restored'].close()
+                        connections['restored'].close_pool()
+                        with self.assertRaisesRegex(RuntimeError, 'restore|guard|maintenance'):
+                            verify_installation(using='restored')
+                        with self.assertRaisesRegex(RuntimeError, 'restore|guard|maintenance'):
+                            restart_initialize(using='restored')
+                        return
                     if root_mismatch:
                         from django.conf import settings
                         from django.test import override_settings
