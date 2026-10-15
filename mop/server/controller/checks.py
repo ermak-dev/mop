@@ -29,11 +29,12 @@ def database_guarantees(app_configs=None, databases=None, **kwargs):
                         SELECT EXISTS (
                             SELECT 1 FROM pg_roles
                             WHERE pg_has_role(current_user, oid, 'MEMBER')
-                              AND (rolsuper OR rolcreatedb OR rolcreaterole)
-                        ), has_schema_privilege(current_user, current_schema(), 'CREATE'),
-                        EXISTS (
+                              AND (rolsuper OR rolcreatedb OR rolcreaterole
+                                   OR has_schema_privilege(oid, current_schema(), 'CREATE'))
+                        ), EXISTS (
                             SELECT 1 FROM pg_tables
-                            WHERE schemaname = current_schema() AND tableowner = current_user
+                            WHERE schemaname = current_schema()
+                              AND pg_has_role(current_user, tableowner, 'MEMBER')
                         )
                     ''')
                     unsafe = any(cursor.fetchone())

@@ -6,6 +6,9 @@ import _layers as layers
 
 # HYPOTHESIS: старый scanner отбрасывает внешние и динамические импорты,
 # поэтому Django в common и скрытый цикл Access/Secrets остаются зелёными.
+# SOLUTION: общий AST scanner, framework guard и направленный subject DAG.
+# RESULT: aliases/TYPE_CHECKING не скрывают обратное ребро.
+# STATUS: FIXED — see #632
 class ImportTests(unittest.TestCase):
     def edges(self, source):
         with tempfile.TemporaryDirectory() as directory:
@@ -37,6 +40,7 @@ class ImportTests(unittest.TestCase):
                 ('mop.server.catalog.leak', 'import mop.server.controller.runtime'),
                 ('mop.server.access.leak', 'import importlib\nimportlib.import_module(target)'),
                 ('mop.server.secrets.leak', 'import importlib as il\nloader = il.import_module\nloader("mop.server.access.models")'),
+                ('mop.server.secrets.leak', 'from builtins import __import__ as load\nload("mop.server.access.models")'),
             ):
                 with self.subTest(name=name):
                     path = Path(directory) / 'probe.py'

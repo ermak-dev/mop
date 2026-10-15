@@ -14,6 +14,10 @@ from mop.server.controller.runtime import database_call
 # HYPOTHESIS: штатный sync_to_async пропускает ленивый QuerySet и оставляет
 # соединение живым; настройки по умолчанию не ограничивают runtime.
 # PostgreSQL-проверки ниже используют отдельные соединения, не TestCase.
+# SOLUTION: bounded runtime, lifecycle/pool cleanup, protected identity и
+# matching-major backup/restore; отрицательные сценарии проверяются на БД.
+# RESULT: constraints/CAS/locks и отказ записи не подменяются fake I/O.
+# STATUS: FIXED — see #632
 class Foundation(TransactionTestCase):
     def test_empty_schema_repeatable_and_no_missing_migrations(self):
         call_command('migrate', verbosity=0, interactive=False)

@@ -16,6 +16,9 @@ from mop.server.controller.bootstrap import load
 # настройки; bootstrap должен отвергать их до первого подключения к БД.
 # Инфраструктурный reader существует: red здесь — принятие опасного ввода,
 # а не отсутствие Django или импортируемого модуля.
+# SOLUTION: finite schema, private owned regular files и явные trust roots.
+# RESULT: небезопасный/неполный bootstrap отказывает до подключения к БД.
+# STATUS: FIXED — see #632
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

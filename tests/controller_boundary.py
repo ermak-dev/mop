@@ -15,6 +15,10 @@ import hermetic  # noqa: E402 — до framework и mop
 
 # HYPOTHESIS: штатный sync_to_async переносит живые модели и QuerySet.
 # Эти проверки не заменяют PostgreSQL lifecycle/concurrency gate.
+# SOLUTION: проверять входы и выходы, дождаться quiescence при отмене,
+# отдельно проверять настоящий ASGI listener и HTTP-resource cleanup.
+# RESULT: модели/QuerySet не пересекают await, отказ сохраняет причину.
+# STATUS: FIXED — see #632
 def main():
     if importlib.util.find_spec('django') is None:
         import hermetic
@@ -165,6 +169,31 @@ class Boundary(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'PostgreSQL 16'):
                 _tool('pg_dump', config, major=16)
             self.assertEqual(run.call_count, 1)
+
+    def test_shutdown_timeout_keeps_the_running_effect_accounted_for(self):
+        from mop.server.controller.runtime import Runtime
+        async def run():
+            runtime = Runtime(effect_limit=1)
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def effect():
+                entered.set()
+                await release.wait()
+                return 'receipt'
+            task = asyncio.create_task(runtime.effect(effect))
+            try:
+                await entered.wait()
+                with self.assertRaisesRegex(RuntimeError, 'still running'):
+                    await runtime.aclose(timeout=.01)
+                self.assertEqual(runtime.pending, 1)
+                self.assertFalse(task.done())
+                release.set()
+                self.assertEqual(await task, 'receipt')
+            finally:
+                release.set()
+                await task
+                await runtime.aclose()
+            self.assertEqual(runtime.pending, 0)
+        asyncio.run(run())
 
     def test_orm_inputs_do_not_cross_the_thread_boundary(self):
         from django.contrib.auth import get_user_model

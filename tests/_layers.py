@@ -134,7 +134,7 @@ def imports_of(path, name, known):
             for a in n.names:
                 full = f'{base}.{a.name}'
                 out.add(full if full in known else base)
-                if base == 'importlib' and a.name == 'import_module':
+                if (base, a.name) in {('importlib', 'import_module'), ('builtins', '__import__')}:
                     loaders.add(a.asname or a.name)
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):

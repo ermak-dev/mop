@@ -14,6 +14,9 @@ from mop.common import deps
 # HYPOTHESIS: установка клиента не умеет выбирать серверную группу;
 # bootstrap командлета проходит через чтение старой .env.
 # Проверки метаданных исполняются без Django и без сетевой установки.
+# SOLUTION: отдельный server extra и stdlib dispatch без старой .env.
+# RESULT: clean-install gate отдельно проверяет настоящий клиентский venv.
+# STATUS: FIXED — see #632
 class Packaging(unittest.TestCase):
     def test_server_extra_is_separate_from_client(self):
         server = getattr(deps, 'SERVER', ())
