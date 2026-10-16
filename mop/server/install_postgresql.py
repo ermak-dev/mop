@@ -195,7 +195,7 @@ def _verify_relations(connection, name, owner):
     """Проверяем effective ACL, в том числе PUBLIC и column grants."""
     tables = connection.execute("SELECT c.oid, c.relname, pg_get_userbyid(c.relowner), c.relkind "
         "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname='public' AND c.relkind IN ('r', 'p', 'S')").fetchall()
+        "WHERE n.nspname='public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')").fetchall()
     for oid, table, table_owner, kind in tables:
         sequence = kind == 'S'
         trust = not sequence and table in TRUST_TABLES
@@ -209,6 +209,12 @@ def _verify_relations(connection, name, owner):
         rights = connection.execute('SELECT p, ' + check + '(%s, %s, p), ' + check +
             "(%s, %s, p || ' WITH GRANT OPTION') FROM unnest(%s::text[]) p",
             (name, oid, name, oid, privileges)).fetchall()
+        if kind not in ('r', 'p', 'S'):
+            column_access = connection.execute('SELECT bool_or(has_any_column_privilege(%s, %s, p)) '
+                'FROM unnest(%s::text[]) p', (name, oid, ['SELECT', 'INSERT', 'UPDATE', 'REFERENCES'])).fetchone()[0]
+            if column_access or any(enabled or grantable for _, enabled, grantable in rights):
+                raise RuntimeError('runtime grants expose an unsupported relation')
+            continue
         if table_owner != owner or {p for p, enabled, _ in rights if enabled} != expected or any(
                 grantable for _, _, grantable in rights):
             raise RuntimeError('runtime existing ' + label + ' are not least privilege')
