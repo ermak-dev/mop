@@ -15,21 +15,38 @@ class Record(models.Model):
         constraints = [models.CheckConstraint(condition=Q(revision__gte=1), name='%(class)s_revision_positive')]
 
 
-class Project(Record):
-    origin = models.CharField(max_length=2048, unique=True)
-    name = models.CharField(max_length=128, unique=True)
-    puppet_limit = models.BigIntegerField(null=True)
+class RetirableRecord(Record):
+    retired_at = models.DateTimeField(null=True)
+    # Обычная compound uniqueness: active занимает zero-slot, tombstone — свой
+    # UUID. Имена/URL остаются в истории без partial indexes и переименований.
+    identity_slot = models.UUIDField(default=uuid.UUID(int=0), editable=False)
 
     class Meta(Record.Meta):
+        abstract = True
+        constraints = Record.Meta.constraints + [models.CheckConstraint(
+            condition=Q(retired_at__isnull=True, identity_slot=uuid.UUID(int=0))
+                | (Q(retired_at__isnull=False, identity_slot=models.F('id')) & ~Q(identity_slot=uuid.UUID(int=0))),
+            name='%(class)s_retirement_state')]
+
+
+class Project(RetirableRecord):
+    origin = models.CharField(max_length=2048)
+    name = models.CharField(max_length=128)
+    puppet_limit = models.BigIntegerField(null=True)
+
+    class Meta(RetirableRecord.Meta):
         permissions = [('view_pool', 'Can view pool'), ('configure_project', 'Can configure project'),
             ('set_project_limit', 'Can set project limit'), ('build_project', 'Can build project'),
             ('recover_build', 'Can recover build')]
-        constraints = Record.Meta.constraints + [models.CheckConstraint(
-            condition=Q(puppet_limit__isnull=True) | Q(puppet_limit__gte=0), name='project_limit_nonnegative')]
+        constraints = RetirableRecord.Meta.constraints + [
+            models.UniqueConstraint(fields=('origin', 'identity_slot'), name='project_origin_slot_unique'),
+            models.UniqueConstraint(fields=('name', 'identity_slot'), name='project_name_slot_unique'),
+            models.CheckConstraint(condition=Q(puppet_limit__isnull=True) | Q(puppet_limit__gte=0), name='project_limit_nonnegative'),
+        ]
 
 
-class Node(Record):
-    name = models.CharField(max_length=128, unique=True)
+class Node(RetirableRecord):
+    name = models.CharField(max_length=128)
     driver = models.CharField(max_length=16)
     ssh_host = models.CharField(max_length=253)
     ssh_port = models.PositiveIntegerField(default=22)
@@ -50,11 +67,13 @@ class Node(Record):
     settings_receipt = models.CharField(max_length=512, blank=True)
     settings_applied_at = models.DateTimeField(null=True)
 
-    class Meta(Record.Meta):
+    class Meta(RetirableRecord.Meta):
         permissions = [('configure_node', 'Can configure node'), ('drain_node', 'Can drain node'),
             ('enable_node', 'Can enable node'), ('forget_node', 'Can forget node'),
             ('record_node_application', 'Can record node application'), ('observe_node', 'Can observe node')]
-        constraints = Record.Meta.constraints + [
+        constraints = RetirableRecord.Meta.constraints + [
+            models.UniqueConstraint(fields=('name', 'identity_slot'), name='node_name_slot_unique'),
+            models.CheckConstraint(condition=Q(retired_at__isnull=True) | Q(deployment_member=False), name='retired_node_not_member'),
             models.CheckConstraint(condition=Q(driver__in=('host', 'pve')), name='node_known_driver'),
             models.CheckConstraint(condition=Q(ssh_port__gte=1, ssh_port__lte=65535), name='node_ssh_port'),
             models.CheckConstraint(condition=Q(settings_revision__gte=1), name='node_settings_revision'),
@@ -170,7 +189,9 @@ class ProjectPolicySnapshot(ImmutableRecord):
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta(Record.Meta):
-        permissions = [('pin_project_policy', 'Can pin project policy')]
+        permissions = (
+            ('pin_project_policy', 'Can pin project policy'),
+        )
         constraints = Record.Meta.constraints + [
             models.UniqueConstraint(fields=('project', 'sequence'), name='policy_project_sequence'),
             models.CheckConstraint(condition=Q(sequence__gte=1, cpu__gte=1, memory_mb__gte=1, disk_mb__gte=1), name='policy_positive_resources'),
