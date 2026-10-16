@@ -841,6 +841,11 @@ class SecretCases(TransactionTestCase):
     # HYPOTHESIS: ранний frozen-set guard после сборки двух исправлений
     # запрещает точный retry bind, хотя он лишь читает прежнее решение.
     # Retry обязан сохранить audit, membership и rotation revision без изменений.
+    # SOLUTION: только точный read-only retry возвращается до locked no_rotation;
+    # новый membership по-прежнему проходит этот guard и model-level freeze.
+    # RESULT: PG16 red — Conflict от раннего guard; после исправления полный
+    # combined controller gate: 102/102 на изолированных PG16 и PG17.
+    # STATUS: FIXED — see #637 (retry/freeze, не runtime composition).
     def test_exact_bind_retry_during_frozen_rotation_has_no_write_effect(self):
         svc, a, new, b, r = self.rotation()
         before = self.m.SecretAudit.objects.count()

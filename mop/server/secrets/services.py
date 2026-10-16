@@ -381,7 +381,6 @@ class SecretStore:
             secret = m.Secret.objects.select_for_update().get(pk=secret_id)
             expected(secret, expected_revision)
             available(secret)
-            no_rotation(secret)
             binding = m.SecretBinding(secret=secret, node_id=node_id, client_id=client_id,
                 controller=controller, role=role, digest=digest, incarnation=incarnation,
                 grant_id=grant_id, assignment_id=assignment_id)
