@@ -19,6 +19,7 @@ import glob
 import hashlib
 import json
 import re
+import select
 import stat
 import struct
 import unicodedata
@@ -30,16 +31,10 @@ import time
 import uuid
 
 SESSIONS = os.path.expanduser("~/.claude/sessions")
-# Каталог состояния тела. Пакет зовёт его paths.STATE, но отсюда paths не
-# импортировать: этот файл едет в тело исходником, только stdlib. Что оба
-# называют одно, держит tests/session.py (#322).
-STATE = os.path.expanduser("~/.local/state/mop")
-# Записи исхода хода (#222): их пишет хук claude, читает `state`.
-TURNS = os.path.join(STATE, "turns")
-# Записи модели сессии (#453): их пишут statusline и PostModelSwitch, читает
-# `state`. Только {model, at} -- сырой JSON statusline несут cost и контекст,
-# это расход и внутренности сессии, а не состояние папета.
-MODELS = os.path.join(STATE, "models")
+# Собственная телеметрия уходит только в ephemeral Unix bridge (#641).
+# Внешние session JSON/JSONL принадлежат CLI; этот модуль их не заменяет.
+HOOK_MAX = 4096
+HOOK_TIMEOUT = 0.1
 CONNECT_TIMEOUT = 5
 PRIORITIES = ("now", "next", "later")
 MODES = ("bypass", "prompting")
@@ -619,12 +614,10 @@ AUTH_FAILED = "authentication_failed"
 RATE_LIMIT = "rate_limit"
 BILLING_ERROR = "billing_error"
 DETAIL_MAX = 300
-TURN_TTL = 7 * 86400
 
 
 def _plain_id(sid):
-    """session_id -- имя файла: только буквы, цифры, дефис и подчёркивание,
-    иначе вход -- не наш (путь в имени писал бы мимо каталога)."""
+    """Внешний CLI session_id: ASCII буквы, цифры, дефис и подчёркивание."""
     return isinstance(sid, str) and bool(sid) and \
         all(c.isalnum() or c in "-_" for c in sid) and sid.isascii()
 
@@ -646,55 +639,8 @@ def turn_record(payload, now):
     return None
 
 
-def _write_turn(root, sid, record, now):
-    """Запись атомарно: временный файл рядом + os.replace. Попутно снимаются
-    записи старше недели -- мёртвые сессии копятся."""
-    os.makedirs(root, exist_ok=True)
-    tmp = os.path.join(root, f".{sid}.{uuid.uuid4().hex}.tmp")
-    try:
-        with open(tmp, "w") as f:
-            json.dump(record, f)
-        os.replace(tmp, os.path.join(root, f"{sid}.json"))
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-    for f in glob.glob(os.path.join(root, "*.json")):
-        try:
-            if os.path.getmtime(f) < now - TURN_TTL:
-                os.remove(f)
-        except OSError:
-            pass
-
-
-# ─── модель сессии (#453) ────────────────────────────────────────────────
-# Дашборд показывает модель папета пусто: сессии claude не несут модель
-# нигде, что читает ростер. Claude Code сам сообщает её дважды: JSON на stdin
-# statusline-команды (при старте и далее периодически, поле model.id) и
-# событием PostModelSwitch (to_model). Отмена и провал перехода события не
-# дают -- проверено вживую на 2.1.288: провалившийся /model не оставляет
-# записи, и статус-строка продолжает звать прежнюю модель.
-#
-# У statusLine нет времени наблюдения: в его JSON поля с моментом, когда
-# модель была видна, нет, «сейчас» стока -- только момент прихода строки.
-# Опрос, сгенерированный ДО перехода, может дойти и ПОСЛЕ -- с прежней
-# моделью и «свежим» временем прихода. Голое сравнение at такую запись
-# пропускало: она откатывала применённый переход (равный at и даже at+1,
-# если опрос завис в канале на секунду дольше); память только о предыдущей
-# модели (from_model) не спасала и при двух быстрых переходах -- запоздалый
-# опрос с САМОЙ ПЕРВОЙ моделью проходил как «иная». Отсюда окно STALE_WINDOW
-# без истории старых id: событие перехода ставит модель и свой момент;
-# пока окно действует, опрос может лишь ПОДТВЕРЖДАТЬ модель события (at
-# обновляется, окно переживает подтверждение), сменить её внутри окна
-# способен только новый PostModelSwitch -- он всегда право. Вне окна опрос
-# -- правда как есть: модель могла смениться и без события (ручной /model
-# с «s: session only»). Граница гарантии: переход без события виден ростеру
-# не раньше, чем опрос дойдёт после истечения окна, -- до 5 минут модель в
-# записи остаётся прежней; и откат не ловится, если опрос завис дольше окна
-# И модель успела смениться без события -- тогда «старое» наблюдение
-# неотличимо от нового факта.
-STALE_WINDOW = 300
-
-
+# Statusline не несёт causal fence: время прихода не доказывает свежесть.
+# Контроллер хранит passive hint отдельно от подтверждённого model switch.
 def model_record(payload, now):
     """Вход statusline или PostModelSwitch -> {model, at} | None.
 
@@ -716,93 +662,53 @@ def model_record(payload, now):
     return {"model": model, "at": int(now)}
 
 
-def _model_event(payload):
-    """Событие перехода -> to_model | None. Проверенное поле, не сырой
-    словарь: id модели той же нормы, что в model_record."""
-    to_m = payload.get("to_model") if isinstance(payload, dict) else None
-    if isinstance(to_m, str) and to_m and len(to_m) <= 128:
-        return to_m
-    return None
+def hook(text, now, *, statusline=False):
+    """Узкий bounded IPC: без транскрипта, timestamps/authority из входа и файлов.
 
-
-def read_model(sid, root=None):
-    """Запись модели сессии или None (нет, не читается, чужой session_id)."""
-    if not _plain_id(sid):
-        return None
-    try:
-        with open(os.path.join(root or MODELS, f"{sid}.json")) as f:
-            got = json.load(f)
-    except (OSError, ValueError):
-        return None
-    return got if isinstance(got, dict) else None
-
-
-def write_model(payload, now, root=None):
-    """Вход statusline/PostModelSwitch -> запись модели по session_id.
-
-    Событие перехода право всегда -- ставит модель и свой момент (event_at).
-    Опрос внутри STALE_WINDOW от события лишь подтверждает модель события
-    (at обновляется, event_at хранится -- окно переживает подтверждение);
-    любая иная модель у опроса внутри окна -- запоздалое наблюдение ДО
-    перехода и отбрасывается. Вне окна опрос пишется как есть: модель могла
-    смениться и без события. TTL и атомарность -- как у записей хода
-    (_write_turn)."""
-    record = model_record(payload, now)
-    if record is None:
+    Credential/сокет выдаёт runtime конкретному телу. Неподтверждённый hook
+    при изоляции теряется; его сбой никогда не останавливает живую сессию.
+    """
+    if len(text) > HOOK_MAX:
         return
-    sid = payload["session_id"]
-    event = _model_event(payload)
-    current = read_model(sid, root=root)
-    if current and not event and current.get("event_at") \
-            and record["at"] - current["event_at"] <= STALE_WINDOW:
-        if record["model"] != current.get("model"):
-            # Запоздалое наблюдение до перехода: модель внутри окна
-            # меняет только новое событие.
-            return
-        if record["at"] > current.get("at", 0):
-            # Подтверждение новее -- обновляем только at (дубль с более
-            # ранним временем прихода ничего не меняет).
-            out = {**current, "at": record["at"]}
-            _write_turn(root or MODELS, sid, out, now)
-        return
-    out = dict(record)
-    if event:
-        out["event_at"] = record["at"]
-    _write_turn(root or MODELS, sid, out, now)
-
-
-def hook(text, now, root=None):
-    """Вход хука (stdin) -> запись на диск, если событие наше."""
     payload = json.loads(text)
-    record = turn_record(payload, now)
-    if record is not None:
-        _write_turn(root or TURNS, payload["session_id"], record, now)
-    write_model(payload, now, root=root)
-
-
-def read_turn(sid, root=None):
-    """Запись исхода хода сессии или None."""
-    if not _plain_id(sid):
-        return None
-    try:
-        with open(os.path.join(root or TURNS, f"{sid}.json")) as f:
-            got = json.load(f)
-    except (OSError, ValueError):
-        return None
-    return got if isinstance(got, dict) else None
+    if not isinstance(payload, dict) or not _plain_id(payload.get('session_id')) or len(payload['session_id']) > 128:
+        return
+    event = 'Statusline' if statusline else payload.get('hook_event_name')
+    if event not in (*CLEARING, FAILURE, 'Statusline'):
+        return
+    if event == 'PostModelSwitch' and not isinstance(payload.get('to_model'), str):
+        return
+    if event == 'PostModelSwitch' and not payload['to_model']:
+        return
+    model = model_record(payload, now)
+    model_id = model['model'] if model and event in ('Statusline', 'PostModelSwitch') else None
+    if event in ('Statusline', 'PostModelSwitch') and model_id is None:
+        return
+    error = payload.get('error') or 'unknown' if event == FAILURE else None
+    if error is not None and (not isinstance(error, str) or len(error) > 64):
+        error = 'unknown'
+    if any(isinstance(value, str) and any(ord(c) < 32 or ord(c) == 127 for c in value)
+           for value in (model_id, error)):
+        return
+    record = dict(schema_version=1, session_id=payload['session_id'], event=event, model=model_id, error=error)
+    path, token = os.environ.get('MOP_TELEMETRY_SOCKET'), os.environ.get('MOP_TELEMETRY_TOKEN')
+    if not path or not token or len(token) != 64:
+        return
+    body = json.dumps(dict(token=token, record=record), ensure_ascii=True, allow_nan=False).encode()+b'\n'
+    if len(body) > HOOK_MAX:
+        return
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(HOOK_TIMEOUT)
+        sock.connect(path)
+        sock.sendall(body)
 
 
 def state(cwd):
-    """Состояние свежейшей сессии каталога одной записью: status, alive и
-    listen -- как у probe, waitingFor -- из файла сессии (открытый диалог),
-    turn -- запись исхода хода этой сессии, model -- id модели ЖИВОЙ сессии
-    каталога по её session_id (мёртвая -- null: запись трупа ничего не
-    говорит о работающей сессии). Привязка подтверждения (#468): sessionId
-    -- session_id живой сессии (чья модель -- тот же id), model_at -- время
-    записи модели (свежесть показа); записи нет -- model_at null вместе с
-    моделью, sessionId остаётся. Сессии нет -- те же ключи, пустые:
-    status и waitingFor null, alive и listen false, turn, sessionId,
-    model_at и model null."""
+    """Диагностика внешней CLI-сессии и freshest live identity.
+
+    Public форма сохранена. turn/model/model_at остаются unknown здесь:
+    собственные наблюдения читает controller ORM, не stdlib файловый fallback.
+    """
     d = session_for_cwd(cwd)
     if d is None:
         return {"status": None, "waitingFor": None, "alive": False, "listen": False,
@@ -813,18 +719,15 @@ def state(cwd):
     except Exception:
         alive = False
     listen = socket_alive(d["messagingSocketPath"]) if d.get("messagingSocketPath") else False
-    live = None
-    if listen:
-        # Модель -- утверждение о работающей сессии: свежайший файл каталога
-        # может быть трупом. Диагностику умершей сессии (status/turn) это не
-        # трогает: она и прежде была о свежайшем файле, а model -- о живых.
-        live = live_session_for_cwd(cwd)
-    got = read_model(live.get("sessionId")) if live is not None else None
+    # Свежайший файл может принадлежать corpse. Его диагностика сохраняется,
+    # но live identity берётся независимо, только из реально живых сессий.
+    live = live_session_for_cwd(cwd)
+    # Этот stdlib probe знает только внешнюю CLI-сессию. Собственные turn/model
+    # наблюдения читаются в контроллере; отсутствие связи — unknown, не fallback.
     return {"status": d.get("status", "?"), "waitingFor": d.get("waitingFor"),
-            "alive": alive, "listen": listen, "turn": read_turn(d.get("sessionId")),
+            "alive": alive, "listen": listen, "turn": None,
             "sessionId": live.get("sessionId") if live is not None else None,
-            "model_at": got.get("at") if got else None,
-            "model": got.get("model") if got else None}
+            "model_at": None, "model": None}
 
 
 # ─── протокол канала ─────────────────────────────────────────────────────
@@ -1035,13 +938,29 @@ def wait_idle(cwd, timeout, tag=None):
         inbox.close()
 
 
+def _hook_stdin():
+    """Абсолютный бюджет stdin: даже не закрывшийся pipe не держит живой CLI."""
+    deadline = time.monotonic() + HOOK_TIMEOUT
+    chunks = bytearray()
+    fd = sys.stdin.fileno()
+    while len(chunks) <= HOOK_MAX:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            return ''
+        chunk = os.read(fd, HOOK_MAX + 1 - len(chunks))
+        if not chunk:
+            return chunks.decode('utf-8')
+        chunks.extend(chunk)
+    return ''
+
+
 def main(argv):
     if argv[:1] == ["hook"]:
         # Молча и всегда 0: stdout хуков SessionStart и UserPromptSubmit
         # уходит в контекст модели, а код 2 на Stop заставил бы claude
         # продолжить ход. Любой сбой стока -- не дело сессии.
         try:
-            hook(sys.stdin.read(), time.time())
+            hook(_hook_stdin(), time.time())
         except BaseException:
             pass
         return 0
@@ -1049,7 +968,7 @@ def main(argv):
         # Тот же контракт молчания: stdout statusline-команды уходит прямо в
         # терминал сессии, а её сбой не должен ронять показ строки.
         try:
-            write_model(json.loads(sys.stdin.read()), time.time())
+            hook(_hook_stdin(), time.time(), statusline=True)
         except BaseException:
             pass
         return 0
