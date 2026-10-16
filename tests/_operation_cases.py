@@ -527,7 +527,10 @@ class DurableOperations(TransactionTestCase):
         from mop.server.access.services import Access
         operation = self.submit()
         claim = self.api.claim(operation['id'])
-        self.user.user_permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='change_node'))
+        # Access теперь требует CRUD + CONTROL право; fixture меняет catalog
+        # настоящим service, не обходит актуальную authority (PG16 red: Denied).
+        self.user.user_permissions.add(*Permission.objects.filter(content_type__app_label='catalog',
+            codename__in=('change_node', 'configure_node')))
         Catalog(authorizer=Access()).set_deployment_membership(self.actor, self.node.pk, True, expected_revision=2)
         Node.objects.filter(pk=self.node.pk).update(observed_eligible=True)
         result = self.api.complete(claim, expected_revision=claim.revision, applied=True)
