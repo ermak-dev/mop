@@ -131,6 +131,7 @@ class ProjectionQueries(TransactionTestCase):
         self.assertEqual(result.status_code, 503, result.content)
         body = result.json()
         self.assertEqual(body['error']['code'], 'authority_unavailable')
+        self.assertNotIn('epoch', body, 'unknown epoch must be omitted, not an invented identity or invalid null revision context')
         self.assertIn('restore', body['error']['message'])
         self.assertNotIn('results', body)
 
