@@ -168,6 +168,24 @@ class Catalog:
         row.save(update_fields=['retired_at', 'identity_slot', 'revision'])
         return snapshot(row)
 
+    def create_project(self, actor, origin, *, limit=None):
+        """Строгое создание: повторный add не превращается в update без CAS.
+
+        Register остаётся идемпотентным для своих callers; начальная настройка
+        имеет известную revision только у действительно новой строки.
+        """
+        value, limit = project_origin(origin), project_limit(limit)
+        self._authorize(actor, 'catalog.add_project')
+        try:
+            with transaction.atomic():
+                row = m.Project.objects.create(origin=value.origin, name=value.name)
+                self._authorize(actor, 'catalog.add_project', projects=(row.id,))
+                if limit is not None:
+                    return self.set_project_limit(actor, row.id, limit, expected_revision=1)
+                return snapshot(row)
+        except IntegrityError as error:
+            raise Conflict('project origin or name is already registered') from error
+
     def register_project(self, actor, origin):
         value = project_origin(origin)
         self._authorize(actor, 'catalog.add_project')
@@ -197,6 +215,20 @@ class Catalog:
         # Отзыв, замеченный при обходе, не превращается в частичный private result.
         self._authorize(actor, 'catalog.view_project', projects=tuple(row.id for row in result))
         return tuple(result)
+
+    def configure_project(self, actor, project_id, *, origin, limit, expected_revision):
+        """Редактирование aggregate: CAS обязателен даже при совпавших значениях."""
+        value, limit = project_origin(origin), project_limit(limit)
+        with transaction.atomic():
+            row = self._locked_project(project_id)
+            self._authorize(actor, 'catalog.change_project', projects=(row.id,))
+            expected(row, expected_revision)
+            result = snapshot(row)
+            if result.origin != value.origin:
+                result = self.replace_project_origin(actor, row.id, value.origin, expected_revision=result.revision)
+            if result.puppet_limit != limit:
+                result = self.set_project_limit(actor, row.id, limit, expected_revision=result.revision)
+            return result
 
     def replace_project_origin(self, actor, project_id, origin, *, expected_revision):
         value = project_origin(origin)
@@ -287,6 +319,24 @@ class Catalog:
                 return snapshot(row)
         except IntegrityError as error:
             raise Conflict('node name is already registered') from error
+
+    def configure_pool_node(self, actor, *, name, driver, ssh_host, ssh_port, control_origin,
+                            lan_address, bootstrap_address, deployment_member, project_ids,
+                            node_id=None, expected_revision=None):
+        """Единая транзакция desired configuration/membership, без deploy/eligibility."""
+        flag(deployment_member)
+        requested = set(project_ids)
+        with transaction.atomic():
+            result = self.configure_node(actor, name=name, driver=driver, ssh_host=ssh_host,
+                ssh_port=ssh_port, control_origin=control_origin, lan_address=lan_address,
+                bootstrap_address=bootstrap_address, node_id=node_id, expected_revision=expected_revision)
+            if result.deployment_member != deployment_member:
+                result = self.set_deployment_membership(actor, result.id, deployment_member,
+                                                       expected_revision=result.revision)
+            previous = set(m.NodeProject.objects.filter(node_id=result.id).values_list('project_id', flat=True))
+            if requested != previous:
+                result = self.set_node_projects(actor, result.id, requested, expected_revision=result.revision)
+            return result
 
     def get_node(self, actor, node_id):
         row = m.Node.objects.get(pk=node_id, retired_at__isnull=True)

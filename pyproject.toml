@@ -25,3 +25,4 @@ namespaces = false
 # Каталог ролей пакета (#580): каждый каталог роли -- soul.yaml и промпт
 # (docs/SOUL.md), не один файл скилла мастера (#351).
 mop = ["skills/*/*"]
+"mop.server.controller" = ["templates/admin/mop/*.html"]

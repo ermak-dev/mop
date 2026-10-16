@@ -1,0 +1,9 @@
+{% extends "admin/index.html" %}
+{% block content %}
+{% if proxy_panel_url %}
+<div class="module"><h2>External services</h2>
+<p><a href="{{ proxy_panel_url }}">Open protected LLM management panel</a></p></div>
+{% endif %}
+{{ block.super }}
+{% endblock %}
+{% block sidebar %}{% endblock %}

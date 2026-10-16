@@ -1,0 +1,13 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div id="content-main">
+  {% if message %}<p role="status">{{ message }}</p>{% endif %}
+  {% if form %}
+  <form method="post" novalidate>{% csrf_token %}
+    {{ form.as_p }}
+    <div class="submit-row"><input type="submit" value="Submit" class="default"></div>
+  </form>
+  {% endif %}
+  {% for url, label in links %}<p><a href="{{ url }}">{{ label }}</a></p>{% endfor %}
+</div>
+{% endblock %}

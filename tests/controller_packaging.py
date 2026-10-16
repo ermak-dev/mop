@@ -77,6 +77,18 @@ class Packaging(unittest.TestCase):
             hermetic.check_runs(collector)
         self.assertTrue(all('exact failing invariant' in message for message in collector.messages))
 
+    # HYPOTHESIS: setuptools берёт только .py; рабочий source Admin скрывает
+    # отсутствие HTML templates после стандартной установки пакета.
+    # SOLUTION: controller объявляет HTML templates в package-data.
+    # RESULT: missing-pattern behavioral red, затем 7/7 packaging green.
+    # STATUS: FIXED — see #638
+    def test_admin_templates_are_declared_package_data(self):
+        import tomllib
+        config = tomllib.loads((ROOT / 'pyproject.toml').read_text())
+        patterns = config['tool']['setuptools']['package-data'].get('mop.server.controller', [])
+        self.assertIn('templates/admin/mop/*.html', patterns)
+        self.assertTrue((ROOT / 'mop/server/controller/templates/admin/mop/form.html').is_file())
+
     def test_controller_dispatch_does_not_initialize_old_environment(self):
         from mop import cli
         from unittest.mock import patch

@@ -59,6 +59,8 @@ def main(argv):
         parser.error('--cross-uid requires --check credential_service')
     if args.label and args.check != 'controller':
         parser.error('--label requires --check controller')
+    if args.cross_uid and args.check != 'credential_service':
+        parser.error('--cross-uid requires --check credential_service')
     test_script = shlex.join(['python3', f'tests/{args.check}.py', *args.label])
     docker = shutil.which('docker')
     if not docker:

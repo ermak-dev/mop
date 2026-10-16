@@ -4,6 +4,14 @@ from django.db import models
 from django.utils import timezone
 
 
+class DomainPermission(models.Model):
+    """Action permissions controller имеют настоящий app label и ContentType."""
+    class Meta:
+        managed = False
+        default_permissions = ()
+        permissions = [('manage_proxy', 'Can manage external proxy'), ('view_models', 'Can view model catalogue')]
+
+
 class RestoreGuard(models.Model):
     """Текущее обслуживание target, не часть восстанавливаемого архива."""
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
