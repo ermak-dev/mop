@@ -6,7 +6,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('access', '0003_creationintent_grant_creationintent_parent_and_more'),
+        ('access', '0004_creationintent_grant_creationintent_parent_and_more'),
     ]
 
     operations = [
