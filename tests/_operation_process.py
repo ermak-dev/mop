@@ -13,9 +13,9 @@ def _configure(database, bootstrap):
 def read(database, bootstrap, actor, operation_id, result):
     _configure(database, bootstrap)
     from django.db import connections
-    from mop.server.operations.service import Operations
+    from mop.server.controller.runtime import operations_service
     try:
-        result.put(Operations().status(actor, operation_id))
+        result.put(operations_service().status(actor, operation_id))
     finally:
         connections.close_all()
 
@@ -23,9 +23,9 @@ def read(database, bootstrap, actor, operation_id, result):
 def claim(database, bootstrap, operation_id, ready, result):
     _configure(database, bootstrap)
     from django.db import connections
-    from mop.server.operations.service import Operations
+    from mop.server.controller.runtime import operations_service
     try:
         ready.wait(timeout=10)
-        result.put(Operations().claim(operation_id))
+        result.put(operations_service().claim(operation_id))
     finally:
         connections.close_all()

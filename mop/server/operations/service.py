@@ -1,4 +1,6 @@
 """Durable admission/lifecycle; SQL никогда не охватывает внешний эффект."""
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -9,8 +11,6 @@ from django.utils import timezone
 from ..access.context import ActorContext, PrincipalKind
 from ..access.services import Access, Denied, NotVisible, current_actor
 from ..catalog.models import Node, NodeProject, Project
-from ..controller.models import Installation
-from ..controller.runtime import require_restore_ready, short_transaction
 from . import models as m
 from .lifecycle import State, transition
 from .node import NodeEligibility
@@ -74,15 +74,12 @@ def _independent():
         raise Refused('transaction_boundary')
 
 
-def _installation(epoch=None):
-    try:
-        generation = UUID(require_restore_ready(lock=True))
-    except RuntimeError as error:
-        raise Refused('controller_unavailable', safe_reason=str(error)) from error
-    row = Installation.objects.select_for_update().get(pk=1)
-    if epoch is not None and row.epoch != epoch:
-        raise Refused('epoch_conflict')
-    return row, generation
+@dataclass(frozen=True)
+class InstallationState:
+    """SQL-only root reader возвращает locked plain state, не ORM identity."""
+    epoch: UUID
+    effects_enabled: bool
+    generation: UUID
 
 
 def _snapshot(row):
@@ -123,13 +120,36 @@ def _move(row, state, code, *, expected_revision, safe_reason=None):
 
 class Operations:
     """Одна durable очередь; root внедряет только доверенную authority composition."""
-    def __init__(self, *, grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
+    def __init__(self, *, installation_state: Callable[[], InstallationState] | None = None,
+                 transaction_scope: Callable[[], AbstractContextManager] | None = None,
+                 grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
         if not (1 <= queue_limit <= 256 and 1 <= project_limit <= 64 and 1 <= execution_limit <= 8):
             raise ValueError('operation limits exceed controller safety caps')
+        self._read_installation = installation_state
+        self._transaction_scope = transaction_scope
         self.access = Access(grants=grants)
         self.grants = grants
         self.executor = executor
         self.queue_limit, self.project_limit, self.execution_limit = queue_limit, project_limit, execution_limit
+
+    def _require_binding(self):
+        if self._read_installation is None or self._transaction_scope is None:
+            raise Refused('controller_unavailable')
+
+    def _transaction(self):
+        self._require_binding()
+        return self._transaction_scope()
+
+    def _installation(self, epoch=None):
+        try:
+            state = self._read_installation()
+        except RuntimeError as error:
+            raise Refused('controller_unavailable', safe_reason=str(error)) from error
+        if type(state) is not InstallationState:
+            raise Refused('controller_unavailable')
+        if epoch is not None and state.epoch != epoch:
+            raise Refused('epoch_conflict')
+        return state
 
     def _authorize(self, actor, action, node_id, projects=()):
         self.access.authorize(actor, action, node_ids=(node_id,), project_ids=tuple(projects))
@@ -149,8 +169,8 @@ class Operations:
         if type(command) is not NodeEligibility:
             raise ValueError('finite typed operation command required')
         _independent()
-        with short_transaction():
-            installation, generation = _installation(command.epoch)
+        with self._transaction():
+            installation = self._installation(command.epoch)
             current_actor(actor, grants=self.grants)
             self._authorize(actor, 'operations.view_operation', command.node_id)
             row = m.Operation.objects.filter(actor_id=actor.user_id, request_id=command.request_id).first()
@@ -182,7 +202,7 @@ class Operations:
                 raise Refused('admission_limit')
             row = m.Operation.objects.create(actor_id=actor.user_id, actor_binding=_binding(actor),
                 request_id=command.request_id, digest=command.digest(), epoch=command.epoch,
-                restore_generation=generation, action=command.action, node=node,
+                restore_generation=installation.generation, action=command.action, node=node,
                 expected_revision=command.expected_revision, eligible=command.eligible, not_after=command.not_after)
             row.projects.set(projects)
             m.Step.objects.create(operation=row)
@@ -191,14 +211,14 @@ class Operations:
         return result
 
     def status(self, actor, operation_id, *, epoch=None):
-        with short_transaction():
-            _installation(epoch)
+        with self._transaction():
+            self._installation(epoch)
             current_actor(actor, grants=self.grants)
             return self._disclose(actor, m.Operation.objects.get(pk=operation_id))
 
     def by_request(self, actor, request_id, *, epoch):
-        with short_transaction():
-            _installation(epoch)
+        with self._transaction():
+            self._installation(epoch)
             current_actor(actor, grants=self.grants)
             row = m.Operation.objects.filter(actor_id=actor.user_id, request_id=request_id).first()
             if row is None:
@@ -214,12 +234,12 @@ class Operations:
 
     def claim(self, operation_id):
         _independent()
-        with short_transaction():
-            installation, generation = _installation()
+        with self._transaction():
+            installation = self._installation()
             row = m.Operation.objects.select_for_update().get(pk=operation_id)
             if row.state != State.ACCEPTED:
                 return None
-            if row.epoch != installation.epoch or row.restore_generation != generation or not installation.effects_enabled:
+            if row.epoch != installation.epoch or row.restore_generation != installation.generation or not installation.effects_enabled:
                 return None
             projects = self._scope(row)
             tuple(Project.objects.select_for_update().filter(pk__in=projects).order_by('pk'))
@@ -267,15 +287,15 @@ class Operations:
     def _bound(self, claim):
         if type(claim) is not Claim:
             raise Refused('claim_conflict')
-        installation, generation = _installation(claim.epoch)
+        installation = self._installation(claim.epoch)
         row = m.Operation.objects.select_for_update().get(pk=claim.operation_id)
         step = m.Step.objects.select_for_update().get(operation=row)
-        if (row.epoch != claim.epoch or row.restore_generation != generation or step.pk != claim.step_id
+        if (row.epoch != claim.epoch or row.restore_generation != installation.generation or step.pk != claim.step_id
                 or step.token != claim.token or row.node_id != claim.node_id
                 or row.expected_revision != claim.source_revision or row.eligible != claim.eligible
                 or row.not_after != claim.not_after):
             raise Refused('claim_conflict')
-        return row, step
+        return row, step, installation
 
     def prepare_effect(self, claim):
         """После claim COMMIT: текущий допуск и единственный dispatch checkpoint.
@@ -284,8 +304,8 @@ class Operations:
         проверить bound not_after перед физическим действием, включая transit wait.
         """
         _independent()
-        with short_transaction():
-            row, step = self._bound(claim)
+        with self._transaction():
+            row, step, installation = self._bound(claim)
             if row.state != State.RUNNING or step.dispatched_at is not None:
                 return None
             if row.revision != claim.revision:
@@ -297,7 +317,7 @@ class Operations:
                 code, reason = 'access_denied', str(error)
             node = Node.objects.select_for_update().get(pk=row.node_id)
             if code is None:
-                if not Installation.objects.get(pk=1).effects_enabled:
+                if not installation.effects_enabled:
                     code = 'effects_disabled'
                 elif row.not_after <= timezone.now():
                     code = 'deadline_expired'
@@ -326,8 +346,8 @@ class Operations:
 
     def uncertain(self, claim, *, expected_revision):
         _independent()
-        with short_transaction():
-            row, step = self._bound(claim)
+        with self._transaction():
+            row, step, installation = self._bound(claim)
             if row.state == State.RECONCILING:
                 _move(row, State.UNKNOWN, 'outcome_unknown', expected_revision=expected_revision)
             else:
@@ -339,8 +359,8 @@ class Operations:
         if type(applied) is not bool:
             raise ValueError('typed effect confirmation required')
         _independent()
-        with short_transaction():
-            row, step = self._bound(claim)
+        with self._transaction():
+            row, step, installation = self._bound(claim)
             receipt = m.EffectReceipt.objects.filter(step=step).first()
             if receipt is not None:
                 if receipt.token != claim.token or receipt.applied != applied:
@@ -391,10 +411,10 @@ class Operations:
 
     def _inspection(self, actor, operation_id, *, expected_revision, claim):
         _independent()
-        with short_transaction():
-            installation, generation = _installation()
+        with self._transaction():
+            installation = self._installation()
             row = m.Operation.objects.select_for_update().get(pk=operation_id)
-            if row.epoch != installation.epoch or row.restore_generation != generation:
+            if row.epoch != installation.epoch or row.restore_generation != installation.generation:
                 raise Refused('epoch_conflict')
             projects = self._scope(row)
             self._authorize(actor, 'operations.recover_operation', row.node_id, projects)
@@ -412,8 +432,8 @@ class Operations:
 
     def cancel(self, actor, operation_id, *, expected_revision):
         _independent()
-        with short_transaction():
-            _installation()
+        with self._transaction():
+            self._installation()
             row = m.Operation.objects.select_for_update().get(pk=operation_id)
             self._authorize(actor, 'operations.cancel_operation', row.node_id, self._scope(row))
             if row.state != State.ACCEPTED:
@@ -422,20 +442,22 @@ class Operations:
             return _snapshot(row)
 
     def pending(self, *, limit=8):
+        self._require_binding()
         if not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
         return tuple(m.Operation.objects.filter(state=State.ACCEPTED).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
 
     def prune(self):
         _independent()
-        with short_transaction():
-            _installation()
+        with self._transaction():
+            self._installation()
             rows = m.Operation.objects.filter(completed_at__lt=timezone.now() - timedelta(days=90), result_pruned=False)
             # Tombstone и всё ещё unresolved evidence не удаляются.
             ids = [row.pk for row in rows if not m.ResourceClaim.objects.filter(operation=row, released_at=None).exists()]
             return m.Operation.objects.filter(pk__in=ids).update(result_pruned=True)
 
     def publish_one(self, publisher):
+        self._require_binding()
         _independent()
         event = m.OutboxEvent.objects.filter(published_at=None).select_related('operation').order_by('id').first()
         if event is None:
@@ -447,6 +469,6 @@ class Operations:
             'project_ids': [str(pk) for pk in event.operation.projects.values_list('pk', flat=True)]}
         # Duplicate delivery при потере ACK — штатна; event_id стабилен.
         publisher(value)
-        with short_transaction():
+        with self._transaction():
             m.OutboxEvent.objects.filter(pk=event.pk, published_at=None).update(published_at=timezone.now())
         return True

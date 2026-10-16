@@ -39,7 +39,7 @@ class DurableOperations(TransactionTestCase):
         from mop.server.operations import models, service
         from mop.server.access import models as access, services
         from mop.server.catalog.models import Project, Node, NodeProject
-        from mop.server.controller.runtime import initialize
+        from mop.server.controller.runtime import initialize, operations_service
         from mop.server.controller.models import Installation, RestoreGuard
         # flush не повторяет data migration; fixture явно восстанавливает seed.
         RestoreGuard.objects.get_or_create(pk=1)
@@ -66,7 +66,8 @@ class DurableOperations(TransactionTestCase):
         executor_token = services.enroll_service('node-executor', self.node.pk,
             project_ids=(self.project.pk,), permissions=('catalog.record_node_application', 'catalog.observe_node'))
         self.executor = services.token_context(executor_token)
-        self.api = service.Operations(executor=self.executor)
+        self.operations = operations_service
+        self.api = self.operations(executor=self.executor)
 
     def command(self, **changes):
         from mop.server.operations.node import NodeEligibility
@@ -77,6 +78,65 @@ class DurableOperations(TransactionTestCase):
 
     def submit(self, command=None):
         return self.api.submit(self.actor, command or self.command())
+
+    # BUG: предметный Operations сам импортирует controller и получает доверие.
+    # HYPOTHESIS: явная root composition должна быть обязательной для admission.
+    # RED: PG16 — Refused not raised, unbound service принимает команду.
+    # RED: PG17 — unbound publisher передаёт event до отказа на ACK transaction.
+    # SOLUTION: root внедряет locked frozen state и прежний short_transaction;
+    #           предметный сервис без обоих bindings отказывает.
+    # RESULT: guard generation проверяется и без смены epoch до domain locks.
+    # STATUS: FIXED — see #625
+    def test_unbound_service_denies_even_with_ready_installation(self):
+        with self.assertRaisesRegex(self.s.Refused, 'controller_unavailable'):
+            self.s.Operations().submit(self.actor, self.command())
+        self.assertEqual(self.m.Operation.objects.count(), 0)
+        self.assertEqual(self.m.OutboxEvent.objects.count(), 0)
+
+    def test_unbound_service_cannot_publish_or_discover_work(self):
+        self.submit()
+        seen = []
+        with self.assertRaisesRegex(self.s.Refused, 'controller_unavailable'):
+            self.s.Operations().publish_one(seen.append)
+        self.assertEqual(seen, [])
+        with self.assertRaisesRegex(self.s.Refused, 'controller_unavailable'):
+            self.s.Operations().pending()
+        self.assertIsNone(self.m.OutboxEvent.objects.get().published_at)
+
+    def test_restore_generation_change_without_epoch_change_fences_claim_and_result(self):
+        from mop.server.controller.models import RestoreGuard
+        operation = self.submit()
+        claim = self.api.claim(operation['id'])
+        queued = self.submit(self.command(expected_revision=2))
+        RestoreGuard.objects.update(generation=uuid4())
+        self.assertIsNone(self.api.claim(queued['id']))
+        with self.assertRaisesRegex(self.s.Refused, 'claim_conflict'):
+            self.api.prepare_effect(claim)
+        with self.assertRaisesRegex(self.s.Refused, 'claim_conflict'):
+            self.api.complete(claim, expected_revision=claim.revision, applied=True)
+        self.assertEqual(self.m.EffectReceipt.objects.count(), 0)
+        self.assertTrue(self.m.ResourceClaim.objects.filter(operation_id=operation['id'], released_at=None).exists())
+
+    def test_root_reader_is_locked_frozen_plain_state_and_refreshes_effect_gate(self):
+        from dataclasses import FrozenInstanceError
+        from mop.server.controller.models import Installation, RestoreGuard
+        from mop.server.controller.runtime import operation_installation_state, short_transaction, materialized
+        with self.assertRaisesRegex(RuntimeError, 'requires an application transaction'):
+            operation_installation_state()
+        with short_transaction():
+            state = operation_installation_state()
+            self.assertEqual(state.epoch, self.epoch)
+            self.assertEqual(state.generation, RestoreGuard.objects.get(pk=1).generation)
+            self.assertEqual(materialized(state), state)
+            with self.assertRaises(FrozenInstanceError):
+                state.effects_enabled = False
+        operation = self.submit()
+        claim = self.api.claim(operation['id'])
+        Installation.objects.update(effects_enabled=False)
+        self.assertIsNone(self.api.prepare_effect(claim))
+        row = self.m.Operation.objects.get(pk=operation['id'])
+        self.assertEqual((row.state, row.code), ('refused', 'effects_disabled'))
+        self.assertFalse(self.m.ResourceClaim.objects.filter(operation=row, released_at=None).exists())
 
     def test_manual_ambient_transaction_cannot_return_uncommitted_acceptance(self):
         connection = connections['default']
@@ -188,14 +248,14 @@ class DurableOperations(TransactionTestCase):
         self.assertEqual(self.m.OutboxEvent.objects.count(), 0)
 
     def test_shared_project_admission_bound_is_not_a_process_local_counter(self):
-        api = self.s.Operations(project_limit=1)
+        api = self.operations(project_limit=1)
         api.submit(self.actor, self.command())
         with self.assertRaisesRegex(self.s.Refused, 'admission_limit'):
-            self.s.Operations(project_limit=1).submit(self.actor, self.command())
+            self.operations(project_limit=1).submit(self.actor, self.command())
         self.assertEqual(self.m.Operation.objects.count(), 1)
 
     def test_shared_admission_bound_and_atomic_rollback(self):
-        api = self.s.Operations(queue_limit=1)
+        api = self.operations(queue_limit=1)
         api.submit(self.actor, self.command())
         with self.assertRaisesRegex(self.s.Refused, 'admission_limit'):
             api.submit(self.actor, self.command())
@@ -309,7 +369,7 @@ class DurableOperations(TransactionTestCase):
         self.assertIsNone(self.api.claim(next_operation['id']))
         self.assertTrue(unknown['resources_held'])
         # Перезапуск владельца не получает новую generation без quiescence.
-        self.assertIsNone(self.s.Operations().claim(next_operation['id']))
+        self.assertIsNone(self.operations().claim(next_operation['id']))
 
     def test_stale_fence_and_restored_epoch_cannot_commit_receipt(self):
         from dataclasses import replace
@@ -369,7 +429,7 @@ class DurableOperations(TransactionTestCase):
         operation = self.submit()
         claim = self.api.claim(operation['id'])
         with self.assertRaises(Denied):
-            self.s.Operations().complete(claim, expected_revision=claim.revision, applied=True)
+            self.operations().complete(claim, expected_revision=claim.revision, applied=True)
         self.user.user_permissions.clear()
         self.assertEqual(self.api.complete(claim, expected_revision=claim.revision, applied=True)['state'], 'succeeded')
 
@@ -389,7 +449,7 @@ class DurableOperations(TransactionTestCase):
         operation = self.submit()
         original = self.api.claim(operation['id'])
         unknown = self.api.uncertain(original, expected_revision=original.revision)
-        restarted = self.s.Operations(executor=self.executor)
+        restarted = self.operations(executor=self.executor)
         inspection = restarted.inspection_claim(self.actor, operation['id'], expected_revision=unknown['revision'])
         self.assertEqual(inspection.token, original.token)
         self.assertEqual(inspection.step_id, original.step_id)

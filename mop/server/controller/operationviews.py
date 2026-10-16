@@ -8,12 +8,12 @@ from rest_framework.views import APIView
 
 from ..operations.commands import decode_body, InvalidCommand
 from ..operations.node import parse
-from ..operations.service import Operations
+from .runtime import operations_service
 
 
 def operations_api():
     # Никаких fake effects и динамического registry в production root.
-    return Operations()
+    return operations_service()
 
 
 def _reply(operation, status=200):

@@ -301,6 +301,26 @@ def require_restore_ready(using='default', *, lock=False):
     return str(guard.generation)
 
 
+def operation_installation_state():
+    """SQL-only reader внутри caller transaction: guard раньше любых domain locks."""
+    from .models import Installation
+    from ..operations.service import InstallationState
+    generation = UUID(require_restore_ready(lock=True))
+    try:
+        row = Installation.objects.select_for_update().get(pk=1)
+    except Installation.DoesNotExist as error:
+        raise RuntimeError('controller installation is not initialized') from error
+    return InstallationState(row.epoch, row.effects_enabled, generation)
+
+
+def operations_service(*, grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
+    """Typed composition durable Operations с настоящим restore fence и DB budget."""
+    from ..operations.service import Operations
+    return Operations(installation_state=operation_installation_state, transaction_scope=short_transaction,
+        grants=grants, executor=executor, queue_limit=queue_limit,
+        project_limit=project_limit, execution_limit=execution_limit)
+
+
 def installation_snapshot(using='default'):
     from .models import Installation
     require_restore_ready(using)
