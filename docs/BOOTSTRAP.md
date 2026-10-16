@@ -27,7 +27,9 @@ fallback старого bootstrap. Описанная ниже файловая 
 
 Содержимое хранится в AEAD `SecretVersion` (#637), а не в `FileField` и не в
 прежнем каталоге. Задачи ограничены 256 KiB, vars — 128 KiB, ссылки — 32
-защищённые версии. Provenance до 1024 символов, commit — hex object id; digest
+защищённые версии project variables/files. После отзыва или смены active
+secret version прежняя ссылка не выдаётся: требуется новая revision/approval,
+а не молчаливая замена bytes. Provenance до 1024 символов, commit — hex object id; digest
 покрывает весь канонический envelope, включая точные bytes и ссылки.
 Материализация файлов исполнителем может быть только временной производной.
 

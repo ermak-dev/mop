@@ -153,6 +153,54 @@ class PreparationCases(PreparationFixture):
         self.assertNotEqual(changed.content_version_id, revision.content_version_id)
         self.assertEqual(self.api.approve(self.actor, revision.id), approval)
 
+    def test_restart_readback_and_bytes_from_an_independent_process(self):
+        import json
+        from pathlib import Path
+        import subprocess
+        import sys
+        from rest_framework.authtoken.models import Token
+        run = self.success(self.new_run())
+        code = '''
+import json, os, sys, uuid
+sys.path.insert(0, sys.argv[1])
+from mop.server.controller.runtime import configure
+configure()
+from django.db import connection, connections
+connections.databases['default']['NAME'] = sys.argv[2]
+from mop.server.access import services as auth
+from mop.server.preparation.services import Preparation
+from mop.server.secrets.crypto import Keyring, XChaCha20Provider
+data = json.loads(sys.stdin.read())
+class Gate:
+    def check(self, actor, binding, action):
+        if str(binding.run_id) != data['run'] or str(binding.incarnation) != data['incarnation']:
+            raise PermissionError('restart fixture binding mismatch')
+try:
+    actor = auth.token_context(data['token'])
+    api = Preparation(provider=XChaCha20Provider(Keyring('test', {'test': b'p' * 32})),
+                      authorizer=auth.Access(), gate=Gate())
+    info = api.get_run(actor, uuid.UUID(data['run']))
+    readback = api.readback(actor, info.binding)
+    content = api.payload(actor, info.binding)
+    print(json.dumps({'pid': os.getpid(), 'state': info.state, 'version': info.version,
+                      'confirmed': readback.confirmed, 'tasks': content.tasks.decode(),
+                      'variables': content.variables.decode()}))
+finally:
+    connections.close_all()
+'''
+        root = str(Path(__file__).resolve().parents[1])
+        child = subprocess.run([sys.executable, '-I', '-c', code, root, connection.settings_dict['NAME']],
+            input=json.dumps({'run': str(run.id), 'incarnation': str(self.incarnation),
+                              'token': Token.objects.get(user=self.user).key}),
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        result = json.loads(child.stdout)
+        import os
+        self.assertNotEqual(result['pid'], os.getpid())
+        self.assertEqual((result['state'], result['version'], result['confirmed']), ('succeeded', run.version, True))
+        self.assertEqual(result['tasks'], '- debug: msg=hello\r\n')
+        self.assertEqual(result['variables'], 'answer: 42\n')
+
     def test_schema_is_repeatable_and_protected_bytes_are_not_plaintext_columns(self):
         from django.core.management import call_command
         from mop.server.secrets.models import SecretVersion
@@ -383,7 +431,7 @@ class PreparationCases(PreparationFixture):
     def test_sanitized_log_retention_and_progress_are_bounded_private(self):
         run = self.begin(self.new_run())
         run = self.api.progress(self.actor, run.binding, 0, percent=75,
-            log=b'private-token\x1b[31m\n' + b'z' * 6000, expected_version=run.version)
+            log=b'z' * 6000 + b'private-token\x1b[31m\n', expected_version=run.version)
         step = self.api.steps(self.actor, run.binding)[0]
         self.assertLessEqual(len(step.log.encode()), 4096)
         self.assertNotIn('private-token', step.log)
