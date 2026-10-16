@@ -604,6 +604,119 @@ class GrantCases(TransactionTestCase):
         with self.assertRaises(PermissionError):
             self.reserve(actor=actor, bundle=bundle)
 
+    # BUG: окончательное решение теряло credential предка, policy/binding и
+    # точный credential создателя после provider wait.
+    # HYPOTHESIS: повторная проверка обязана читать весь текущий authority,
+    # а activation — сохранённую capability, не первый credential принципала.
+    def test_ancestor_token_revoke_during_recipient_decrypt_fences_delivery(self):
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        source, actor = self.active(actor=parent_actor)
+        target, _ = self.active(bundle=self.publish('target-role'))
+        target_version = access.RoleBundle.objects.get(pk=target.bundle_id).content_version_id
+        provider = self.provider
+        class RevokeDuringDecrypt:
+            fired = False
+            def encrypt(inner, value, context):
+                return provider.encrypt(value, context)
+            def decrypt(inner, envelope, context):
+                value = provider.decrypt(envelope, context)
+                if context.record == target_version.bytes and not inner.fired:
+                    inner.fired = True
+                    Token.objects.filter(user_id=parent_actor.user_id).delete()
+                return value
+        class Delivery:
+            calls = []
+            def send(inner, decision, message):
+                inner.calls.append(decision)
+        self.api.secrets.provider = RevokeDuringDecrypt()
+        self.api.messages = Delivery()
+        try:
+            self.api.send(actor, target_id=target.target_id, message=b'blocked after ancestor revoke')
+        except PermissionError:
+            pass
+        self.assertFalse(Token.objects.filter(user_id=parent_actor.user_id).exists())
+        self.assertEqual(self.api.messages.calls, [], 'delivery effect ran after ancestor token revocation')
+
+    def test_token_revocation_before_activation_blocks_active_state(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
+        Token.objects.filter(user__principal__grant__id=row.id).delete()
+        try:
+            self.api.activate(row.id, expected_revision=provisioned.revision)
+        except PermissionError:
+            pass
+        self.assertEqual(access.Grant.objects.get(pk=row.id).state, 'reserved',
+            'activation accepted a revoked grant credential')
+
+    def test_retained_credential_requires_current_incarnation(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = replace(row.binding, incarnation=uuid.uuid4())
+        from mop.server.secrets.services import RetentionScope
+        scope = RetentionScope(self.project.pk, self.user.pk, row.id, 'grant')
+        with self.assertRaises(PermissionError, msg='stale-incarnation credential plaintext was delivered'):
+            self.api.secrets.read(self.actor, scope, provisioned.credential_version_id)
+
+    def test_policy_revocation_during_credential_decrypt_blocks_plaintext(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        from mop.server.secrets.services import RetentionScope
+        scope = RetentionScope(self.project.pk, self.user.pk, row.id, 'grant')
+        provider = self.provider
+        class RevokeApprovalDuringDecrypt:
+            def encrypt(inner, value, context):
+                return provider.encrypt(value, context)
+            def decrypt(inner, envelope, context):
+                value = provider.decrypt(envelope, context)
+                if context.record == provisioned.credential_version_id.bytes:
+                    self.approvals.enabled = False
+                return value
+        self.api.secrets.provider = RevokeApprovalDuringDecrypt()
+        with self.assertRaises(PermissionError, msg='credential plaintext escaped a revoked policy'):
+            self.api.secrets.read(self.actor, scope, provisioned.credential_version_id)
+
+    def test_delegation_cannot_bypass_current_owner_issue_permission(self):
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        permission = Permission.objects.get(content_type__app_label='access', codename='issue_grant')
+        self.user.user_permissions.remove(permission)
+        with self.assertRaises(PermissionError):
+            self.reserve()
+        with self.assertRaises(PermissionError, msg='delegated issuance amplified owner permissions'):
+            self.reserve(actor=parent_actor)
+
+    def test_activation_does_not_substitute_another_valid_creator_credential(self):
+        from django.test import Client
+        browser = Client()
+        self.assertTrue(browser.login(username='owner', password='test-only-password'))
+        browser_actor = auth.session_context(browser.session.session_key)
+        # Старая реализация выбирает первый token binding вместо capability
+        # браузера; после logout этот token не должен продолжить его намерение.
+        access.CredentialBinding.objects.filter(pk=self.actor.credential_id).update(id=uuid.UUID(int=0))
+        row = self.reserve(actor=browser_actor)
+        provisioned = self.api.provision(browser_actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
+        browser.logout()
+        with self.assertRaises(PermissionError, msg='activation substituted another creator credential'):
+            self.api.activate(row.id, expected_revision=provisioned.revision)
+
+    def test_expired_unrelated_browser_session_does_not_block_token_creation(self):
+        from django.contrib.sessions.models import Session
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
+        principal, identity = auth._principal(self.user)
+        expired = Session.objects.create(session_key='expired-other-browser', session_data='',
+            expire_date=timezone.now() - timedelta(hours=1))
+        access.CredentialBinding.objects.create(id=uuid.UUID(int=0), session=expired,
+            **auth._binding_values(principal, identity))
+        auth.current_actor(self.actor)
+        activated = self.api.activate(row.id, expected_revision=provisioned.revision)
+        self.assertEqual(activated.state, 'active')
+
     def test_crypto_provider_never_runs_in_sql_and_no_unsupported_effect_port(self):
         with transaction.atomic():
             with self.assertRaises(ValueError):
