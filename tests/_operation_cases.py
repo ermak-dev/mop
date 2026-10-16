@@ -23,6 +23,10 @@ from _operation_process import read as _read_in_process, claim as _claim_in_proc
 # RED: PG16/17 и CI 5486/29528 на 273655c1 — отсутствует durable ORM.
 # RED: отдельные PG checks — receipt CAS, restore 503, manual transaction,
 #      restart inspection и Runtime shutdown без потери result.
+# RED: PG16/17 — effect после expiry/revoke между claim и dispatch; новый
+#      catalog revision блокировал подтверждённый receipt и quiescence.
+# SOLUTION: отдельный dispatch checkpoint; immutable source receipt не зависит
+#           от возможности обновить более новую catalog projection.
 # RESULT: реальный PG подтверждает независимые процессы, атомарность и fences;
 #         общий CI gate также включает отдельно исправляемые foundation fixtures.
 # STATUS: FIXED — see #625
@@ -279,7 +283,9 @@ class DurableOperations(TransactionTestCase):
         operation = self.submit()
         self.user.user_permissions.clear()
         self.assertIsNone(self.api.claim(operation['id']))
-        self.assertEqual(self.m.Operation.objects.get(pk=operation['id']).state, 'refused')
+        row = self.m.Operation.objects.get(pk=operation['id'])
+        self.assertEqual(row.state, 'refused')
+        self.assertEqual(row.reason, 'action permission required')
         self.assertEqual(self.m.ResourceClaim.objects.filter(operation_id=operation['id'], released_at=None).count(), 0)
 
     def test_expiry_tombstone_is_never_new_admission(self):
@@ -454,6 +460,96 @@ class DurableOperations(TransactionTestCase):
     def test_schema_has_no_uncommitted_model_delta(self):
         from django.core.management import call_command
         call_command('makemigrations', 'operations', check=True, dry_run=True, verbosity=0)
+
+    def test_new_catalog_revision_cannot_trap_a_confirmed_quiescent_effect(self):
+        from mop.server.catalog.models import Node
+        from mop.server.catalog.services import Catalog
+        from mop.server.access.services import Access
+        operation = self.submit()
+        claim = self.api.claim(operation['id'])
+        self.user.user_permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='change_node'))
+        Catalog(authorizer=Access()).set_deployment_membership(self.actor, self.node.pk, True, expected_revision=2)
+        Node.objects.filter(pk=self.node.pk).update(observed_eligible=True)
+        result = self.api.complete(claim, expected_revision=claim.revision, applied=True)
+        self.assertEqual(result['state'], 'succeeded')
+        self.assertEqual(result['code'], 'effect_confirmed_prior_revision')
+        self.assertFalse(result['resources_held'])
+        self.assertFalse(result['evidence']['projection_updated'])
+        node = Node.objects.get(pk=self.node.pk)
+        self.assertEqual(node.revision, 3)
+        self.assertIsNone(node.applied_revision)
+        self.assertTrue(node.observed_eligible)
+        self.assertEqual(self.m.EffectReceipt.objects.count(), 1)
+
+    def test_claim_carries_the_unextendable_execution_deadline(self):
+        from dataclasses import replace
+        command = self.command()
+        operation = self.submit(command)
+        claim = self.api.claim(operation['id'])
+        self.assertEqual(claim.not_after, command.not_after)
+        with self.assertRaisesRegex(self.s.Refused, 'claim_conflict'):
+            self.api.complete(replace(claim, not_after=claim.not_after + timedelta(days=1)),
+                expected_revision=claim.revision, applied=True)
+
+    def test_expiry_after_claim_commit_prevents_adapter_dispatch(self):
+        from unittest.mock import patch
+        from mop.server.controller.runtime import Runtime
+        from mop.server.operations.worker import Worker
+        now = timezone.now()
+        command = self.command(not_after=now + timedelta(seconds=30))
+        operation = self.submit(command)
+        clock, effects = [now], []
+        claim = self.api.claim
+        def claim_then_expire(operation_id):
+            value = claim(operation_id)
+            clock[0] = command.not_after + timedelta(seconds=1)
+            return value
+        class Adapter:
+            async def set_eligibility(self, claim):
+                effects.append(claim.operation_id)
+                return True
+        async def run():
+            runtime = Runtime()
+            try:
+                await Worker(runtime, self.api, Adapter()).run_one(operation['id'])
+            finally:
+                await runtime.aclose()
+        with patch('mop.server.operations.service.timezone.now', side_effect=lambda: clock[0]), \
+                patch.object(self.api, 'claim', side_effect=claim_then_expire):
+            asyncio.run(run())
+        self.assertEqual(effects, [])
+        result = self.api.status(self.actor, operation['id'])
+        self.assertEqual(result['state'], 'refused')
+        self.assertEqual(result['code'], 'deadline_expired')
+        self.assertFalse(result['resources_held'])
+
+    def test_revocation_after_claim_commit_prevents_adapter_dispatch(self):
+        from unittest.mock import patch
+        from mop.server.controller.runtime import Runtime
+        from mop.server.operations.worker import Worker
+        operation = self.submit()
+        effects, user_id = [], self.user.pk
+        claim = self.api.claim
+        def claim_then_revoke(operation_id):
+            value = claim(operation_id)
+            get_user_model().objects.get(pk=user_id).user_permissions.clear()
+            return value
+        class Adapter:
+            async def set_eligibility(self, claim):
+                effects.append(claim.operation_id)
+                return True
+        async def run():
+            runtime = Runtime()
+            try:
+                await Worker(runtime, self.api, Adapter()).run_one(operation['id'])
+            finally:
+                await runtime.aclose()
+        with patch.object(self.api, 'claim', side_effect=claim_then_revoke):
+            asyncio.run(run())
+        self.assertEqual(effects, [])
+        row = self.m.Operation.objects.get(pk=operation['id'])
+        self.assertEqual((row.state, row.code), ('refused', 'access_denied'))
+        self.assertFalse(self.m.ResourceClaim.objects.filter(operation=row, released_at=None).exists())
 
     def test_worker_effect_and_outbox_publish_are_outside_atomic(self):
         operation = self.submit()

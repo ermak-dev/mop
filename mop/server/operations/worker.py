@@ -17,6 +17,9 @@ class Worker:
         claim = await self.runtime.database(self.operations.claim, operation_id)
         if claim is None:
             return None
+        claim = await self.runtime.database(self.operations.prepare_effect, claim)
+        if claim is None:
+            return None
         try:
             applied = await self.node_executor.set_eligibility(claim)
             if type(applied) is not bool:

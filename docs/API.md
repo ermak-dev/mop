@@ -339,11 +339,20 @@ with `record_node_application`/`observe_node` permissions. A lost owner's rights
 cannot authorize a new stage, but does not erase an already confirmed effect fact.
 
 The worker accepts only the finite managed `set_eligibility(Claim)` adapter port.
-A boolean confirmation means the effect is finished and either applied or known
-not applied; an exception/uncertain response records `unknown` and retains every
-claim. Lease expiry, caller timeout and worker restart do not mint a new executor.
+After claim commit it rechecks current authority, target revision and expiry in a
+separate durable dispatch checkpoint. The claim carries its immutable deadline;
+the real receiver must also enforce it after transport waits, before the physical
+effect. A boolean confirmation means the effect is finished and either applied or
+known not applied; an exception/uncertain response records `unknown` and retains
+every claim. Lease expiry, caller timeout and worker restart do not mint a new executor.
 The test composition owns a managed fake adapter and real PostgreSQL connections;
 there is no fake adapter or automatic-success workflow in the production root.
+Safe authorization refusal phrases remain in the scoped operation result and
+audit; the general outbox contains codes and revisions, not credentials or raw
+exceptions. A confirmed receipt for an older configuration still records
+quiescence and releases its claims. It does not mark a newer catalog revision
+applied or overwrite that revision's observation; the result explicitly reports
+`effect_confirmed_prior_revision` and `projection_updated: false`.
 
 | Consumer or handler | Actual remaining dependency before cutover |
 |---|---|

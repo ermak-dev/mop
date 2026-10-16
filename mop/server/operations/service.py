@@ -1,6 +1,6 @@
 """Durable admission/lifecycle; SQL никогда не охватывает внешний эффект."""
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from django.db import transaction
@@ -51,6 +51,7 @@ class Claim:
     source_revision: int
     eligible: bool
     revision: int
+    not_after: datetime
 
 
 def _binding(actor):
@@ -85,33 +86,37 @@ def _installation(epoch=None):
 
 
 def _snapshot(row):
-    receipt = m.EffectReceipt.objects.filter(step__operation=row).values('id', 'applied', 'received_at').first()
+    receipt = m.EffectReceipt.objects.filter(step__operation=row).values('id', 'applied', 'source_revision').first()
     started = m.Step.objects.filter(operation=row, token__isnull=False).exists()
     return dict(id=str(row.pk), request_id=str(row.request_id), epoch=str(row.epoch), state=row.state,
-        revision=row.revision, code=row.code, target={'id': str(row.node_id), 'kind': 'node',
+        revision=row.revision, code=row.code, reason=row.reason, target={'id': str(row.node_id), 'kind': 'node',
             'revision': str(row.expected_revision + int(started)), 'source_revision': str(row.expected_revision)},
         resources_held=m.ResourceClaim.objects.filter(operation=row, released_at=None).exists(),
-        evidence=({'receipt_id': str(receipt['id']), 'applied': receipt['applied']} if receipt else None))
+        evidence=({'receipt_id': str(receipt['id']), 'applied': receipt['applied'],
+            'source_revision': str(receipt['source_revision']),
+            'applied_revision': str(receipt['source_revision'] + 1) if receipt['applied'] else None,
+            'projection_updated': row.code == 'effect_confirmed'} if receipt else None))
 
 
 def _event(row):
     values = dict(operation=row, revision=row.revision, state=row.state, code=row.code,
                   target_revision=Node.objects.get(pk=row.node_id).revision)
-    m.AuditEvent.objects.create(**values)
+    m.AuditEvent.objects.create(reason=row.reason, **values)
     m.OutboxEvent.objects.create(**values)
 
 
-def _move(row, state, code, *, expected_revision):
+def _move(row, state, code, *, expected_revision, safe_reason=None):
     try:
         change = transition(row.state, state, revision=row.revision, expected_revision=expected_revision)
     except ValueError:
         raise Refused('revision_conflict' if row.revision != expected_revision else 'operation_conflict') from None
     before = row.revision
     row.state, row.revision, row.code = change.state.value, change.revision, code
+    row.reason = safe_reason or _MESSAGES.get(code, code.replace('_', ' '))
     if state not in (State.ACCEPTED, State.RUNNING, State.RECONCILING):
         row.completed_at = timezone.now()
     if not m.Operation.objects.filter(pk=row.pk, revision=before).update(state=row.state,
-            revision=row.revision, code=row.code, completed_at=row.completed_at):
+            revision=row.revision, code=row.code, reason=row.reason, completed_at=row.completed_at):
         raise Refused('revision_conflict')
     _event(row)
 
@@ -205,7 +210,7 @@ class Operations:
 
     def _claim_value(self, row, step):
         return Claim(row.pk, step.pk, step.token, row.epoch, row.node_id,
-                     row.expected_revision, row.eligible, row.revision)
+                     row.expected_revision, row.eligible, row.revision, row.not_after)
 
     def claim(self, operation_id):
         _independent()
@@ -220,8 +225,8 @@ class Operations:
             tuple(Project.objects.select_for_update().filter(pk__in=projects).order_by('pk'))
             try:
                 self._authorize(_actor(row), 'catalog.' + row.action + '_node', row.node_id, projects)
-            except Denied:
-                _move(row, State.REFUSED, 'access_denied', expected_revision=row.revision)
+            except Denied as error:
+                _move(row, State.REFUSED, 'access_denied', expected_revision=row.revision, safe_reason=str(error))
                 return None
             if row.not_after <= timezone.now():
                 _move(row, State.EXPIRED, 'deadline_expired', expected_revision=row.revision)
@@ -267,9 +272,57 @@ class Operations:
         step = m.Step.objects.select_for_update().get(operation=row)
         if (row.epoch != claim.epoch or row.restore_generation != generation or step.pk != claim.step_id
                 or step.token != claim.token or row.node_id != claim.node_id
-                or row.expected_revision != claim.source_revision or row.eligible != claim.eligible):
+                or row.expected_revision != claim.source_revision or row.eligible != claim.eligible
+                or row.not_after != claim.not_after):
             raise Refused('claim_conflict')
         return row, step
+
+    def prepare_effect(self, claim):
+        """После claim COMMIT: текущий допуск и единственный dispatch checkpoint.
+
+        COMMIT checkpoint не доказывает старт эффекта. Получатель также обязан
+        проверить bound not_after перед физическим действием, включая transit wait.
+        """
+        _independent()
+        with short_transaction():
+            row, step = self._bound(claim)
+            if row.state != State.RUNNING or step.dispatched_at is not None:
+                return None
+            if row.revision != claim.revision:
+                raise Refused('revision_conflict')
+            projects, code, reason = self._scope(row), None, None
+            try:
+                self._authorize(_actor(row), 'catalog.' + row.action + '_node', row.node_id, projects)
+            except Denied as error:
+                code, reason = 'access_denied', str(error)
+            node = Node.objects.select_for_update().get(pk=row.node_id)
+            if code is None:
+                if not Installation.objects.get(pk=1).effects_enabled:
+                    code = 'effects_disabled'
+                elif row.not_after <= timezone.now():
+                    code = 'deadline_expired'
+                elif (node.revision != row.expected_revision + 1 or
+                      set(projects) != set(NodeProject.objects.filter(node=node).values_list('project_id', flat=True))):
+                    code = 'revision_conflict'
+            if code is not None:
+                # Только этот владелец знает, что adapter ещё не вызывался;
+                # timeout уже dispatched stage сюда не попадает.
+                _move(row, State.REFUSED, code, expected_revision=row.revision, safe_reason=reason)
+                step.quiescent_at = timezone.now()
+                step.save(update_fields=['quiescent_at'])
+                m.ResourceClaim.objects.filter(operation=row, step=step, token=claim.token,
+                    released_at=None).update(released_at=step.quiescent_at)
+                return None
+            step.dispatched_at = timezone.now()
+            step.save(update_fields=['dispatched_at'])
+            before = row.revision
+            row.revision += 1
+            row.code, row.reason = 'dispatch_authorized', 'current authority and execution deadline confirmed'
+            if not m.Operation.objects.filter(pk=row.pk, revision=before, state=State.RUNNING).update(
+                    revision=row.revision, code=row.code, reason=row.reason):
+                raise Refused('revision_conflict')
+            _event(row)
+            return self._claim_value(row, step)
 
     def uncertain(self, claim, *, expected_revision):
         _independent()
@@ -307,20 +360,23 @@ class Operations:
             if self.executor is None or self.executor.kind is not PrincipalKind.SERVICE:
                 raise Denied('enrolled node executor required for effect confirmation')
             catalog = Catalog(authorizer=self.access)
+            projection_updated = False
             if applied:
-                if not catalog.record_node_application(self.executor, row.node_id,
-                        target_revision=row.expected_revision + 1, receipt=str(step.pk)):
-                    raise Refused('revision_conflict')
-                catalog.observe_node(self.executor, row.node_id, eligible=row.eligible,
-                    source='operation:' + str(row.pk), observed_at=timezone.now())
+                projection_updated = catalog.record_node_application(self.executor, row.node_id,
+                    target_revision=row.expected_revision + 1, receipt=str(step.pk))
+                if projection_updated:
+                    catalog.observe_node(self.executor, row.node_id, eligible=row.eligible,
+                        source='operation:' + str(row.pk), observed_at=timezone.now())
+                # Новый catalog intent не отменяет подтверждённый старый факт.
+                # Не затирать новую projection, но сохранить receipt/quiescence.
             else:
                 self._authorize(self.executor, 'catalog.record_node_application', row.node_id, self._scope(row))
             m.EffectReceipt.objects.create(step=step, token=claim.token, epoch=row.epoch, node_id=row.node_id,
                 source_revision=row.expected_revision, decision_revision=expected_revision, applied=applied)
             step.quiescent_at = timezone.now()
             step.save(update_fields=['quiescent_at'])
-            _move(row, State.SUCCEEDED if applied else State.FAILED,
-                'effect_confirmed' if applied else 'effect_failed', expected_revision=row.revision)
+            code = ('effect_confirmed' if projection_updated else 'effect_confirmed_prior_revision') if applied else 'effect_failed'
+            _move(row, State.SUCCEEDED if applied else State.FAILED, code, expected_revision=row.revision)
             m.ResourceClaim.objects.filter(operation=row, step=step, token=claim.token, released_at=None).update(released_at=step.quiescent_at)
             result = _snapshot(row)
         return result

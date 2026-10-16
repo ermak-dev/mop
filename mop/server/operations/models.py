@@ -25,6 +25,7 @@ class Operation(models.Model):
     state = models.CharField(max_length=16, default=State.ACCEPTED)
     revision = models.PositiveBigIntegerField(default=1)
     code = models.CharField(max_length=64, blank=True)
+    reason = models.CharField(max_length=512, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     completed_at = models.DateTimeField(null=True)
     result_pruned = models.BooleanField(default=False)
@@ -48,6 +49,7 @@ class Step(models.Model):
     name = models.CharField(max_length=32, default='node_eligibility')
     token = models.UUIDField(null=True)
     started_at = models.DateTimeField(null=True)
+    dispatched_at = models.DateTimeField(null=True)
     lease_until = models.DateTimeField(null=True)
     quiescent_at = models.DateTimeField(null=True)
 
@@ -118,6 +120,7 @@ class AuditEvent(Evidence):
     target_revision = models.PositiveBigIntegerField()
     state = models.CharField(max_length=16)
     code = models.CharField(max_length=64)
+    reason = models.CharField(max_length=512, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta(Evidence.Meta):
