@@ -1,6 +1,6 @@
-# Проверки mop (#632): полный строгий mop dev test в Docker на
-# Python 3.12/PostgreSQL 16 и Python 3.13/PostgreSQL 17. Django runner
-# создаёт отдельные пустые БД, в том числе для concurrent hermetic прогонов.
+# Проверки mop (#678): единственная обязательная комбинация — Python 3.12
+# и PostgreSQL 17. Полный строгий suite и web/dist проверяются одним test job.
+# Django runner создаёт отдельные пустые БД для изолированных прогонов.
 #
 # Раннер -- shell-исполнитель `builder` с тегом docker, под непривилегированным
 # пользователем: image: он не видит, и шаги задачи шли бы на самом хосте
@@ -12,8 +12,9 @@
 # недостающей (#220: без jinja2 рендер юнитов пропускался, код 0) не
 # выглядит зелёным; пустой HOME -- та изоляция, за которую воевал #217; а
 # shell-раннер на контроллере отдал бы каждому push'у токен Nomad, сиды NATS
-# и .env установки. В контейнер едут только MOP_TESTS_STRICT и TESTS -- ни
-# окружения раннера, ни секретов, ни переменных установки, ни шагов deploy.
+# и .env установки. В контейнер едут только объявленные check-команды и
+# синтетические fixture inputs — ни окружения раннера, ни секретов установки,
+# ни шагов deploy.
 #
 # MOP_TESTS_STRICT=1 -- контракт #229: под ней любой SKIPPED -- отказ.
 #
@@ -54,9 +55,10 @@ stages: [test, deploy]
     SETUP:
       value: |
         apt-get update -qq
-        apt-get install -y -qq --no-install-recommends git openssl jq curl ca-certificates tmux >/dev/null
-        # Клиент 17 не восстанавливает свой dump на 16 (transaction_timeout).
-        # Используем подписанный upstream apt repo и matching major tools.
+        apt-get install -y -qq --no-install-recommends git openssl jq curl ca-certificates tmux libstdc++6 libatomic1 >/dev/null
+        export PATH="/opt/mop-node/bin:$PATH"
+        # Native backup/restore использует matching-major клиент PostgreSQL 17.
+        # Пакет берётся из подписанного upstream apt repo.
         install -d /usr/share/postgresql-common/pgdg
         curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
         printf '%s\n' 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main' > /etc/apt/sources.list.d/pgdg.list
@@ -78,7 +80,7 @@ stages: [test, deploy]
         done
         useradd --home-dir /tmp/ci-home ci
         install -d -o ci -m 0700 /tmp/ci-home
-        chown -R ci /io
+        chown -R ci /io /tmp/ci-home
         exec su ci -s /bin/bash -c "$TESTS"
       expand: false
   script:
@@ -103,19 +105,41 @@ stages: [test, deploy]
     # Native TLS/ACL broker запускается только тестом в owned runner namespace.
     - mkdir "/tmp/mop-ci-nats-$CI_JOB_ID"
     - docker create --name "mop-ci-nats-image-$CI_JOB_ID" nats:2.10.26
+    # Из Node image берём только toolchain: все mop-команды работают на Python 3.12.
+    - mkdir "/tmp/mop-ci-node-$CI_JOB_ID"
+    - mkdir -p "/tmp/mop-ci-node-$CI_JOB_ID/bin" "/tmp/mop-ci-node-$CI_JOB_ID/lib/node_modules"
+    - docker create --name "mop-ci-node-image-$CI_JOB_ID" "$NODE_IMAGE"
+    - docker cp "mop-ci-node-image-$CI_JOB_ID:/usr/local/bin/node" "/tmp/mop-ci-node-$CI_JOB_ID/bin/node"
+    - docker cp "mop-ci-node-image-$CI_JOB_ID:/usr/local/lib/node_modules/npm" "/tmp/mop-ci-node-$CI_JOB_ID/lib/node_modules/"
+    - ln -s ../lib/node_modules/npm/bin/npm-cli.js "/tmp/mop-ci-node-$CI_JOB_ID/bin/npm"
+    - ln -s ../lib/node_modules/npm/bin/npx-cli.js "/tmp/mop-ci-node-$CI_JOB_ID/bin/npx"
+    - chmod -R a+rX "/tmp/mop-ci-node-$CI_JOB_ID"
     - docker cp "mop-ci-nats-image-$CI_JOB_ID:/nats-server" "/tmp/mop-ci-nats-$CI_JOB_ID/nats-server"
-    - >-
-      docker run --rm --network "mop-ci-$CI_JOB_ID"
-      -v "$CI_PROJECT_DIR:/io" -w /io
-      -v mop-ci-pip:/root/.cache/pip
-      -v "/tmp/mop-ci-nats-$CI_JOB_ID:/opt/mop-nats:ro"
-      -e MOP_TEST_NATS_BINARY=/opt/mop-nats/nats-server
-      -e MOP_TESTS_STRICT -e TESTS -e POSTGRES_MAJOR -e MOP_TEST_POSTGRES_HOST=postgres
-      "$PYTHON_IMAGE" bash -euc "$SETUP"
+    - |
+      export PYTHON_TESTS="$TESTS"
+      export TESTS='
+      python_status=0
+      bash -c "$PYTHON_TESTS" || python_status=$?
+      web_status=0
+      bash -c "$CHECK" || web_status=$?
+      if [ "$python_status" -ne 0 ] || [ "$web_status" -ne 0 ]; then
+        exit 1
+      fi'
+      docker run --rm --network "mop-ci-$CI_JOB_ID" \
+        -v "$CI_PROJECT_DIR:/io" -w /io \
+        -v mop-ci-pip:/root/.cache/pip \
+        -v mop-ci-npm:/tmp/ci-home/.npm \
+        -v "/tmp/mop-ci-nats-$CI_JOB_ID:/opt/mop-nats:ro" \
+        -v "/tmp/mop-ci-node-$CI_JOB_ID:/opt/mop-node:ro" \
+        -e MOP_TEST_NATS_BINARY=/opt/mop-nats/nats-server \
+        -e MOP_TESTS_STRICT -e TESTS -e PYTHON_TESTS -e CHECK -e POSTGRES_MAJOR -e MOP_TEST_POSTGRES_HOST=postgres \
+        "$PYTHON_IMAGE" bash -euc "$SETUP"
   after_script:
     - docker rm -f "mop-ci-db-$CI_JOB_ID" || true
     - docker rm -f "mop-ci-nats-image-$CI_JOB_ID" || true
+    - docker rm -f "mop-ci-node-image-$CI_JOB_ID" || true
     - rm -rf "/tmp/mop-ci-nats-$CI_JOB_ID"
+    - rm -rf "/tmp/mop-ci-node-$CI_JOB_ID"
     - docker network rm "mop-ci-$CI_JOB_ID" || true
     # И при отказе: контейнер оставил checkout чужим (ci, root), и
     # следующая задача раннера его бы не вычистила -- отдаём пользователю
@@ -125,50 +149,33 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
-    # Полный строгий suite, включая Access и Secret cases, без narrow overrides.
+    # Оба обязательных gate исполняются здесь, даже если один из них красный.
     TESTS: bin/mop dev test -v
     PYTHON_IMAGE: python:3.12-slim-trixie
-    POSTGRES_IMAGE: postgres:16-bookworm
-    POSTGRES_MAJOR: "16"
-
-controller:pg17:
-  extends: .tests
-  variables:
-    # Тот же полный строгий suite на втором поддержанном PostgreSQL.
-    TESTS: bin/mop dev test -v
-    PYTHON_IMAGE: python:3.13-slim-trixie
     POSTGRES_IMAGE: postgres:17-bookworm
     POSTGRES_MAJOR: "17"
-
-# Дашборд (#297): собранный web/dist лежит в репозитории, потому что на
-# серверах node нет и rumop раскатывается с сервера вручную. Задача собирает
-# приложение заново и сравнивает с закоммиченным байт в байт: разошедшийся с
-# исходниками dist -- красное, а не молчание. Образ node несёт python3 (для
-# диспетчера mop) и npm; кэш npm -- том docker, как кэш pip у проверок.
-web:dist:
-  stage: test
-  tags: [docker]
-  variables:
+    # Node нужен только frontend-гейтам; Python compatibility остаётся 3.12.
     NODE_IMAGE: node:22-bookworm
+    # Все три frontend-гейта (#678): build --check, types и полный Vitest.
+    # Каждый со своим кодом -- без fail-fast: ранний отказ web-команд не
+    # должен скрывать остальные, красит любой.
     CHECK:
-      value: bin/mop dev web build --check
+      value: |
+        web_build_status=0
+        bin/mop dev web build --check || web_build_status=$?
+        web_types_status=0
+        bin/mop dev web test --types || web_types_status=$?
+        web_tests_status=0
+        bin/mop dev web test || web_tests_status=$?
+        test "$web_build_status" -eq 0 && test "$web_types_status" -eq 0 && test "$web_tests_status" -eq 0
       expand: false
-  script:
-    - >-
-      docker run --rm
-      -v "$CI_PROJECT_DIR:/io" -w /io
-      -v mop-ci-npm:/root/.npm
-      -e CHECK
-      "$NODE_IMAGE" bash -euc "$CHECK"
-  after_script:
-    - docker run --rm -v "$CI_PROJECT_DIR:/io" alpine chown -R "$(id -u):$(id -g)" /io
 
 deploy:mop:
   stage: deploy
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET
   tags: [docker]
-  needs: [test:py3.12, controller:pg17, web:dist]
+  needs: [test:py3.12]
   # Одна выкладка за раз: два master'а подряд не раскатываются внахлёст.
   resource_group: mop-deploy
   variables:

@@ -338,12 +338,13 @@ registration rather than treating a superuser or caller-selected owner as a
 substitute for a missing capability.
 
 Owned source-only socket checks can exercise actual distinct OS UIDs with
-`mop dev controller --postgres 16 --check credential_service --cross-uid`
-(and 17). Only that explicit fixture runs its test process as root inside its
+`mop dev controller --postgres 17 --check credential_service --cross-uid`
+on Python 3.12. Only that explicit fixture runs its test process as root inside its
 new isolated container; the default CI suite remains unprivileged. This creates
 no live pool service or host account and passes no installation inputs.
 
-Cold-start order is dependency setup, provisioned PostgreSQL 16/17 and trust
+Cold-start acceptance uses Python 3.12 + PostgreSQL 17 only. Its order is dependency
+setup, provisioned PostgreSQL 17 and trust
 roots, `migrate`, `initialize`, `admin --username name`, `check`, then `serve` and
 `worker` under their restricted principals. `admin` reads and confirms the
 password privately; it only creates the first administrator and refuses to reset
@@ -386,7 +387,7 @@ target is provisioned by standard Django migrations; an already migrated but
 uninitialized controller target is also accepted. Existing installation/domain
 data or unrelated tables are refused. Matching PostgreSQL client tools of the
 same major must be installed by provisioning and selected in the process PATH
-(CI tests matching clients 16 and 17). Mismatched tools are refused: a newer dump
+(the required CI verifies PostgreSQL 17 clients and server). Mismatched tools are refused: a newer dump
 tool can introduce settings an older server cannot restore. Passwords travel
 through a transient private passfile, not argv. Root-key recovery material is
 separately protected and is not in the dump. Treat archives as authorized
