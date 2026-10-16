@@ -51,7 +51,7 @@ controller:pg17:
                         'public.py', '.mop/sandbox.yaml'], check=True)
         return root
 
-    def invoke(self, root, *, cleanup_failure=False):
+    def invoke(self, root, *, cleanup_failure=False, check='controller'):
         original_run, original_which = subprocess.run, shutil.which
         snapshots, commands = [], []
 
@@ -73,7 +73,7 @@ controller:pg17:
                 patch.object(controller.shutil, 'which', side_effect=lambda name:
                              '/fixture/docker' if name == 'docker' else original_which(name)), \
                 patch.object(controller.subprocess, 'run', side_effect=run):
-            result = controller.main(['--postgres', '16'])
+            result = controller.main(['--postgres', '16', '--check', check])
         return result, snapshots, commands
 
     def test_snapshot_contains_tracked_and_new_source_but_no_ignored_inputs(self):
@@ -90,6 +90,13 @@ controller:pg17:
             self.assertNotIn(private, files)
         self.assertFalse(any(path.startswith('.git/') for path in files))
         self.assertTrue(any(command[1:3] == ['rm', '-f'] for command in commands))
+
+    def test_runtime_gate_can_be_selected_in_owned_postgres_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, commands = self.invoke(self.source(directory), check='controller_runtime')
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if 'bash' in command)
+        self.assertIn('TESTS=python3 tests/controller_runtime.py', runner)
 
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
