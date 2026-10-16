@@ -136,6 +136,17 @@ class SendCommand:
         _require(type(self.notify_when_idle) is bool, "notify_when_idle")
 
 
+@dataclass(frozen=True)
+class DispatchCommand(SendCommand):
+    """Отдельный intent, не флаг обхода receiving policy."""
+
+
+def parse_dispatch(body):
+    value = parse_send(body)
+    return DispatchCommand(value.intent, value.message, value.priority,
+                           value.wait_seconds, value.notify_when_idle)
+
+
 def _intent(target_id, body):
     if type(body["schema_version"]) is not int or body["schema_version"] != 1:
         raise InvalidCommand("unsupported_schema")
@@ -218,13 +229,13 @@ def decode_body(raw):
 def intent_digest(command, *, key):
     """HMAC скрывает угадываемый plaintext; ключ — отдельный bootstrap-purpose, не root_digest."""
     _require(type(key) is bytes and 32 <= len(key) <= 1024, "digest_key")
-    _require(type(command) in (RestartCommand, SendCommand), "body")
+    _require(type(command) in (RestartCommand, SendCommand, DispatchCommand), "body")
     identity = command.intent
     params = {"fresh": command.fresh} if type(command) is RestartCommand else {
         "message": command.message, "priority": command.priority.value,
         "wait_seconds": command.wait_seconds, "notify_when_idle": command.notify_when_idle,
     }
-    value = {"schema_version": 1, "action": "restart" if type(command) is RestartCommand else "send",
+    value = {"schema_version": 1, "action": "restart" if type(command) is RestartCommand else "dispatch" if type(command) is DispatchCommand else "send",
              "epoch": str(identity.epoch), "target_id": str(identity.target_id),
              "incarnation": str(identity.incarnation), "expected_revision": str(identity.expected_revision),
              "not_after": identity.not_after.isoformat(timespec="microseconds").replace("+00:00", "Z"),

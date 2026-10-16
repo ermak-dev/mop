@@ -101,6 +101,8 @@ def _snapshot(row):
             steps=list(m.Step.objects.filter(operation=row).order_by('ordinal').values('name','outcome','evidence')),
             evidence=({'receipt_id':str(receipt['id']), 'action':receipt['step__name'],
                 'incarnation':str(row.incarnation_id), 'confirmed':receipt['applied']} if receipt else None))
+    if row.action in ('send', 'dispatch'):
+        result['message_id'] = str(row.messagebinding.message_id)
     return result
 
 
@@ -143,6 +145,7 @@ class Operations:
         self.executor = executor
         self.targets, self.restart_support = targets, restart_support
         self.builds = None
+        self.messages = None
         self.queue_limit, self.project_limit, self.execution_limit = queue_limit, project_limit, execution_limit
 
     def _require_binding(self):
@@ -170,13 +173,23 @@ class Operations:
     def _scope(self, row):
         return tuple(row.projects.values_list('pk', flat=True))
 
+    def view_own_puppet_operation(self, actor, project_ids, *, row=None):
+        if actor.kind is PrincipalKind.GRANT:
+            current_actor(actor, grants=self.grants)
+            if row is not None and (row.actor_id != actor.user_id or row.actor_binding != _binding(actor)):
+                raise NotVisible('operation not found')
+            # Result-reading не новая role capability и не право читать соседей.
+            self.access.authorize_owner(actor.human_owner_id, 'operations.view_operation', project_ids=project_ids)
+        else:
+            self.access.authorize(actor, 'operations.view_operation', project_ids=project_ids)
+
     def _disclose(self, actor, row):
         if row.action == 'build':
             if self.builds is None:
                 raise Refused('controller_unavailable')
             return self.builds.disclose(actor, row)
         if row.target_kind == 'puppet':
-            self.access.authorize(actor, 'operations.view_operation', project_ids=self._scope(row))
+            self.view_own_puppet_operation(actor, self._scope(row), row=row)
         else:
             self._authorize(actor, 'operations.view_operation', row.node_id, self._scope(row))
         # Запрос по request_id принадлежит actor; ID disclosure допускает отдельное
@@ -186,14 +199,28 @@ class Operations:
         return _snapshot(row)
 
     def submit(self, actor, command):
-        from .commands import RestartCommand
+        from .commands import RestartCommand, SendCommand, DispatchCommand
         from .puppet import RestartHandler
         # Конечный registry, не выбор метода/import из payload.
-        handlers = {NodeEligibility: self.submit_node, RestartCommand: RestartHandler(self).submit}
+        handlers = {NodeEligibility: self.submit_node, RestartCommand: RestartHandler(self).submit,
+            SendCommand: self.submit_message, DispatchCommand: self.submit_message}
         handler = handlers.get(type(command))
         if handler is None:
             raise ValueError('finite typed operation command required')
         return handler(actor, command)
+
+    def submit_message(self, actor, command, *, holder=None):
+        if self.messages is None:
+            raise Refused('controller_unavailable', safe_reason='protected message handler is unavailable')
+        return self.messages.submit(actor, command, holder=holder)
+
+    def machine_handler(self, action):
+        from .puppet import RestartHandler
+        if action == 'restart':
+            return RestartHandler(self)
+        if action in ('send', 'dispatch') and self.messages is not None:
+            return self.messages
+        raise Refused('controller_unavailable', safe_reason='named puppet handler is unavailable')
 
     def submit_node(self, actor, command):
         if type(command) is not NodeEligibility:
@@ -488,6 +515,8 @@ class Operations:
 
     def pending_machine(self, *, node_id, executor_epoch, project_ids, limit):
         from .puppet import RestartHandler
+        if self.messages is not None:
+            self.messages.expire_payloads()
         return RestartHandler(self).pending(node_id=node_id, executor_epoch=executor_epoch, project_ids=project_ids, limit=limit)
 
     def current_machine(self, operation_id, step_id):

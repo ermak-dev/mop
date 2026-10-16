@@ -446,6 +446,15 @@ class Grants:
         """Проверка получающего grant без provider I/O; инициатора проверяет WorkPort."""
         self._execution_rows(binding)
 
+    @storage_boundary
+    def authorize_recipient(self, binding, *, dispatch=False):
+        """Receiving policy — SQL-only gate; outgoing capabilities проверяет Access."""
+        if type(dispatch) is not bool:
+            raise ValueError('typed dispatch policy required')
+        rows = self._execution_rows(binding)
+        if dispatch and not rows[0].intent.bundle.receives_dispatch:
+            raise auth.Denied('target does not receive dispatch')
+
     def local_authority(self):
         return LocalGrantAuthority(self)
 

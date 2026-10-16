@@ -41,9 +41,9 @@ class Operation(models.Model):
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build')), name='operation_finite_action'),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'send', 'dispatch')), name='operation_finite_action'),
             models.CheckConstraint(condition=(Q(target_kind='node', action__in=('drain','enable','build'), eligible__isnull=False,
-                target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet', action='restart',
+                target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet', action__in=('restart', 'send', 'dispatch'),
                 eligible__isnull=True, target_id__isnull=False, incarnation_id__isnull=False)), name='operation_typed_target'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
@@ -67,7 +67,7 @@ class Step(models.Model):
     class Meta:
         default_permissions = ()
         constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
-            'restart_session', 'confirm_ready', 'image_build')), name='step_finite_handler'),
+            'restart_session', 'confirm_ready', 'image_build', 'send_message')), name='step_finite_handler'),
             models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
             models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
 
@@ -85,6 +85,26 @@ class RestartBinding(models.Model):
 
     class Meta:
         default_permissions = ()
+
+
+class MessageBinding(models.Model):
+    """Ограниченный AEAD input общего Operation; не отдельная очередь доставки."""
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    message_id = models.UUIDField(default=uuid.uuid4, unique=True)
+    ciphertext = models.BinaryField()
+    priority = models.CharField(max_length=8)
+    wait_seconds = models.PositiveSmallIntegerField(default=0)
+    notify_when_idle = models.BooleanField(default=False)
+    holder_endpoint = models.UUIDField(null=True)
+    holder_connection = models.UUIDField(null=True)
+
+    class Meta:
+        default_permissions = ()
+        constraints = [
+            models.CheckConstraint(condition=Q(priority__in=('now', 'next', 'later')), name='message_finite_priority'),
+            models.CheckConstraint(condition=Q(wait_seconds__lte=60), name='message_bounded_wait'),
+            models.CheckConstraint(condition=(Q(holder_endpoint__isnull=True, holder_connection__isnull=True)
+                | Q(holder_endpoint__isnull=False, holder_connection__isnull=False)), name='message_complete_holder')]
 
 
 class Resource(models.Model):

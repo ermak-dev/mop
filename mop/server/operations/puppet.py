@@ -65,14 +65,25 @@ def digest(command):
 
 
 class RestartHandler:
+    stages = STAGES
+
     def __init__(self, operations):
         self.ops = operations
 
     def _ports(self):
-        if self.ops.targets is None or self.ops.restart_support is None:
+        if self.ops.targets is None:
+            raise Refused('controller_unavailable', safe_reason='current target binding is unavailable')
+        messages = self.ops.messages
+        if self.ops.restart_support is None and (messages is None or messages.support is None):
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
 
-    def _authorize(self, actor, target):
+    def require(self, target, row=None):
+        if self.ops.restart_support is None:
+            raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
+        self.ops.targets.authorize(target)
+        self.ops.restart_support.require(target)
+
+    def _authorize(self, actor, target, row=None):
         self.ops.access.authorize(actor, 'sessions.restart_puppet', project_ids=(target.project_id,))
         # Разрешение action не даёт права уничтожить чужую человеческую работу.
         if actor.human_owner_id != target.owner_id:
@@ -105,8 +116,7 @@ class RestartHandler:
                 raise Denied('current assignment is unavailable')
             self.ops.access.authorize(actor, 'operations.view_operation', project_ids=(target.project_id,))
             self._authorize(actor, target)
-            self.ops.targets.authorize(target)
-            self.ops.restart_support.require(target)
+            self.require(target)
             if not installation.effects_enabled:
                 raise Refused('effects_disabled')
             now = timezone.now()
@@ -163,12 +173,13 @@ class RestartHandler:
             raise Refused('transaction_boundary')
         self._ports()
         installation = self.ops._installation()
-        row = m.Operation.objects.select_for_update().get(pk=operation_id, action='restart', target_kind='puppet')
+        row = m.Operation.objects.select_for_update().get(pk=operation_id, action__in=('restart', 'send', 'dispatch'), target_kind='puppet')
         step = m.Step.objects.select_for_update().get(pk=step_id, operation=row)
         value = self._value(row, step)
         expected = RestartTarget(value.target_id, row.restartbinding.project_id, value.node_id, value.incarnation_id,
             value.executor_epoch, value.owner_id, value.role, value.bundle_digest, value.grant_id, value.generation, value.revision)
-        self._authorize(_actor(row), expected)
+        handler = self.ops.machine_handler(row.action)
+        handler._authorize(_actor(row), expected, row)
         target = self.ops.targets.current(row.target_id)
         if (target is None or value.epoch != installation.epoch or row.restore_generation != installation.generation
                 or not installation.effects_enabled or row.state not in ('accepted','running')
@@ -176,8 +187,7 @@ class RestartHandler:
             raise Refused('operation_conflict')
         if target != expected:
             raise Refused('revision_conflict')
-        self.ops.targets.authorize(target)
-        self.ops.restart_support.require(target)
+        handler.require(target, row)
         if m.Step.objects.filter(operation=row, ordinal__lt=step.ordinal).exclude(outcome='succeeded').exists():
             raise Refused('operation_conflict')
         return value
@@ -219,6 +229,7 @@ class RestartHandler:
             restartbinding__executor_epoch=executor_epoch, epoch=installation.epoch,
             restore_generation=installation.generation, state__in=('accepted','running','reconciling')).order_by('pk')
         for row in rows:
+            m.MessageBinding.objects.filter(operation=row).update(ciphertext=b'')
             if row.state == State.ACCEPTED:
                 _move(row, State.REFUSED, 'executor_retired', expected_revision=row.revision)
             else:
@@ -240,6 +251,7 @@ class RestartHandler:
         if step.quiescent_at is not None:
             raise Refused('claim_conflict')
         if outcome == 'unknown':
+            m.MessageBinding.objects.filter(operation=row).update(ciphertext=b'')
             step.outcome, step.evidence = outcome, evidence
             step.save(update_fields=('outcome','evidence'))
             if row.state != State.UNKNOWN:
@@ -252,8 +264,9 @@ class RestartHandler:
             source_revision=row.expected_revision, decision_revision=row.revision, applied=outcome=='succeeded')
         step.outcome, step.evidence, step.quiescent_at = outcome, evidence, timezone.now()
         step.save(update_fields=('outcome','evidence','quiescent_at'))
-        terminal = outcome == 'failed' or step.ordinal == len(STAGES)
+        terminal = outcome == 'failed' or step.ordinal == len(self.ops.machine_handler(row.action).stages)
         if terminal:
+            m.MessageBinding.objects.filter(operation=row).update(ciphertext=b'')
             _move(row, State.SUCCEEDED if outcome=='succeeded' else State.FAILED,
                 'effect_confirmed' if outcome=='succeeded' else 'effect_failed', expected_revision=row.revision)
             m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
