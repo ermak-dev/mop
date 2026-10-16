@@ -206,11 +206,11 @@ class Catalog:
         self._authorize(actor, 'catalog.view_node', nodes=(row.id,), projects=self._node_scope(row.id))
         return snapshot(row)
 
-    def _change_node_flag(self, actor, node_id, field, value, revision):
+    def _change_node_flag(self, actor, node_id, field, value, revision, *, action='catalog.change_node'):
         flag(value)
         with transaction.atomic():
             row = m.Node.objects.select_for_update().get(pk=node_id)
-            self._authorize(actor, 'catalog.change_node', nodes=(row.id,), projects=self._node_scope(row.id))
+            self._authorize(actor, action, nodes=(row.id,), projects=self._node_scope(row.id))
             expected(row, revision)
             setattr(row, field, value)
             row.revision += 1
@@ -222,6 +222,12 @@ class Catalog:
 
     def set_node_eligibility(self, actor, node_id, eligible, *, expected_revision):
         return self._change_node_flag(actor, node_id, 'desired_eligible', eligible, expected_revision)
+
+    def request_node_eligibility(self, actor, node_id, eligible, *, expected_revision):
+        """Command intent: отдельное CONTROL право, не permission обход."""
+        flag(eligible)
+        action = 'catalog.enable_node' if eligible else 'catalog.drain_node'
+        return self._change_node_flag(actor, node_id, 'desired_eligible', eligible, expected_revision, action=action)
 
     def set_node_projects(self, actor, node_id, project_ids, *, expected_revision):
         ids = set(project_ids)

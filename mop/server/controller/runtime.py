@@ -160,6 +160,10 @@ class Runtime:
         self._closing_adapter = None
 
     @property
+    def accepting(self):
+        return not self._stopped
+
+    @property
     def pending(self):
         return sum(self._counts.values())
 
@@ -179,7 +183,9 @@ class Runtime:
             raise
 
     async def _submit(self, kind, semaphore, capacity, function):
-        if self._stopped:
+        # Уже принадлежащий Runtime эффект должен записать result при drain.
+        # Новые внешние callers после stop по-прежнему получают отказ.
+        if self._stopped and (kind != 'database' or asyncio.current_task() not in self._tasks):
             raise RuntimeError('runtime is stopped')
         if self._counts[kind] >= capacity or self.pending >= self._capacity:
             raise Backpressure('controller runtime capacity exhausted')

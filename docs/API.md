@@ -317,6 +317,48 @@ Preserve safe library refusal reasons. Raw untrusted exceptions are translated
 once at their adapter, not repeatedly sanitized into an empty generic error.
 A failed HTTP response is not proof the external effect failed.
 
+## Durable operations implementation checkpoint (#625)
+
+The first ORM/DRF vertical is **node drain/enable**, not a production replacement
+for every operation in CONTROL. It uses the canonical catalog and Access migration
+graph. `Operation`, `Step`, `EffectReceipt`, ordered durable resource claims,
+`AuditEvent` and `OutboxEvent` are database records. Admission, claim, catalog intent,
+result/application evidence and publication acknowledgment have independent short
+commit boundaries. No operation model runs an effect from `save` or a signal.
+
+Implemented endpoints are `POST /api/v1/nodes/<uuid>/commands/drain` and `/enable`,
+`GET /api/v1/operations/<uuid>` and
+`GET /api/v1/operations?request_id=<uuid>&epoch=<uuid>`. Node command envelopes use
+schema version, epoch, client request ID, expected catalog revision, UTC deadline
+and empty `params`; they accept no shell, subject or adapter selection. Catalog
+node IDs are stable configuration identities, not puppet runtime incarnations.
+Admission needs the specific `catalog.drain_node`/`enable_node` permission and
+installation-wide membership; queries need `operations.view_operation` and current
+scope. Executor confirmation uses a separately enrolled node-bound service actor
+with `record_node_application`/`observe_node` permissions. A lost owner's rights
+cannot authorize a new stage, but does not erase an already confirmed effect fact.
+
+The worker accepts only the finite managed `set_eligibility(Claim)` adapter port.
+A boolean confirmation means the effect is finished and either applied or known
+not applied; an exception/uncertain response records `unknown` and retains every
+claim. Lease expiry, caller timeout and worker restart do not mint a new executor.
+The test composition owns a managed fake adapter and real PostgreSQL connections;
+there is no fake adapter or automatic-success workflow in the production root.
+
+| Consumer or handler | Actual remaining dependency before cutover |
+|---|---|
+| Production drain/enable effects | #639 NodeExecutor adapter, runtime/incarnation and physical receipt fencing; bind its managed lifecycle in the controller root |
+| Restart/send | Typed pure inputs exist, but no ORM admission endpoint or effect handler; #639/#640 must provide session identity, encrypted delivery and confirmation ports |
+| Create/update/recycle/delete/wipe, project build, grant activation, credential rotation, terminal and maintenance operations | Finite subject-owned handlers and receipt/recovery rules; not an arbitrary callback registry and not accepted as implemented commands |
+| Worker process | Bounded Runtime-owned `Worker.run_one`/`run_pending` exist; root must wire the real executor, wake/poll and shutdown ownership rather than reuse the old web worker |
+| Realtime publication | Durable outbox publishing seam exists, including duplicate event IDs after lost ACK; #626 connects authorized event fan-out and resync |
+| Grants | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it |
+| Admin and CLI | #638/#642 call the same local service/DRF boundary; remove old admission/workflow owners only when these consumers are connected in the epic |
+| Retention | Completed results become undisclosable after the 90-day prune boundary; request identity cannot be reused. Physical audit/receipt erasure still requires the operator's explicit privacy/retention policy |
+
+This checkpoint does not authorize an old-pool deployment or imply that those
+remaining handlers have passed transport, crash or performance acceptance.
+
 ## Operation, claim and compensation lifecycle
 
 | From | To | Evidence/precondition |
