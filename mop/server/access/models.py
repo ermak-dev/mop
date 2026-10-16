@@ -249,6 +249,8 @@ class RoleBundleApproval(Evidence):
 class CreationIntent(Evidence):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     actor = models.ForeignKey(Principal, on_delete=models.PROTECT)
+    # UUID, не FK: logout удаляет credential, но не immutable намерение.
+    actor_credential_id = models.UUIDField()
     project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
     bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
     parent = models.ForeignKey('Grant', null=True, on_delete=models.PROTECT, related_name='+')

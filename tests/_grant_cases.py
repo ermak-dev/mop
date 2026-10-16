@@ -608,6 +608,13 @@ class GrantCases(TransactionTestCase):
     # точный credential создателя после provider wait.
     # HYPOTHESIS: повторная проверка обязана читать весь текущий authority,
     # а activation — сохранённую capability, не первый credential принципала.
+    # RED: /tmp/mop-635-live-red-seeded-pg17.log: шесть reported defects и
+    # подмена capability воспроизведены поведением (6 failures + 1 Denied).
+    # SOLUTION: final ancestor credentials; live policy/binding на retention;
+    # owner issue permission; credential activation; UUID capability в intent.
+    # RESULT: 40/40 grant cases green на PG16/17. Полный collector: 164 tests,
+    # два прежних DRF transport failures #632; это не зелёный общий gate.
+    # STATUS: FIXED — see #635 (семь safety regressions, не приёмка epic).
     def test_ancestor_token_revoke_during_recipient_decrypt_fences_delivery(self):
         parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
         source, actor = self.active(actor=parent_actor)
