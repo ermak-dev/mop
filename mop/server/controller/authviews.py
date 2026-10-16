@@ -174,10 +174,11 @@ class RevokeToken(PrivateView):
 
 class Identity(PrivateView):
     def get(self, request):
-        actor = access.current_actor(actor_for_request(request))
+        actor = access.current_actor(request.actor, grants=getattr(self, 'grant_resolver', None))
         return Response({'schema_version': 1, 'user_id': actor.user_id,
             'principal_id': str(actor.principal_id), 'kind': actor.kind.value,
-            'human_owner_id': actor.human_owner_id, 'node_id': str(actor.node_id) if actor.node_id else None})
+            'human_owner_id': actor.human_owner_id, 'node_id': str(actor.node_id) if actor.node_id else None,
+            'grant_id': str(actor.grant_id) if actor.grant_id else None})
 
 
 def _project(row):

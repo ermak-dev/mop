@@ -104,7 +104,6 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
-    # Полный строгий suite на точном issue SHA, включая controller/secret cases.
     PYTHON_IMAGE: python:3.12-slim-trixie
     POSTGRES_IMAGE: postgres:16-bookworm
     POSTGRES_MAJOR: "16"
@@ -112,7 +111,6 @@ test:py3.12:
 controller:pg17:
   extends: .tests
   variables:
-    # Тот же полный gate на втором поддерживаемом PostgreSQL major.
     PYTHON_IMAGE: python:3.13-slim-trixie
     POSTGRES_IMAGE: postgres:17-bookworm
     POSTGRES_MAJOR: "17"

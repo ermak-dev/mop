@@ -96,6 +96,17 @@ class ReceiptGuard:
             timezone.datetime.fromisoformat(f['expires_at']))
 
 
+def retirement_catalog(test, authorizer):
+    """Trusted fixture guard; production removal owners ещё не подключены."""
+    with connection.schema_editor() as editor:
+        editor.create_model(InspectionRecord)
+    def drop():
+        with connection.schema_editor() as editor:
+            editor.delete_model(InspectionRecord)
+    test.addCleanup(drop)
+    return services.Catalog(authorizer=authorizer, removal_guard=ReceiptGuard(test))
+
+
 class CatalogRetirementCases(TransactionTestCase):
     serialized_rollback = True
 

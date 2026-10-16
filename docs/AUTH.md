@@ -36,7 +36,7 @@ it is not AEAD/hashed token storage. Token/session records and their private bin
 references require protected DB/backup access and are not registered in Admin.
 CredentialBinding stores a token HMAC generation check or a reference to the actual
 Django Session, never an additional plaintext token store. ActorContext contains
-only immutable IDs/kind/owner/node references, never token/session keys or grants.
+only immutable IDs/kind/owner/node/grant references, never token/session keys or ORM grant objects.
 
 `token_context`, `session_context`, `current_actor` and `Access.authorize` reload
 current User, identity source/subject fingerprint, credential generation, session
@@ -70,6 +70,48 @@ Standard `view_project`/`view_node` are not declared twice. The fresh-install
 catalog migration graph has one permissions leaf, `0002_action_permissions`.
 Access's role/grant actions live on Principal. Later owning apps register their
 CONTROL actions before the evaluator can admit them.
+
+### Transaction-local delegated authority (#635 / #639)
+
+`Grants.local_authority()` exposes the standard delegated resolver methods
+`token_context`, `resolve_actor` and `authorize` without decrypting a prompt or
+manifest. It validates live credentials, current owner/source/permissions, active
+ancestors, pinned approvals and runtime bindings. Outgoing action authorization
+uses the immutable normalized capability rows and the same pure capability policy
+as the content-reading service. Publication writes all capability, spawn and secret
+name rows, checks their complete sets against the actual parsed bundle, then writes
+an immutable `RoleBundleSeal` in the same transaction. Ordinary child inserts lock
+the parent bundle and refuse any append after that seal, including before human
+approval. Approval uses the same parent lock for its final normalized check.
+The seal is publication evidence, not a flag edited on an existing RoleBundle;
+ordinary ORM creation, mutation, deletion and bulk writes cannot manufacture or
+replace it. The schema migration does not backfill seals or trust unsealed rows:
+reads, approvals and full/local grant authority fail closed for them.
+
+The local authority owns a short SQL transaction, or joins the caller's transaction;
+no provider/network I/O is permitted in its approval and binding query ports.
+Full and local token resolvers pin the presented key's digest to the selected
+CredentialBinding generation before constructing an actor. Looking up a token and
+then a binding by user must not adopt a newly issued credential during rotation;
+the existing current-credential checks still apply to that exact binding UUID.
+
+`Grants.authorize_execution(RoleBinding)` is the narrower receiving-grant gate.
+It requires an existing caller transaction and compares every actual project,
+target, incarnation, role/digest, grant and human-owner reference. Ancestor Grant
+rows are locked in primary-key order. Binding and approval queries must remain
+SQL-only and must not acquire resource locks in the reverse order. The gate does
+not authenticate the machine, authorize the initiating action, create an
+execution claim or establish effect quiescence. Machine admission and the
+Operations work port supply those independent checks. A human-authorized incoming
+restart/message does not require the receiving role to possess the corresponding
+outgoing capability.
+
+Content-reading/preparation methods on `Grants` still perform provider I/O outside
+transactions. Do not bind full `Grants.authorize` to an atomic admission callback;
+use the local authority for that boundary and the separate credential runtime
+for protected aggregate use cases. CreationIntent retains the exact creator
+credential UUID: activation cannot select another still-valid browser/token
+credential after the actual creator logged out or was revoked.
 
 The authoritative Router respects an existing LoginIdentity before source order.
 Otherwise the first knowing source decides, including wrong password, ambiguous
