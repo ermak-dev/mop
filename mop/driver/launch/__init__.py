@@ -8,6 +8,7 @@ import base64
 import binascii
 from dataclasses import dataclass, field
 import ipaddress
+import os
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
@@ -109,6 +110,12 @@ class RegisteredLayout:
         if (not isinstance(self.home, Path) or not self.home.is_absolute()
                 or '..' in self.home.parts or type(self.registration) is not Registration):
             raise ValueError('trusted absolute registered layout required')
+        # sockaddr_un вмещает 108 байт sun_path c завершающим NUL (#677):
+        # layout, чей session.sock не помещается, отказывает здесь, до spawn --
+        # иначе тело умирает на bind молча, до первой готовности. Граница
+        # проверена на настоящем kernel: 107 байт bind проходит, 108 -- нет.
+        if len(os.fsencode(self.runtime/'session.sock')) > 107:
+            raise ValueError('registered runtime path does not fit sockaddr_un')
 
     @property
     def clone(self):

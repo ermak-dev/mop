@@ -90,6 +90,31 @@ class LaunchTests(unittest.TestCase):
         other = m.RegisteredLayout(layout.home, replace(r, work=replace(w, incarnation_id=str(uuid4()))))
         self.assertNotEqual(layout.runtime, other.runtime)
 
+    def test_infeasible_unix_socket_path_is_refused_before_any_spawn(self):
+        # BUG (#677): layout, чей session.sock длиннее sockaddr_un (108 с NUL),
+        # принимается как доверенный: ребёнок умирает на bind молча, до «ready»,
+        # и контракт живого процесса не проверяется вовсе.
+        # HYPOTHESIS: RegisteredLayout не знает границы sockaddr_un, поэтому
+        # полный hermetic прогон (вложенные корни процессов, ~113-120 байт)
+        # тихо превращает проверку живого процесса в проверку трупа.
+        # SOLUTION: RegisteredLayout отказывает с явной причиной до spawn.
+        # RESULT: 49-байтовый home (107 байт session.sock) принимается,
+        # 50-байтовый (108) отказывает; bind на настоящем kernel подтверждает
+        # границу: 107 проходит, 108 -- AF_UNIX path too long.
+        m = api()
+        w = work()
+        r = m.Registration(w, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        feasible = m.RegisteredLayout(Path('/tmp/'+'h'*44), r)
+        self.assertEqual(len(os.fsencode(feasible.runtime/'session.sock')), 107)
+        # 108-байтовый session.sock -- тот же layout по арифметике production
+        # (home/'runtime'/incarnation/'session.sock'); после отказа конструктор
+        # сам такой объект уже не строит, длину считает проверка.
+        infeasible_home = '/tmp/'+'h'*45
+        infeasible_sock = f'{infeasible_home}/runtime/{w.incarnation_id}/session.sock'
+        self.assertEqual(len(os.fsencode(infeasible_sock)), 108)
+        with self.assertRaisesRegex(ValueError, 'sockaddr_un'):
+            m.RegisteredLayout(Path(infeasible_home), r)
+
     def test_exact_work_bootstrap_image_and_approved_bytes_are_required(self):
         m = api()
         b = bundle()
@@ -120,7 +145,11 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
         b = bundle()
         w = replace(work(), bundle_digest=b.digest)
         r = m.Registration(w, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
-        with tempfile.TemporaryDirectory(prefix='mop-643-') as directory:
+        # Короткий собственный корень (#677): во вложенном прогоне наследуемый
+        # TMPDIR удлиняет путь за границу sockaddr_un, и RegisteredLayout
+        # отказывает заранее; сокет здесь двойник, но путь обязан оставаться
+        # осуществимым, как у настоящего layout.
+        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
             root = Path(directory)
             layout = m.RegisteredLayout(root, r)
             root.joinpath('bus.json').write_text('old')
@@ -469,7 +498,15 @@ class PhysicalProcessTests(unittest.IsolatedAsyncioTestCase):
         from mop.node.body_launch import SessionApiProbe, SessionProof, process_identity
         w = work()
         r = m.Registration(w, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
-        with tempfile.TemporaryDirectory(prefix='m643-') as directory:
+        # HYPOTHESIS (#677): полный hermetic прогон вкладывает корни процессов
+        # друг в друга (TMPDIR родителя наследуется), и session.sock на
+        # /tmp/mop-test-run.../mop-test-run.../m643.../runtime/UUID/session.sock
+        # разрастается до ~120 байт > 107 sockaddr_un: ребёнок умирает на bind
+        # до «ready», и контракт живого процесса не проверяется вовсе.
+        # SOLUTION (#677): короткий собственный корень фикстуры прямо в /tmp,
+        # не наследующий длину родительских каталогов; владение и удаление --
+        # самой проверкой, не общим корнем процесса.
+        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
             layout = m.RegisteredLayout(Path(directory), r)
             layout.clone.mkdir(parents=True)
             layout.runtime.mkdir(parents=True, mode=0o700)
@@ -551,7 +588,10 @@ class SessionConfirmationTests(unittest.IsolatedAsyncioTestCase):
         from mop.common.telemetry import Ack
         w = work()
         r = m.Registration(w, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
-        with tempfile.TemporaryDirectory(prefix='m643-') as directory:
+        # Короткий собственный корень (#677): bridge-сокет здесь настоящий
+        # (bind и chmod 0o600 проверяются), во вложенном прогоне наследуемый
+        # TMPDIR удлиняет путь за sockaddr_un.
+        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
             path = Path(directory)/'hook.sock'
             os.chmod(directory, 0o700)
             proof = SessionProof(r, '%0', 'actual-session', uuid4(), Path(directory)/'session.sock', 123, 'start-1')
