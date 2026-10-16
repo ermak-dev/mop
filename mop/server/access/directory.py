@@ -153,7 +153,10 @@ def apply_directory(source_id, revision, result, *, configuration=None, expected
             permissions = []
             for action in result.permissions:
                 app, code = action.split('.')
-                permissions.append(Permission.objects.get(content_type__app_label=app, codename=code))
+                matches = list(Permission.objects.filter(content_type__app_label=app, codename=code))
+                if not matches:
+                    raise DirectoryUnavailable('directory permission catalogue is unavailable')
+                permissions.extend(matches)
             ownership.group.permissions.set(permissions)
             user.groups.add(ownership.group)
         m.CredentialEvent.objects.create(user=user, action='directory_validated' if result.allowed else 'directory_denied')
