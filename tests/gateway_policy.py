@@ -1,6 +1,8 @@
 """Проверки единственного владельца чистых правил management gateway #647."""
 import json
 import sys
+
+import hermetic  # noqa: F401 -- изоляция импорта до первого mop (#675)
 from _lib import Checks
 from mop.server import management_policy as p
 

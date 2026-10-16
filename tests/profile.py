@@ -6,8 +6,6 @@ RESULT: direct commandlet использует тот же HTTP handler, не gi
 red старого reader проверен в control_consumers до изменения командлета.
 STATUS: FIXED — see #642 (profile consumer, не весь scope задачи).
 """
-import contextlib
-import io
 import json
 import os
 import sys
@@ -15,13 +13,13 @@ import unittest
 from unittest.mock import patch
 
 import hermetic  # noqa: F401
+from _lib import run_command
+from _control_fixture import Fixture, Response, NODE, OP, TOKEN
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop import cli
 from mop.cli import _control
 from mop.cli.core import profile
 from mop.client import control as api
-from control_client import Fixture, Response
-from control_consumers import NODE, OP, TOKEN
 
 
 class Profiles(unittest.TestCase):
@@ -31,18 +29,17 @@ class Profiles(unittest.TestCase):
                 fixture = Fixture(Response(200, {'schema_version': 1, 'user_id': 2,
                     'principal_id': NODE, 'kind': kind, 'human_owner_id': 2,
                     'node_id': None, 'grant_id': grant_id}))
-                out, err = io.StringIO(), io.StringIO()
                 with patch.object(api, '_DeadlineHTTPSConnection', fixture.factory), \
-                     _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    self.assertEqual(profile.main([]), 0)
-                value = json.loads(out.getvalue())
+                     _control.use(api.ServerContext('https://controller.example', TOKEN)):
+                    out, err, code = run_command(profile.main, [])
+                self.assertEqual(code, 0)
+                value = json.loads(out)
                 self.assertEqual(value['kind'], kind)
                 self.assertEqual(value['principal_id'], NODE)
                 self.assertEqual(value['grant_id'], grant_id)
                 self.assertIsNone(value['action_permissions'])
                 self.assertFalse({'token', 'address', 'role', 'branch'} & value.keys())
-                self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+                self.assertNotIn(TOKEN, out+err)
                 self.assertEqual(fixture.calls[0][:2], ('GET', '/api/v1/identity'))
 
     def test_profile_declaration_does_not_grant_legacy_management_verbs(self):

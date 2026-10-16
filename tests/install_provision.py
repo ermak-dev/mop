@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import _lib  # noqa: F401
 import hermetic  # noqa: F401
-from fresh_install import FreshPlanFixture, ROOT
+from _fresh_install_fixture import FreshPlanFixture, ROOT
 
 
 # HYPOTHESIS: provisioning описывает OS resources, но не имеет конечного apply.

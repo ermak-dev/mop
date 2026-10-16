@@ -6,8 +6,10 @@ SPEC: #625 node eligibility не имеет incarnation; lookup требует e
 RESULT: meaningful red проверил недостающие bindings, потерю key/reason,
 неверный recovery target, scope селектора и admission до проверки wait.
 STATUS: FIXED — see #642 (только связанные consumers; вся миграция не завершена).
+
+#675: общие конверты/транспортные двойники -- в _control_fixture, захват
+вывода -- run_command из tests/_lib: своих диалектов файл не держит.
 """
-import contextlib
 import io
 import json
 import os
@@ -16,73 +18,13 @@ import unittest
 from unittest.mock import patch
 
 import hermetic  # noqa: F401
+from _lib import run_command
+from _control_fixture import (Fixture, Response, KEY, EPOCH, NODE, OP, DEADLINE,
+    TOKEN, PROJECT, POLICY, PUPPET, INCARNATION, puppet_row, pool_page,
+    build_operation, restart_operation, node_operation, page)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop import cli
 from mop.client import control as api
-from control_client import Fixture, Response
-
-KEY = '8e6449b9-65db-4148-aa68-a8b4020bd8b5'
-EPOCH = 'cb739f05-87ef-457d-a5a2-e205ed97cf49'
-NODE = 'e3089889-7246-4de1-93c3-2e1854151700'
-OP = 'a4948f9b-8bad-491a-a0cc-160d4da18828'
-DEADLINE = '2026-10-16T10:05:00Z'
-TOKEN = 'private-consumer-token'
-PROJECT = '5ee23d6c-04a4-43ae-9b91-409485c535fc'
-POLICY = 'b5600b0d-15cc-4fa3-ab0e-7c59d7e98939'
-PUPPET = '9db85243-4ae1-4511-8acc-bf6c8140cf2c'
-INCARNATION = 'f6db1446-0358-4dfd-8605-85ec12367ebc'
-
-
-def puppet_row():
-    unavailable = {'value': None, 'freshness': 'unavailable', 'reason': 'not_observed',
-        'sequence': None, 'producer_epoch': None, 'incarnation': None,
-        'observed_at': None, 'received_at': None, 'expires_at': None}
-    return {'kind': 'puppet', 'id': PUPPET, 'incarnation': INCARNATION,
-        'revision': '9007199254740993', 'deleted': False, 'name': None, 'aliases': [],
-        'project_id': PROJECT, 'project_name': 'owned', 'node_id': NODE, 'node_name': 'fixture-node',
-        'desired': {'revision': '7', 'role': 'worker', 'bundle_digest': 'a'*64,
-            'generation': '2', 'owner_id': '2', 'expires_at': DEADLINE},
-        'applied': {'identity': False, 'ready': False},
-        'observed': {kind: dict(unavailable) for kind in ('state', 'clone', 'size')},
-        'state': {'kind': 'unknown', 'detail': 'no current session observation', 'branch': None},
-        'node': {'desired': {'eligible': True}, 'applied': {'applied_revision': None, 'at': None},
-                 'observed': {'eligible': None, 'at': None, 'freshness': 'unverified',
-                              'reason': 'source_version_unavailable'}},
-        'usage': {'source': 'proxy', 'freshness': 'unavailable', 'reason': 'usage_query_not_bound'}}
-
-
-def pool_page():
-    return {'schema_version': 1, 'epoch': EPOCH, 'snapshot_id': OP,
-        'cursor': 'opaque-event-position', 'next_cursor': None, 'results': [puppet_row()],
-        'coverage': {'catalog': True, 'assignments': True, 'observations': True,
-            'operation_publication': False, 'pending_operations': False,
-            'endpoints': False, 'telemetry': False, 'usage': False}, 'handshake_complete': False}
-
-
-def build_operation(state='accepted'):
-    value = node_operation(state)
-    value['operation']['target'] = {'id': PROJECT, 'kind': 'project', 'source_revision': '5'}
-    value['operation']['build'] = {'policy_id': POLICY, 'source_commit': 'c'*40, 'source_ref': 'main',
-        'manifest_digest': 'a'*64, 'source_digest': 'b'*64, 'mode': 'update', 'target_nodes': [NODE],
-        'planned': False, 'skipped': False, 'affected_targets': [], 'unresolved_stages': [],
-        'stages': [], 'original_failure': None, 'compensation_failures': []}
-    return value
-
-
-def restart_operation(state='accepted'):
-    value = node_operation(state)
-    value['operation']['target'] = {'id': PUPPET, 'kind': 'puppet', 'incarnation': INCARNATION,
-                                  'revision': '7', 'source_revision': '7'}
-    value['operation']['steps'] = [{'name': name, 'outcome': '', 'evidence': ''}
-        for name in ('apply_identity', 'restart_session', 'confirm_ready')]
-    return value
-
-
-def node_operation(state='accepted'):
-    return {'schema_version': 1, 'epoch': EPOCH, 'operation': {
-        'id': OP, 'epoch': EPOCH, 'request_id': KEY, 'state': state, 'revision': '1',
-        'target': {'id': NODE, 'kind': 'node', 'revision': '2', 'source_revision': '1'},
-        'code': 'admitted', 'reason': 'command admitted', 'resources_held': True, 'evidence': None}}
 
 
 class Consumers(unittest.TestCase):
@@ -116,35 +58,30 @@ class Consumers(unittest.TestCase):
     def test_build_cli_is_named_admission_with_no_local_manifest_or_force_fallback(self):
         from mop.cli import _control
         self.response(build_operation(), 202)
-        out, err = io.StringIO(), io.StringIO()
         args = [PROJECT, '--policy-id', POLICY, '--target-node', NODE, '--epoch', EPOCH,
             '--expected-revision', '5', '--request-id', KEY, '--not-after', DEADLINE, '--mode', 'update']
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['build', *args])
-        self.assertEqual(code, 3, err.getvalue())
-        self.assertEqual(json.loads(out.getvalue())['operation']['state'], 'accepted')
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['build', *args])
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
         body = json.loads(self.fixture.calls[-1][2])
         self.assertEqual(body['target_nodes'], [NODE])
         self.assertEqual(body['policy_id'], POLICY)
         self.assertNotIn('branch', body)
         self.assertNotIn('manifest', body)
         self.assertIs(body['force_safety'], False)
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+        self.assertNotIn(TOKEN, out+err)
         for option in ('--force', '--force-safety'):
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(cli.main(['build', *args, option]), 2)
+            self.assertEqual(run_command(cli.main, ['build', *args, option])[2], 2)
         self.assertEqual(len(self.fixture.calls), 1)
 
     def test_restart_cli_uses_canonical_detail_desired_revision_not_projection_clock(self):
         from mop.cli import _control
         self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
         self.response(restart_operation(), 202)
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['restart', PUPPET, '--request-id', KEY, '--not-after', DEADLINE])
-        self.assertEqual(code, 3, err.getvalue())
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['restart', PUPPET, '--request-id', KEY, '--not-after', DEADLINE])
+        self.assertEqual(code, 3, err)
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'POST'])
         self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/puppets/{PUPPET}/commands/restart')
         body = json.loads(self.fixture.calls[-1][2])
@@ -152,28 +89,25 @@ class Consumers(unittest.TestCase):
         self.assertEqual(body['incarnation'], INCARNATION)
         self.assertEqual(body['params'], {'fresh': False})
         self.assertEqual(body['request_id'], KEY)
-        self.assertEqual(json.loads(out.getvalue())['operation']['state'], 'accepted')
+        self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
 
     def test_restart_explicit_binding_needs_no_roster_read_and_never_enables_override(self):
         from mop.cli import _control
         self.response(restart_operation('succeeded'))
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['restart', PUPPET, '--epoch', EPOCH, '--incarnation', INCARNATION,
-                '--expected-revision', '7', '--request-id', KEY, '--not-after', DEADLINE])
-        self.assertEqual(code, 0, err.getvalue())
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['restart', PUPPET, '--epoch', EPOCH,
+                '--incarnation', INCARNATION, '--expected-revision', '7',
+                '--request-id', KEY, '--not-after', DEADLINE])
+        self.assertEqual(code, 0, err)
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST'])
         for flag in ('--fresh', '--force'):
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(cli.main(['restart', PUPPET, flag]), 2)
+            self.assertEqual(run_command(cli.main, ['restart', PUPPET, flag])[2], 2)
         self.assertEqual(len(self.fixture.calls), 1)
 
     def test_restart_validates_request_identity_before_its_detail_query(self):
         from mop.cli import _control
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(['restart', PUPPET, '--request-id', '']), 1)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            self.assertEqual(run_command(cli.main, ['restart', PUPPET, '--request-id', ''])[2], 1)
         self.assertEqual(self.fixture.calls, [])
 
     def test_public_request_identity_factory_is_transient_and_rejects_replacement(self):
@@ -203,15 +137,13 @@ class Consumers(unittest.TestCase):
         changed = node_operation('succeeded')
         changed['operation']['target']['id'] = PROJECT
         self.response(changed)
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = _control.invoke('node drain', [NODE, '--epoch', EPOCH,
-                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('node drain', a[0]), [[NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE]])
         self.assertEqual(code, 3)
-        self.assertIn(KEY, err.getvalue())
-        self.assertIn('unknown', err.getvalue())
-        self.assertEqual(out.getvalue(), '')
+        self.assertIn(KEY, err)
+        self.assertIn('unknown', err)
+        self.assertEqual(out, '')
 
     def test_node_admission_uses_published_schema_and_get_only_recovery(self):
         self.assertTrue(hasattr(self.client, 'prepare_node_drain'), '#642 missing typed node drain consumer')
@@ -252,50 +184,44 @@ class Consumers(unittest.TestCase):
         self.fixture.responses.extend((OSError('private low-level detail'),
             Response(404, {'schema_version': 1, 'error': {'code': 'not_found',
                 'message': 'resource not found', 'retryable': False}})))
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = _control.invoke('node drain', [NODE, '--epoch', EPOCH,
-                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('node drain', a[0]), [[NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE]])
         self.assertEqual(code, 3)
-        self.assertIn(KEY, err.getvalue())
-        self.assertIn(EPOCH, err.getvalue())
-        self.assertIn('unknown', err.getvalue())
-        self.assertIn('not_found', err.getvalue())
-        self.assertIn('resource not found', err.getvalue())
-        self.assertNotIn('private low-level detail', err.getvalue())
+        self.assertIn(KEY, err)
+        self.assertIn(EPOCH, err)
+        self.assertIn('unknown', err)
+        self.assertIn('not_found', err)
+        self.assertIn('resource not found', err)
+        self.assertNotIn('private low-level detail', err)
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
 
     def test_lost_result_after_accepted_keeps_admitted_operation_and_request_key(self):
         from mop.cli import _control
         self.response(node_operation(), 202)
         self.fixture.responses.append(OSError('private result read failed'))
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = _control.invoke('node drain', [NODE, '--epoch', EPOCH,
-                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE, '--wait', '1'])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('node drain', a[0]), [[NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE, '--wait', '1']])
         self.assertEqual(code, 3)
-        self.assertIn(KEY, err.getvalue())
-        self.assertIn(OP, err.getvalue())
-        self.assertIn(EPOCH, err.getvalue())
+        self.assertIn(KEY, err)
+        self.assertIn(OP, err)
+        self.assertIn(EPOCH, err)
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
-        self.assertNotIn('private result read failed', err.getvalue())
+        self.assertNotIn('private result read failed', err)
 
     def test_wait_permission_refusal_keeps_reason_and_original_operation_identity(self):
         from mop.cli import _control
         self.response(node_operation(), 202)
         self.response({'schema_version': 1, 'error': {'code': 'access_denied',
             'message': 'operation scope was revoked', 'retryable': False}}, 403)
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = _control.invoke('node drain', [NODE, '--epoch', EPOCH,
-                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE, '--wait', '1'])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('node drain', a[0]), [[NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE, '--wait', '1']])
         self.assertEqual(code, 1)
         for value in ('operation scope was revoked', KEY, OP, EPOCH):
-            self.assertIn(value, err.getvalue())
-        self.assertEqual(out.getvalue(), '')
+            self.assertIn(value, err)
+        self.assertEqual(out, '')
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
 
     def test_wait_is_bound_to_already_admitted_epoch_and_request(self):
@@ -310,18 +236,16 @@ class Consumers(unittest.TestCase):
     def test_cli_accepted_is_not_success_and_recovery_is_get_only(self):
         from mop.cli import _control
         self.response(node_operation(), 202)
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = _control.invoke('node up', [NODE, '--epoch', EPOCH,
-                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('node up', a[0]), [[NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE]])
         self.assertEqual(code, 3)
-        self.assertEqual(json.loads(out.getvalue())['operation']['state'], 'accepted')
+        self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
         self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/nodes/{NODE}/commands/enable')
         self.response(node_operation('succeeded'))
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            self.assertEqual(_control.invoke('operation', ['--request-id', KEY, '--epoch', EPOCH]), 0)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            self.assertEqual(run_command(lambda a: _control.invoke('operation', a[0]),
+                [['--request-id', KEY, '--epoch', EPOCH]])[2], 0)
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
 
     def test_published_identity_is_typed_and_not_a_live_endpoint_or_permission_list(self):
@@ -355,44 +279,37 @@ class Consumers(unittest.TestCase):
 
     def test_legacy_server_prefix_cannot_bypass_converted_command_gate(self):
         from mop.common import context
-        out, err = io.StringIO(), io.StringIO()
-        with patch.object(context, 'here', side_effect=AssertionError('legacy selector read old stores')), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(['--server', 'old-selector.example', 'list']), 2)
-        self.assertIn('unsupported', err.getvalue())
-        self.assertNotIn('old-selector.example', err.getvalue())
+        with patch.object(context, 'here', side_effect=AssertionError('legacy selector read old stores')):
+            out, err, code = run_command(cli.main, ['--server', 'old-selector.example', 'list'])
+        self.assertEqual(code, 2)
+        self.assertIn('unsupported', err)
+        self.assertNotIn('old-selector.example', err)
         self.assertEqual(self.fixture.calls, [])
 
     def test_dispatcher_enters_transient_https_without_legacy_resolution(self):
         from mop.common import context
         from mop.cli import _control
-        out, err = io.StringIO(), io.StringIO()
         self.response({'schema_version': 1, 'state': 'ready', 'epoch': EPOCH,
             'effects_enabled': True})
         with patch.object(context, 'here', side_effect=AssertionError('legacy context read')), \
              patch.object(cli, 'environment', side_effect=AssertionError('installation environment read')), \
-             _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                code = cli.main(['health'])
-            except SystemExit as error:
-                code = error.code
-        self.assertEqual(code, 0, err.getvalue())
-        self.assertEqual(json.loads(out.getvalue())['state'], 'ready')
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+             _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['health'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)['state'], 'ready')
+        self.assertNotIn(TOKEN, out+err)
         self.assertEqual([call[:2] for call in self.fixture.calls], [('GET', '/api/v1/health')])
 
     def test_user_actions_are_finite_and_never_edit_the_old_operator_store(self):
         from mop.common import context
         for words in ('server user', 'server user add', 'server user delete',
                       'server user passwd', 'server user import'):
-            out, err = io.StringIO(), io.StringIO()
             with self.subTest(words=words), \
-                 patch.object(context, 'here', side_effect=AssertionError('old operator-store context')), \
-                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                self.assertEqual(cli.main(words.split()), 2)
-            self.assertIn('unsupported', err.getvalue())
-            self.assertEqual(out.getvalue(), '')
+                 patch.object(context, 'here', side_effect=AssertionError('old operator-store context')):
+                out, err, code = run_command(cli.main, words.split())
+            self.assertEqual(code, 2)
+            self.assertIn('unsupported', err)
+            self.assertEqual(out, '')
         self.assertEqual(self.fixture.calls, [])
 
     def test_mcp_never_starts_legacy_channel_or_invents_action_permissions(self):
@@ -400,39 +317,35 @@ class Consumers(unittest.TestCase):
         from mop.cli import _control
         self.response({'schema_version': 1, 'user_id': 2, 'principal_id': NODE,
             'kind': 'human', 'human_owner_id': 2, 'node_id': None, 'grant_id': None})
-        out, err = io.StringIO(), io.StringIO()
         with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             patch.object(context, 'here', side_effect=AssertionError('legacy MCP started')), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(['mcp', '--check']), 0)
-            self.assertIsNone(json.loads(out.getvalue())['action_permissions'])
-            self.assertEqual(cli.main(['mcp']), 2)
-        self.assertIn('unsupported', err.getvalue())
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+             patch.object(context, 'here', side_effect=AssertionError('legacy MCP started')):
+            out, err, code = run_command(cli.main, ['mcp', '--check'])
+            self.assertEqual(code, 0)
+            self.assertIsNone(json.loads(out)['action_permissions'])
+            _, refused, code = run_command(cli.main, ['mcp'])
+        self.assertEqual(code, 2)
+        self.assertIn('unsupported', refused)
+        self.assertNotIn(TOKEN, out+err+refused)
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET'])
 
     def test_default_project_query_and_offline_diagnose_do_not_read_old_login_store(self):
         from mop.common import context
         from mop.cli import _control
         self.response({'schema_version': 1, 'count': 0, 'results': [], 'next_cursor': None})
-        out, err = io.StringIO(), io.StringIO()
         with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             patch.object(context, 'here', side_effect=AssertionError('old login/config read')), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(['project']), 0)
-            self.assertEqual(json.loads(out.getvalue())['results'], [])
-            out.seek(0)
-            out.truncate()
-            self.assertEqual(cli.main(['diagnose']), 0)
-            self.assertEqual(json.loads(out.getvalue())['origin'], 'https://controller.example')
+             patch.object(context, 'here', side_effect=AssertionError('old login/config read')):
+            _, err, code = run_command(cli.main, ['project'])
+            self.assertEqual(code, 0)
+            out, err2, code = run_command(cli.main, ['diagnose'])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)['origin'], 'https://controller.example')
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET'])
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+        self.assertNotIn(TOKEN, out+err+err2)
 
     def test_role_launcher_cannot_fall_back_to_legacy_context_or_ssh(self):
         from mop.common import context
-        with patch.object(context, 'here', side_effect=AssertionError('legacy role launch')), \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(['fixture-role']), 2)
+        with patch.object(context, 'here', side_effect=AssertionError('legacy role launch')):
+            self.assertEqual(run_command(cli.main, ['fixture-role'])[2], 2)
 
     def test_mcp_adapter_refuses_local_commands_before_execution(self):
         from mop.cli import _control
@@ -443,39 +356,35 @@ class Consumers(unittest.TestCase):
     def test_invalid_wait_does_not_admit_effect(self):
         from mop.cli import _control
         self.response(node_operation(), 202)
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(_control.invoke('node drain', [NODE, '--epoch', EPOCH,
-                '--expected-revision', '1', '--request-id', KEY, '--wait', '-1']), 1)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            self.assertEqual(run_command(lambda a: _control.invoke('node drain', a[0]), [[NODE, '--epoch', EPOCH,
+                '--expected-revision', '1', '--request-id', KEY, '--wait', '-1']])[2], 1)
         self.assertEqual(self.fixture.calls, [])
 
     def test_cli_never_prints_token_even_in_safe_error_reason(self):
         from mop.cli import _control
         self.response({'schema_version': 1, 'error': {'code': 'authentication_required',
             'message': 'denied '+TOKEN, 'retryable': False}}, 401)
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(_control.invoke('health', []), 1)
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
-        self.assertIn('denied', err.getvalue())
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('health', a[0]), [[]])
+        self.assertEqual(code, 1)
+        self.assertNotIn(TOKEN, out+err)
+        self.assertIn('denied', err)
         response = node_operation()
         response['operation']['reason'] = 'controller reason '+TOKEN
         self.response(response, 202)
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(_control.invoke('node drain', [NODE, '--epoch', EPOCH,
-                '--expected-revision', '1', '--request-id', KEY, '--not-after', DEADLINE]), 3)
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
-        self.assertIn('controller reason', json.loads(out.getvalue())['operation']['reason'])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(lambda a: _control.invoke('node drain', a[0]), [[NODE, '--epoch', EPOCH,
+                '--expected-revision', '1', '--request-id', KEY, '--not-after', DEADLINE]])
+        self.assertEqual(code, 3)
+        self.assertNotIn(TOKEN, out+err)
+        self.assertIn('controller reason', json.loads(out)['operation']['reason'])
 
     def test_help_does_not_become_an_unsupported_role_launch(self):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(['help']), 0)
-        self.assertIn('mop', out.getvalue())
-        self.assertEqual(err.getvalue(), '')
+        out, err, code = run_command(cli.main, ['help'])
+        self.assertEqual(code, 0)
+        self.assertIn('mop', out)
+        self.assertEqual(err, '')
 
     def test_all_management_surfaces_have_explicit_conversion_inventory(self):
         from mop.cli import _control
@@ -541,19 +450,17 @@ class Consumers(unittest.TestCase):
         from mop.common import context, puppets
         self.response(pool_page())
         self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
-        out, err = io.StringIO(), io.StringIO()
         with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
              patch.object(context, 'here', side_effect=AssertionError('legacy query context')), \
-             patch.object(puppets, 'roster', side_effect=AssertionError('client assembled a roster')), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(['list', '--project-id', PROJECT]), 0)
-            self.assertEqual(json.loads(out.getvalue())['results'][0], puppet_row())
-            out.seek(0)
-            out.truncate()
-            self.assertEqual(cli.main(['detail', PUPPET]), 0)
-            self.assertEqual(json.loads(out.getvalue())['puppet'], puppet_row())
+             patch.object(puppets, 'roster', side_effect=AssertionError('client assembled a roster')):
+            listed, err, code = run_command(cli.main, ['list', '--project-id', PROJECT])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(listed)['results'][0], puppet_row())
+            out, err2, code = run_command(cli.main, ['detail', PUPPET])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)['puppet'], puppet_row())
         self.assertEqual(len(self.fixture.calls), 2)
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+        self.assertNotIn(TOKEN, listed+out+err+err2)
 
     def test_live_addresses_are_server_endpoint_records_not_user_presence(self):
         self.assertTrue(hasattr(self.client, 'addresses'), '#642 missing #649 presence query')
@@ -570,11 +477,10 @@ class Consumers(unittest.TestCase):
             f'/api/v1/addresses?schema_version=1&project_id={EPOCH}&limit=20')
         from mop.cli import _control
         self.response({'schema_version': 1, 'addresses': [endpoint]})
-        out = io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), contextlib.redirect_stdout(out):
-            code = _control.invoke('addresses', [EPOCH, '--limit', '20'])
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, _, code = run_command(lambda a: _control.invoke('addresses', a[0]), [[EPOCH, '--limit', '20']])
         self.assertEqual(code, 0)
-        self.assertFalse(json.loads(out.getvalue())['addresses'][0]['live'])
+        self.assertFalse(json.loads(out)['addresses'][0]['live'])
 
     def test_project_pages_preserve_server_cursor_and_never_follow_url(self):
         row = {'id': NODE, 'name': 'fixture', 'origin': 'https://git.example/fixture.git',
@@ -598,12 +504,11 @@ class Consumers(unittest.TestCase):
         self.response({'schema_version': 1, 'count': 0, 'results': [], 'next_cursor': None})
         self.response(node_operation('succeeded'), 200)
         with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             patch.object(bus, 'config', side_effect=AssertionError('legacy commandlet authority')), \
-             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(profile.main([]), 0)
-            self.assertEqual(projects.main([]), 0)
-            self.assertEqual(drain.main([NODE, '--epoch', EPOCH, '--expected-revision', '1',
-                '--request-id', KEY, '--not-after', DEADLINE]), 0)
+             patch.object(bus, 'config', side_effect=AssertionError('legacy commandlet authority')):
+            self.assertEqual(run_command(profile.main, [])[2], 0)
+            self.assertEqual(run_command(projects.main, [])[2], 0)
+            self.assertEqual(run_command(drain.main, [NODE, '--epoch', EPOCH,
+                '--expected-revision', '1', '--request-id', KEY, '--not-after', DEADLINE])[2], 0)
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'GET', 'POST'])
 
     def test_new_mcp_declarations_name_server_actions_not_legacy_verbs(self):
@@ -641,28 +546,25 @@ class Consumers(unittest.TestCase):
         self.assertTrue(_control.allowed({'annotations': 'readonly', 'actions': []}, scoped))
         self.assertFalse(_control.allowed({'annotations': 'destructive', 'actions': []}, scoped))
         self.assertFalse(_control.allowed({'annotations': 'readonly'}, scoped))
-        out, err = io.StringIO(), io.StringIO()
         decl = {'args': [{'name': 'cursor', 'type': 'string', 'flag': '--cursor'}]}
         self.response({'schema_version': 1, 'count': 0, 'results': [], 'next_cursor': None})
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            result = _control.tool_call(['project', 'list'], decl, {'cursor': 'safe-cursor'})
+        def mcp_tool(argv):
+            return _control.tool_call(['project', 'list'], decl, {'cursor': 'safe-cursor'})
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, result = run_command(mcp_tool, [])
         self.assertEqual(json.loads(result)['results'], [])
-        self.assertEqual(out.getvalue(), '')
-        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(out, '')
+        self.assertEqual(err, '')
         self.assertNotIn(TOKEN, result)
         self.assertEqual(self.fixture.calls[-1][1], '/api/v1/projects?page_size=100&cursor=safe-cursor')
 
     def test_proxy_stat_uses_published_usage_parser_without_transcript_attribution(self):
         from mop.cli import _control
-        from usage_query import page
         self.response(page())
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['stat', '--start', '2026-10-16', '--end', '2026-10-17'])
-        self.assertEqual(code, 0, err.getvalue())
-        result = json.loads(out.getvalue())
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['stat', '--start', '2026-10-16', '--end', '2026-10-17'])
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
         self.assertEqual(result['source'], 'cliproxy')
         self.assertFalse(result['source_complete'])
         self.assertEqual(result['attribution'], {'user': 'unavailable', 'project': 'unavailable', 'puppet': 'unavailable'})
@@ -670,30 +572,27 @@ class Consumers(unittest.TestCase):
         self.assertIsNone(result['groups'][0]['counters']['cache_read']['value'])
         self.assertEqual(self.fixture.calls[-1][:2], ('GET',
             '/api/v1/usage?schema_version=1&start=2026-10-16&end=2026-10-17&limit=100&after='))
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+        self.assertNotIn(TOKEN, out+err)
 
     def test_proxy_stat_unavailable_breakdown_refuses_before_any_query(self):
         from mop.cli import _control
         for args in (['--users'], ['--puppets'], ['--group-by', 'project']):
-            out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                self.assertEqual(cli.main(['stat', *args]), 2)
-            self.assertIn('unavailable', err.getvalue())
-            self.assertIn('proxy', err.getvalue())
-            self.assertEqual(out.getvalue(), '')
+            out, err, code = run_command(cli.main, ['stat', *args])
+            self.assertEqual(code, 2)
+            self.assertIn('unavailable', err)
+            self.assertIn('proxy', err)
+            self.assertEqual(out, '')
         self.assertEqual(self.fixture.calls, [])
 
     def test_absent_backend_refuses_before_any_io_and_never_ssh_or_nats(self):
         from mop.cli import _control
         for words in ('add', 'update', 'recycle', 'delete', 'wipe', 'stop', 'model',
                       'secret file', 'secret var', 'server gc', 'attach', 'master'):
-            out, err = io.StringIO(), io.StringIO()
-            with self.subTest(words=words), _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = _control.invoke(words, [])
+            with self.subTest(words=words), _control.use(api.ServerContext('https://controller.example', TOKEN)):
+                out, err, code = run_command(lambda a: _control.invoke(words, a[0]), [[]])
                 self.assertEqual(code, 2)
-                self.assertIn('unsupported', err.getvalue())
-                self.assertNotIn('accepted', out.getvalue())
+                self.assertIn('unsupported', err)
+                self.assertNotIn('accepted', out)
         self.assertEqual(self.fixture.calls, [])
 
 

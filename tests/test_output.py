@@ -1,12 +1,12 @@
 """Диагностика отказа видна до следующего файла, не после всего CI suite."""
-import contextlib
 import io
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
 import hermetic  # noqa: F401
-from _lib import offline
+from _lib import offline, run_command
 from mop.cli.dev import test as runner
 
 
@@ -26,6 +26,9 @@ class FailureOutput(unittest.TestCase):
     # SOLUTION: flush полного отказа после файла; в конце только общий verdict.
     # RESULT: 3/3 behavioral checks и 4/4 strict файлов green; нет fail-fast/дублей.
     # STATUS: FIXED — see #672
+    #
+    # #675: захват вывода — общий run_command(out=...): наблюдатель flush
+    # (#672) получает записи прямо в свой поток, а не в скрытую копию.
     def test_failure_is_flushed_before_the_next_file_in_quiet_and_verbose_modes(self):
         for verbose in (False, True):
             with self.subTest(verbose=verbose):
@@ -42,9 +45,9 @@ class FailureOutput(unittest.TestCase):
 
                 with patch.object(runner, 'root', return_value='/fixture'), \
                         patch.object(runner.os, 'listdir', return_value=['first.py', 'second.py']), \
-                        patch.object(runner.subprocess, 'run', side_effect=execute), \
-                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-                    result = runner.main(['first', 'second', *(['-v'] if verbose else [])])
+                        patch.object(runner.subprocess, 'run', side_effect=execute):
+                    _, _, result = run_command(runner.main,
+                        ['first', 'second', *(['-v'] if verbose else [])], out=output)
                 self.assertEqual(result, 1)
                 self.assertEqual(calls, ['tests/first.py', 'tests/second.py'])
                 self.assertEqual(output.getvalue().count(reason), 1, 'failure diagnostic was printed twice')
@@ -55,9 +58,8 @@ class FailureOutput(unittest.TestCase):
         output = Output()
         with patch.object(runner, 'root', return_value='/fixture'), \
                 patch.object(runner.os, 'listdir', return_value=['first.py', 'second.py']), \
-                patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'child body\n')), \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            result = runner.main(['first', 'second'])
+                patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'child body\n')):
+            _, _, result = run_command(runner.main, ['first', 'second'], out=output)
         self.assertEqual(result, 0)
         self.assertEqual(output.getvalue(), '2/2 ok\n')
 
@@ -71,9 +73,8 @@ class FailureOutput(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 1, 'diagnostic-' + str(index) + '\n')
         with patch.object(runner, 'root', return_value='/fixture'), \
                 patch.object(runner.os, 'listdir', return_value=['first.py', 'second.py', 'third.py']), \
-                patch.object(runner.subprocess, 'run', side_effect=execute), \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            result = runner.main(['first', 'second', 'third'])
+                patch.object(runner.subprocess, 'run', side_effect=execute):
+            _, _, result = run_command(runner.main, ['first', 'second', 'third'], out=output)
         self.assertEqual(result, 1)
         self.assertEqual(len(calls), 3)
         for index in (1, 2, 3):

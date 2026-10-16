@@ -19,48 +19,18 @@ import socket
 import ssl
 import subprocess
 import sys
-import tempfile
-import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from types import SimpleNamespace
 
 import hermetic  # noqa: F401
+from _lib import run_command
+from _control_fixture import (own_tls, KEY, EPOCH, NODE, DEADLINE, TOKEN, PUPPET,
+    node_operation, pool_page, puppet_row, page)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop import cli
 from mop.cli import _control
 from mop.client import control as api
-from control_consumers import KEY, EPOCH, NODE, DEADLINE, TOKEN, PUPPET, node_operation, pool_page, puppet_row
-
-
-@contextlib.contextmanager
-def own_tls(handler):
-    """Один TLS fixture для stdlib и настоящего Django/PostgreSQL клиента."""
-    if shutil.which('openssl') is None:
-        raise AssertionError('declared test environment needs openssl for own TLS fixture')
-    with tempfile.TemporaryDirectory(prefix='mop-642-own-tls-') as directory:
-        root = Path(directory)
-        cert, key = root/'ca.pem', root/'key.pem'
-        result = subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-            '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost',
-            '-addext', 'subjectAltName=DNS:localhost'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode:
-            raise AssertionError('could not create isolated TLS certificate')
-        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
-        server.daemon_threads = True
-        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.load_cert_chain(cert, key)
-        server.socket = tls.wrap_socket(server.socket, server_side=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            yield server, 'https://localhost:'+str(server.server_port), cert, directory
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(5)
-            if thread.is_alive():
-                raise AssertionError('own TLS fixture did not shut down')
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -94,7 +64,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path.path == '/api/v1/health':
             self.reply(200, {'schema_version': 1, 'epoch': EPOCH, 'state': 'ready', 'effects_enabled': True})
         elif path.path == '/api/v1/usage':
-            from usage_query import page
             self.reply(200, page())
         elif path.path == '/api/v1/puppets':
             self.reply(200, pool_page())
@@ -166,15 +135,14 @@ class TLSConsumers(unittest.TestCase):
         self.assertEqual(caught.exception.error.http_status, 409)
 
     def test_cli_real_tls_recovers_lost_accepted_reply_without_second_post(self):
-        out, err = io.StringIO(), io.StringIO()
-        with _control.use(self.context()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['node', 'drain', NODE, '--epoch', EPOCH, '--expected-revision', '1',
-                             '--request-id', KEY, '--not-after', DEADLINE])
-        self.assertEqual(code, 0, err.getvalue())
-        self.assertEqual(json.loads(out.getvalue())['operation']['state'], 'succeeded')
+        with _control.use(self.context()):
+            out, err, code = run_command(cli.main, ['node', 'drain', NODE, '--epoch', EPOCH,
+                '--expected-revision', '1', '--request-id', KEY, '--not-after', DEADLINE])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)['operation']['state'], 'succeeded')
         self.assertEqual(self.server.admissions, [KEY])
         self.assertEqual([method for method, _ in self.server.calls], ['POST', 'GET'])
-        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+        self.assertNotIn(TOKEN, out+err)
 
     def test_installed_wheel_client_without_dependencies_or_server_extras(self):
         root = Path(self.directory.name)/'install-fixture'

@@ -23,6 +23,8 @@ from unittest.mock import patch
 
 import hermetic  # noqa: F401
 from _lib import patched_env
+from _control_fixture import Fixture, Response, Connection  # noqa: F401 -- общие транспортные двойники (#675)
+from _control_fixture import TRANSPORT_TOKEN as TOKEN, TRANSPORT_MESSAGE as MESSAGE
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 # Отсутствующая возможность — намеренный red, не сбой окружения/зависимостей.
@@ -30,8 +32,6 @@ assert importlib.util.find_spec("mop.client.control") is not None, \
     "#642 missing independent HTTP control client"
 from mop.client import control as api
 
-TOKEN = "private-test-token"
-MESSAGE = "private-message-never-in-diagnostics"
 KEY = "8e6449b9-65db-4148-aa68-a8b4020bd8b5"
 DEADLINE = "2026-10-16T10:05:00Z"
 REVISION = "90071992547409931234567890"
@@ -47,31 +47,6 @@ def envelope(**fields):
     return {"schema_version": 1, "epoch": "e_1", **fields}
 
 
-class Response:
-    def __init__(self, status=200, data=None, raw=None, headers=None):
-        self.status = status
-        self.body = raw if raw is not None else json.dumps(data or {}).encode()
-        self.headers = {"Content-Type": "application/json", **(headers or {})}
-        self.closed = False
-        self.read_sizes = []
-
-    def getheader(self, name, default=None):
-        return next((v for k, v in self.headers.items() if k.lower() == name.lower()), default)
-
-    def read1(self, size):
-        self.read_sizes.append(size)
-        part, self.body = self.body[:size], self.body[size:]
-        return part
-
-    def close(self):
-        self.closed = True
-
-
-class Socket:
-    def settimeout(self, value):
-        self.timeout = value
-
-
 class Clock:
     def __init__(self):
         self.now = 100.0
@@ -81,43 +56,6 @@ class Clock:
 
     def advance(self, seconds):
         self.now += seconds
-
-
-class Connection:
-    def __init__(self, fixture, *args, **kwargs):
-        self.fixture, self.args, self.kwargs = fixture, args, kwargs
-        self.closed = False
-        self.sock = Socket()
-        self.debuglevel = 1
-        fixture.connections.append(self)
-
-    def connect(self):
-        if self.fixture.connect_failure:
-            raise OSError(TOKEN)
-
-    def request(self, method, path, body=None, headers=None):
-        self.fixture.calls.append((method, path, body, headers))
-        if self.fixture.send_failure:
-            raise OSError(TOKEN + MESSAGE)
-
-    def getresponse(self):
-        value = self.fixture.responses.pop(0)
-        if isinstance(value, Exception):
-            raise value
-        return value
-
-    def close(self):
-        self.closed = True
-
-
-class Fixture:
-    def __init__(self, *responses):
-        self.responses = list(responses)
-        self.calls, self.connections = [], []
-        self.connect_failure = self.send_failure = False
-
-    def factory(self, *args, **kwargs):
-        return Connection(self, *args, **kwargs)
 
 
 class ControlClient(unittest.TestCase):
