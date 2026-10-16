@@ -4,6 +4,18 @@
 
 Every command of `mop`, as its commandlet in `mop/cli` describes itself: the first line of the docstring is what `mop help` lists, the whole docstring is the command's usage.
 
+### New controller migration
+
+The #623/#642 migration is incomplete. The dispatcher uses only explicit transient HTTPS origin/token/CA context for remote control; it never falls back to the old bus, connection.json or git config stores. Local developer/setup commands stay local.
+
+Bound consumers: `mop addresses`, `mop diagnose`, `mop health`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`. `mop diagnose` is offline context validation only.
+
+Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop build`, `mop code`, `mop delete`, `mop detail`, `mop dispatch`, `mop driver build`, `mop landing`, `mop list`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop restart`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop session history`, `mop session terminal`, `mop stat`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
+
+`mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
+
+The retained command descriptions below are not evidence that an unbound backend exists. New commands use resource identities, not an independently assembled roster.
+
 ## Client
 
 Run on a client: an operator's machine or a master shell.
@@ -30,6 +42,17 @@ snapshot. A roleless add is gone: every puppet carries a soul.
 --request-id retries an earlier unknown outcome under its id: the server
 reconciles to the job it reserved instead of creating a second one; a
 changed payload under the same id is refused before any effect.
+```
+
+#### mop addresses
+
+```text
+mop addresses <project-id> [--limit N]: query own authorized session addresses
+
+Returns endpoint records from the controller, including registered but not live
+endpoints. A Django User is not a live session. This is not a pool roster or a
+remote host-session scan. Delivery addresses must come from these records.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop attach
@@ -104,6 +127,17 @@ is the diagnosis. empty/machine are informational: exit code 0 with an
 explicit not-ready line, not a success message.
 ```
 
+#### mop health
+
+```text
+mop health: query authenticated HTTPS controller readiness
+
+Select the server with --api-origin https://host and optional --api-ca PATH,
+or transient MOP_API_ORIGIN/MOP_API_CA. MOP_API_TOKEN supplies the Django token;
+it is never an argv option and no connection.json or git config is read.
+The response describes observed controller readiness, not puppet health.
+```
+
 #### mop landing
 
 ```text
@@ -162,15 +196,31 @@ The key is never printed. The proxy catalog may include models that Claude
 Code cannot use; this command does not test model compatibility.
 ```
 
+#### mop operation
+
+```text
+mop operation [id] [--request-id id --epoch id] [--wait seconds]
+
+Retrieve an admitted operation, or recover an uncertain admission by its original
+request-id and epoch. Recovery and waiting use GET only; they never resubmit the
+effect. accepted/running/reconciling/partial/unknown return exit 3, not success.
+An expired wait does not cancel the operation. Keep the original key and epoch.
+
+The explicit HTTPS origin/CA and transient Django token follow mop health.
+```
+
 #### mop profile
 
 ```text
-mop profile: show the pool role, project and integration branch
+mop profile: query the authenticated controller identity over HTTPS
 
-The role comes from bus credentials, not the presence of MCP tools. An unset
-integration branch is reported as unset; it is not inferred from origin/HEAD.
-A role principal is profiled by its bundle's role name — a grant is a puppet,
-not a master of anything.
+Returns the actual principal kind and owner, never a fabricated live session
+address or human authority inferred from a role name. Missing server action
+permissions remain unavailable, not an all-tools grant. No local credential,
+role-bundle, connection.json or git config store is read.
+
+Select --api-origin and optional --api-ca, or explicit transient MOP_API_ORIGIN,
+MOP_API_CA and MOP_API_TOKEN. The token is never a command-line option or output.
 ```
 
 #### mop recycle
@@ -827,10 +877,15 @@ inventory — the next deploy would configure it from again.
 #### mop node drain
 
 ```text
-mop node drain <name>: move its puppets off and close it to the scheduler
+mop node drain <id> --epoch <id> --expected-revision N [--request-id id] [--wait seconds]
 
-Graceful: the wrapper takes its session down on TERM, so a puppet leaves
-with its clone intact.
+Submit the controller's durable drain action with an explicit node binding.
+The server owns eligibility, scope, resource claims and relocation. accepted
+is not completed: exit 3 retains an outstanding/unknown operation, exit 0 means
+observed succeeded. --not-after supplies an explicit UTC admission deadline.
+Recover a lost response with mop operation --request-id <id> --epoch <id>;
+recovery and wait use GET, never a new effect key or an automatic resubmission.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop node forget
@@ -849,7 +904,14 @@ mop server deploy first.
 #### mop node up
 
 ```text
-mop node up <name>: open the node to the scheduler again
+mop node up <id> --epoch <id> --expected-revision N [--request-id id] [--wait seconds]
+
+Submit the published durable enable action, not the old cluster up RPC.
+Requires an explicit node revision and installation epoch. --not-after supplies
+a UTC admission deadline. The receipt is printed as a versioned operation;
+accepted/running/unknown are not success. Recover with mop operation, using GET
+and the original request-id/epoch rather than repeating a submitted effect.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 ### project: pool projects: mop project [add <git-origin>|delete <name>|list]
@@ -931,9 +993,12 @@ service reads it on every add, so no restart is needed.
 #### mop project list
 
 ```text
-projects the pool serves: mop project list [--origins]
+mop project list [--cursor VALUE] [--page-size N]: query authorized projects
 
---origins prints the origins themselves; without it, project names.
+Returns one bounded controller page and its opaque next_cursor, without an
+independent client state store or roster. Reuse the returned cursor with the same
+page size. Origin and project revision come from the authorized server query.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 ### secret: project secrets: mop secret file|var add|list|remove

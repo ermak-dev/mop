@@ -1,20 +1,16 @@
-"""projects the pool serves: mop project list [--origins]
+"""mop project list [--cursor VALUE] [--page-size N]: query authorized projects
 
---origins prints the origins themselves; without it, project names.
+Returns one bounded controller page and its opaque next_cursor, without an
+independent client state store or roster. Reuse the returned cursor with the same
+page size. Origin and project revision come from the authorized server query.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 """
-from mop.cli import lib
-from mop.common import bus
+from mop.cli import _control
+
+MCP = {"annotations": "readonly", "actions": ["catalog.view_project"], "args": [
+    {"name": "cursor", "type": "string", "flag": "--cursor", "help": "opaque server page cursor"},
+    {"name": "page_size", "type": "integer", "flag": "--page-size", "help": "page size within 1..500"}]}
 
 
 def main(argv):
-    want_origins = "--origins" in argv
-    if [a for a in argv if a != "--origins"]:
-        lib.usage(__doc__)
-    ans = bus.call_cluster("projects", project=bus.ADMIN)
-    for n in ans.get("origins" if want_origins else "names") or []:
-        print(n)
-    return 0
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+    return _control.invoke('project list', argv)

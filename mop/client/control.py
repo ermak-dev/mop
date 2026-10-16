@@ -1,10 +1,8 @@
-"""Раннее HTTP-ядро #642; CLI/MCP пока остаются на старом пути.
+"""Типизированный HTTPS-клиент #642 без Django, NATS и локального state store.
 
-Контекст приходит от вызывающего: здесь нет login, файлов профиля, окружения,
-NATS и реконструкции модели пула. Snapshot сохраняет материализованные поля
-проекции #626, не придумывая за сервером clone/lease/state. Типизированы только
-общая версия/эпоха, операции, страницы и две конечные команды API/CONTROL.
-Настоящий сервер, TLS-стенд и чистая установка принимаются отдельно.
+Контекст приходит от вызывающего. Query DTO сохраняют авторитет сервера:
+отсутствие action permissions не означает разрешение всех действий, а User
+не является живым адресом сессии. Конечные команды не принимают RPC verbs.
 """
 from collections.abc import Mapping, Iterator
 from dataclasses import dataclass, field
@@ -250,6 +248,84 @@ class PreparedCommand:
         return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
+@dataclass(frozen=True)
+class NodeCommand:
+    """#625 eligibility binding: у узла нет incarnation пользовательской сессии."""
+
+    action: str
+    node_id: str
+    epoch: str
+    request_id: str
+    not_after: str
+    expected_revision: str
+
+    def __post_init__(self):
+        _require(self.action in ("drain", "enable"))
+        for value in (self.node_id, self.epoch, self.request_id):
+            _key(value)
+        _deadline(self.not_after)
+        _revision(self.expected_revision)
+        _require(1 <= int(self.expected_revision) < 2 ** 63)
+
+    @property
+    def body(self) -> bytes:
+        return json.dumps({"schema_version": 1, "epoch": self.epoch,
+            "request_id": self.request_id, "not_after": self.not_after,
+            "expected_revision": self.expected_revision, "params": {}},
+            sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+@dataclass(frozen=True)
+class Identity:
+    user_id: int
+    principal_id: str
+    kind: str
+    human_owner_id: int | None
+    node_id: str | None
+    grant_id: str | None
+    action_permissions: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
+class Health:
+    epoch: str
+    state: str
+    effects_enabled: bool
+
+
+@dataclass(frozen=True)
+class Project:
+    id: str
+    name: str
+    origin: str
+    revision: str
+    puppet_limit: int | None
+
+
+@dataclass(frozen=True)
+class Address:
+    id: str
+    session_id: str
+    address: str
+    project_id: str
+    external_session_id: str
+    display_name: str
+    expires_at: datetime
+    state: str
+    live: bool
+
+
+@dataclass(frozen=True)
+class AddressPage:
+    items: tuple[Address, ...]
+
+
+@dataclass(frozen=True)
+class ProjectPage:
+    items: tuple[Project, ...]
+    next_cursor: str | None = field(repr=False)
+
+
 _STATES = frozenset(("accepted", "running", "succeeded", "refused", "expired", "cancelled",
                      "failed", "partial", "reconciling", "unknown"))
 _TERMINAL = _STATES - {"accepted", "running", "reconciling"}
@@ -264,7 +340,7 @@ class Operation:
     state: str
     revision: str
     target_id: str
-    incarnation: str
+    incarnation: str | None
     data: Mapping = field(repr=False)
 
     @property
@@ -324,7 +400,8 @@ def _json(raw):
                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid JSON number")))
         if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != 1:
             raise ValueError("unsupported schema")
-        _identity(data.get("epoch"))
+        if "epoch" in data:
+            _identity(data["epoch"])
         frozen = _freeze(data)
     except (ValueError, TypeError, RecursionError, ClientError):
         failed = True
@@ -340,11 +417,19 @@ def _operation(data, epoch):
         _key(data["request_id"])
         _revision(data["revision"])
         _identity(data["target"]["id"])
-        _identity(data["target"]["incarnation"])
-        if data["state"] not in _STATES:
-            raise ValueError("invalid state")
+        _identity(epoch)
+        incarnation = data["target"].get("incarnation")
+        if data["target"].get("kind") == "node":
+            _key(data["target"]["id"])
+            _revision(data["target"]["revision"])
+            _revision(data["target"]["source_revision"])
+            _require(incarnation is None)
+        else:
+            _identity(incarnation)
+        if data["state"] not in _STATES or data.get("epoch", epoch) != epoch:
+            raise ValueError("invalid operation binding")
         result = Operation(1, epoch, data["id"], data["request_id"], data["state"], data["revision"],
-                           data["target"]["id"], data["target"]["incarnation"], data)
+                           data["target"]["id"], incarnation, data)
     except (KeyError, TypeError, ValueError, ClientError):
         failed = True
     if failed:
@@ -359,7 +444,12 @@ _CODES = frozenset(("validation_error", "not_authenticated", "authentication_fai
                     "incarnation_conflict", "resource_conflict", "epoch_conflict", "stale_epoch",
                     "result_expired", "cursor_expired", "invalid_cursor", "reset_required",
                     "rate_limited", "throttled", "unavailable", "authority_unavailable",
-                    "database_unavailable", "deadline_expired"))
+                    "database_unavailable", "deadline_expired", "access_denied",
+                    "authentication_required", "method_not_allowed", "request_refused", "csrf_failed",
+                    "database_outcome_unknown", "installation_unavailable", "deadline_horizon",
+                    "effects_disabled", "admission_limit", "claim_conflict", "operation_conflict",
+                    "transaction_boundary", "controller_unavailable", "delivery_capacity",
+                    "delivery_unavailable", "delivery_conflict"))
 
 
 def _api_error(data, status, retry_after):
@@ -369,7 +459,7 @@ def _api_error(data, status, retry_after):
         code, reason, retryable = error["code"], error["message"], error["retryable"]
         if code not in _CODES or not isinstance(reason, str) or len(reason) > 4096 or type(retryable) is not bool:
             raise ValueError("invalid error")
-        snapshot = ErrorSnapshot(1, data["epoch"], status, code, reason, retryable,
+        snapshot = ErrorSnapshot(1, data.get("epoch"), status, code, reason, retryable,
                                  retry_after, data.get("reset"))
         cls = APIError
         if code in ("reset_required", "cursor_expired", "invalid_cursor", "stale_epoch", "epoch_conflict"):
@@ -515,6 +605,16 @@ class Client:
                                not_after, message=message, priority=priority,
                                wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
 
+    def prepare_node_drain(self, node_id: str, *, epoch: str, expected_revision: str,
+                           not_after: str, request_id: str | None = None) -> NodeCommand:
+        return NodeCommand("drain", node_id, epoch, str(uuid4()) if request_id is None else request_id,
+                           not_after, expected_revision)
+
+    def prepare_node_enable(self, node_id: str, *, epoch: str, expected_revision: str,
+                            not_after: str, request_id: str | None = None) -> NodeCommand:
+        return NodeCommand("enable", node_id, epoch, str(uuid4()) if request_id is None else request_id,
+                           not_after, expected_revision)
+
     def _exchange(self, method, path, body=None, *, command=None, budget=None):
         limits = self._limits
         _require(body is None or len(body) <= limits.max_request_bytes)
@@ -586,7 +686,10 @@ class Client:
             raise TransportError("control API transport unavailable")
         data = _json(raw)
         if not 200 <= status < 300:
-            raise _api_error(data, status, retry_after)
+            error = _api_error(data, status, retry_after)
+            if command is not None and error.error.code == 'database_outcome_unknown':
+                raise UnknownSubmission(command)
+            raise error
         return status, data
 
     def _get(self, path, *, budget=None):
@@ -595,10 +698,15 @@ class Client:
             raise ProtocolError("unexpected control API query status")
         return data
 
-    def submit(self, command: PreparedCommand) -> Submission:
-        _require(type(command) is PreparedCommand)
-        path = (f"/api/v1/puppets/{command.target.id}/commands/restart" if command.action == "restart"
-                else "/api/v1/messages")
+    def submit(self, command: PreparedCommand | NodeCommand) -> Submission:
+        _require(type(command) in (PreparedCommand, NodeCommand))
+        if type(command) is NodeCommand:
+            path = f"/api/v1/nodes/{command.node_id}/commands/{command.action}"
+            target_id, incarnation = command.node_id, None
+        else:
+            path = (f"/api/v1/puppets/{command.target.id}/commands/restart" if command.action == "restart"
+                    else "/api/v1/messages")
+            target_id, incarnation = command.target.id, command.target.incarnation
         # Слишком большой локальный ввод — ещё не неизвестный admission.
         body = command.body
         _require(len(body) <= self._limits.max_request_bytes)
@@ -609,7 +717,7 @@ class Client:
                 raise ProtocolError("unexpected control API submission status")
             result = self._read_operation(data)
             if (result.request_id != command.request_id or result.epoch != command.epoch or
-                    result.target_id != command.target.id or result.incarnation != command.target.incarnation):
+                    result.target_id != target_id or result.incarnation != incarnation):
                 raise ProtocolError("operation binding mismatch")
         except ProtocolError:
             failed = True
@@ -619,7 +727,7 @@ class Client:
 
     @staticmethod
     def _read_operation(data):
-        if not isinstance(data.get("operation"), Mapping):
+        if not isinstance(data.get("operation"), Mapping) or not isinstance(data.get("epoch"), str):
             raise ProtocolError("missing operation response")
         return _operation(data["operation"], data["epoch"])
 
@@ -629,10 +737,130 @@ class Client:
             raise ProtocolError("operation resource identity mismatch")
         return result
 
-    def lookup_operation(self, request_id: str) -> Operation:
-        result = self._read_operation(self._get("/api/v1/operations?" + urlencode({"request_id": _key(request_id)})))
-        if result.request_id != request_id:
+    def lookup_operation(self, request_id: str, *, epoch: str | None = None) -> Operation:
+        params = {"request_id": _key(request_id)}
+        if epoch is not None:
+            params["epoch"] = _key(epoch)
+        result = self._read_operation(self._get("/api/v1/operations?" + urlencode(params)))
+        if result.request_id != request_id or epoch is not None and result.epoch != epoch:
             raise ProtocolError("operation request identity mismatch")
+        return result
+
+    def identity(self) -> Identity:
+        data = self._get("/api/v1/identity")
+        failed = False
+        try:
+            _key(data["principal_id"])
+            _require(type(data["user_id"]) is int and data["user_id"] > 0)
+            _require(data["kind"] in ("human", "grant", "service"))
+            for name in ("node_id", "grant_id"):
+                if data[name] is not None:
+                    _key(data[name])
+            owner = data["human_owner_id"]
+            _require(owner is None or type(owner) is int and owner > 0)
+            actions = data.get("action_permissions")
+            _require(actions is None or isinstance(actions, tuple) and all(
+                isinstance(action, str) and re.fullmatch(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", action)
+                for action in actions))
+            result = Identity(data["user_id"], data["principal_id"], data["kind"], owner,
+                data["node_id"], data["grant_id"], None if actions is None else frozenset(actions))
+        except (KeyError, TypeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError("invalid identity response")
+        return result
+
+    def health(self) -> Health:
+        data = self._get("/api/v1/health")
+        failed = False
+        try:
+            _key(data["epoch"])
+            _require(data["state"] == "ready" and type(data["effects_enabled"]) is bool)
+            result = Health(data["epoch"], data["state"], data["effects_enabled"])
+        except (KeyError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError("invalid health response")
+        return result
+
+    @staticmethod
+    def _address(data):
+        for name in ('id', 'session_id', 'project_id'):
+            _key(data[name])
+        _require(isinstance(data['address'], str) and data['address'].startswith('private:'))
+        _key(data['address'][8:])
+        for name, limit in (('external_session_id', 256), ('display_name', 128)):
+            _require(isinstance(data[name], str) and 0 < len(data[name]) <= limit)
+        expires = datetime.fromisoformat(data['expires_at'].replace('Z', '+00:00'))
+        _require(expires.utcoffset() is not None and data['state'] in ('registered', 'expired') and
+                 type(data['live']) is bool)
+        return Address(data['id'], data['session_id'], data['address'], data['project_id'],
+            data['external_session_id'], data['display_name'], expires, data['state'], data['live'])
+
+    def addresses(self, project_id: str, *, limit: int = 100) -> AddressPage:
+        _key(project_id)
+        _require(type(limit) is int and 1 <= limit <= 500)
+        data = self._get('/api/v1/addresses?' + urlencode({'schema_version': 1,
+            'project_id': project_id, 'limit': limit}))
+        failed = False
+        try:
+            rows = data['addresses']
+            _require(isinstance(rows, tuple) and len(rows) <= limit)
+            values = tuple(self._address(row) for row in rows)
+            _require(all(row.project_id == project_id for row in values))
+            result = AddressPage(values)
+        except (KeyError, TypeError, ValueError, AttributeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError('invalid address page')
+        return result
+
+    def address(self, endpoint_id: str) -> Address:
+        data = self._get('/api/v1/addresses/' + _key(endpoint_id))
+        failed = False
+        try:
+            result = self._address(data['endpoint'])
+            _require(result.id == endpoint_id)
+        except (KeyError, TypeError, ValueError, AttributeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError('invalid address response')
+        return result
+
+    def projects_page(self, *, cursor: str | None = None, page_size: int = 100) -> ProjectPage:
+        data = self._get("/api/v1/projects?" + self._page_query(page_size, cursor))
+        failed = False
+        try:
+            rows, following = data["results"], data["next_cursor"]
+            _require(isinstance(rows, tuple) and len(rows) <= page_size)
+            if following is not None:
+                _cursor(following)
+            result = ProjectPage(tuple(self._project(row) for row in rows), following)
+        except (KeyError, TypeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError("invalid project page")
+        return result
+
+    @staticmethod
+    def _project(data):
+        _key(data["id"])
+        _revision(data["revision"])
+        _require(all(isinstance(data[name], str) and data[name] for name in ("name", "origin")))
+        limit = data["puppet_limit"]
+        _require(limit is None or type(limit) is int and limit >= 0)
+        return Project(data["id"], data["name"], data["origin"], data["revision"], limit)
+
+    def project(self, project_id: str) -> Project:
+        data = self._get("/api/v1/projects/" + _key(project_id))
+        failed = False
+        try:
+            result = self._project(data)
+            _require(result.id == project_id)
+        except (KeyError, TypeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError("invalid project response")
         return result
 
     @staticmethod
@@ -713,12 +941,15 @@ class Client:
                            binding)
 
     def wait_operation(self, operation_id: str, *, timeout: float | None = None,
-                       poll_interval: float = 0.25) -> Operation:
+                       poll_interval: float = 0.25, initial: Operation | None = None) -> Operation:
         _identity(operation_id)
+        _require(initial is None or type(initial) is Operation and initial.id == operation_id)
         timeout = self._limits.wait_timeout if timeout is None else timeout
         _seconds(timeout, self._limits.wait_timeout)
         _seconds(poll_interval, self._limits.wait_timeout)
-        deadline, last = time.monotonic() + timeout, None
+        deadline, last = time.monotonic() + timeout, initial
+        if last is not None and last.terminal:
+            return last
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
@@ -737,6 +968,9 @@ class Client:
                 raise ProtocolError("operation resource identity mismatch")
             if last is not None and current.epoch != last.epoch:
                 raise ResetRequired(ErrorSnapshot(1, current.epoch, 409, "reset_required", "installation epoch changed"))
+            if last is not None and (current.request_id, current.target_id, current.incarnation) != (
+                    last.request_id, last.target_id, last.incarnation):
+                raise ProtocolError('operation wait binding changed')
             last = current
             if last.terminal:
                 return last
