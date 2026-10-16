@@ -51,7 +51,7 @@ controller:pg17:
                         'public.py', '.mop/sandbox.yaml'], check=True)
         return root
 
-    def invoke(self, root, *, cleanup_failure=False, arguments=None, labels=()):
+    def invoke(self, root, *, cleanup_failure=False, arguments=None, labels=(), check='controller'):
         original_run, original_which = subprocess.run, shutil.which
         snapshots, commands = [], []
 
@@ -73,7 +73,7 @@ controller:pg17:
                 patch.object(controller.shutil, 'which', side_effect=lambda name:
                              '/fixture/docker' if name == 'docker' else original_which(name)), \
                 patch.object(controller.subprocess, 'run', side_effect=run):
-            result = controller.main(arguments or ['--postgres', '16',
+            result = controller.main(arguments or ['--postgres', '16', '--check', check,
                 *[word for label in labels for word in ('--label', label)]])
         return result, snapshots, commands
 
@@ -128,6 +128,55 @@ controller:pg17:
         runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
         script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
         self.assertEqual(shlex.split(script), ['python3', 'tests/controller.py', *labels])
+    def test_runtime_gate_can_be_selected_in_owned_postgres_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, commands = self.invoke(self.source(directory), check='controller_runtime')
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if 'bash' in command)
+        self.assertIn('TESTS=python3 tests/controller_runtime.py', runner)
+
+    def test_drop_diagnostic_reads_only_owned_database_and_known_pid_metadata(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        import sys
+        from _controller_fixture import _drop_backend_state
+        observer = MagicMock()
+        observer.__enter__.return_value = observer
+        observer.execute.return_value.fetchall.return_value = [(123, 'postgres', 'active', 'IPC', 'CheckpointDone')]
+        connect = MagicMock(return_value=observer)
+        config = dict(NAME='test_mop_' + 'a' * 32, HOST='fixture-only', PORT='5432',
+                      USER='fixture-only', PASSWORD='synthetic-do-not-log')
+        with patch.dict(sys.modules, {'psycopg': SimpleNamespace(connect=connect)}):
+            rows = _drop_backend_state(config, 123)
+        self.assertEqual(rows, [(123, 'postgres', 'active', 'IPC', 'CheckpointDone')])
+        query, params = observer.execute.call_args.args
+        self.assertEqual(params, (123, config['NAME']))
+        self.assertEqual(query, 'SELECT pid, datname, state, wait_event_type, wait_event FROM pg_stat_activity WHERE pid = %s OR datname = %s')
+        self.assertNotIn('synthetic-do-not-log', repr(rows))
+        self.assertIn('default_transaction_read_only=on', connect.call_args.kwargs['options'])
+        self.assertIn('statement_timeout=1000', connect.call_args.kwargs['options'])
+        self.assertEqual(connect.call_args.kwargs['connect_timeout'], 5)
+
+    def test_drop_diagnostic_refuses_nonfixture_database_or_unknown_pid_before_connect(self):
+        # HYPOTHESIS: диагностический helper не должен расширять SQL-scope
+        # при неверном NAME/PID. Это защита probe, не исправление причины #668.
+        # SOLUTION: fixture UUID-name и положительный int PID проверяются до connect.
+        # RESULT: шесть meaningful red (SQL выполнялся), затем guard green.
+        # STATUS: защита probe проверена; причина #668 ещё не подтверждена.
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        import sys
+        from _controller_fixture import _drop_backend_state
+        connect = MagicMock()
+        valid = 'test_mop_' + 'a' * 32
+        with patch.dict(sys.modules, {'psycopg': SimpleNamespace(connect=connect)}):
+            for name, pid in [('mop_ci', 123), ('test_mop_', 123), (valid, None),
+                              (valid, 0), (valid, True), (valid, '123')]:
+                with self.subTest(database=name, pid=pid):
+                    with self.assertRaisesRegex(ValueError, 'owned test database|known backend PID'):
+                        _drop_backend_state(dict(NAME=name, HOST='fixture-only', PORT='5432',
+                                                 USER='fixture-only', PASSWORD='synthetic'), pid)
+        connect.assert_not_called()
 
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:

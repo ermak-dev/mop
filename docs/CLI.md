@@ -676,7 +676,7 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres] [--label dotted.test] [--realtime] [--cross-uid]: isolated PostgreSQL checks
+mop dev controller [--postgres 16|17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres] [--label dotted.test] [--realtime] [--cross-uid]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
