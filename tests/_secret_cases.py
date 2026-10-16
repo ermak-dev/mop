@@ -844,7 +844,7 @@ class SecretCases(TransactionTestCase):
     # SOLUTION: frozen-set guard стоит только перед новой записью, после exact retry.
     # RED: combined PG16 202 cases — оба exact retry получили unresolved rotation.
     # RESULT: combined PG16/17 203/203, включая оба frozen retry и запрет новых bindings.
-    # STATUS: FIXED — see #635.
+    # STATUS: FIXED — see #635 и #637 (retry/freeze, не runtime composition).
     def test_exact_bind_retry_during_frozen_rotation_has_no_write_effect(self):
         svc, a, new, b, r = self.rotation()
         before = self.m.SecretAudit.objects.count()

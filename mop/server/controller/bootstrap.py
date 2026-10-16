@@ -1,5 +1,6 @@
 """Защищённый ввод до БД; не является источником настроек установки."""
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -135,3 +136,28 @@ def load(path):
 def root_digest(bootstrap):
     """Fingerprint проверяет custody, не используется как ключ шифрования."""
     return hashlib.sha256(private_bytes(bootstrap['root_key'])).hexdigest()
+
+
+def secret_provider(bootstrap, *, installation_id, expected_root_digest, key_id):
+    """Maintenance-композиция; identity/fingerprint берутся из проверенной Installation."""
+    from mop.server.secrets.crypto import Keyring, XChaCha20Provider
+    if bootstrap.get('role') != 'maintenance':
+        raise RuntimeError('secret root access requires the maintenance process role')
+    if type(installation_id) is not str or not re.fullmatch(
+            r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', installation_id) or \
+            bootstrap.get('installation_id') != installation_id:
+        raise RuntimeError('secret root installation identity mismatch')
+    if type(expected_root_digest) is not str or not re.fullmatch(r'[0-9a-f]{64}', expected_root_digest):
+        raise RuntimeError('secret root fingerprint is invalid')
+    if type(key_id) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', key_id):
+        raise ValueError('invalid encryption key identifier')
+    root = private_bytes(bootstrap.get('root_key', ''))
+    if len(root) < 32:
+        raise RuntimeError('bootstrap root key must contain at least 32 bytes')
+    if not hmac.compare_digest(hashlib.sha256(root).hexdigest(), expected_root_digest):
+        raise RuntimeError('secret root fingerprint mismatch')
+    # RFC 5869: один 32-byte expand block; корень — случайные bytes, не пароль.
+    prk = hmac.digest(b'mop.secret.root.hkdf-sha256.v1\x00', root, 'sha256')
+    info = b'mop.secret.aead\x00' + installation_id.encode('ascii') + b'\x00' + key_id.encode('ascii')
+    key = hmac.digest(prk, info + b'\x01', 'sha256')
+    return XChaCha20Provider(Keyring(key_id, {key_id: key}))
