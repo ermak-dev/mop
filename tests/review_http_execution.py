@@ -18,17 +18,12 @@ import tempfile
 import time
 import unittest
 
+import _lib  # noqa: F401 -- общий временный корень процесса (#338)
 import hermetic
-from http_execution import wire
+from _body_fixture import wire, binding
 from mop.node.http_execution import Work, EffectGuard, Refused, Unavailable
-from mop.node.execution_adapters import BoundTarget, ActionInput, LocalExecutor, ProcessRunner
+from mop.node.execution_adapters import ActionInput, LocalExecutor, ProcessRunner
 from mop.node.execution_facts import LocalFacts, FactScope
-
-
-def binding(work, root):
-    return BoundTarget(work.target_id, work.incarnation_id, work.node_id,
-        work.executor_epoch, work.generation, work.role, work.bundle_digest,
-        work.grant_id, root/'repo', root/'tmux', '%0', root/'launcher')
 
 
 class Review(unittest.IsolatedAsyncioTestCase):

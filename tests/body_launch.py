@@ -12,9 +12,7 @@ STATUS: FIXED — see #643 (driver/node stage, Root binding отдельно)
 import asyncio
 import base64
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -23,33 +21,12 @@ import tempfile
 import unittest
 from uuid import UUID, uuid4
 
+import _lib  # noqa: F401 -- общий временный корень процесса (#338)
 import hermetic  # noqa: F401
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mop.common import soul
-from mop.node.http_execution import Work, Refused, Unavailable
+from _body_fixture import api, work, bundle, wire
+from mop.node.http_execution import Refused, Unavailable
 from mop.node.execution_adapters import BoundTarget, ActionInput
 
-
-def api():
-    spec = importlib.util.find_spec('mop.driver.launch')
-    assert spec is not None, 'addressed body launch boundary is missing'
-    from mop.driver import launch
-    return launch
-
-
-def work():
-    return Work.parse(dict(schema_version=1, **{key: str(uuid4()) for key in
-        ('epoch', 'operation_id', 'step_id', 'target_id', 'incarnation_id', 'node_id',
-         'executor_epoch', 'grant_id')}, owner_id='1', generation='2', revision='3',
-        role='worker', bundle_digest='a'*64, action='apply_identity',
-        not_after=(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()))
-
-
-def bundle():
-    return soul.from_manifest(dict(version=1, soul='worker',
-        prompt='prompt.md', runtime=dict(driver='any', receives_dispatch=True),
-        capabilities=dict(node_verbs=[], cluster_verbs=[], dispatch=False, spawn=[]),
-        secrets=dict(files=[], vars=[])), b'approved prompt\n')
 
 
 class LaunchTests(unittest.TestCase):

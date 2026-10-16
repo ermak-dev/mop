@@ -12,21 +12,8 @@ import importlib
 from pathlib import Path
 import unittest
 from _lib import offline
+from _control_fixture import page  # noqa: F401 -- общая страница #656 (#675)
 import hermetic  # noqa: F401
-
-
-def page():
-    return {'schema_version': 1, 'source': 'cliproxy', 'source_complete': False,
-        'period': {'start': '2026-10-16', 'end': '2026-10-17', 'timezone': 'UTC', 'end_exclusive': True},
-        'attribution': {'user': 'unavailable', 'project': 'unavailable', 'puppet': 'unavailable'},
-        'sources': [], 'next': None,
-        'items': [{'id': '0195305d-152b-42c0-80c6-edbce57a4ef4', 'source_id': '9195305d-152b-42c0-80c6-edbce57a4ef4',
-            'date': '2026-10-16', 'key_id': None, 'provider': 'provider', 'model': 'model', 'alias': 'alias',
-            'requests': 1, 'failed_requests': 0, 'partial_events': 1,
-            'counters': {name: {'value': '41' if name == 'total' else None,
-                'known_events': 1 if name == 'total' else 0, 'unknown_events': 0 if name == 'total' else 1}
-                for name in ('total', 'unclassified', 'input', 'input_uncached', 'cache_read', 'cache_write',
-                             'output', 'output_non_reasoning', 'reasoning')}}]}
 
 
 class UsageQuery(unittest.TestCase):

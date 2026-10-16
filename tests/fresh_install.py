@@ -1,16 +1,17 @@
 """Fresh install: stdlib plan, explicit topology и честные late blockers."""
+import io
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import unittest
 
-import _lib  # noqa: F401
+from _lib import run_command
+import _lib  # noqa: F401 -- общий временный корень процесса (#338)
 import hermetic  # noqa: F401
+from _fresh_install_fixture import FreshPlanFixture, ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # HYPOTHESIS: deploy запускает прежние роли и не имеет отдельного fresh пути.
@@ -20,33 +21,6 @@ sys.path.insert(0, str(ROOT))
 # purpose-scoped DB bootstrap и явные blockers вместо фиктивного runtime.
 # RESULT: render/права/no-leak/cold path проверены без установки служб.
 # STATUS: FIXED — see #644 (installation-only slice, не полный runtime).
-class FreshPlanFixture:
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='mop-fresh-plan-')
-        self.addCleanup(self.tmp.cleanup)
-        self.path = Path(self.tmp.name) / 'install.json'
-        self.spec = {
-            'installation_id': 'fresh-proof',
-            'database': {'topology': 'remote', 'major': 16, 'host': 'db.example.invalid',
-                         'port': 5543, 'name': 'fresh_db', 'tls_ca': '/etc/mop-db/ca.pem'},
-            'paths': {'venv': '/opt/mop-fresh/venv', 'configuration': '/etc/mop-fresh',
-                      'state': '/var/lib/mop-fresh', 'backup': '/var/backups/mop-fresh',
-                      'root_trust': '/var/lib/mop-trust'},
-            'identities': {'maintenance': 'mop_maintenance', 'web': 'mop_web',
-                           'worker': 'mop_worker', 'gateway': 'mop_gateway',
-                           'credentials': 'mop_credentials', 'builder': 'mop_builder'},
-        }
-        self.write()
-
-    def write(self):
-        self.path.write_text(json.dumps(self.spec))
-        self.path.chmod(0o600)
-
-    def call(self, *args):
-        return subprocess.run([str(ROOT / 'bin/mop'), 'server', 'install', *args,
-                               '--spec', str(self.path)], cwd=self.tmp.name,
-                              capture_output=True, text=True)
-
 class FreshPlan(FreshPlanFixture, unittest.TestCase):
     def test_stdlib_cold_plan_has_dependency_order_and_explicit_blockers(self):
         result = self.call('plan')
@@ -64,8 +38,8 @@ class FreshPlan(FreshPlanFixture, unittest.TestCase):
         self.assertNotIn('site.yml', result.stdout)
 
     def test_cold_command_bypasses_legacy_context_and_environment_readers(self):
-        import contextlib
-        import io
+        # #675: захват stdout -- общий run_command(out=...), а не свой
+        # redirect_stdout; патчи легаси-читателей остаются вокруг вызова.
         from unittest.mock import patch
         from mop import cli
         from mop.common import config, context
@@ -73,10 +47,11 @@ class FreshPlan(FreshPlanFixture, unittest.TestCase):
         with patch.object(context, 'here', side_effect=AssertionError('legacy context read')), \
                 patch.object(context, 'strip_server', side_effect=AssertionError('legacy selector read')), \
                 patch.object(config, 'get', side_effect=AssertionError('legacy setting read')), \
-                patch.object(cli, 'run', side_effect=lambda fn, argv: fn(argv)), \
-                contextlib.redirect_stdout(output):
-            self.assertEqual(cli.main(['server', 'install', 'plan', '--spec', str(self.path)]), 0)
-        self.assertFalse(json.loads(output.getvalue())['legacy_inputs'])
+                patch.object(cli, 'run', side_effect=lambda fn, argv: fn(argv)):
+            text, _, code = run_command(cli.main,
+                ['server', 'install', 'plan', '--spec', str(self.path)], out=output)
+        self.assertEqual(code, 0)
+        self.assertFalse(json.loads(text)['legacy_inputs'])
 
     def test_provisioning_command_emits_review_only_artifact(self):
         result = self.call('provisioning')

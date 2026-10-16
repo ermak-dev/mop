@@ -86,7 +86,8 @@ class Checks:
 
 
 # ─── командлет в процессе ────────────────────────────────────────────────
-def run_command(fn, argv=(), stdin=None, via_cli=False, typed=None, module=None):
+def run_command(fn, argv=(), stdin=None, via_cli=False, typed=None, module=None,
+                *, out=None, err=None):
     """Прогнать командлет в процессе. -> (stdout, stderr, код выхода).
 
     fn -- его main. via_cli -- через mop.cli.run: ожидаемые отказы
@@ -95,8 +96,14 @@ def run_command(fn, argv=(), stdin=None, via_cli=False, typed=None, module=None)
     вызывающему. SystemExit -- код выхода: число, либо текст (usage,
     sys.exit("...")) -- тогда код и есть этот текст, его печатает только
     интерпретатор на выходе. stdin -- текст для sys.stdin; typed -- ответы
-    getpass по порядку, подменяются в module (его getpass)."""
-    out, err = io.StringIO(), io.StringIO()
+    getpass по порядку, подменяются в module (его getpass). out/err --
+    готовые потоки проверки (#675): свой наблюдатель (flush-фикстура #672,
+    файл) получает записи прямо в себя, а не в скрытую копию; без них --
+    свои StringIO, как раньше. Возвращаются строки потоков: у чужого потока
+    без getvalue -- пустая, сам поток читает проверка."""
+    streams = (out if out is not None else io.StringIO(),
+               err if err is not None else io.StringIO())
+    out, err = streams
     code = 0
     keep_stdin = sys.stdin
     answers = list(typed or ())
@@ -119,7 +126,8 @@ def run_command(fn, argv=(), stdin=None, via_cli=False, typed=None, module=None)
         sys.stdin = keep_stdin
         if module is not None and keep_getpass is not None:
             module.getpass = keep_getpass
-    return out.getvalue(), err.getvalue(), code
+    drained = tuple(s.getvalue() if hasattr(s, "getvalue") else "" for s in streams)
+    return *drained, code
 
 
 # ─── сеть ────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import importlib.util
 import unittest
 from unittest.mock import patch
 import _lib  # noqa: F401
+import hermetic  # noqa: F401 -- изоляция импорта до первого mop (#675)
 from mop.server.sessions import projection_policy as policy
 from mop.common.state import State
 

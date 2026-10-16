@@ -22,7 +22,7 @@ from datetime import timedelta
 
 import _operation_cases as operation_fixture
 import _build_cases as build_fixture
-from control_tls import own_tls
+from _control_fixture import own_tls
 from mop import cli
 from mop.cli import _control
 from mop.client import control as api

@@ -17,9 +17,9 @@ import unittest
 from dataclasses import replace
 from uuid import uuid4
 
+import _lib  # noqa: F401 -- общий временный корень процесса (#338)
 import hermetic  # noqa: F401
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from body_launch import work, bundle
+from _body_fixture import work, bundle
 from mop.driver.launch import MachineConfig, Registration, RegisteredLayout
 from mop.server import spec
 

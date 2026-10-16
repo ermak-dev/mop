@@ -10,7 +10,7 @@ RESULT: красный новый entry; отдельно воспроизвед
 STATUS: FIXED — see #640
 """
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sys
@@ -22,21 +22,12 @@ import shutil
 import json
 from uuid import uuid4
 
+import _lib  # noqa: F401 -- общий временный корень процесса (#338)
 import hermetic  # noqa: F401
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _body_fixture import wire
 from mop.node.http_execution import MachineClient, Runtime, Work, Refused, Unavailable, HttpsTransport, EffectGuard
 from mop.node.execution_adapters import BoundTarget, ActionInput, LocalExecutor, ProcessRunner, UnixSessionSender
 from mop.node.execution_facts import LocalFacts, FactScope
-
-
-def wire(**changes):
-    value = dict(schema_version=1, **{k: str(uuid4()) for k in (
-        'epoch', 'operation_id', 'step_id', 'target_id', 'incarnation_id', 'node_id',
-        'executor_epoch', 'grant_id')}, owner_id='1', generation='1', revision='1',
-        role='worker', bundle_digest='a'*64, action='send_message',
-        not_after=(datetime.now(timezone.utc)+timedelta(minutes=2)).isoformat())
-    value.update(changes)
-    return value
 
 
 class Transport:
