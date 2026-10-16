@@ -394,6 +394,7 @@ class Endpoints:
             raise NotVisible('resource not found')
         if actor.principal_id == row.sender_principal_id:
             self._sender(actor, row.endpoint.project_id)
+            self._permission(actor, 'view_delivery')
         elif actor.kind is PrincipalKind.HUMAN and actor.user_id == row.endpoint.session.owner_id:
             self._human(actor, 'view_delivery', row.endpoint.project_id, row.endpoint.session.client_id)
         else:
@@ -459,13 +460,24 @@ class Endpoints:
             if receipt:
                 if receipt.outcome != outcome:
                     raise Conflict('delivery receipt conflicts with stored evidence')
-                return self._result(row)
-            if row.state != 'attempting':
-                raise Conflict('delivery is no longer awaiting application evidence')
-            m.DeliveryReceipt.objects.create(delivery=row, kind='delivery', outcome=outcome,
-                connection_generation=context.generation, connection_nonce=context.nonce)
-            self._finish(row, outcome)
-            return self._result(row)
+            else:
+                if row.state != 'attempting':
+                    raise Conflict('delivery is no longer awaiting application evidence')
+                m.DeliveryReceipt.objects.create(delivery=row, kind='delivery', outcome=outcome,
+                    connection_generation=context.generation, connection_nonce=context.nonce)
+                self._finish(row, outcome)
+            # Физическое evidence уже получено: отзыв не откатывает его в
+            # noneffect. Сохраняем receipt, но отказ выводим после commit, чтобы
+            # caller не получил authority для следующего stage/idle subscription.
+            denied = None
+            try:
+                self._sending_authority(row)
+            except Denied as error:
+                denied = error
+            result = self._result(row)
+        if denied is not None:
+            raise denied
+        return result
 
     def idle_message(self, context, delivery_id):
         with self._transaction() as authority:
@@ -473,6 +485,7 @@ class Endpoints:
             row = self._attempt(context, delivery_id)
             if not row.notify_when_idle or row.state != 'accepted':
                 raise Conflict('delivery has no accepted idle subscription')
+            self._sending_authority(row)
             return row.message_id
 
     def idle(self, context, delivery_id):
@@ -481,6 +494,7 @@ class Endpoints:
             row = self._attempt(context, delivery_id)
             if not row.notify_when_idle or row.state != 'accepted':
                 raise Conflict('idle is not evidence of accepted message delivery')
+            self._sending_authority(row)
             m.DeliveryReceipt.objects.get_or_create(delivery=row, kind='idle', defaults=dict(outcome='observed',
                 connection_generation=context.generation, connection_nonce=context.nonce))
             return self._result(row)

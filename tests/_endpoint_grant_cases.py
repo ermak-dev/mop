@@ -49,8 +49,26 @@ class EndpointGrantReports(TransactionTestCase):
         frame = api.take(context)
         self.assertEqual(frame.text, 'private report')
         self.assertEqual(api.acknowledge(context, report.id, outcome='accepted').state, 'accepted')
+        # BUG: sender grant может исчезнуть в acceptance wait после take.
+        # HYPOTHESIS: acknowledge проверяет receiver, но не исходный grant.
+        # RED: PG16 — PermissionError not raised после revoke текущего grant.
+        # SOLUTION: сохранить physical acceptance и после commit вернуть отказ;
+        # повторно проверять grant перед idle lookup/observation.
+        # STATUS: FIXED — see #649.
+        accepted_late = api.send(actor, expected_epoch=epoch, address=endpoint.address, message_id=uuid4(),
+            text='already accepted physically', notify_when_idle=True,
+            not_after=timezone.now()+timedelta(minutes=1))
+        api.take(context)
         pending = api.send(actor, expected_epoch=epoch, address=endpoint.address, message_id=uuid4(), text='revoked report',
             not_after=timezone.now()+timedelta(minutes=1))
         self.api.revoke(self.actor, grant.id, expected_revision=grant.revision)
+        with self.assertRaises(PermissionError):
+            api.acknowledge(context, accepted_late.id, outcome='accepted')
+        from mop.server.sessions.endpoint_models import DeliveryReceipt, MessageDelivery
+        self.assertEqual(DeliveryReceipt.objects.get(delivery_id=accepted_late.id).outcome, 'accepted')
+        self.assertEqual(MessageDelivery.objects.get(pk=accepted_late.id).state, 'accepted')
+        for operation in (api.idle_message, api.idle):
+            with self.assertRaises(PermissionError):
+                operation(context, accepted_late.id)
         self.assertIsNone(api.take(context))
         self.assertEqual(api.delivery(self.actor, pending.id).state, 'unavailable')

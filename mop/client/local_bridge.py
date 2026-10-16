@@ -43,6 +43,7 @@ class LocalBridge:
         self._idle = {}
         self._seen = {}
         self._tasks = set()
+        self._outbound = set()
         self._writers = set()
         self._stopped = False
 
@@ -132,23 +133,49 @@ class LocalBridge:
             self._writers.discard(writer)
             self._tasks.discard(task)
 
-    async def _write(self, frame):
+    async def _write(self, frame, guard=None):
         path = self._path()
         async with asyncio.timeout(self.timeout):
             _, writer = await asyncio.open_unix_connection(str(path))
+            self._writers.add(writer)
             try:
                 self._peer(writer)
                 data = []
                 if self.own.token is not None:
                     data.append({'type': 'auth', 'token': self.own.token})
                 data.append(frame)
-                writer.write((''.join(json.dumps(value, ensure_ascii=False)+'\n' for value in data)).encode())
+                encoded = (''.join(json.dumps(value, ensure_ascii=False)+'\n' for value in data)).encode()
+                # Trusted root port, никогда не значение wire/JSON. После всех
+                # readiness/connect awaits проверяем живую authority без SQL lock
+                # под сетью. От результата guard до write нет другого await.
+                if guard is not None:
+                    await guard()
+                if self._stopped:
+                    raise ConnectionError('local bridge is stopped')
+                writer.write(encoded)
                 await writer.drain()
             finally:
                 writer.close()
-                await writer.wait_closed()
+                try:
+                    await writer.wait_closed()
+                finally:
+                    self._writers.discard(writer)
 
     async def deliver(self, frame):
+        return await self.deliver_guarded(frame, None)
+
+    async def deliver_guarded(self, frame, guard):
+        """Root передаёт trusted prewrite port отдельно от пользовательского frame."""
+        if self._stopped:
+            raise ConnectionError('local bridge is stopped')
+        task = asyncio.current_task()
+        self._outbound.add(task)
+        try:
+            return await self._deliver(frame, guard)
+        finally:
+            self._outbound.discard(task)
+
+    async def _deliver(self, frame, guard):
         if type(frame) is not DeliveryFrame or frame.external_session_id != self.external_session_id:
             raise PermissionError('message targets a different external conversation')
         if not isinstance(frame.text, str) or len(frame.text.encode()) > 65536 or frame.priority not in ('next', 'now'):
@@ -179,7 +206,7 @@ class LocalBridge:
             if frame.reply_address:
                 user['message']['content'] += '\n\nReply address: '+frame.reply_address
             started = True
-            await self._write(user)
+            await self._write(user, guard)
             try:
                 outcome = await asyncio.wait_for(asyncio.shield(future), self.timeout)
             except TimeoutError:
@@ -189,8 +216,8 @@ class LocalBridge:
                 self._idle[frame.message_id] = (subscription, asyncio.Event())
                 try:
                     await self._write({'msgV': 1, 'type': 'control', 'msg_id': subscription,
-                        'action': 'notify_when_idle', 'from': callback})
-                except (OSError, TimeoutError):
+                        'action': 'notify_when_idle', 'from': callback}, guard)
+                except (OSError, TimeoutError, PermissionError, ValueError):
                     # Принятие user-frame уже подтверждено, но idle неизвестен.
                     self._idle.pop(frame.message_id, None)
         except (OSError, TimeoutError):
@@ -226,10 +253,17 @@ class LocalBridge:
             self._server = None
         for writer in tuple(self._writers):
             writer.close()
-        for task in tuple(self._tasks):
+        tasks = (self._tasks | self._outbound) - {asyncio.current_task()}
+        for task in tasks:
             task.cancel()
-        if self._tasks:
-            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=self.timeout)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
+            if pending:
+                # Cancel не доказывает quiescence: authority нельзя отдавать.
+                raise RuntimeError('local bridge shutdown incomplete: outbound or callback work')
         if self._callback is not None:
             self._callback.unlink(missing_ok=True)
             self._callback = None

@@ -22,6 +22,9 @@ class DeliveryGateway:
         self._attaching = 0
         self._busy = set()
         self._calls = set()
+        self._work = {}
+        self._closing = set()
+        self._closers = {}
         self._loops = {}
         self._loop_failure = None
         self._idle_pending = {}
@@ -68,23 +71,34 @@ class DeliveryGateway:
         return await self.runtime.effect(self._deliver_one, context)
 
     async def _deliver_one(self, context):
-        if self._stopped or context not in self._peers:
+        if self._stopped or context in self._closing or context not in self._peers:
             raise ConnectionError('private gateway receiver is unavailable')
         if context in self._busy:
             return None
         self._busy.add(context)
         task = asyncio.current_task()
         self._calls.add(task)
+        self._work.setdefault(context, set()).add(task)
         try:
             await self.runtime.database(self.endpoints.renew, context)
             frame = await self.runtime.database(self.endpoints.take, context)
             if frame is None:
                 return None
-            await self.runtime.database(self.endpoints.before_dispatch, context, frame.id)
+            async def prewrite():
+                if self._stopped or context in self._closing:
+                    raise ConnectionError('private gateway receiver is closing')
+                await self.runtime.database(self.endpoints.before_dispatch, context, frame.id)
+                if self._stopped or context in self._closing:
+                    raise ConnectionError('private gateway receiver is closing')
+            await prewrite()
             outcome = 'unknown'
             try:
                 async with asyncio.timeout(5):
-                    evidence = await self._peers[context].deliver(frame)
+                    peer = self._peers[context]
+                    # Native peer проверяет port после readiness и socket open,
+                    # непосредственно перед write; port не входит в wire frame.
+                    guarded = getattr(peer, 'deliver_guarded', None)
+                    evidence = await guarded(frame, prewrite) if guarded else await peer.deliver(frame)
                 if type(evidence) is ApplicationAcceptance and evidence.outcome in ('accepted', 'unknown', 'unavailable'):
                     outcome = evidence.outcome
             except (OSError, TimeoutError):
@@ -101,14 +115,20 @@ class DeliveryGateway:
         finally:
             self._busy.discard(context)
             self._calls.discard(task)
+            self._work[context].discard(task)
+            if not self._work[context]:
+                self._work.pop(context)
 
     async def observe_idle(self, context, delivery_id, message_id, *, timeout=2):
-        if context not in self._peers or self._stopped:
+        if context not in self._peers or self._stopped or context in self._closing:
             raise ConnectionError('private gateway receiver is unavailable')
         async def observe():
             task = asyncio.current_task()
             self._calls.add(task)
+            self._work.setdefault(context, set()).add(task)
             try:
+                if context in self._closing:
+                    raise ConnectionError('private gateway receiver is closing')
                 expected = await self.runtime.database(self.endpoints.idle_message, context, delivery_id)
                 if message_id != expected:
                     raise PermissionError('idle message does not match addressed delivery')
@@ -122,6 +142,9 @@ class DeliveryGateway:
                 return None
             finally:
                 self._calls.discard(task)
+                self._work[context].discard(task)
+                if not self._work[context]:
+                    self._work.pop(context)
         return await self.runtime.effect(observe)
 
     async def cycle(self, context):
@@ -130,7 +153,7 @@ class DeliveryGateway:
 
     def start_receiver(self, context):
         """Root-owned loop, один на current connection; HTTP его не ожидает."""
-        if self._stopped or context not in self._peers:
+        if self._stopped or context in self._closing or context not in self._peers:
             raise ConnectionError('private gateway receiver is unavailable')
         if context in self._loops:
             return self._loops[context][0]
@@ -169,24 +192,45 @@ class DeliveryGateway:
             await self.detach(context)
 
     async def detach(self, context):
+        # Сначала запрещаем новый write и доказываем quiescence транспорта.
+        # Timeout оставляет peer/lease у owner для повторного drain, не clean close.
+        peer = self._peers.get(context)
+        if peer is None:
+            return
+        self._closing.add(context)
         pair = self._loops.get(context)
         if pair:
             pair[1].set()
         self._idle_pending.pop(context, None)
-        peer = self._peers.pop(context, None)
-        if peer is None:
-            return
+        close = self._closers.get(context)
+        if close is None:
+            close = asyncio.create_task(peer.aclose())
+            self._closers[context] = close
+        _, pending = await asyncio.wait((close,), timeout=5)
+        if pending:
+            raise RuntimeError('private delivery detach incomplete: peer cleanup')
         try:
-            await self.runtime.database(self.endpoints.disconnect, context)
+            close.result()
         finally:
-            async with asyncio.timeout(5):
-                await peer.aclose()
+            self._closers.pop(context, None)
+        tasks = self._work.get(context, set()) - {asyncio.current_task()}
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=5)
+            if pending:
+                raise RuntimeError('private delivery detach incomplete: active transport work')
+        await self.runtime.database(self.endpoints.disconnect, context)
+        self._peers.pop(context, None)
+        self._closing.discard(context)
 
     async def aclose(self):
         self._stopped = True
         failures = []
         for task, stop in self._loops.values():
             stop.set()
+        for context in tuple(self._peers):
+            await self.detach(context)
         if self._loops:
             tasks = tuple(pair[0] for pair in self._loops.values())
             _, pending = await asyncio.wait(tasks, timeout=10)

@@ -664,6 +664,299 @@ class Endpoints(TransactionTestCase):
         with self.assertRaises(self.s.Conflict):
             self.api.idle_message(first, plain.id)
 
+    # BUG: readiness/acceptance waits outlive authority and successful detach.
+    # HYPOTHESIS: только admission/result проверяют authority, outbound tasks не owned.
+    # Receipt insertion доверяет ordinary ORM без correlation с claim.
+    # RED: PG16 — 6 assertion failures; PG17 — 7 (добавлен socket-open wait).
+    # Отдельный PG16 red подтвердил bulk-create и revoke grant после take.
+    # SOLUTION: trusted prewrite port после awaits, bounded outbound join до
+    # lease release; receipt commit сохраняется, но revoked sender не получает
+    # дальнейшую authority. ORM insert сериализуется с claim/result.
+    # RESULT: late plaintext отсутствует; incomplete close не отдаёт lease;
+    # acceptance сохраняется без idle privilege; неподтверждённый idle отвергнут.
+    # STATUS: FIXED — see #649; точные PG/CI прогоны указаны в отчёте.
+    def test_receiver_revoked_during_native_readiness_never_gets_plaintext(self):
+        asyncio.run(self._late_native_write('revoke'))
+
+    def test_bridge_close_joins_outbound_and_prevents_late_plaintext(self):
+        asyncio.run(self._late_native_write('close'))
+
+    def test_gateway_detach_quiesces_before_releasing_connection(self):
+        asyncio.run(self._late_native_write('detach'))
+
+    def test_receiver_revoked_during_actual_socket_open_never_gets_plaintext(self):
+        asyncio.run(self._late_native_write('revoke-open'))
+
+    def test_incomplete_detach_keeps_authority_owned_and_retry_drains_without_replay(self):
+        asyncio.run(self._late_native_write('timeout'))
+
+    async def _late_native_write(self, action):
+        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.server.controller.endpointroot import create_endpoint_runtime
+        with tempfile.TemporaryDirectory(prefix='mop-endpoint-fence-') as directory:
+            os.chmod(directory, 0o700)
+            path = str(Path(directory)/'external.sock')
+            frames, arrived = [], asyncio.Event()
+            async def external(reader, writer):
+                try:
+                    line = await reader.readline()
+                    if line:
+                        frames.append(json.loads(line))
+                        arrived.set()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+            server = await asyncio.start_unix_server(external, path=path)
+            os.chmod(path, 0o600)
+            bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.05)
+            runtime, gateway = create_endpoint_runtime(self.api)
+            await runtime.start()
+            release, entered = asyncio.Event(), asyncio.Event()
+            task, binding = None, None
+            try:
+                context = await gateway.attach(self.actor, self.endpoint.id, bridge)
+                report = await runtime.database(self.send)
+                original = bridge.ready
+                async def delayed_probe():
+                    result = await original()
+                    entered.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        if action != 'timeout':
+                            raise
+                        # Проверяем честный incomplete, а не доверяем cancel().
+                        await release.wait()
+                    return result
+                if action == 'revoke-open':
+                    from unittest.mock import patch
+                    original_open, opens = asyncio.open_unix_connection, 0
+                    async def delayed_open(*args, **kwargs):
+                        nonlocal opens
+                        result = await original_open(*args, **kwargs)
+                        opens += 1
+                        if opens == 2:
+                            entered.set()
+                            await release.wait()
+                        return result
+                    binding = patch('asyncio.open_unix_connection', delayed_open)
+                    binding.start()
+                else:
+                    bridge.ready = delayed_probe
+                task = asyncio.create_task(gateway.deliver_one(context))
+                await asyncio.wait_for(entered.wait(), 2)
+                if action.startswith('revoke'):
+                    # Независимый DB worker должен пройти без SQL lock под сетью.
+                    await asyncio.wait_for(runtime.database(self.auth.revoke_token, self.actor), 2)
+                elif action == 'close':
+                    await bridge.aclose()
+                elif action == 'timeout':
+                    with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+                        await asyncio.wait_for(gateway.detach(context), 2)
+                    self.assertTrue(await runtime.database(lambda: self.m.ConnectionLease.objects.get(
+                        endpoint_id=context.endpoint_id).connected))
+                    self.assertEqual(await runtime.database(lambda: self.m.MessageDelivery.objects.get(
+                        pk=report.id).state), 'attempting')
+                    self.assertFalse(task.done())
+                else:
+                    await gateway.detach(context)
+                    self.assertFalse(await runtime.database(lambda: self.m.ConnectionLease.objects.get(
+                        endpoint_id=context.endpoint_id).connected))
+                    self.assertEqual(await runtime.database(lambda: self.m.MessageDelivery.objects.get(
+                        pk=report.id).state), 'unknown')
+                if action in ('close', 'detach'):
+                    self.assertFalse(bridge._outbound, 'successful close must join outbound work')
+                if action == 'detach':
+                    self.assertFalse(gateway._work.get(context), 'lease release requires quiescent work')
+                release.set()
+                results = await asyncio.gather(task, return_exceptions=True)
+                if action.startswith('revoke'):
+                    self.assertIsInstance(results[0], PermissionError)
+                try:
+                    await asyncio.wait_for(arrived.wait(), .2)
+                except TimeoutError:
+                    pass
+                self.assertEqual(frames, [], 'revoked/closed receiver received late plaintext')
+                if action == 'timeout':
+                    await gateway.detach(context)
+                    replacement = await runtime.database(self.connect)
+                    self.assertIsNone(await runtime.database(self.api.take, replacement))
+                    self.assertEqual(await runtime.database(lambda: self.m.MessageDelivery.objects.get(
+                        pk=report.id).state), 'unknown')
+                    await runtime.database(self.api.disconnect, replacement)
+                if not action.startswith('revoke'):
+                    self.assertFalse(bridge._tasks)
+                    self.assertFalse(bridge._writers)
+            finally:
+                release.set()
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+                if binding is not None:
+                    binding.stop()
+                await runtime.aclose()
+                server.close()
+                await server.wait_closed()
+
+    def test_sender_revoked_during_acceptance_keeps_evidence_but_no_idle_authority(self):
+        from mop.common.endpoint import ApplicationAcceptance
+        from mop.server.controller.endpointroot import create_endpoint_runtime
+        async def scenario():
+            runtime, gateway = create_endpoint_runtime(self.api)
+            entered, release = asyncio.Event(), asyncio.Event()
+            class Peer:
+                external_session_id = self.external
+                async def ready(self): pass
+                async def start(self): pass
+                async def aclose(self): pass
+                async def deliver(self, frame):
+                    entered.set()
+                    await release.wait()
+                    return ApplicationAcceptance('accepted')
+            await runtime.start()
+            try:
+                context = await gateway.attach(self.actor, self.endpoint.id, Peer())
+                report = await runtime.database(self.api.send, self.other_actor,
+                    expected_epoch=self.installation.epoch, address=self.endpoint.address,
+                    message_id=uuid4(), text='independently revocable sender', notify_when_idle=True,
+                    not_after=timezone.now()+timedelta(minutes=1))
+                task = asyncio.create_task(gateway.deliver_one(context))
+                await asyncio.wait_for(entered.wait(), 2)
+                await runtime.database(self.auth.revoke_token, self.other_actor)
+                release.set()
+                with self.assertRaises(PermissionError):
+                    await task
+                # Принятие уже произошло: отзыв не превращает его в noneffect.
+                self.assertEqual(await runtime.database(lambda: self.m.DeliveryReceipt.objects.get(
+                    delivery_id=report.id, kind='delivery').outcome), 'accepted')
+                self.assertEqual(await runtime.database(lambda: self.m.MessageDelivery.objects.get(
+                    pk=report.id).state), 'accepted')
+                self.assertFalse(gateway._idle_pending.get(context))
+                for operation in (self.api.idle_message, self.api.idle):
+                    with self.assertRaises(PermissionError):
+                        await runtime.database(operation, context, report.id)
+            finally:
+                release.set()
+                await runtime.aclose()
+        asyncio.run(scenario())
+
+    def test_native_acceptance_after_sender_revocation_cannot_write_idle_control(self):
+        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.server.controller.endpointroot import create_endpoint_runtime
+        async def scenario():
+            with tempfile.TemporaryDirectory(prefix='mop-endpoint-accept-') as directory:
+                os.chmod(directory, 0o700)
+                path = str(Path(directory)/'external.sock')
+                frames, received, control = [], asyncio.Event(), asyncio.Event()
+                async def external(reader, writer):
+                    try:
+                        line = await reader.readline()
+                        if line:
+                            frame = json.loads(line)
+                            frames.append(frame)
+                            (received if frame['type'] == 'user' else control).set()
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                server = await asyncio.start_unix_server(external, path=path)
+                os.chmod(path, 0o600)
+                runtime, gateway = create_endpoint_runtime(self.api)
+                await runtime.start()
+                try:
+                    bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=1)
+                    context = await gateway.attach(self.actor, self.endpoint.id, bridge)
+                    report = await runtime.database(self.api.send, self.other_actor,
+                        expected_epoch=self.installation.epoch, address=self.endpoint.address,
+                        message_id=uuid4(), text='physically accepted', notify_when_idle=True,
+                        not_after=timezone.now()+timedelta(minutes=1))
+                    task = asyncio.create_task(gateway.deliver_one(context))
+                    await asyncio.wait_for(received.wait(), 2)
+                    await runtime.database(self.auth.revoke_token, self.other_actor)
+                    _, reply = await asyncio.open_unix_connection(frames[0]['from'][4:])
+                    reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'message_accepted',
+                        'orig_msg_id': str(report.message_id)})+'\n').encode())
+                    await reply.drain()
+                    reply.close()
+                    await reply.wait_closed()
+                    with self.assertRaises(PermissionError):
+                        await task
+                    self.assertEqual(await runtime.database(lambda: self.m.DeliveryReceipt.objects.get(
+                        delivery_id=report.id).outcome), 'accepted')
+                    try:
+                        await asyncio.wait_for(control.wait(), .2)
+                    except TimeoutError:
+                        pass
+                    self.assertEqual([frame['type'] for frame in frames], ['user'])
+                    self.assertFalse(bridge._idle)
+                    self.assertFalse(gateway._idle_pending.get(context))
+                finally:
+                    await runtime.aclose()
+                    server.close()
+                    await server.wait_closed()
+        asyncio.run(scenario())
+
+    def test_sender_read_requires_independent_view_delivery_permission(self):
+        self.connect()
+        report = self.send()
+        self.user.user_permissions.remove(Permission.objects.get(
+            content_type__app_label='execution', codename='view_delivery'))
+        with self.assertRaises(PermissionError):
+            self.api.delivery(self.actor, report.id)
+        with self.assertRaises(PermissionError):
+            self.api.delivery(self.other_actor, report.id)
+
+    def test_ordinary_orm_receipt_cannot_invent_idle_without_accepted_claim(self):
+        context = self.connect()
+        report = self.send(notify_when_idle=True)
+        with self.assertRaises(ValueError):
+            self.m.DeliveryReceipt.objects.create(delivery_id=report.id, kind='idle', outcome='observed',
+                connection_generation=context.generation+100, connection_nonce=uuid4())
+        self.assertFalse(self.api.delivery(self.actor, report.id).idle)
+        # Даже правильный nonce не заменяет attempted/accepted evidence.
+        with self.assertRaises(ValueError):
+            self.m.DeliveryReceipt.objects.create(delivery_id=report.id, kind='delivery', outcome='accepted',
+                connection_generation=context.generation, connection_nonce=context.nonce)
+        self.api.take(context)
+        with self.assertRaises(ValueError):
+            self.m.DeliveryReceipt.objects.create(delivery_id=report.id, kind='delivery', outcome='accepted',
+                connection_generation=context.generation+1, connection_nonce=uuid4())
+        self.api.acknowledge(context, report.id, outcome='accepted')
+        with self.assertRaises(ValueError):
+            self.m.DeliveryReceipt.objects.create(delivery_id=report.id, kind='idle', outcome='observed',
+                connection_generation=context.generation+1, connection_nonce=uuid4())
+        self.api.idle(context, report.id)
+        self.assertTrue(self.api.delivery(self.actor, report.id).idle)
+
+    def test_ordinary_receipt_creation_racing_public_ack_cannot_forge_idle(self):
+        context = self.connect()
+        report = self.send(notify_when_idle=True)
+        self.api.take(context)
+        barrier = Barrier(2)
+        def operation(fake):
+            connections.close_all()
+            try:
+                barrier.wait(timeout=10)
+                if fake:
+                    with self.assertRaises(ValueError):
+                        self.m.DeliveryReceipt.objects.create(delivery_id=report.id, kind='idle', outcome='observed',
+                            connection_generation=context.generation+1, connection_nonce=uuid4())
+                else:
+                    self.assertEqual(self.api.acknowledge(context, report.id, outcome='accepted').state, 'accepted')
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(operation, (False, True)))
+        self.assertEqual(self.m.DeliveryReceipt.objects.filter(delivery_id=report.id).count(), 1)
+        self.assertFalse(self.api.delivery(self.actor, report.id).idle)
+
+    def test_ordinary_bulk_receipt_cannot_bypass_confirmation_guard(self):
+        context = self.connect()
+        report = self.send(notify_when_idle=True)
+        with self.assertRaises(ValueError):
+            self.m.DeliveryReceipt.objects.bulk_create([self.m.DeliveryReceipt(
+                delivery_id=report.id, kind='idle', outcome='observed',
+                connection_generation=context.generation, connection_nonce=context.nonce)])
+        self.assertFalse(self.api.delivery(self.actor, report.id).idle)
+
     def test_bridge_and_common_wire_have_no_framework_or_legacy_discovery_import(self):
         for module in ('mop.client.local_bridge', 'mop.common.endpoint'):
             spec = importlib.util.find_spec(module)
