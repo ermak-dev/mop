@@ -314,6 +314,13 @@ class GrantCases(TransactionTestCase):
     # BUG: обычный append расширяет утверждённые capabilities локального gate;
     # token lookup по user усыновляет binding выпущенного параллельно ключа.
     # HYPOTHESIS: отсутствуют durable seal полного child set и pin presented digest.
+    # RED: PG16/17 принимают append и старый ключ после реального transaction rotation;
+    # approval не удерживает parent lock, publisher не сверяет actual normalized set.
+    # SOLUTION: publisher проверяет полный set и пишет immutable seal; ORM children
+    # и approval берут один parent lock, общий token helper сверяет presented digest.
+    # RESULT: approved fixture с matching native tools — PG16 и PG17 по 224/224;
+    # восемь новых checks и прежние пять local/receiving checks проходят без ослабления.
+    # STATUS: FIXED — see #635
     def test_published_child_sets_reject_ordinary_append_before_and_after_approval(self):
         for approved in (False, True):
             raw = json.dumps(manifest('sealed-' + str(approved).lower())).encode()
