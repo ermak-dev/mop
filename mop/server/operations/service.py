@@ -83,9 +83,10 @@ class InstallationState:
 
 
 def _snapshot(row):
-    receipt = m.EffectReceipt.objects.filter(step__operation=row).values('id', 'applied', 'source_revision').first()
+    receipt = m.EffectReceipt.objects.filter(step__operation=row).order_by('-step__ordinal').values(
+        'id', 'applied', 'source_revision', 'step__name').first()
     started = m.Step.objects.filter(operation=row, token__isnull=False).exists()
-    return dict(id=str(row.pk), request_id=str(row.request_id), epoch=str(row.epoch), state=row.state,
+    result = dict(id=str(row.pk), request_id=str(row.request_id), epoch=str(row.epoch), state=row.state,
         revision=row.revision, code=row.code, reason=row.reason, target={'id': str(row.node_id), 'kind': 'node',
             'revision': str(row.expected_revision + int(started)), 'source_revision': str(row.expected_revision)},
         resources_held=m.ResourceClaim.objects.filter(operation=row, released_at=None).exists(),
@@ -93,11 +94,18 @@ def _snapshot(row):
             'source_revision': str(receipt['source_revision']),
             'applied_revision': str(receipt['source_revision'] + 1) if receipt['applied'] else None,
             'projection_updated': row.code == 'effect_confirmed'} if receipt else None))
+    if row.target_kind == 'puppet':
+        result.update(target={'id': str(row.target_id), 'kind': row.target_kind, 'incarnation': str(row.incarnation_id),
+            'revision': str(row.expected_revision), 'source_revision': str(row.expected_revision)},
+            steps=list(m.Step.objects.filter(operation=row).order_by('ordinal').values('name','outcome','evidence')),
+            evidence=({'receipt_id':str(receipt['id']), 'action':receipt['step__name'],
+                'incarnation':str(row.incarnation_id), 'confirmed':receipt['applied']} if receipt else None))
+    return result
 
 
 def _event(row):
     values = dict(operation=row, revision=row.revision, state=row.state, code=row.code,
-                  target_revision=Node.objects.get(pk=row.node_id).revision)
+                  target_revision=(row.expected_revision if row.target_kind == 'puppet' else Node.objects.get(pk=row.node_id).revision))
     m.AuditEvent.objects.create(reason=row.reason, **values)
     m.OutboxEvent.objects.create(**values)
 
@@ -122,7 +130,8 @@ class Operations:
     """Одна durable очередь; root внедряет только доверенную authority composition."""
     def __init__(self, *, installation_state: Callable[[], InstallationState] | None = None,
                  transaction_scope: Callable[[], AbstractContextManager] | None = None,
-                 grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
+                 grants=None, executor=None, targets=None, restart_support=None,
+                 queue_limit=256, project_limit=64, execution_limit=8):
         if not (1 <= queue_limit <= 256 and 1 <= project_limit <= 64 and 1 <= execution_limit <= 8):
             raise ValueError('operation limits exceed controller safety caps')
         self._read_installation = installation_state
@@ -130,6 +139,7 @@ class Operations:
         self.access = Access(grants=grants)
         self.grants = grants
         self.executor = executor
+        self.targets, self.restart_support = targets, restart_support
         self.queue_limit, self.project_limit, self.execution_limit = queue_limit, project_limit, execution_limit
 
     def _require_binding(self):
@@ -158,7 +168,10 @@ class Operations:
         return tuple(row.projects.values_list('pk', flat=True))
 
     def _disclose(self, actor, row):
-        self._authorize(actor, 'operations.view_operation', row.node_id, self._scope(row))
+        if row.target_kind == 'puppet':
+            self.access.authorize(actor, 'operations.view_operation', project_ids=self._scope(row))
+        else:
+            self._authorize(actor, 'operations.view_operation', row.node_id, self._scope(row))
         # Запрос по request_id принадлежит actor; ID disclosure допускает отдельное
         # view_operation право в актуальном scope, не владеет правом execution.
         if row.result_pruned:
@@ -166,6 +179,16 @@ class Operations:
         return _snapshot(row)
 
     def submit(self, actor, command):
+        from .commands import RestartCommand
+        from .puppet import RestartHandler
+        # Конечный registry, не выбор метода/import из payload.
+        handlers = {NodeEligibility: self.submit_node, RestartCommand: RestartHandler(self).submit}
+        handler = handlers.get(type(command))
+        if handler is None:
+            raise ValueError('finite typed operation command required')
+        return handler(actor, command)
+
+    def submit_node(self, actor, command):
         if type(command) is not NodeEligibility:
             raise ValueError('finite typed operation command required')
         _independent()
@@ -237,7 +260,7 @@ class Operations:
         with self._transaction():
             installation = self._installation()
             row = m.Operation.objects.select_for_update().get(pk=operation_id)
-            if row.state != State.ACCEPTED:
+            if row.target_kind != 'node' or row.state != State.ACCEPTED:
                 return None
             if row.epoch != installation.epoch or row.restore_generation != installation.generation or not installation.effects_enabled:
                 return None
@@ -445,7 +468,27 @@ class Operations:
         self._require_binding()
         if not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
-        return tuple(m.Operation.objects.filter(state=State.ACCEPTED).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
+        return tuple(m.Operation.objects.filter(state=State.ACCEPTED, target_kind='node').order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
+
+    def pending_machine(self, *, node_id, executor_epoch, project_ids, limit):
+        from .puppet import RestartHandler
+        return RestartHandler(self).pending(node_id=node_id, executor_epoch=executor_epoch, project_ids=project_ids, limit=limit)
+
+    def current_machine(self, operation_id, step_id):
+        from .puppet import RestartHandler
+        return RestartHandler(self).current(operation_id, step_id)
+
+    def claimed_machine(self, work, attempt_id):
+        from .puppet import RestartHandler
+        return RestartHandler(self).claimed(work, attempt_id)
+
+    def completed_machine(self, work, attempt_id, outcome, evidence):
+        from .puppet import RestartHandler
+        return RestartHandler(self).completed(work, attempt_id, outcome, evidence)
+
+    def retired_machine(self, target_id, executor_epoch):
+        from .puppet import RestartHandler
+        return RestartHandler(self).retired(target_id, executor_epoch)
 
     def prune(self):
         _independent()
@@ -465,7 +508,10 @@ class Operations:
         value = {'event_id': str(event.event_id), 'epoch': str(event.operation.epoch),
             'operation_id': str(event.operation_id), 'revision': str(event.revision),
             'state': event.state, 'code': event.code, 'type': 'operation.changed',
-            'target': {'kind': 'node', 'id': str(event.operation.node_id), 'revision': str(event.target_revision)},
+            'target': {'kind': event.operation.target_kind,
+                'id': str(event.operation.target_id if event.operation.target_kind == 'puppet' else event.operation.node_id),
+                'revision': str(event.target_revision),
+                **({'incarnation':str(event.operation.incarnation_id)} if event.operation.target_kind == 'puppet' else {})},
             'project_ids': [str(pk) for pk in event.operation.projects.values_list('pk', flat=True)]}
         # Duplicate delivery при потере ACK — штатна; event_id стабилен.
         publisher(value)

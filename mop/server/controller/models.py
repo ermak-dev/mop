@@ -29,4 +29,5 @@ class Installation(models.Model):
     initialized_at = models.DateTimeField(default=timezone.now, editable=False)
 
     class Meta:
+        permissions = [('manage_proxy', 'Can manage proxy'), ('view_models', 'Can view models')]
         constraints = [models.CheckConstraint(condition=models.Q(id=1), name='controller_single_installation')]
