@@ -1,6 +1,6 @@
-# Проверки mop (#230, эпик #228): каждый файл tests/ в Docker, на 3.12 --
-# машине оператора; сервер и узлы (Debian 13, 3.13) гоняют тот же tests/
-# поверх того же deps.PIP, своя джоба там не ловила ничего своего (#525).
+# Проверки mop (#632): полный строгий mop dev test в Docker на
+# Python 3.12/PostgreSQL 16 и Python 3.13/PostgreSQL 17. Django runner
+# создаёт отдельные пустые БД, в том числе для concurrent hermetic прогонов.
 #
 # Раннер -- shell-исполнитель `builder` с тегом docker, под непривилегированным
 # пользователем: image: он не видит, и шаги задачи шли бы на самом хосте
@@ -63,7 +63,12 @@ stages: [test, deploy]
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends "postgresql-client-$POSTGRES_MAJOR" >/dev/null
         export PATH="/usr/lib/postgresql/$POSTGRES_MAJOR/bin:$PATH"
-        pip install -q --root-user-action=ignore --disable-pip-version-check jinja2 '.[server]'
+        # Один набор wheels для runner и чистых client venv: декларации
+        # остаются в package metadata, но дочерние проверки не зависят от
+        # повторной сетевой установки тех же библиотек в каждом новом HOME.
+        pip wheel -q --disable-pip-version-check --wheel-dir /opt/mop-wheels '.[server]' jinja2 'setuptools>=64'
+        pip install -q --root-user-action=ignore --disable-pip-version-check --no-index --find-links /opt/mop-wheels 'mop[server]' jinja2
+        export PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/mop-wheels
         for attempt in $(seq 1 60); do
           pg_isready -h postgres -U mop_ci && break
           test "$attempt" -lt 60
@@ -78,7 +83,7 @@ stages: [test, deploy]
     # Отдельная сеть и БД каждой задачи: никаких credentials установки.
     - docker network create "mop-ci-$CI_JOB_ID"
     - >-
-      docker run -d --name "mop-ci-db-$CI_JOB_ID"
+      docker run --rm -d --name "mop-ci-db-$CI_JOB_ID"
       --network "mop-ci-$CI_JOB_ID" --network-alias postgres
       -e POSTGRES_DB=mop_ci -e POSTGRES_USER=mop_ci
       -e POSTGRES_PASSWORD=isolated-test-only "$POSTGRES_IMAGE"
@@ -140,7 +145,7 @@ deploy:mop:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET
   tags: [docker]
-  needs: [test:py3.12, web:dist]
+  needs: [test:py3.12, controller:pg17, web:dist]
   # Одна выкладка за раз: два master'а подряд не раскатываются внахлёст.
   resource_group: mop-deploy
   variables:
