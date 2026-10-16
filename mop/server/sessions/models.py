@@ -4,6 +4,9 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 from mop.server.catalog.models import Record, ImmutableRecord
+# Регистрация отдельных моделей #641 в execution; не импорт Access/Root.
+from .telemetry_models import (SessionObservation, TurnOutcome, ModelObservation,
+    TelemetryReceipt, PrivateHistoryCursor)  # noqa: F401
 
 
 class Assignment(Record):

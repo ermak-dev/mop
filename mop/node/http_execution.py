@@ -156,7 +156,7 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts')}
+                   ('GET','work/input'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp
