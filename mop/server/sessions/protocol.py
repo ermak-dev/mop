@@ -98,6 +98,15 @@ class AssignmentBinding:
 
 
 @dataclass(frozen=True)
+class CredentialAssignment:
+    """Точное текущее назначение и immutable подтверждения, не транспортный revoke."""
+    binding: AssignmentBinding
+    epoch: UUID
+    identity_receipt_id: UUID
+    readiness_receipt_id: UUID
+
+
+@dataclass(frozen=True)
 class WorkV1:
     epoch: UUID
     operation_id: UUID

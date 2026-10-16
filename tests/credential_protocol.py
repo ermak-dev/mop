@@ -86,6 +86,24 @@ class ClientBoundary(unittest.TestCase):
                     with self.assertRaises(p.CredentialError):
                         p.parse_request({**request, 'args': {**args, name: identity}})
 
+    # HYPOTHESIS: адресная выдача без target не выбирает конкретную инкарнацию.
+    # SOLUTION: target UUID обязателен; только сервер выбирает остальные refs.
+    # RESULT: red — invalid fields для target, затем пустая форма не была отказана.
+    # После fix все 12 checks green. STATUS: FIXED — see #669.
+    def test_addressed_target_is_the_only_caller_supplied_delivery_reference(self):
+        from mop.common import credentials as p
+        from uuid import uuid4
+        target = uuid4()
+        request = {'version': 1, 'auth': {'kind': 'token', 'value': 'a' * 40},
+            'command': 'issue_addressed', 'args': {'target_id': str(target)}}
+        _, command, args = p.parse_request(request)
+        self.assertEqual(args, {'target_id': target})
+        with self.assertRaises(p.CredentialError):
+            p.parse_request({**request, 'args': {}})
+        for field in ('node_id', 'owner_id', 'incarnation', 'grant_id', 'generation', 'binding_ids', 'required_names'):
+            with self.subTest(field=field), self.assertRaises(p.CredentialError):
+                p.parse_request({**request, 'args': {**request['args'], field: str(uuid4())}})
+
     def test_publish_requires_concrete_project_and_bounded_reference_list(self):
         from mop.common import credentials as p
         from uuid import uuid4
@@ -183,7 +201,8 @@ class ClientBoundary(unittest.TestCase):
                     patch.object(client.socket, 'socket', return_value=Socket()), \
                     patch.object(client.time, 'monotonic', side_effect=lambda: clock[0]):
                 adapter = client.CredentialClient(directory + '/service.sock', server_uid=os.geteuid())
-                self.assertEqual(adapter.issue_addressed(protocol.Credential('token', 'a' * 40)), ())
+                from uuid import uuid4
+                self.assertEqual(adapter.issue_addressed(protocol.Credential('token', 'a' * 40), target_id=uuid4()), ())
 
     def test_socket_parent_and_symlink_are_not_ambient_discovery(self):
         self.assertIsNotNone(importlib.util.find_spec('mop.common.credential_client'), 'credential client is missing')

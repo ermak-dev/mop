@@ -155,11 +155,14 @@ class CredentialSocketCases(TransactionTestCase):
         self.run_socket(body, provider=Revoking())
         self.assertFalse(Secret.objects.exists())
 
-    def test_missing_assignment_gate_denies_even_permitted_human(self):
+    def test_bound_assignment_gate_still_denies_even_permitted_human(self):
+        from uuid import uuid4
+        from mop.server.controller.models import Installation
+        Installation.objects.filter(pk=1).update(effects_enabled=True)
         async def body(client, server):
             await asyncio.to_thread(self.create, client)
-            with self.assertRaisesRegex(self.Error, 'assignment.*not bound'):
-                await asyncio.to_thread(client.issue_addressed, self.auth)
+            with self.assertRaisesRegex(self.Error, 'enrolled node service required'):
+                await asyncio.to_thread(client.issue_addressed, self.auth, target_id=uuid4())
         self.run_socket(body)
 
     def test_distinct_frontend_uid_uses_only_group_protected_socket(self):
@@ -441,15 +444,12 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             with self.assertRaises(PermissionError):
                 app.grants.bindings.retirement(grant_id, 1)
 
-    def reserved_grant(self):
+    def reserved_grant(self, *, secret_names=()):
         from datetime import timedelta
         import uuid
         from django.utils import timezone
-        from django.contrib.contenttypes.models import ContentType
-        content_type, _ = ContentType.objects.get_or_create(app_label='sessions', model='credential_fixture')
-        Permission.objects.get_or_create(content_type=content_type, codename='create_puppet')
         for action in ('access.approve_role', 'access.view_role', 'access.issue_grant',
-                       'sessions.create_puppet', 'preparation.approve_bootstrap'):
+                       'execution.create_puppet', 'preparation.approve_bootstrap'):
             app_label, code = action.split('.')
             self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app_label, codename=code))
         with override_settings(BOOTSTRAP=self.bootstrap):
@@ -459,6 +459,10 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             provenance='fixture', commit='a' * 40)
         app.preparation.approve(actor, revision.id)
         manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
+        if secret_names:
+            document = json.loads(manifest)
+            document['secrets'] = {'vars': list(secret_names), 'files': []}
+            manifest = json.dumps(document).encode()
         bundle = app.grants.publish_bundle(actor, project_id=self.project.id, manifest=manifest,
             prompt=b'private', provenance='fixture')
         app.grants.approve_bundle(actor, bundle.id)
@@ -557,11 +561,8 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         import uuid
         from django.utils import timezone
         from mop.server.preparation.models import BootstrapRevision
-        from django.contrib.contenttypes.models import ContentType
-        content_type, _ = ContentType.objects.get_or_create(app_label='sessions', model='credential_fixture')
-        Permission.objects.get_or_create(content_type=content_type, codename='create_puppet')
         for action in ('access.approve_role', 'access.view_role', 'access.issue_grant',
-                       'sessions.create_puppet', 'preparation.approve_bootstrap'):
+                       'execution.create_puppet', 'preparation.approve_bootstrap'):
             app_label, code = action.split('.')
             self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app_label, codename=code))
         manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'

@@ -20,6 +20,7 @@ import uuid
 from django.utils import timezone
 
 from django.db import DatabaseError, IntegrityError, connections, transaction
+from django.db.models import Q
 
 from . import models as m
 from .crypto import CryptoProvider, Envelope, SecretContext, SecretCryptoError, MAX_PLAINTEXT_BYTES
@@ -61,6 +62,9 @@ class DeliverySelection:
     """Только серверные факты из trusted gate, не десериализация пользовательского JSON."""
     binding_ids: tuple
     required_names: tuple[tuple[str, str], ...]
+    # Trusted owner projections участвуют в post-provider equality. Не wire input
+    # и не замена повторной проверки authority: каждый resolve делает её заново.
+    current_proof: tuple = ()
 
 
 class DeliveryGate(Protocol):
@@ -619,6 +623,34 @@ class SecretStore:
                 binding.save(update_fields=['retired_at'])
                 audit(actor, 'retire_binding', secret)
             return binding_metadata(binding)
+
+    @storage_errors
+    def addressed_selection(self, actor, *, project_id, node_id, assignment_id, incarnation,
+                            role, digest, grant_id, required_names, current_proof):
+        """SQL-only подбор по exact trusted owner refs; не выдаёт plaintext.
+
+        Root сначала проверяет Assignment/grant/approved policy публичными owner
+        APIs. Только этот серверный allowlist определяет выбор; наличие Binding
+        само по себе не создаёт authority и не расширяет список роли.
+        """
+        self.authorizer.authorize(actor, 'secrets.deliver_secret', project_ids=(project_id,),
+            node_ids=(node_id,), client_ids=())
+        if (type(required_names) is not tuple or not 1 <= len(required_names) <= 128
+                or len(set(required_names)) != len(required_names) or type(current_proof) is not tuple):
+            raise Refused('invalid approved addressed secret allowlist')
+        names = Q(pk__in=())
+        for kind, name in required_names:
+            if kind not in ('variable', 'file'):
+                raise Refused('addressed project secret kind required')
+            m.validate_name(name, kind)
+            names |= Q(secret__kind=kind, secret__name=name)
+        bindings = tuple(m.SecretBinding.objects.filter(names, secret__project_id=project_id,
+            secret__purpose='project', node_id=node_id, client_id__isnull=True, controller=False,
+            assignment_id=assignment_id, incarnation=incarnation, role=role, digest=digest,
+            grant_id=grant_id, retired_at__isnull=True).order_by('id').values_list('id', flat=True)[:129])
+        if len(bindings) != len(required_names):
+            raise Refused('required addressed project secret binding is missing')
+        return DeliverySelection(bindings, required_names, current_proof)
 
     def _selection(self, actor):
         selection = self.delivery_gate.resolve(actor)
