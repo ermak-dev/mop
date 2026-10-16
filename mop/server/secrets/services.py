@@ -385,6 +385,31 @@ class RetainedSecrets:
         return value
 
 
+@storage_errors
+def verify_storage(provider_for_key, *, installation_id, using='default'):
+    """Maintenance-only проверка quiescent архива; наружу только число версий."""
+    outside_transaction()
+    after, count = None, 0
+    while True:
+        rows = m.SecretVersion.objects.using(using).select_related('secret__installation').order_by('pk')
+        if after is not None:
+            rows = rows.filter(pk__gt=after)
+        batch = tuple(rows[:8])
+        if not batch:
+            return count
+        for version in batch:
+            if version.secret.installation.identity != installation_id:
+                raise SecretCryptoError('secret recovery installation mismatch')
+            envelope = Envelope.from_bytes(bytes(version.envelope))
+            if envelope.key_id != version.key_id or envelope.nonce != bytes(version.nonce):
+                raise SecretCryptoError('secret recovery envelope metadata mismatch')
+            value = reveal(provider_for_key(envelope.key_id), envelope, context(version.secret, version))
+            if len(value) != version.size:
+                raise SecretCryptoError('secret recovery plaintext size mismatch')
+            count += 1
+        after = batch[-1].pk
+
+
 class SecretStore:
     def __init__(self, *, provider: CryptoProvider, authorizer: Authorizer | None = None,
                  delivery_gate: DeliveryGate | None = None):
