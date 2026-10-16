@@ -33,16 +33,24 @@ require a separate operator decision before any incompatible release can ship.
 
 | Component | Contract |
 |---|---|
-| Python | 3.12 and 3.13; clients and nodes do not acquire server dependencies |
+| Python | 3.12; clients and nodes do not acquire server dependencies |
 | Django | 5.2 LTS, maintained security patch selected and declared by #632 |
 | DRF | 3.16 compatible maintained patch; synchronous dispatch/services |
 | Channels | 4.x compatible maintained patch, selected and checked in #632 |
 | ASGI server | Maintained compatible production server, declared in #632; not `runserver` |
-| Database | PostgreSQL 16 and 17; mandatory CI on both for the new controller |
+| Database | PostgreSQL 17; the sole required compatibility combination is Python 3.12 + PostgreSQL 17 |
 | Optional backend | SQLite may run fast pure/schema checks; not a supported controller runtime or concurrency gate |
 
-These are support decisions, not claims that every backend Django supports has
-been tested. Adding a backend requires the same migration, transaction, locking,
+Compatibility acceptance runs only Python 3.12 + PostgreSQL 17. One CI test job
+runs the complete strict suite and every mandatory frontend gate — the dashboard
+build check, full TypeScript checking and the complete Vitest interaction suite —
+in the same Python 3.12 container with a read-only Node toolchain. Each gate runs
+under its own exit status without fail-fast: any failure rejects the job, and a
+failed Python check or an early web gate failure does not skip the remaining checks.
+Other Python/PostgreSQL combinations are not required or guaranteed by this
+contract. Existing bootstrap recognition of another version does not expand that
+guarantee. These are support decisions, not claims that every backend Django
+supports has been tested. Adding a backend requires the same migration, transaction, locking,
 constraint, recovery and backup gate before advertising support. Unsupported
 capabilities fail system checks, rather than weakening a domain rule.
 
@@ -472,7 +480,7 @@ fact, clone and inspection reads also refuse such a caller transaction. Restore
 guard precedes Assignment and Operation/Step locks, including the expiry worker.
 
 Run the disposable native fixture with the worktree launcher:
-`mop dev controller --postgres 16 --label _restart_live_cases` (also `17`). It uses
+`mop dev controller --postgres 17 --label _restart_live_cases`. It uses Python 3.12 and
 new isolated PostgreSQL/Docker resources, verified native HTTPS, actual disposable
 tmux, Git and application Unix sockets; it checks old process-group termination,
 new app readiness, owner identity and committed receipts/outbox. A second case
@@ -1212,7 +1220,7 @@ Acceptance owners and scenarios:
   imports/settings/dependencies/templates/endpoints or accidental legacy discovery.
 
 Every pure/testable implementation uses red-before-green TDD. Documentation itself
-needs no artificial failing test. The full strict suite and web:dist gate exact
+needs no artificial failing test. The combined strict-suite and frontend-gates job gates exact
 issue and epic merge SHAs in CI; Django gates are added by #632, so today's old
 suite cannot be reported as Django acceptance. Report source inspection, local
 checks, CI and live experiments separately, including anything unverified.

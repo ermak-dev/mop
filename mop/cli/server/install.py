@@ -16,7 +16,8 @@
   apply         refuse until runtime executors and realtime composition are accepted
 
 The finite JSON specification contains only installation identity, PostgreSQL
-16/17 topology, absolute disjoint paths and six distinct OS service identities.
+topology, absolute disjoint paths and six distinct OS service identities.
+Compatibility acceptance covers Python 3.12 with PostgreSQL 17 only.
 It contains no passwords, root bytes or general settings. No legacy input is
 read and no old service is stopped. Plan does not execute provisioning.
 Dependencies use mop server controller setup --venv PATH and its declared server
