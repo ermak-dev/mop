@@ -370,6 +370,8 @@ def create_admin(username, password, using='default'):
         validate_password(password, user)
         user.set_password(password)
         user.save(using=using)
+        from mop.server.access.services import bind_local_identity
+        bind_local_identity(user.pk)
     return {'username': user.username}
 
 
