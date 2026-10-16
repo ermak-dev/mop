@@ -11,6 +11,16 @@
 где ещё ничего не стоит.
 """
 
+# Только контроллер: клиент, узел и stdlib installer этот список не импортируют.
+SERVER = (
+    "Django==5.2.18",
+    "djangorestframework==3.16.1",
+    "channels==4.3.2",
+    "uvicorn[standard]==0.54.0",
+    "psycopg[binary,pool]==3.3.6",
+    "psycopg-pool==3.3.3",  # shutdown проверяет workers этого отдельного release
+)
+
 PIP = (
     "nats-py",        # шина
     "aiohttp",        # её WebSocket-транспорт: wss через TLS-прокси (#97)

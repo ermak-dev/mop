@@ -466,10 +466,13 @@ def client_command(modname):
     """Операторские команды, включая дочерний MCP, без .env установки."""
     return modname.startswith(("mop.cli.core.", "mop.cli.pool.", "mop.cli.node.",
                                "mop.cli.project.", "mop.cli.secret.", "mop.cli.session.")) or \
-        modname in ("mop.cli.service.mcp", "mop.cli.session")
+        modname in ("mop.cli.service.mcp", "mop.cli.session", "mop.cli.server.controller")
 
 
 def main(argv):
+    # Новый bootstrap не читает context/.env даже до загрузки командлета.
+    if argv[:2] == ["server", "controller"]:
+        return run(command("mop.cli.server.controller"), argv[2:])
     # Новый путь выбирается до legacy context/.env: даже отсутствующая capability
     # не должна открывать старый login store или импортировать NATS.
     from . import _control
@@ -495,6 +498,10 @@ def main(argv):
         server, argv = context.strip_server(argv)
     except ValueError as e:
         sys.exit(f"mop: {e}")
+    if argv[:2] == ["server", "controller"]:
+        # Старый глобальный selector не должен включать profile/.env пути.
+        print("controller uses its protected bootstrap; --server is not supported", file=sys.stderr)
+        return 1
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())
         return 0

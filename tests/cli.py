@@ -2242,10 +2242,10 @@ CAPS_OK = {
     # статусы, которые читают глазами и модель
     "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
     # протоколы, сигналы, литералы чужих программ
-    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
+    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "ASGI", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
     "PLAY", "RECAP", "EXIT",
     # идентификаторы в тексте
-    "SECTIONS",
+    "SECTIONS", "TESTS",
     # плейсхолдеры в строках usage
     "ADDRESS", "ADDR", "PROFILE", "TEXT", "VALUE", "LOGIN", "NAME",
     # заголовки колонок, названные в тексте
@@ -3540,7 +3540,7 @@ def check_server_namespace_259(c):
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
             "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
             "diagnose",   # #536: офлайн-сводка локальной установки
-            "proxykey", "grant"}
+            "proxykey", "grant", "controller"}
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))
@@ -3873,10 +3873,11 @@ def check_dev_help_433(c):
     # #484: проверки и локальный просмотр веба тоже идут через диспетчер.
     # #613: отдельный интерактивный probe добавляет ещё один обязательный глагол.
     # #615: локальный integration smoke -- самостоятельный обязательный глагол.
-    if not c.check("#433/#615 dev subtree: 4 groups, 26 verbs including chat smoke",
+    if not c.check("#433/#632 dev subtree: 4 groups, 27 verbs including controller fixture",
                    len([d for d in docs if d.endswith("__init__.py")]) == 4
                    and len([d for d in docs
-                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 26
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 27
+                   and docs.get("dev/controller.py", "").startswith("mop dev controller")
                    and docs.get("dev/chat-smoke.py", "").startswith("mop dev chat-smoke")
                    and docs.get("dev/chat-probe.py", "").startswith("mop dev chat-probe")
                    and docs.get("dev/bug/evidence.py", "").startswith("mop dev bug evidence")
