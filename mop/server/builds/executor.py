@@ -69,6 +69,11 @@ def _read(connection, maximum):
     raise ValueError('executor frame exceeds bound')
 
 
+def public_failure(error, *, safe_refusals=()):
+    reason = str(error) if safe_refusals and isinstance(error, safe_refusals) else 'privileged executor refused: '+type(error).__name__
+    return StageResult('unknown', False, reason[:512])
+
+
 class UnixPrivilegedClient:
     capabilities = frozenset({'node_executor','inspect'})
 
@@ -111,13 +116,18 @@ class PrivilegedExecutor:
     resolve фиксирует единственный dispatch до возврата ticket. record сохраняет
     result даже после disconnect caller. Ошибка БД оставляет общий Step unknown.
     """
-    def __init__(self, *, path, caller_uid, resolve, record, image_builder, node_executor, request_timeout=5):
+    def __init__(self, *, path, caller_uid, resolve, record, image_builder, node_executor, request_timeout=5, safe_refusals=()):
         if os.getuid() == 0 or caller_uid == os.getuid() or not 0 < request_timeout <= 5:
             raise ValueError('privileged executor must run under a distinct non-root OS identity')
         if (not {'image_builder','inspect'} <= getattr(image_builder, 'capabilities', frozenset())
                 or not {'node_executor','inspect'} <= getattr(node_executor, 'capabilities', frozenset())):
             raise ValueError('privileged executor capabilities are not bound')
+        if (type(safe_refusals) is not tuple or len(safe_refusals) > 8
+                or any(not isinstance(kind, type) or not issubclass(kind, Exception)
+                    or kind in (Exception, ValueError, PermissionError, RuntimeError, OSError) for kind in safe_refusals)):
+            raise ValueError('root must name narrow safe application refusal classes')
         self.path, self.caller_uid = Path(path), caller_uid
+        self.safe_refusals = safe_refusals
         self.resolve, self.record = resolve, record
         self.image_builder, self.node_executor = image_builder, node_executor
         self.timeout, self.listener = request_timeout, None
@@ -160,7 +170,7 @@ class PrivilegedExecutor:
                     raise ValueError('executor requires typed evidence')
                 self.record(ticket.claim, ticket, result)
             except Exception as error:
-                result = StageResult('unknown', False, 'privileged executor refused: '+type(error).__name__)
+                result = public_failure(error, safe_refusals=self.safe_refusals)
             try:
                 connection.sendall(json.dumps(dict(outcome=result.outcome, quiescent=result.quiescent, reason=result.reason)).encode()+b'\n')
             except (BrokenPipeError, ConnectionResetError):

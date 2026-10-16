@@ -353,6 +353,17 @@ def builds_service(*, scheduler=None, image_builder=None, node_executor=None, gr
     return builds
 
 
+def privileged_build_executor(*, path, caller_uid, image_builder, node_executor, grants=None):
+    """Private OS service: только named ports, scoped SQL callbacks и safe refusals."""
+    from ..access.services import Denied
+    from ..operations.service import Refused
+    from ..builds.executor import PrivilegedExecutor
+    builds = builds_service(grants=grants)
+    return PrivilegedExecutor(path=path, caller_uid=caller_uid, resolve=builds.resolve_ticket,
+        record=builds._record, image_builder=image_builder, node_executor=node_executor,
+        safe_refusals=(Denied, Refused))
+
+
 def assignments_service(**options):
     """Root связывает shared target fence без обратного domain import."""
     from ..sessions.services import Assignments

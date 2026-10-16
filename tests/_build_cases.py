@@ -397,6 +397,25 @@ class ImageBuilds(TransactionTestCase):
             with self.assertRaisesRegex(self.s.Refused, 'transaction_boundary'):
                 self.builds._record(claim, ticket, StageResult('succeeded', True, 'fixture confirmation'))
 
+    def test_executor_preserves_known_safe_library_refusal_without_leaking_raw_errors(self):
+        from mop.server.builds.executor import public_failure
+        from mop.server.access.services import Denied
+        safe = (Denied, self.s.Refused)
+        for error in (Denied('current owner permission was revoked'), self.s.Refused('epoch_conflict')):
+            with self.subTest(kind=type(error).__name__):
+                self.assertEqual(public_failure(error, safe_refusals=safe).reason, str(error))
+        self.assertNotIn('fixture-secret', public_failure(RuntimeError('fixture-secret'), safe_refusals=safe).reason)
+
+    def test_build_port_preserves_a_known_safe_refusal_reason(self):
+        from mop.server.access.services import Denied
+        self.setup_build(targets=0)
+        def denied(ticket):
+            raise Denied('current owner permission was revoked')
+        self.fake.apply = denied
+        result = self.builds.run(UUID(self.operation['id']))
+        self.assertEqual(result['state'], 'unknown')
+        self.assertIn('current owner permission was revoked', result['build']['stages'][0]['reason'])
+
     def test_denied_permission_has_no_operation_or_effect(self):
         from django.test import Client
         body = self.body(self.policy())

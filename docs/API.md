@@ -531,7 +531,9 @@ adapter. `GET /api/v1/operations/{id}` and request lookup expose bounded stage
 progress, unresolved intents and failure details without a realtime subscription.
 
 The privileged Unix executor checks both OS peer identity and the root-provided
-Step/claim gate. It runs under a distinct non-root UID, never a node-bound
+Step/claim gate. `privileged_build_executor` binds independent SQL callbacks and
+narrow safe refusal classes; already-safe library reasons survive unchanged,
+while raw provider/OS exceptions expose only their type. It runs under a distinct non-root UID, never a node-bound
 `Access.kind=service` identity. Its finite protocol carries durable IDs and tokens,
 not keys, inventory, shell or arbitrary arguments. Dispatch consumption commits
 before privileged execution; replay is denied. Disconnect does not undo a result
