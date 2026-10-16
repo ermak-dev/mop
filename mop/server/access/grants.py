@@ -20,6 +20,7 @@ from rest_framework.authtoken.models import Token
 
 from mop.common import soul
 from ..catalog.models import Project
+from ..catalog.services import Catalog
 from ..secrets.services import RetainedSecrets, RetentionScope, outside_transaction
 from ..secrets.crypto import SecretCryptoError
 from . import models as m, services as auth
@@ -172,6 +173,8 @@ class Grants:
         principal, _ = auth._principal(user)
         if principal.kind != 'human':
             raise auth.Denied('human owner required')
+        if not Catalog.project_is_current(project_id):
+            raise auth.Denied('grant project is unavailable')
         if not (auth._global(user) or m.ProjectMembership.objects.filter(
                 user=user, project_id=project_id, source__enabled=True).exists()):
             raise auth.Denied('human owner no longer belongs to project')
