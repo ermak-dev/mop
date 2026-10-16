@@ -60,6 +60,9 @@ class CurrentVerifier:
 
 
 class SecretCases(TransactionTestCase):
+    # Foundation guard — migration seed, не runtime fallback после test flush.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertIsNotNone(importlib.util.find_spec('mop.server.secrets.services'),
                              'missing encrypted ORM store commands')
@@ -826,6 +829,21 @@ class SecretCases(TransactionTestCase):
             self.m.SecretBinding.objects.create(secret_id=a.id, node_id=b.node_id,
                 role='another-role', digest=b.digest, incarnation=uuid.uuid4(),
                 grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
+
+    # HYPOTHESIS: ранний frozen-set guard после сборки двух исправлений
+    # запрещает точный retry bind, хотя он лишь читает прежнее решение.
+    # Retry обязан сохранить audit, membership и rotation revision без изменений.
+    def test_exact_bind_retry_during_frozen_rotation_has_no_write_effect(self):
+        svc, a, new, b, r = self.rotation()
+        before = self.m.SecretAudit.objects.count()
+        repeated = self.api.bind(self.actor, a.id, expected_revision=2, node_id=b.node_id,
+            role=b.role, digest=b.digest, incarnation=b.incarnation,
+            grant_id=b.grant_id, assignment_id=b.assignment_id)
+        self.assertEqual(repeated, b)
+        self.assertEqual(self.m.SecretAudit.objects.count(), before)
+        self.assertEqual(svc.metadata(self.actor, r.id), r)
+        self.assertEqual(tuple(self.m.SecretBinding.objects.filter(secret_id=a.id)
+                               .values_list('id', flat=True)), (b.id,))
 
     def test_binding_stage_and_retirement_race_with_independent_connections(self):
         a = self.secret()

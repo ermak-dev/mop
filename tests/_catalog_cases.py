@@ -28,6 +28,9 @@ class Allow:
 
 
 class CatalogCases(TransactionTestCase):
+    # Как foundation cases: сохраняем migration seeds между flush.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(hasattr(services, 'Catalog'), 'missing catalogue domain API: Catalog')
         for name in ('Project', 'Node', 'NodeProject', 'InstallationSetting', 'NodeSetting',
