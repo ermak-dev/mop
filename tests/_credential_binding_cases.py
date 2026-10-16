@@ -353,58 +353,7 @@ class AddressedCredentialCases(TransactionTestCase):
                     self.assertEqual(self.app.store.provider.decrypt(Envelope.from_bytes(bytes(row.envelope)),
                         context(row.secret, row)), expected[row.id])
 
-    def test_addressed_delivery_uses_actual_frontend_uid_without_rights_inference(self):
-        if os.geteuid() != 0:
-            self.skipTest('distinct UID fixture requires owned root container')
-        import json
-        import sys
-        from pathlib import Path
-        from mop.server.controller.runtime import Runtime
-        import tempfile
-        self.delivery()
-        shared = tempfile.TemporaryDirectory(prefix='mop-addressed-crossuid-', dir='/tmp')
-        self.addCleanup(shared.cleanup)
-        self.path = str(Path(shared.name) / 'credential.sock')
-        os.chmod(shared.name, 0o750)
-        with override_settings(BOOTSTRAP=self.bootstrap):
-            app = self.service.application()
-        code = '''
-import json, os, sys
-sys.path.insert(0, sys.argv[1])
-from mop.common.credential_client import CredentialClient
-from mop.common.credentials import Credential, CredentialError
-from uuid import UUID
-p = json.loads(sys.stdin.read())
-assert os.geteuid() == 65534
-client = CredentialClient(p['path'], server_uid=0)
-rows = client.issue_addressed(Credential('token', p['machine']), target_id=UUID(p['target']))
-assert len(rows) == 1 and rows[0].value == b'exact-addressed-value'
-try:
-    client.issue_addressed(Credential('token', p['human']), target_id=UUID(p['target']))
-except CredentialError:
-    pass
-else:
-    raise AssertionError('peer UID gave human node authority')
-assert not any(n.startswith(('django', 'mop.server', 'nacl')) for n in sys.modules)
-print('addressed-only')
-'''
-        async def run():
-            runtime = Runtime(queue_limit=0)
-            server = self.service.CredentialService(self.path, application=app, runtime=runtime,
-                allowed_uids=(65534,), socket_group=os.getegid())
-            await server.start()
-            try:
-                process = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', code,
-                    str(Path(__file__).resolve().parents[1]), user=65534, group=os.getegid(), extra_groups=(),
-                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    env={k: v for k, v in os.environ.items() if not k.startswith(('MOP_', 'DJANGO_'))})
-                async with asyncio.timeout(10):
-                    output, error = await process.communicate(json.dumps({'path': self.path,
-                        'machine': self.machine_auth.value, 'human': self.token,
-                        'target': str(self.assignment.id)}).encode())
-                self.assertEqual(process.returncode, 0, error.decode())
-                self.assertEqual(output.strip(), b'addressed-only')
-            finally:
-                await server.aclose()
-                await runtime.aclose()
-        async_to_sync(run)()
+    # test_addressed_delivery_uses_actual_frontend_uid_without_rights_inference
+    # перенесён без изменения утверждений в узкий root gate #674
+    # (_credential_uid_gate.AddressedCredentialUids): общий непривилегированный
+    # прогон не может его проверить, и молчаливый пропуск читался зелёным.

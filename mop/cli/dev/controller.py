@@ -9,8 +9,10 @@ nonignored source, not installation inputs or .git. No host ports, installation 
 Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
 checks start their own native TLS broker with fixture-only principals and ACLs.
---cross-uid runs only credential_service as root inside the owned container to
-exercise distinct OS peers; the default suite still runs as unprivileged ci.
+--cross-uid runs only the narrow root UID gate (_credential_uid_gate.py,
+the two real cross-peer cases #669) as root inside the owned container,
+after the setup builds the uid pair; the default suite still runs as
+unprivileged ci.
 --web adds the frontend gates — the dashboard build check, full TypeScript
 checking and the complete Vitest interaction suite — with Node tools in the
 same Python 3.12 container; every check runs under its own exit status and any
@@ -72,6 +74,11 @@ def main(argv):
     test_script = shlex.join(['python3', f'tests/{check_script}.py', *args.label])
     if args.check == 'client':
         test_script += ' && ' + shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])
+    if args.cross_uid:
+        # Узкий root gate #674: в корневом прогоне исполняется только
+        # точечный вход gate (проверка пары UID + два перенесённых случая),
+        # не весь credential_service suite.
+        test_script = shlex.join(['python3', 'tests/_credential_uid_fixture.py'])
     if args.web:
         test_script = ('python_status=0; bash -c ' + shlex.quote(test_script) + ' || python_status=$?; '
             'web_status=0; python3 tests/_web_dist_fixture.py || web_status=$?; '

@@ -1,4 +1,10 @@
-"""Django runner на настоящем PostgreSQL, без внешней test-транзакции."""
+"""Django runner на настоящем PostgreSQL, без внешней test-транзакции.
+
+Контракт #674: под MOP_TESTS_STRICT=1 (как CI) skipped Django-результат --
+провал прогона. Прежний DiscoverRunner молча считал его зелёным, и
+непривилегированный CI никогда не замечал, что root-only UID граница не
+проверена: 1 skipped читался зелёным итогом.
+"""
 import json
 import os
 from pathlib import Path
@@ -9,6 +15,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import _lib  # noqa: F401,E402 — lifetime всех временных файлов
 import hermetic  # noqa: E402 — сначала отделить настройки старой машины
+
+
+def strict_failure_count(result, *, strict):
+    """Число провалов прогона. Контракт #229 для Django runner (#674).
+
+    Вне строгого режима -- как у Django: failures + errors. Под строгим --
+    каждый skipped тоже отказ: пропуск проверяемой границы не зелёный.
+    """
+    failures = len(getattr(result, 'failures', ()) or ())
+    errors = len(getattr(result, 'errors', ()) or ())
+    skipped = len(getattr(result, 'skipped', ()) or ())
+    return failures + errors + (skipped if strict else 0)
 
 
 def _drop_backend_state(config, pid):
@@ -127,4 +145,5 @@ def main(labels=None):
         original = creation.deserialize_db_from_string
         with patch.object(creation, 'deserialize_db_from_string',
                           new=lambda data: restore_snapshot(creation, data, original)):
-            return int(bool(runner.run_tests(labels or ['_controller_cases'])))
+            suite_result = runner.run_tests(labels or ['_controller_cases'])
+            return int(bool(strict_failure_count(suite_result, strict=hermetic.STRICT)))

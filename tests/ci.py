@@ -264,6 +264,19 @@ def check_pipeline_yaml(c):
     c.expect('#678 deploy still requires the default branch and explicit target',
              ci['deploy:mop'].get('rules'),
              [{'if': '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET'}])
+    # #674: root-only UID gate живёт в объявленном SETUP того же единственного
+    # test job -- после создания пользователей, до exec su ci, и только там:
+    # внутри test-контейнера нет docker-сокета, TESTS остаётся чистым
+    # непривилегированным suite.
+    setup = template['variables']['SETUP']['value']
+    c.check('#674 the root uid gate is declared in the owned setup',
+            'python3 tests/_credential_uid_fixture.py' in setup)
+    gate_builder = setup.index('python3 tests/_credential_uid_fixture.py') \
+        if 'python3 tests/_credential_uid_fixture.py' in setup else -1
+    c.check('#674 the gate runs after users exist and before the unprivileged suite',
+            gate_builder >= 0 and setup.index('useradd') < gate_builder < setup.index('exec su ci'))
+    c.check('#674 the unprivileged suite has no root gate and no docker need',
+            '--cross-uid' not in (variables.get('TESTS') or ''))
     script = template['script'][-1]
     with tempfile.TemporaryDirectory(prefix='mop-ci-contract-') as directory:
         root = Path(directory)
@@ -297,22 +310,44 @@ sys.exit(int(os.environ[result]) if result else 92)
 ''')
         command.chmod(0o700)
         log = root / 'calls.jsonl'
-        for codes in ((0, 0, 0, 0), (7, 0, 0, 0), (0, 9, 0, 0),
-                      (0, 0, 11, 0), (0, 0, 0, 13), (7, 9, 11, 13)):
-            python_result, build_result, types_result, tests_result = codes
+        setup_log = root / 'gate-calls.jsonl'
+        # #674: gate живёт в SETUP, не в TESTS -- у окружения job нет
+        # docker-сокета, и runner-контейнер обязан звать только mop suite.
+        gate = root / 'gate.sh'
+        gate.write_text('#!/bin/bash\n'
+                        'python3 - <<\'PY\'\n'
+                        'import json, os\n'
+                        'with open(os.environ["CALL_LOG"], "a") as stream:\n'
+                        '    stream.write(json.dumps("uid-gate") + "\\n")\n'
+                        'PY\n'
+                        'exit "$GATE_RESULT"\n')
+        gate.chmod(0o700)
+        for codes in ((0, 0, 0, 0, 0), (7, 0, 0, 0, 0), (3, 0, 0, 0, 0), (0, 9, 0, 0, 0),
+                      (0, 0, 11, 0, 0), (0, 0, 0, 13, 0), (7, 9, 11, 13, 3)):
+            gate_result, python_result, build_result, types_result, tests_result = codes
             log.write_text('')
+            setup_log.write_text('')
             env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ.get('PATH', ''),
                 'CI_PROJECT_DIR': str(root), 'CI_JOB_ID': '678-fixture',
                 'PYTHON_IMAGE': str(variables['PYTHON_IMAGE']), 'NODE_IMAGE': str(variables.get('NODE_IMAGE', 'node:22-bookworm')),
-                'PYTHON_RESULT': str(python_result), 'WEB_BUILD_RESULT': str(build_result),
+                'GATE_RESULT': str(gate_result), 'PYTHON_RESULT': str(python_result),
+                'WEB_BUILD_RESULT': str(build_result),
                 'WEB_TYPES_RESULT': str(types_result), 'WEB_TEST_RESULT': str(tests_result), 'CALL_LOG': str(log),
-                'TESTS': 'bin/mop dev test -v', 'CHECK': check_script or '', 'SETUP': 'unused'}
+                'TESTS': variables.get('TESTS') or 'bin/mop dev test -v', 'CHECK': check_script or '', 'SETUP': 'unused'}
+            # SETUP исполняет gate и затем TESTS: отказ gate красит прогон
+            # до suite, отказ suite красит прогон после gate. Отдельный лог
+            # gate-прогона: line-протокол общий, но прогон отдельный.
+            setup_result = subprocess.run(['bash', '-euc',
+                f"'{gate}'"], env={**env, 'CALL_LOG': str(setup_log)},
+                text=True, capture_output=True)
             result = subprocess.run(['bash', '-euc', script], env=env, text=True, capture_output=True)
-            c.expect(f'#678 every check runs for exit codes {codes}',
-                     [json.loads(line) for line in log.read_text().splitlines()],
-                     ['python', 'web-build', 'web-types', 'web-tests'])
-            c.expect(f'#678 any failed check rejects the job {codes}',
-                     result.returncode == 0, all(code == 0 for code in codes))
+            entries = ([json.loads(line) for line in setup_log.read_text().splitlines()]
+                       + [json.loads(line) for line in log.read_text().splitlines()])
+            c.expect(f'#674 gate and every check run for exit codes {codes}',
+                     entries, ['uid-gate', 'python', 'web-build', 'web-types', 'web-tests'])
+            c.expect(f'#674 any failed gate or check rejects the job {codes}',
+                     result.returncode == 0 and setup_result.returncode == 0,
+                     all(code == 0 for code in codes))
 
 
 def main():
