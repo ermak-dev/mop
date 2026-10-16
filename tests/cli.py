@@ -1566,7 +1566,7 @@ def check_role_declarations_585(c):
     # node usage; landing -- только landing.
     ANNOTATED = {
         "wipe": (["wipe"], ["alloc"]),
-        "restart": ([], ["alloc", "restart"]),
+        "restart": None,
         "delete": (["wipe"], ["alloc", "delete"]),
         "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
                               "bootstrap_result"]),
@@ -1583,7 +1583,8 @@ def check_role_declarations_585(c):
         "project_add": None, "project_limit": None,
         "models": None, "diagnose": None, "server_diagnose": None,
         # #642: новые HTTP-командлеты не декларируют старые bus verbs.
-        "health": None, "addresses": None, "operation": None, "project_list": None,
+        "health": None, "addresses": None, "operation": None, "project_list": None, "build": None,
+        "list": None, "detail": None,
         # #594: приватная история требует человеческого логина, терминал —
         # admin-допуска. Исходящим полномочием роли они не становятся.
         "session_history": None, "session_terminal": None,
@@ -2284,12 +2285,10 @@ def check_output_rules(c):
         puppets.running_alloc = lambda name: {"ClientStatus": "running", "NodeName": "n1"}
         lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
         # Быстрая команда на успехе молчит: MCP ответит модели `done`.
-        from mop.cli.core import restart
         from mop.cli.node import forget
-        # #642 drain печатает versioned admission/result, а не молчит на accepted;
-        # его HTTP/TLS и exit semantics проверены в control_consumers/control_tls.
-        for what, main, argv in (("restart", restart.main, ["pu-mop-1"]),
-                                 ("node forget", forget.main, ["n1"])):
+        # #642 drain/restart печатают versioned admission/result, а не молчат
+        # на accepted; HTTP/TLS и exit semantics — в control_consumers/control_tls.
+        for what, main, argv in (("node forget", forget.main, ["n1"]),):
             out, err, code = run_command(main, argv)
             c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",
                     not (out or err or code))
@@ -3193,7 +3192,7 @@ def check_nomad_import_187(c):
                            command="mop.cli.driver.build", argv=["--nope"])
 
 
-def missing_library(c, lib, module, text, command="mop.cli.core.restart", argv=()):
+def missing_library(c, lib, module, text, command="mop.cli.core.delete", argv=()):
     """Импорт module без библиотеки lib -- ImportError с текстом text, а
     командлет command, которому module нужен, через cli.run -- одна строка в
     stderr и код 1. Модули перезагружаются: проверка идёт последней."""
@@ -3659,7 +3658,7 @@ def check_named_263(c):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
-            "recycle": line, "restart": line,
+            "recycle": line,
             "wipe": line + "pu-mop-1: clone reset to HEAD, target wiped (/t)\n",
             "update": line + core_common.sent_line(NOFILE_334) + "\n",
         }
@@ -3675,6 +3674,15 @@ def check_named_263(c):
                 # печатает его интерпретатор на выходе (stderr, код 1).
                 c.check(f"#263 mop {module} {bad}: must exit with its usage",
                         not ((out, err, code) != ("", "", usage)), repr((out, err, str(code)[:60])))
+        # #642: human takeover не переехал в новый restart как обычный флаг.
+        calls.clear()
+        out, err, code, usage = run('restart', ['pu-mop-1', '--force'])
+        c.check('#642 restart refuses takeover before any old RPC',
+                out == '' and code == 2 and 'unsupported' in err and calls == [], (out, err, code, calls))
+        for bad in ([], ['a', 'b']):
+            out, err, code, usage = run('restart', bad)
+            c.expect('#642 restart invalid args are a safe typed boundary refusal',
+                     (out, err, code), ('', 'invalid command arguments\n', 1))
 
 
 def check_body_file_270(c):

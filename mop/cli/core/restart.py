@@ -1,33 +1,30 @@
-"""restart a stuck puppet: mop restart <name> [--force]
+"""mop restart <id> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-The clone and branch survive a restart — the wrapper comes up on the same
-directory.
+Submit the finite durable restart action, keeping the clone and branch. With no
+explicit binding, first read authorized detail and use desired.revision, never
+the observation/projection clock. The request key and absolute UTC --not-after
+(default two minutes) are fixed before that query. A full explicit binding needs
+no roster read; the server still rechecks current identity, scope and ownership.
 
-Another master's puppet (work in its clone, or dispatched minutes ago) is
-refused with that master's name; --force acts anyway and says whose it was.
+accepted is not restarted: outstanding/unknown operations return exit 3. Recover
+through mop operation with the original key/epoch; neither a lost reply nor wait
+reposts the effect. --force and --fresh are explicitly unsupported before I/O.
+The server must supply its physical restart binding; an unavailable API never
+opens SSH or falls back to the old bus. MCP requires the full explicit binding.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 """
-from mop.cli import lib
-from mop.common import bus, ops, puppets
+from mop.cli import _control
 
-
-# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "node_verbs": [], "cluster_verbs": ['alloc', 'restart'], "args": [
-    {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
-    {"name": "force", "type": "boolean", "flag": "--force",
-     "help": "act on a puppet another master leads; the answer names whom"}]}
+MCP = {"annotations": "destructive",
+       "actions": ["sessions.restart_puppet", "operations.view_operation"], "args": [
+    {"name": "puppet_id", "type": "string", "required": True, "help": "puppet assignment resource id"},
+    {"name": "epoch", "type": "string", "flag": "--epoch", "required": True, "help": "installation epoch"},
+    {"name": "incarnation", "type": "string", "flag": "--incarnation", "required": True, "help": "current execution incarnation"},
+    {"name": "expected_revision", "type": "string", "flag": "--expected-revision", "required": True, "help": "desired assignment revision, not projection clock"},
+    {"name": "request_id", "type": "string", "flag": "--request-id", "help": "initial command identity"},
+    {"name": "not_after", "type": "string", "flag": "--not-after", "help": "absolute UTC admission deadline"},
+    {"name": "wait", "type": "integer", "flag": "--wait", "help": "bounded GET wait in seconds"}]}
 
 
 def main(argv):
-    name, force = lib.named(argv, __doc__)
-    # Не работает -- отказ с причиной (LookupError) до запроса рестарта.
-    puppets.running_alloc(name)
-    v = ops.restart(bus.call_cluster, name, force=force, login=bus.login())
-    if v.get("outcome") == ops.REFUSED:
-        raise bus.Refused(f"restart failed: {v['error']}\n"
-                          f"Alternative: mop delete {name} && mop add <origin>")
-    # Молча на успехе; чью аренду прошёл force -- называем (#40).
-    lib.note(name, v)
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+    return _control.invoke('restart', argv)

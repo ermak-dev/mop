@@ -3,8 +3,9 @@
 
 SPEC: #625 node eligibility не имеет incarnation; lookup требует epoch;
 #633/#649 query/error envelopes имеют schema_version без epoch.
-RESULT: сначала проверяется meaningful red отсутствующих consumer bindings.
-STATUS: INCOMPLETE — see #642; это не приёмка всей миграции.
+RESULT: meaningful red проверил недостающие bindings, потерю key/reason,
+неверный recovery target, scope селектора и admission до проверки wait.
+STATUS: FIXED — see #642 (только связанные consumers; вся миграция не завершена).
 """
 import contextlib
 import io
@@ -26,6 +27,55 @@ NODE = 'e3089889-7246-4de1-93c3-2e1854151700'
 OP = 'a4948f9b-8bad-491a-a0cc-160d4da18828'
 DEADLINE = '2026-10-16T10:05:00Z'
 TOKEN = 'private-consumer-token'
+PROJECT = '5ee23d6c-04a4-43ae-9b91-409485c535fc'
+POLICY = 'b5600b0d-15cc-4fa3-ab0e-7c59d7e98939'
+PUPPET = '9db85243-4ae1-4511-8acc-bf6c8140cf2c'
+INCARNATION = 'f6db1446-0358-4dfd-8605-85ec12367ebc'
+
+
+def puppet_row():
+    unavailable = {'value': None, 'freshness': 'unavailable', 'reason': 'not_observed',
+        'sequence': None, 'producer_epoch': None, 'incarnation': None,
+        'observed_at': None, 'received_at': None, 'expires_at': None}
+    return {'kind': 'puppet', 'id': PUPPET, 'incarnation': INCARNATION,
+        'revision': '9007199254740993', 'deleted': False, 'name': None, 'aliases': [],
+        'project_id': PROJECT, 'project_name': 'owned', 'node_id': NODE, 'node_name': 'fixture-node',
+        'desired': {'revision': '7', 'role': 'worker', 'bundle_digest': 'a'*64,
+            'generation': '2', 'owner_id': '2', 'expires_at': DEADLINE},
+        'applied': {'identity': False, 'ready': False},
+        'observed': {kind: dict(unavailable) for kind in ('state', 'clone', 'size')},
+        'state': {'kind': 'unknown', 'detail': 'no current session observation', 'branch': None},
+        'node': {'desired': {'eligible': True}, 'applied': {'applied_revision': None, 'at': None},
+                 'observed': {'eligible': None, 'at': None, 'freshness': 'unverified',
+                              'reason': 'source_version_unavailable'}},
+        'usage': {'source': 'proxy', 'freshness': 'unavailable', 'reason': 'usage_query_not_bound'}}
+
+
+def pool_page():
+    return {'schema_version': 1, 'epoch': EPOCH, 'snapshot_id': OP,
+        'cursor': 'opaque-event-position', 'next_cursor': None, 'results': [puppet_row()],
+        'coverage': {'catalog': True, 'assignments': True, 'observations': True,
+            'operation_publication': False, 'pending_operations': False,
+            'endpoints': False, 'telemetry': False, 'usage': False}, 'handshake_complete': False}
+
+
+def build_operation(state='accepted'):
+    value = node_operation(state)
+    value['operation']['target'] = {'id': PROJECT, 'kind': 'project', 'source_revision': '5'}
+    value['operation']['build'] = {'policy_id': POLICY, 'source_commit': 'c'*40, 'source_ref': 'main',
+        'manifest_digest': 'a'*64, 'source_digest': 'b'*64, 'mode': 'update', 'target_nodes': [NODE],
+        'planned': False, 'skipped': False, 'affected_targets': [], 'unresolved_stages': [],
+        'stages': [], 'original_failure': None, 'compensation_failures': []}
+    return value
+
+
+def restart_operation(state='accepted'):
+    value = node_operation(state)
+    value['operation']['target'] = {'id': PUPPET, 'kind': 'puppet', 'incarnation': INCARNATION,
+                                  'revision': '7', 'source_revision': '7'}
+    value['operation']['steps'] = [{'name': name, 'outcome': '', 'evidence': ''}
+        for name in ('apply_identity', 'restart_session', 'confirm_ready')]
+    return value
 
 
 def node_operation(state='accepted'):
@@ -45,6 +95,123 @@ class Consumers(unittest.TestCase):
 
     def response(self, data, status=200):
         self.fixture.responses.append(Response(status, data))
+
+    def test_build_uses_published_finite_parser_and_preserves_pinned_policy(self):
+        self.assertTrue(hasattr(self.client, 'prepare_build'), '#642 missing published build consumer')
+        command = self.client.prepare_build(PROJECT, policy_id=POLICY, epoch=EPOCH,
+            expected_revision='5', not_after=DEADLINE, request_id=KEY,
+            target_nodes=(NODE,), mode='update')
+        self.assertEqual(self.fixture.calls, [])
+        from mop.server.builds.commands import parse
+        parsed = parse(PROJECT, json.loads(command.body))
+        self.assertEqual(str(parsed.policy_id), POLICY)
+        self.assertIs(parsed.force_safety, False)
+        self.assertEqual(parsed.mode, 'update')
+        self.response(build_operation(), 202)
+        result = self.client.submit(command)
+        self.assertEqual(result.operation.target_id, PROJECT)
+        self.assertEqual(result.operation.data['build']['policy_id'], POLICY)
+        self.assertEqual(self.fixture.calls[-1][:2], ('POST', f'/api/v1/projects/{PROJECT}/commands/build'))
+
+    def test_build_cli_is_named_admission_with_no_local_manifest_or_force_fallback(self):
+        from mop.cli import _control
+        self.response(build_operation(), 202)
+        out, err = io.StringIO(), io.StringIO()
+        args = [PROJECT, '--policy-id', POLICY, '--target-node', NODE, '--epoch', EPOCH,
+            '--expected-revision', '5', '--request-id', KEY, '--not-after', DEADLINE, '--mode', 'update']
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(['build', *args])
+        self.assertEqual(code, 3, err.getvalue())
+        self.assertEqual(json.loads(out.getvalue())['operation']['state'], 'accepted')
+        body = json.loads(self.fixture.calls[-1][2])
+        self.assertEqual(body['target_nodes'], [NODE])
+        self.assertEqual(body['policy_id'], POLICY)
+        self.assertNotIn('branch', body)
+        self.assertNotIn('manifest', body)
+        self.assertIs(body['force_safety'], False)
+        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+        for option in ('--force', '--force-safety'):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(['build', *args, option]), 2)
+        self.assertEqual(len(self.fixture.calls), 1)
+
+    def test_restart_cli_uses_canonical_detail_desired_revision_not_projection_clock(self):
+        from mop.cli import _control
+        self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
+        self.response(restart_operation(), 202)
+        out, err = io.StringIO(), io.StringIO()
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(['restart', PUPPET, '--request-id', KEY, '--not-after', DEADLINE])
+        self.assertEqual(code, 3, err.getvalue())
+        self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'POST'])
+        self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/puppets/{PUPPET}/commands/restart')
+        body = json.loads(self.fixture.calls[-1][2])
+        self.assertEqual(body['expected_revision'], '7')
+        self.assertEqual(body['incarnation'], INCARNATION)
+        self.assertEqual(body['params'], {'fresh': False})
+        self.assertEqual(body['request_id'], KEY)
+        self.assertEqual(json.loads(out.getvalue())['operation']['state'], 'accepted')
+
+    def test_restart_explicit_binding_needs_no_roster_read_and_never_enables_override(self):
+        from mop.cli import _control
+        self.response(restart_operation('succeeded'))
+        out, err = io.StringIO(), io.StringIO()
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(['restart', PUPPET, '--epoch', EPOCH, '--incarnation', INCARNATION,
+                '--expected-revision', '7', '--request-id', KEY, '--not-after', DEADLINE])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST'])
+        for flag in ('--fresh', '--force'):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(['restart', PUPPET, flag]), 2)
+        self.assertEqual(len(self.fixture.calls), 1)
+
+    def test_restart_validates_request_identity_before_its_detail_query(self):
+        from mop.cli import _control
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(['restart', PUPPET, '--request-id', '']), 1)
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_public_request_identity_factory_is_transient_and_rejects_replacement(self):
+        self.assertTrue(hasattr(api, 'new_request_id'), '#642 missing pre-I/O request identity factory')
+        from uuid import UUID
+        generated = api.new_request_id()
+        self.assertEqual(str(UUID(generated)), generated)
+        self.assertEqual(api.new_request_id(KEY), KEY)
+        for bad in ('', True, 'not-a-key'):
+            with self.assertRaises(api.ClientError):
+                api.new_request_id(bad)
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_restart_recovery_rejects_a_changed_source_revision_under_the_same_key(self):
+        command = self.client.prepare_restart(api.Target(PUPPET, INCARNATION, '7'), epoch=EPOCH,
+            not_after=DEADLINE, request_id=KEY)
+        response = restart_operation('succeeded')
+        response['operation']['target']['source_revision'] = '8'
+        self.response(response)
+        with self.assertRaises(api.ProtocolError):
+            self.client.recover(command)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['GET'])
+
+    def test_recovery_rejects_a_different_target_under_the_same_key(self):
+        from mop.cli import _control
+        self.fixture.responses.append(OSError('lost admission reply'))
+        changed = node_operation('succeeded')
+        changed['operation']['target']['id'] = PROJECT
+        self.response(changed)
+        out, err = io.StringIO(), io.StringIO()
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = _control.invoke('node drain', [NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE])
+        self.assertEqual(code, 3)
+        self.assertIn(KEY, err.getvalue())
+        self.assertIn('unknown', err.getvalue())
+        self.assertEqual(out.getvalue(), '')
 
     def test_node_admission_uses_published_schema_and_get_only_recovery(self):
         self.assertTrue(hasattr(self.client, 'prepare_node_drain'), '#642 missing typed node drain consumer')
@@ -94,6 +261,8 @@ class Consumers(unittest.TestCase):
         self.assertIn(KEY, err.getvalue())
         self.assertIn(EPOCH, err.getvalue())
         self.assertIn('unknown', err.getvalue())
+        self.assertIn('not_found', err.getvalue())
+        self.assertIn('resource not found', err.getvalue())
         self.assertNotIn('private low-level detail', err.getvalue())
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
 
@@ -112,6 +281,22 @@ class Consumers(unittest.TestCase):
         self.assertIn(EPOCH, err.getvalue())
         self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
         self.assertNotIn('private result read failed', err.getvalue())
+
+    def test_wait_permission_refusal_keeps_reason_and_original_operation_identity(self):
+        from mop.cli import _control
+        self.response(node_operation(), 202)
+        self.response({'schema_version': 1, 'error': {'code': 'access_denied',
+            'message': 'operation scope was revoked', 'retryable': False}}, 403)
+        out, err = io.StringIO(), io.StringIO()
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = _control.invoke('node drain', [NODE, '--epoch', EPOCH,
+                '--request-id', KEY, '--expected-revision', '1', '--not-after', DEADLINE, '--wait', '1'])
+        self.assertEqual(code, 1)
+        for value in ('operation scope was revoked', KEY, OP, EPOCH):
+            self.assertIn(value, err.getvalue())
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
 
     def test_wait_is_bound_to_already_admitted_epoch_and_request(self):
         self.response(node_operation())
@@ -158,6 +343,26 @@ class Consumers(unittest.TestCase):
         self.assertEqual(caught.exception.error.reason, 'node action permission denied')
         self.assertEqual(caught.exception.error.http_status, 403)
 
+    def test_https_context_options_are_only_a_global_prefix_not_command_data(self):
+        from mop.cli import _control
+        args = ['dev', 'bug', 'new', '--title', '--api-origin=https://not-a-context.example']
+        self.assertEqual(_control.options(args), ({}, args))
+        args = ['project', 'list', '--cursor', '--api-origin=https://not-a-context.example']
+        self.assertEqual(_control.options(args), ({}, args))
+        self.assertEqual(_control.options(['--api-origin', 'https://controller.example',
+            '--api-ca', '/explicit/ca.pem', 'health']),
+            ({'origin': 'https://controller.example', 'ca_file': '/explicit/ca.pem'}, ['health']))
+
+    def test_legacy_server_prefix_cannot_bypass_converted_command_gate(self):
+        from mop.common import context
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(context, 'here', side_effect=AssertionError('legacy selector read old stores')), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(['--server', 'old-selector.example', 'list']), 2)
+        self.assertIn('unsupported', err.getvalue())
+        self.assertNotIn('old-selector.example', err.getvalue())
+        self.assertEqual(self.fixture.calls, [])
+
     def test_dispatcher_enters_transient_https_without_legacy_resolution(self):
         from mop.common import context
         from mop.cli import _control
@@ -176,6 +381,19 @@ class Consumers(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())['state'], 'ready')
         self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
         self.assertEqual([call[:2] for call in self.fixture.calls], [('GET', '/api/v1/health')])
+
+    def test_user_actions_are_finite_and_never_edit_the_old_operator_store(self):
+        from mop.common import context
+        for words in ('server user', 'server user add', 'server user delete',
+                      'server user passwd', 'server user import'):
+            out, err = io.StringIO(), io.StringIO()
+            with self.subTest(words=words), \
+                 patch.object(context, 'here', side_effect=AssertionError('old operator-store context')), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(words.split()), 2)
+            self.assertIn('unsupported', err.getvalue())
+            self.assertEqual(out.getvalue(), '')
+        self.assertEqual(self.fixture.calls, [])
 
     def test_mcp_never_starts_legacy_channel_or_invents_action_permissions(self):
         from mop.common import context
@@ -270,6 +488,73 @@ class Consumers(unittest.TestCase):
         self.assertLessEqual(required, set(_control.SURFACES))
         self.assertEqual(set(_control.SURFACES.values())-{'bound', 'unsupported'}, set())
 
+    def test_published_pool_query_keeps_projection_and_command_revisions_separate(self):
+        self.assertTrue(hasattr(self.client, 'puppets_page'), '#642 missing #626 pool query binding')
+        self.assertTrue(hasattr(self.client, 'read_puppet'), '#642 missing typed detail binding')
+        self.response(pool_page())
+        page = self.client.puppets_page(project_id=PROJECT, page_size=1)
+        self.assertEqual(page.items[0].revision, '9007199254740993')
+        self.assertEqual(page.items[0].target.revision, '7')
+        self.assertEqual(page.items[0].target.incarnation, INCARNATION)
+        self.assertFalse(page.coverage['pending_operations'])
+        self.assertFalse(page.handshake_complete)
+        self.assertNotIn('pending_operations', page.data)
+        self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/puppets?page_size=1&project_id={PROJECT}')
+        self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
+        detail = self.client.read_puppet(PUPPET)
+        self.assertEqual(detail.id, PUPPET)
+        self.assertIsNone(detail.data['name'])
+        self.assertFalse(detail.data['applied']['ready'])
+        self.assertEqual(detail.data['observed']['state']['reason'], 'not_observed')
+        self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/puppets/{PUPPET}')
+
+    def test_missing_incarnation_and_wrong_detail_never_create_a_command_binding(self):
+        self.assertTrue(hasattr(self.client, 'read_puppet'), '#642 missing typed detail binding')
+        row = puppet_row()
+        row['incarnation'] = None
+        self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': row})
+        view = self.client.read_puppet(PUPPET)
+        with self.assertRaises(api.ClientError):
+            view.target
+        row = puppet_row()
+        row['id'] = PROJECT
+        self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': row})
+        with self.assertRaises(api.ProtocolError):
+            self.client.read_puppet(PUPPET)
+        self.assertTrue(all(call[0] == 'GET' for call in self.fixture.calls))
+
+    def test_authority_error_nullable_epoch_is_not_replaced_by_a_protocol_error(self):
+        self.response({'schema_version': 1, 'epoch': None, 'error': {'code': 'authority_unavailable',
+            'message': 'installation read authority is unavailable', 'retryable': True}}, 503)
+        with self.assertRaises(api.APIError) as caught:
+            self.client.snapshot()
+        self.assertEqual(caught.exception.error.reason, 'installation read authority is unavailable')
+        self.assertIsNone(caught.exception.error.epoch)
+
+    def test_success_snapshot_without_epoch_has_a_typed_protocol_refusal(self):
+        self.response({'schema_version': 1, 'results': [], 'next_cursor': None})
+        with self.assertRaises(api.ProtocolError):
+            self.client.snapshot()
+
+    def test_list_and_detail_use_canonical_queries_not_a_client_roster(self):
+        from mop.cli import _control
+        from mop.common import context, puppets
+        self.response(pool_page())
+        self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
+        out, err = io.StringIO(), io.StringIO()
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             patch.object(context, 'here', side_effect=AssertionError('legacy query context')), \
+             patch.object(puppets, 'roster', side_effect=AssertionError('client assembled a roster')), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(['list', '--project-id', PROJECT]), 0)
+            self.assertEqual(json.loads(out.getvalue())['results'][0], puppet_row())
+            out.seek(0)
+            out.truncate()
+            self.assertEqual(cli.main(['detail', PUPPET]), 0)
+            self.assertEqual(json.loads(out.getvalue())['puppet'], puppet_row())
+        self.assertEqual(len(self.fixture.calls), 2)
+        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+
     def test_live_addresses_are_server_endpoint_records_not_user_presence(self):
         self.assertTrue(hasattr(self.client, 'addresses'), '#642 missing #649 presence query')
         endpoint = {'id': NODE, 'session_id': OP, 'address': 'private:'+NODE,
@@ -329,6 +614,17 @@ class Consumers(unittest.TestCase):
         address = cli.declared(os.path.join(cli.PACKAGE, 'core', 'addresses.py'))
         self.assertEqual(address.get('actions'), ['sessions.view_delivery', 'catalog.view_project'])
         self.assertIs(address.get('human_only'), True)
+        drain = cli.declared(os.path.join(cli.PACKAGE, 'node', 'drain.py'))
+        self.assertEqual(drain.get('actions'), ['catalog.drain_node', 'operations.view_operation'])
+        build = cli.declared(os.path.join(cli.PACKAGE, 'core', 'build.py'))
+        self.assertEqual(build.get('actions'), ['catalog.build_project', 'operations.view_operation'])
+        self.assertIs(build.get('human_only'), True)
+
+    def test_mutating_declaration_cannot_claim_an_empty_action_requirement(self):
+        with patch('builtins.open', return_value=io.StringIO(
+                'MCP = {"annotations": "destructive", "actions": [], "args": []}')):
+            with self.assertRaises(ValueError):
+                cli.declared('own-declaration-fixture.py')
 
     def test_mcp_action_filter_fails_closed_and_invokes_same_commandlet(self):
         from mop.cli import _control
@@ -341,6 +637,10 @@ class Consumers(unittest.TestCase):
         self.assertFalse(_control.allowed({'cluster_verbs': ['restart']}, identity))
         self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']},
             api.Identity(1, NODE, 'human', 1, None, None)))
+        scoped = api.Identity(1, NODE, 'human', 1, None, None, frozenset())
+        self.assertTrue(_control.allowed({'annotations': 'readonly', 'actions': []}, scoped))
+        self.assertFalse(_control.allowed({'annotations': 'destructive', 'actions': []}, scoped))
+        self.assertFalse(_control.allowed({'annotations': 'readonly'}, scoped))
         out, err = io.StringIO(), io.StringIO()
         decl = {'args': [{'name': 'cursor', 'type': 'string', 'flag': '--cursor'}]}
         self.response({'schema_version': 1, 'count': 0, 'results': [], 'next_cursor': None})

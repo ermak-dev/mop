@@ -178,6 +178,22 @@ controller:pg17:
                                                  USER='fixture-only', PASSWORD='synthetic'), pid)
         connect.assert_not_called()
 
+    def test_client_fixture_runs_clean_wheel_tls_and_real_postgres_contracts(self):
+        # HYPOTHESIS: один control_tls не доказывает Django admission contracts.
+        # SOLUTION: последовательный script с &&, обе проверки обязательны.
+        # RESULT: missing PostgreSQL command red, затем четыре fixture checks green.
+        # STATUS: FIXED — see #642.
+        import shlex
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            result, _, commands = self.invoke(root, check='client')
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
+        self.assertEqual(script.split(' && '), [
+            shlex.join(['python3', 'tests/control_tls.py']),
+            shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])])
+
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.source(directory)
