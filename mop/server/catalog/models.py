@@ -189,9 +189,7 @@ class ProjectPolicySnapshot(ImmutableRecord):
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta(Record.Meta):
-        permissions = (
-            ('pin_project_policy', 'Can pin project policy'),
-        )
+        permissions = [('pin_project_policy', 'Can pin project policy')]
         constraints = Record.Meta.constraints + [
             models.UniqueConstraint(fields=('project', 'sequence'), name='policy_project_sequence'),
             models.CheckConstraint(condition=Q(sequence__gte=1, cpu__gte=1, memory_mb__gte=1, disk_mb__gte=1), name='policy_positive_resources'),

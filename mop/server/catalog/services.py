@@ -127,6 +127,20 @@ class Catalog:
         return m.Node.objects.filter(pk=node_id, retired_at__isnull=True).exists()
 
     @staticmethod
+    def current_project_ids(project_ids=None):
+        """SQL scope query для Access; None — все current, пустой набор — никто."""
+        rows = m.Project.objects.filter(retired_at__isnull=True)
+        if project_ids is not None:
+            rows = rows.filter(pk__in=project_ids)
+        return tuple(rows.order_by('pk').values_list('pk', flat=True))
+
+    @staticmethod
+    def current_node_ids(node_ids):
+        """Batch currentness без утечки retirement predicate в Access."""
+        return tuple(m.Node.objects.filter(pk__in=node_ids, retired_at__isnull=True)
+                     .order_by('pk').values_list('pk', flat=True))
+
+    @staticmethod
     def _live(row):
         if row.retired_at is not None:
             raise Conflict('catalogue target is retired')

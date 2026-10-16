@@ -185,6 +185,49 @@ class GrantCases(TransactionTestCase):
         self.assertTrue(callable(query), 'public ORM-only execution binding check is missing')
         return query
 
+    # BUG: retained owner/project/binding оставляют grant authority после retirement.
+    # HYPOTHESIS: global owner bypasses membership, но project currentness не проверена.
+    # RED: PG16/17 — Grants, LocalGrantAuthority и receiving binding не отказали.
+    # SOLUTION: current owner permission требует public Catalog.project_is_current.
+    # RESULT: public retirement закрывает оба resolver и receiving binding при всех scopes.
+    # STATUS: FIXED — see #635 / #634
+    def test_public_project_retirement_revokes_existing_grant_and_receiving_binding(self):
+        from _catalog_retirement_cases import retirement_catalog
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        row, actor = self.active(actor=parent_actor)
+        token = Token.objects.get(user__principal__pk=row.principal_id).key
+        local = self.api.local_authority()
+        self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        with transaction.atomic():
+            local.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            self.api.authorize_execution(row.binding)
+        self.user.is_superuser = True
+        self.user.save()
+        catalogue = retirement_catalog(self, auth.Access())
+        catalogue.delete_project(self.actor, self.project.pk, expected_revision=1)
+        replacement = catalogue.register_project(self.actor, self.project.origin)
+        self.assertNotEqual(replacement.id, self.project.pk)
+        self.assertTrue(Project.objects.filter(pk=self.project.pk).exists())
+        self.assertEqual(self.bindings.current(row.project_id, row.target_id), row.binding)
+        for mode in ('superuser', 'all', 'member'):
+            self.user.is_superuser = mode == 'superuser'
+            self.user.save()
+            access.AllProjectMembership.objects.filter(user=self.user).delete()
+            if mode == 'all':
+                access.AllProjectMembership.objects.create(user=self.user, source=self.source)
+            for resolver in (self.api, local):
+                with self.subTest(mode=mode, resolver=type(resolver).__name__):
+                    with self.assertRaises(auth.Denied):
+                        auth.token_context(token, grants=resolver)
+                    with self.assertRaises(auth.Denied):
+                        auth.current_actor(actor, grants=resolver)
+                    with self.assertRaises(auth.Denied):
+                        auth.Access(grants=resolver).authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+                    with self.assertRaises(auth.Denied):
+                        auth.Access(grants=resolver).authorize(actor, 'sessions.send_message', project_ids=(replacement.id,))
+            with transaction.atomic(), self.assertRaises(auth.Denied):
+                self.api.authorize_execution(row.binding)
+
     def test_execution_binding_is_current_inside_transaction_without_provider_io(self):
         query = self.execution_query()
         row, _ = self.active()
