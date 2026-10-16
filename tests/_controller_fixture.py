@@ -27,6 +27,38 @@ def _drop_backend_state(config, pid):
             (pid, config['NAME'])).fetchall()
 
 
+def restore_snapshot(creation, data, original):
+    """Batch только migration seeds; прочие snapshots сохраняют путь Django."""
+    from django.apps import apps
+    from django.core import serializers
+    from django.db import transaction
+    from django.db.models.signals import pre_init, post_init, pre_save, post_save
+    seeds = {'contenttypes.contenttype', 'auth.permission', 'controller.restoreguard'}
+    labels = {row['model'] for row in json.loads(data)}
+    if not labels <= seeds:
+        return original(data)
+    models = [apps.get_model(label) for label in labels]
+    if any(model._meta.many_to_many or model._meta.parents
+           or any(signal.has_listeners(model) for signal in (pre_init, post_init, pre_save, post_save))
+           for model in models):
+        return original(data)
+    # Guard до deserialization: fallback не должен повторять init signals.
+    objects = serializers.deserialize('json', data, using=creation.connection.alias)
+    batches = {}
+    for obj in objects:
+        batches.setdefault(type(obj.object), []).append(obj.object)
+    using = creation.connection.alias
+    # Как у Django: одна настоящая транзакция, deferred FK и явная проверка
+    # всех затронутых таблиц до COMMIT; ни constraints, ни seeds не убраны.
+    with transaction.atomic(using=using):
+        with creation.connection.constraint_checks_disabled():
+            for model, rows in batches.items():
+                model._base_manager.using(using).bulk_create(rows, update_conflicts=True,
+                    unique_fields=[model._meta.pk.name],
+                    update_fields=[field.name for field in model._meta.concrete_fields if not field.primary_key])
+        creation.connection.check_constraints(table_names={model._meta.db_table for model in batches})
+
+
 def main(labels=None):
     host = hermetic.FIXTURE_ENV.get('MOP_TEST_POSTGRES_HOST')
     if not host:
@@ -89,4 +121,10 @@ def main(labels=None):
                 with patch.object(psycopg.Cursor, 'execute', diagnostic_execute):
                     return super().teardown_databases(old_config, **kwargs)
         runner = DiagnosticRunner(verbosity=2, interactive=False)
-        return int(bool(runner.run_tests(labels or ['_controller_cases'])))
+        from django.db import connection
+        from unittest.mock import patch
+        creation = connection.creation
+        original = creation.deserialize_db_from_string
+        with patch.object(creation, 'deserialize_db_from_string',
+                          new=lambda data: restore_snapshot(creation, data, original)):
+            return int(bool(runner.run_tests(labels or ['_controller_cases'])))

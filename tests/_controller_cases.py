@@ -228,6 +228,96 @@ class TransportDeadline(TransactionTestCase):
 class Foundation(TransactionTestCase):
     serialized_rollback = True
 
+    def test_migration_seed_replay_preserves_rows_and_constraints_without_per_row_sql(self):
+        # HYPOTHESIS 1 (WRONG): tmpfs ускорит gate; PG17 302.493 → 300.520 s,
+        # разница в пределах шума, изменение полностью убрано.
+        # HYPOTHESIS 2: serialized_rollback повторяет UPDATE+INSERT для каждой
+        # migration seed; gate делает сотни тысяч SQL вместо нескольких batches.
+        # SOLUTION: batch UPSERT только трёх seed models; штатный Django при
+        # lifecycle receivers/других models, настоящие atomic и FK checks.
+        # RESULT: RED — 502 statements; GREEN — 7, тот же JSON, usable PK
+        # sequence, FK rollback и штатные lifecycle signals сохранены.
+        # STATUS: FIXED — see #668 (seed replay, не все teardown timeouts).
+        import json
+        from django.test.utils import CaptureQueriesContext
+        from _controller_fixture import restore_snapshot
+        original = type(connection.creation).deserialize_db_from_string.__get__(connection.creation)
+        data = connection._test_serialized_contents
+        call_command('flush', verbosity=0, interactive=False, inhibit_post_migrate=True, reset_sequences=False)
+        with CaptureQueriesContext(connection) as baseline:
+            started = time.perf_counter()
+            original(data)
+            native_seconds = time.perf_counter() - started
+        call_command('flush', verbosity=0, interactive=False, inhibit_post_migrate=True, reset_sequences=False)
+        with CaptureQueriesContext(connection) as queries:
+            started = time.perf_counter()
+            restore_snapshot(connection.creation, data, original)
+            batch_seconds = time.perf_counter() - started
+        print(f'Migration seed replay: native {len(baseline)} SQL / {native_seconds:.6f}s; '
+              f'batch {len(queries)} SQL / {batch_seconds:.6f}s')
+        self.assertEqual(json.loads(connection.creation.serialize_db_to_string()), json.loads(data))
+        self.assertLessEqual(len(queries), 12, 'migration seed replay issues per-row SQL')
+        # Первый test после migrate уже имеет seeds: Django обновляет их,
+        # повторный replay обязан остаться идемпотентным и не терять строки.
+        restore_snapshot(connection.creation, data, original)
+        self.assertEqual(json.loads(connection.creation.serialize_db_to_string()), json.loads(data))
+        from django.contrib.contenttypes.models import ContentType
+        # Как штатный TransactionTestCase, flush выше не перематывает sequences:
+        # после replay должна работать и обычная вставка без явного PK.
+        ContentType.objects.create(app_label='seed-replay-fixture', model='sequence_check')
+        call_command('flush', verbosity=0, interactive=False, inhibit_post_migrate=True, reset_sequences=False)
+        invalid = json.loads(data)
+        permission = next(row for row in invalid if row['model'] == 'auth.permission')
+        permission['fields']['content_type'] = -1
+        with self.assertRaises(IntegrityError):
+            restore_snapshot(connection.creation, json.dumps(invalid), original)
+        self.assertEqual(ContentType.objects.count(), 0, 'invalid snapshot was partially committed')
+
+    def test_migration_seed_replay_keeps_raw_save_signal_semantics(self):
+        from django.contrib.contenttypes.models import ContentType
+        from django.db.models.signals import post_save, post_init
+        from _controller_fixture import restore_snapshot
+        original = type(connection.creation).deserialize_db_from_string.__get__(connection.creation)
+        data = connection._test_serialized_contents
+        call_command('flush', verbosity=0, interactive=False, inhibit_post_migrate=True, reset_sequences=False)
+        observed, initialized = [], []
+        def receiver(sender, instance, raw, **kwargs):
+            observed.append((instance.pk, raw))
+        def init_receiver(sender, instance, **kwargs):
+            initialized.append(instance.pk)
+        post_save.connect(receiver, sender=ContentType)
+        post_init.connect(init_receiver, sender=ContentType)
+        try:
+            restore_snapshot(connection.creation, data, original)
+        finally:
+            post_save.disconnect(receiver, sender=ContentType)
+            post_init.disconnect(init_receiver, sender=ContentType)
+        expected = list(ContentType.objects.values_list('pk', flat=True))
+        self.assertCountEqual(observed, [(pk, True) for pk in expected])
+        self.assertCountEqual(initialized, expected, 'fallback deserialized migration seeds twice')
+        # Даже один init receiver может читать уже сохранённые предыдущие rows:
+        # interleaving стандартного deserializer тогда тоже нельзя менять.
+        from unittest.mock import Mock
+        native = original
+        original = Mock(wraps=native)
+        post_init.connect(init_receiver, sender=ContentType)
+        try:
+            restore_snapshot(connection.creation, data, original)
+        finally:
+            post_init.disconnect(init_receiver, sender=ContentType)
+        original.assert_called_once_with(data)
+
+    def test_migration_seed_replay_delegates_nonseed_rows_to_django(self):
+        from django.core import serializers
+        from unittest.mock import Mock
+        from _controller_fixture import restore_snapshot
+        data = serializers.serialize('json', [get_user_model()(pk=999999, username='nonseed-fixture')])
+        native = type(connection.creation).deserialize_db_from_string.__get__(connection.creation)
+        original = Mock(wraps=native)
+        restore_snapshot(connection.creation, data, original)
+        original.assert_called_once_with(data)
+        self.assertTrue(get_user_model().objects.filter(pk=999999, username='nonseed-fixture').exists())
+
     def test_empty_schema_repeatable_and_no_missing_migrations(self):
         call_command('migrate', verbosity=0, interactive=False)
         call_command('migrate', verbosity=0, interactive=False)
