@@ -157,9 +157,12 @@ separate #633 decision. Pinning policy records exact input, not approval or a
 build; confidential policy access also performs the service's explicit project
 and policy view checks. Image intent/availability methods edit metadata only.
 Changing desired node eligibility or deployment membership does not execute a
-drain/restart/deploy or prove application. Project/node removal currently refuses
-until fresh external safety guards are bound; `delete_node` is not permission to
-execute the future physical forget operation. No configuration permission or
+drain/restart/deploy or prove application. Project/node removal is metadata
+retirement, not physical deletion: the catalogue retains target IDs and referenced
+history, hides retired targets from active queries and assigns a new UUID when a
+name/origin is registered again. Retirement defaults to refusal until the trusted
+removal guard is bound. `delete_node` is not permission to execute the future
+physical forget operation. No configuration permission or
 change flag implies `build_project`, `drain_node`, `enable_node`, `forget_node` or
 any puppet lifecycle permission. Those physical-operation handlers and their
 permissions remain with their implementation tasks, not speculative catalog

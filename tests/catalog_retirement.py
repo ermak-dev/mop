@@ -13,6 +13,9 @@ import hermetic
 # HYPOTHESIS: непрозрачная self-assertion без адресного receipt не доказывает
 # отсутствие stopped jobs/occupants и свежесть обоих источников.
 # SPEC: finite typed proofs, nonfuture bounded observations, exact target/revision.
+# SOLUTION: чистая finite policy проверяет typed receipt, адрес и оба источника.
+# RESULT: malformed/unknown/stale evidence отказывает, только complete empty проходит.
+# STATUS: FIXED — see #634
 def main():
     name = 'mop.server.catalog.retirement'
     assert importlib.util.find_spec(name) is not None, 'missing pure safe-retirement proof policy'
@@ -49,9 +52,14 @@ def main():
                 replace(observation, observed_at=now-timedelta(minutes=10)),
                 replace(observation, expires_at=now+timedelta(minutes=6))):
         refused(lambda: validate_project_receipt(replace(project, scheduler=bad), proof, now))
+    for bad in (None, {}, True, replace(proof, revision=True), replace(proof, revision=0),
+                replace(proof, receipt_id=None), replace(proof, target_id=None)):
+        refused(lambda: validate_project_receipt(project, bad, now))
     node_proof = NodeRemovalProof(uuid.uuid4(), 1, uuid.uuid4())
     node = NodeRemovalReceipt(node_proof, observation, replace(observation, source='node-executor'), (), ())
     validate_node_receipt(node, node_proof, now)
+    for bad in (None, {}, True, replace(node_proof, revision=True), replace(node_proof, receipt_id=None)):
+        refused(lambda: validate_node_receipt(node, bad, now))
     for bad in (None, project, replace(node, scheduler_occupants=None),
                 replace(node, executor_occupants=None), replace(node, scheduler_occupants=('allocation',)),
                 replace(node, executor_occupants=('stopped-body',)),

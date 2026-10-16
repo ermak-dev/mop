@@ -5,7 +5,7 @@ from datetime import timedelta
 import threading
 import uuid
 
-from django.db import connection, connections, models as dbmodels, transaction, IntegrityError
+from django.db import connection, connections, models as dbmodels, transaction, IntegrityError, DatabaseError
 from django.test import TransactionTestCase
 from django.utils import timezone
 
@@ -19,6 +19,10 @@ from _catalog_cases import Allow
 # SPEC: inspection вне SQL, commit под parent lock с новым auth/CAS/receipt;
 # jobs включают stopped, unknown не empty, membership не обходится proof.
 # Fixture receipt — настоящий SQL record внешнего владельца, не payload actor.
+# SOLUTION: два typed prepared/commit use cases, SQL-only guard validation;
+# portable zero/UUID identity slots сохраняют retained FKs и tombstones.
+# RESULT: PG16/17 — 78 checks green; неизвестный/stale receipt отказывает.
+# STATUS: FIXED — see #634 (production guard/Access/Operations wiring позднее).
 class InspectionRecord(dbmodels.Model):
     id = dbmodels.UUIDField(primary_key=True)
     target_id = dbmodels.UUIDField()
@@ -78,7 +82,7 @@ class ReceiptGuard:
         from mop.server.catalog.retirement import SourceObservation
         self.test.assertTrue(connection.in_atomic_block, 'receipt validation outside target transaction')
         try:
-            row = InspectionRecord.objects.get(pk=proof.receipt_id)
+            row = InspectionRecord.objects.select_for_update().get(pk=proof.receipt_id)
         except InspectionRecord.DoesNotExist:
             raise services.UnsafeRemoval('authoritative SQL receipt is missing') from None
         if (row.target_id != target.id or row.revision != target.revision
@@ -266,6 +270,21 @@ class CatalogRetirementCases(TransactionTestCase):
             prepared = prepare(self.actor, target.id, expected_revision=1)
             entered, attempted = threading.Event(), threading.Event()
             def locked_validation():
+                # Независимое соединение должно наблюдать именно parent lock
+                # во время SQL receipt validation, не только конечный CAS.
+                def probe():
+                    try:
+                        with transaction.atomic():
+                            model = models.Node if node else models.Project
+                            model.objects.select_for_update(nowait=True).get(pk=target.id)
+                        return 'unlocked'
+                    except DatabaseError as error:
+                        self.assertIn('could not obtain lock', str(error))
+                        return 'locked'
+                    finally:
+                        connections.close_all()
+                with ThreadPoolExecutor(max_workers=1) as observer:
+                    self.assertEqual(observer.submit(probe).result(timeout=5), 'locked')
                 entered.set()
                 self.assertTrue(attempted.wait(5))
             self.guard.after_validation = locked_validation
