@@ -165,53 +165,10 @@ class CredentialSocketCases(TransactionTestCase):
                 await asyncio.to_thread(client.issue_addressed, self.auth, target_id=uuid4())
         self.run_socket(body)
 
-    def test_distinct_frontend_uid_uses_only_group_protected_socket(self):
-        if os.geteuid() != 0:
-            self.skipTest('distinct UID fixture requires owned root container')
-        import sys
-        from mop.server.controller.runtime import Runtime
-        shared = tempfile.TemporaryDirectory(prefix='mop-credential-crossuid-', dir='/tmp')
-        self.addCleanup(shared.cleanup)
-        self.path = str(Path(shared.name) / 'credential.sock')
-        os.chmod(shared.name, 0o750)
-        code = '''
-import json, os, sys
-sys.path.insert(0, sys.argv[1])
-from mop.common.credential_client import CredentialClient
-from mop.common.credentials import Credential
-from uuid import UUID
-payload = json.loads(sys.stdin.read())
-assert os.geteuid() == 65534
-client = CredentialClient(payload['path'], server_uid=0)
-item = client.create(Credential('token', payload['token']), project_id=UUID(payload['project']),
-    name='DISTINCT_UID', kind='variable', purpose='project', value=b'uid-fixture')
-assert not any(name.startswith(('django', 'mop.server', 'nacl')) for name in sys.modules)
-print(item.revision)
-'''
-        with override_settings(BOOTSTRAP=self.bootstrap):
-            app = self.service.application()
-        async def run():
-            runtime = Runtime(queue_limit=0)
-            server = self.service.CredentialService(self.path, application=app, runtime=runtime,
-                allowed_uids=(65534,), socket_group=os.getegid())
-            await server.start()
-            try:
-                process = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', code,
-                    str(Path(__file__).resolve().parents[1]), user=65534, group=os.getegid(), extra_groups=(),
-                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    env={key: value for key, value in os.environ.items() if not key.startswith(('MOP_', 'DJANGO_'))})
-                payload = json.dumps({'path': self.path, 'token': self.token, 'project': str(self.project.id)}).encode()
-                async with asyncio.timeout(8):
-                    output, error = await process.communicate(payload)
-                self.assertEqual(process.returncode, 0, error.decode())
-                self.assertEqual(output.strip(), b'1')
-                client = self.Client(self.path, server_uid=0)
-                with self.assertRaises(self.Error):
-                    await asyncio.to_thread(self.create, client)
-            finally:
-                await server.aclose()
-                await runtime.aclose()
-        async_to_sync(run)()
+    # test_distinct_frontend_uid_uses_only_group_protected_socket перенесён
+    # без изменения утверждений в узкий root gate #674
+    # (_credential_uid_gate.CredentialSocketUids): общий непривилегированный
+    # прогон не может его проверить, и молчаливый пропуск читался зелёным.
 
     def test_peer_uid_is_default_deny_and_client_verifies_server_uid(self):
         async def body(client, server):

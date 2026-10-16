@@ -187,6 +187,109 @@ test:py3.12:
             controller.main(['--check', 'hermetic', '--cross-uid'])
         self.assertEqual(caught.exception.code, 2)
 
+    # HYPOTHESIS: Django DiscoverRunner молча считает пропуск зелёным
+    # результатом: непривилегированный CI прогонял root-only UID границу как
+    # пропуск и уходил зелёным, ни разу её не проверив (#674).
+    # SOLUTION: контракт #229 распространён на Django runner -- под
+    # MOP_TESTS_STRICT=1 каждый skipped результат входит в счёт провалов.
+    def test_strict_runner_counts_skipped_django_results_as_failures(self):
+        from types import SimpleNamespace
+        from _controller_fixture import strict_failure_count
+        clean = SimpleNamespace(failures=[], errors=[], skipped=[])
+        one_skip = SimpleNamespace(failures=[], errors=[], skipped=[object()])
+        mixed = SimpleNamespace(failures=[object()], errors=[object()],
+                                skipped=[object(), object()])
+        self.assertEqual(strict_failure_count(clean, strict=True), 0)
+        self.assertEqual(strict_failure_count(one_skip, strict=False), 0)
+        self.assertEqual(strict_failure_count(one_skip, strict=True), 1)
+        self.assertEqual(strict_failure_count(mixed, strict=True), 4)
+        self.assertEqual(strict_failure_count(mixed, strict=False), 2)
+
+    ROOT_GATE_MODULE = '_credential_uid_gate.py'
+    # Обязательное множество root-only ID (#674): ровно эти два случая
+    # перенесены из общих модулей #669 в узкий root gate, без изменения
+    # утверждений. Новый root-only случай расширяет этот набор явно.
+    REQUIRED_ROOT_ONLY_IDS = frozenset({
+        ('CredentialSocketUids', 'test_distinct_frontend_uid_uses_only_group_protected_socket'),
+        ('AddressedCredentialUids', 'test_addressed_delivery_uses_actual_frontend_uid_without_rights_inference'),
+    })
+
+    def _test_inventory(self, name):
+        import ast
+        from pathlib import Path
+        source = (Path(__file__).resolve().parent / name).read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        ids = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef) and item.name.startswith('test_'):
+                        ids.add((node.name, item.name))
+        return ids, source, tree
+
+    # HYPOTHESIS: два root-only метода в общих модулях под ci уходили в
+    # skipTest-подобный пропуск; перенос должен быть переносом, а не потерей
+    # -- union счёта случаев #669 сохраняется, gate держит ровно
+    # обязательные ID, не пропускает и запускает ровно их через точечный
+    # вход fixture, не весь унаследованный класс.
+    def test_uid_gate_holds_exactly_the_moved_root_only_ids(self):
+        import ast
+        gate_ids, gate_source, tree = self._test_inventory(self.ROOT_GATE_MODULE)
+        self.assertEqual(gate_ids, self.REQUIRED_ROOT_ONLY_IDS)
+        self.assertNotIn('skipTest', gate_source)
+        self.assertIn('os.geteuid() != 0', gate_source)
+        # Точечный вход: _credential_uid_fixture.py объявляет метки ровно
+        # двух перенесённых случаев -- не модуль и не весь класс.
+        entry = Path(__file__).resolve().with_name('_credential_uid_fixture.py')
+        fixture_source = entry.read_text(encoding='utf-8')
+        labels = ()
+        for node in ast.walk(ast.parse(fixture_source)):
+            if (isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == 'GATE_LABELS'
+                            for target in node.targets)):
+                labels = ast.literal_eval(node.value)
+        self.assertTrue(labels, 'the gate entry must declare its exact labels')
+        self.assertEqual(sorted(labels), sorted(
+            f'{module}.{cls}.{method}' for (cls, method), module in (
+                (pair, self.ROOT_GATE_MODULE.removesuffix('.py')) for pair in self.REQUIRED_ROOT_ONLY_IDS)))
+        suite_ids = set()
+        for name in ('_credential_cases.py', '_credential_binding_cases.py'):
+            ids, source = self._test_inventory(name)[:2]
+            self.assertNotIn('skipTest', source, f'{name} must not skip unprivileged')
+            self.assertEqual(ids & self.REQUIRED_ROOT_ONLY_IDS, set(),
+                             f'{name} still carries root-only cases')
+            suite_ids |= ids
+        # Перенос, не потеря: суммарный счёт случаев #669 сохранён.
+        self.assertEqual(len(suite_ids) + len(gate_ids), 66)
+        self.assertEqual(suite_ids & gate_ids, set())
+
+    # HYPOTHESIS: узкий root gate обязан прогоняться обязательно, иначе
+    # непривилегированный CI снова зелёный без реальной UID-проверки (#674).
+    # SOLUTION: SETUP объявленного CI job гоняет gate под root после
+    # создания пользователей и до exec su ci; TESTS job'а остаётся чистым
+    # непривилегированным suite -- внутри test-контейнера нет docker-сокета,
+    # и командлет fixture там не запустить.
+    # RESULT: red до объявления; фактический прогон gate ниже.
+    def test_declared_ci_job_runs_the_root_uid_gate_inside_the_owned_fixture(self):
+        import yaml
+        top = Path(__file__).resolve().parents[1]
+        with (top / '.gitlab-ci.yml').open() as stream:
+            ci = yaml.safe_load(stream)
+        setup = ci['.tests']['variables']['SETUP']['value']
+        tests_value = ci['test:py3.12']['variables']['TESTS']
+        tests_script = tests_value.get('value') if isinstance(tests_value, dict) else tests_value
+        useradd = setup.index('useradd')
+        gate_builder = (setup.index('python3 tests/_credential_uid_fixture.py')
+                        if 'python3 tests/_credential_uid_fixture.py' in setup else -1)
+        su_ci = setup.index('exec su ci')
+        self.assertLess(useradd, gate_builder, 'users must exist before the gate runs')
+        self.assertLess(gate_builder, su_ci, 'the root gate runs before the unprivileged suite')
+        self.assertEqual(setup.count('python3 tests/_credential_uid_fixture.py'), 1,
+                         'exactly one declared gate run')
+        self.assertEqual(tests_script, 'bin/mop dev test -v',
+                         'TESTS stays the pure unprivileged suite')
+        self.assertNotIn('--cross-uid', tests_script)
+
     def test_narrow_labels_are_passed_as_arguments_not_shell_source(self):
         import shlex
         labels = ('_access_cases.AccessContracts.test_currentness', 'not-a-label; exit 0')
@@ -283,6 +386,42 @@ test:py3.12:
         self.assertEqual(script.split(' && '), [
             shlex.join(['python3', 'tests/control_tls.py']),
             shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])])
+
+    # HYPOTHESIS: объявленный SETUP обязан строить ровно одну root-only пару
+    # UID и гонать ею только перемещённые UID-случаи; расширенный su ci или
+    # подменённый gate молча менял бы границу привилегий (#674).
+    # SOLUTION: builder только проверяет объявленную пару и отказывает не
+    # под root; useradd остаётся в SETUP; корневой прогон получает только
+    # узкий gate-модуль, обычный -- полные общие модули без root-only случаев.
+    def test_cross_uid_fixture_builds_one_gate_pair_and_runs_only_the_gate_module(self):
+        from pathlib import Path as P
+        source = (P(__file__).resolve().parent / '_credential_uid_fixture.py').read_text()
+        self.assertIn('uid_pair', source)
+        self.assertNotIn('useradd', source,
+                         'the builder verifies the declared pair; useradd stays in SETUP')
+        self.assertIn("os.geteuid() != 0", source)
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            setup_path = root / '.gitlab-ci.yml'
+            setup_path.write_text(setup_path.read_text().replace('value: exit 0',
+                "value: |\n        python3 tests/_credential_uid_fixture.py\n"
+                '        exec su ci -s /bin/bash -c "$TESTS"'))
+            result, _, commands = self.invoke(root, arguments=['--postgres', '17',
+                '--check', 'credential_service', '--cross-uid'])
+        self.assertEqual(result, 0)
+        worker = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        script = next(word.removeprefix('TESTS=') for word in worker if word.startswith('TESTS='))
+        self.assertEqual(script, 'python3 tests/_credential_uid_fixture.py')
+        self.assertIn('exec bash -c', worker[-1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            result, _, commands = self.invoke(root, check='credential_service')
+        self.assertEqual(result, 0)
+        worker = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        script = next(word.removeprefix('TESTS=') for word in worker if word.startswith('TESTS='))
+        self.assertIn('tests/credential_service.py', script)
+        self.assertNotIn('_credential_uid_gate', script,
+                         'the default unprivileged suite must not import the root gate')
 
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:

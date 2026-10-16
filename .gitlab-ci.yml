@@ -40,7 +40,9 @@ stages: [test, deploy]
     MOP_TESTS_STRICT: "1"
     # Каждый файл tests/ (hermetic.py среди них) -- той же командой, что у
     # людей и папетов (#271): упавшие -- с выводом, итог строкой, код 1 при
-    # любом красном. -v -- строка на файл в журнале задачи.
+    # любом красном. -v -- строка на файл в журнале задачи. Полный suite
+    # идёт непривилегированным ci; root-only UID gate #674 прогоняется
+    # SETUP'ом выше под root, в этом списке его нет.
     TESTS:
       value: bin/mop dev test -v
       expand: false
@@ -81,6 +83,12 @@ stages: [test, deploy]
         useradd --home-dir /tmp/ci-home ci
         install -d -o ci -m 0700 /tmp/ci-home
         chown -R ci /io /tmp/ci-home
+        # #674: единственный root-шаг прогона. Под root гоняется узкий gate
+        # двух настоящих cross-UID случаев #669 (пара root/nobody уже есть в
+        # образе) -- реальный SO_PEERCRED двух OS-пиров и настоящий
+        # PostgreSQL, не мок. Весь остальной прогон -- непривилегированным
+        # ci строкой ниже; отказ gate красит job до начала suite.
+        python3 tests/_credential_uid_fixture.py
         exec su ci -s /bin/bash -c "$TESTS"
       expand: false
   script:
@@ -149,7 +157,9 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
-    # Оба обязательных gate исполняются здесь, даже если один из них красный.
+    # Оба обязательных gate исполняются в этом job даже при красном другом:
+    # полный непривилегированный suite (TESTS) и узкий root-only UID gate
+    # #674 из SETUP. Каждый отказ красит job.
     TESTS: bin/mop dev test -v
     PYTHON_IMAGE: python:3.12-slim-trixie
     POSTGRES_IMAGE: postgres:17-bookworm
