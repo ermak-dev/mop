@@ -29,9 +29,11 @@ export function fullAt(ts: number | null | undefined, timeZone?: string): string
     timeZoneName: "shortOffset",
   });
   const get = (t: string) => fmt.formatToParts(date).find((x) => x.type === t)?.value ?? "";
-  // node печатает «GMT» вместо «UTC» -- это один и тот же нулевой пояс,
-  // приводим к каноническому виду, чтобы запись не зависела от среды
-  const zone = get("timeZoneName").replace(/^GMT$/, "UTC");
+  // node печатает нулевое смещение по-разному в соседних сборках: «GMT»
+  // (v22.12) и «GMT+0» (v22.23, образ CI #678). Это один и тот же нулевой
+  // пояс -- приводим оба написания к каноническому «UTC», чтобы запись не
+  // зависела от среды (#682); реальные смещения остаются как есть.
+  const zone = get("timeZoneName").replace(/^GMT(?:\+0)?$/, "UTC");
   return `${get("day")}.${get("month")}.${get("year")} ${get("hour")}:${get("minute")}:${get("second")} ${zone}`;
 }
 

@@ -88,3 +88,39 @@ test("review3: an out-of-range timestamp renders a dash, not a crash", () => {
   expect(fullAt(1e20)).toBe("-");
   expect(Number.isFinite(1e20)).toBe(true);   // метка конечна -- тест про Date, не про NaN
 });
+
+// #682: нулевое смещение ICU печатает по-разному в соседних сборках node 22
+// одного семейства: v22.12 отдаёт «GMT», v22.23 (node:22-bookworm, образ CI
+// #678) -- «GMT+0». Нулевой пояс -- один и тот же пояс: запись обязана
+// заканчиваться каноническим «UTC» в обеих средах, иначе журнал зелёный у
+// разработчика и красный в CI.
+// HYPOTHESIS (#682): полная дата с нулевым поясом всегда канонична -- «UTC»,
+// какое бы написание нулевого смещения ни выдала ICU среды.
+// SOLUTION: в fullAt канонизируются оба написания нулевого смещения
+// («GMT» и «GMT+0»), остальные смещения -- как есть, без ломки реальных зон.
+// RESULT: см. проверку ниже.
+test("#682: a zero offset renders as UTC on both ICU renderings", () => {
+  expect(fullAt(E.at, "UTC")).toBe("14.11.2023 22:13:20 UTC");
+  // оба написания нулевого смещения, как их отдаёт ICU разных сборок node
+  expect("GMT+0".replace(/^GMT(?:\+0)?$/, "UTC")).toBe("UTC");
+  expect("GMT".replace(/^GMT(?:\+0)?$/, "UTC")).toBe("UTC");
+});
+
+// #682, продолжение: канонизация касается только нулевого смещения --
+// настоящий пояс (и половинный) печатается как есть, усечения не должно
+// быть: асимметричная нормализация сломала бы реальную зону смотрящего.
+test("#682: real zone offsets keep their sign and minutes", () => {
+  const msk = fullAt(E.at, "Europe/Moscow");
+  expect(msk).toMatch(/(GMT\+3|\+03:00)$/);
+  expect(msk).toContain("15.11.2023");
+  // половинный час и минус: не «GMT0» и не пустая строка после канонизации
+  const kolkata = fullAt(E.at, "Asia/Kolkata");
+  expect(kolkata).toMatch(/(GMT\+5:30|\+05:30)$/);
+  expect(kolkata).toContain("15.11.2023 03:43:20");
+  const ny = fullAt(E.at, "America/New_York");
+  expect(ny).toMatch(/(GMT-5|-05:00)$/);
+  expect(ny).toContain("14.11.2023 17:13:20");
+  // зоны без смещения в момент (исторические/углы ICU) не получают «UTC»
+  // из-за канонизации: «GMT+0» -- нулевое смещение, не отсутствие зоны.
+  expect(fullAt(E.at, "UTC")).not.toMatch(/GMT/);
+});
