@@ -136,6 +136,8 @@ def _arm_restore(using):
             raise RuntimeError('restore requires an empty target with an uninitialized restore guard')
         # Только штатные metadata seeds допустимы в заранее migrated target.
         for model in apps.get_models(include_auto_created=True):
+            if not model._meta.can_migrate(connection):
+                continue
             if model in (RestoreGuard,) or model._meta.label_lower in {'auth.permission', 'contenttypes.contenttype'}:
                 continue
             if model._default_manager.using(using).exists():

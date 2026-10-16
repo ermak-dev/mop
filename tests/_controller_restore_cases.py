@@ -101,6 +101,39 @@ finally:
         for reason in json.loads(child.stdout).values():
             self.assertRegex(reason, 'restore|guard|maintenance')
 
+    def test_restore_arm_checks_physical_models_not_permission_metadata(self):
+        # BUG: unmanaged DomainPermission имеет ContentType, но не SQL-таблицу.
+        # HYPOTHESIS: проверка пустоты должна обходить только модели, для которых
+        # Django действительно создаёт таблицы, не пропуская реальные данные.
+        # SOLUTION: ModelOptions.can_migrate отделяет физические модели от metadata.
+        # RESULT: PG17 red — UndefinedTable при полном migration ledger;
+        # PG16/17 green — по 23 restore/secret/trust проверки, реальные данные отклонены.
+        # STATUS: FIXED — see #623
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+        from mop.server.controller.models import DomainPermission, RestoreGuard
+        from mop.server.controller.runtime import _schema_ready
+        with self.target(migrate=True) as target:
+            _schema_ready(target)
+            self.assertNotIn(DomainPermission._meta.db_table,
+                             connections[target].introspection.table_names())
+            self.assertTrue(Permission.objects.using(target).filter(
+                content_type__app_label='controller', content_type__model='domainpermission',
+                codename='manage_proxy').exists())
+            generation = archive_tools._arm_restore(target)
+            connections[target].close()
+            connections[target].close_pool()
+            guard = RestoreGuard.objects.using(target).get(pk=1)
+            self.assertEqual(guard.state, 'restoring')
+            self.assertEqual(guard.generation, generation)
+            self.assertFalse(Installation.objects.using(target).exists())
+        with self.target(migrate=True) as target:
+            get_user_model().objects.using(target).create(username='not-an-empty-target')
+            with self.assertRaisesRegex(RuntimeError, 'empty'):
+                archive_tools._arm_restore(target)
+            self.assertEqual(RestoreGuard.objects.using(target).get(pk=1).state, 'uninitialized')
+            self.assertTrue(get_user_model().objects.using(target).filter(username='not-an-empty-target').exists())
+
     def test_backup_cannot_export_an_uncommitted_installation(self):
         # pg_dump использует другую connection и не видит initialize до COMMIT.
         with self.target(migrate=True) as using, tempfile.TemporaryDirectory() as directory:
