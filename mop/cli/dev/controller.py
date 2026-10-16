@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation] [--label dotted.test]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|fresh_postgres] [--label dotted.test]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -46,7 +46,7 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
-    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation', 'fresh_postgres'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     args = parser.parse_args(argv)
     if args.label and args.check != 'controller':
@@ -103,7 +103,20 @@ def main(argv):
             call(['run', '--rm', '-d', '--name', database, '--network', prefix,
                   '--network-alias', 'postgres', '-e', 'POSTGRES_DB=mop_ci',
                   '-e', 'POSTGRES_USER=mop_ci', '-e', 'POSTGRES_PASSWORD=isolated-test-only',
-                  job['POSTGRES_IMAGE']], stdout=subprocess.DEVNULL)
+                  job['POSTGRES_IMAGE'], 'bash', '-euc',
+                  'openssl req -x509 -newkey rsa:2048 -nodes -days 2 '
+                  '-subj /CN=postgres -addext subjectAltName=DNS:postgres '
+                  '-keyout /tmp/mop-test-server.key -out /tmp/mop-test-server.crt >/dev/null 2>&1; '
+                  'chmod 600 /tmp/mop-test-server.key; '
+                  'chown postgres:postgres /tmp/mop-test-server.key /tmp/mop-test-server.crt; '
+                  'exec docker-entrypoint.sh postgres -c ssl=on '
+                  '-c ssl_cert_file=/tmp/mop-test-server.crt -c ssl_key_file=/tmp/mop-test-server.key'],
+                 stdout=subprocess.DEVNULL)
+            call(['exec', database, 'bash', '-ec',
+                  'for attempt in $(seq 1 60); do '
+                  'test -s /tmp/mop-test-server.crt && pg_isready -U mop_ci && exit 0; sleep 1; done; exit 1'],
+                 stdout=subprocess.DEVNULL)
+            call(['cp', database + ':/tmp/mop-test-server.crt', str(snapshot / '.test-postgres-ca.pem')])
             # Test script, не subprocess другого командлета.
             result = call(['run', '--rm', '--name', worker, '--network', prefix,
                            '-v', f'{snapshot}:/io', '-w', '/io',

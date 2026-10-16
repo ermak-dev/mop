@@ -445,17 +445,17 @@ def client_command(modname):
 
 def main(argv):
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
-    if argv[:2] == ["server", "controller"]:
-        return run(command("mop.cli.server.controller"), argv[2:])
+    if len(argv) >= 2 and argv[0] == "server" and argv[1] in ("controller", "install"):
+        return run(command("mop.cli.server." + argv[1]), argv[2:])
     # Глобальная опция (#131): сервер для любой команды, с любого места argv.
     from mop.common import context
     try:
         server, argv = context.strip_server(argv)
     except ValueError as e:
         sys.exit(f"mop: {e}")
-    if argv[:2] == ["server", "controller"]:
+    if len(argv) >= 2 and argv[0] == "server" and argv[1] in ("controller", "install"):
         # Старый глобальный selector не должен включать profile/.env пути.
-        print("controller uses its protected bootstrap; --server is not supported", file=sys.stderr)
+        print(argv[1] + " uses its protected bootstrap; --server is not supported", file=sys.stderr)
         return 1
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())

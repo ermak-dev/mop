@@ -625,7 +625,7 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation] [--label dotted.test]: isolated PostgreSQL checks
+mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|fresh_postgres] [--label dotted.test]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -1337,6 +1337,34 @@ operations without stopping the body or its current work.
 --cut also removes this principal's stored password. Existing bus connections
 retain their transport permissions until reconnecting; this is not a forced
 disconnect and cannot erase credentials or secrets already delivered to a body.
+```
+
+#### mop server install
+
+```text
+mop server install <action> --spec PATH: independent fresh-install preparation
+
+  plan          validate protected topology and show ordered prerequisites (stdlib)
+  provisioning  review OS accounts/directories and explicit PostgreSQL topology
+  database      create a new DB and four least-privilege roles over verified TLS
+    --provision-bootstrap PATH  separate protected database-only admin document
+    --passwords-file PATH       protected JSON of four new DB role passwords
+  database-check --provision-bootstrap PATH  verify an external DB as maintenance
+  bootstrap --role NAME --password-file PATH  write a new private role bootstrap
+  prepare --bootstrap PATH    direct maintenance: migrations then trust initialization
+  configure --bootstrap PATH --settings-file PATH --username NAME
+                authenticate privately and initialize fresh ORM settings once
+  render --bootstrap PATH --username NAME  render ORM desired state; no apply receipt
+  retention --keep N [--delete]  preview/apply native dump retention in protected backup dir
+  apply         refuse until runtime executors and realtime composition are accepted
+
+The finite JSON specification contains only installation identity, PostgreSQL
+16/17 topology, absolute disjoint paths and six distinct OS service identities.
+It contains no passwords, root bytes or general settings. No legacy input is
+read and no old service is stopped. Plan does not execute provisioning.
+Dependencies use mop server controller setup --venv PATH and its declared server
+extra; PostgreSQL OS provisioning is an operator action, never an inferred host.
+Full installed runtime and host/PVE reboot acceptance is a later integration gate.
 ```
 
 #### mop server proxykey
