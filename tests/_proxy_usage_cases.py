@@ -250,13 +250,19 @@ class ProxyUsage(TransactionTestCase):
         from mop.server.access import services, models
         user = get_user_model().objects.create_user('global' if global_scope else 'project')
         services.bind_local_identity(user.pk)
-        user.user_permissions.add(Permission.objects.get(content_type__app_label='execution', codename='view_usage'))
+        user.user_permissions.add(Permission.objects.get(
+            content_type__app_label='execution', content_type__model='usagesource', codename='view_usage'))
         if global_scope:
             source = models.IdentitySource.objects.get(kind='local')
             models.AllProjectMembership.objects.create(user=user, source=source)
         token = services.issue_token(user.pk)
         return services.token_context(token), token
 
+    # HYPOTHESIS: app/codename неоднозначны: Assignment и UsageSource объявляют view_usage.
+    # RED: integration PG17 — MultipleObjectsReturned (2 permissions) до проверки scope.
+    # SOLUTION: fixture выдаёт право именно UsageSource; Django action остаётся execution.view_usage.
+    # RESULT: targeted PG16/17 — 18/18 green, включая отказ service/HTTP после revoke.
+    # STATUS: FIXED — see #656
     @override_settings(ALLOWED_HOSTS=['testserver'])
     def test_public_queries_require_global_usage_permission_and_never_invent_attribution(self):
         self.finish(self.begin())
@@ -280,6 +286,12 @@ class ProxyUsage(TransactionTestCase):
         self.assertFalse(summary['source_complete'])
         bad = client.get('/api/v1/usage?schema_version=1&start=2026-10-16&start=2026-10-15&end=2026-10-17', secure=True)
         self.assertEqual(bad.status_code, 400)
+        # Глобальная membership без самого permission не открывает installation usage.
+        get_user_model().objects.get(pk=actor.user_id).user_permissions.clear()
+        with self.assertRaises(Denied):
+            self.s.UsageQueries().read(actor, start='2026-10-16', end='2026-10-17')
+        denied = client.get('/api/v1/usage?schema_version=1&start=2026-10-16&end=2026-10-17', secure=True)
+        self.assertEqual(denied.status_code, 403)
 
     def test_boundary_validation_errors_and_misaddressed_capability_fail_before_intent(self):
         from mop.server.controller.runtime import Runtime
