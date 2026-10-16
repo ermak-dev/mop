@@ -625,7 +625,7 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 16|17] [--check controller|hermetic]: isolated PostgreSQL checks
+mop dev controller [--postgres 16|17] [--check controller|hermetic] [--label dotted.test]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -1230,6 +1230,7 @@ mop server controller <action>: isolated Django controller maintenance
 Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
 
   setup --venv PATH             install the declared server extra in a new venv
+  schema [--app NAME] [--write]  offline migration check; --write generates migrations
   check                         Django system checks and schema readiness
   migrate                       apply standard Django migrations
   migrations-check              refuse uncommitted model changes
@@ -1242,7 +1243,7 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
 
-Every action except setup requires an explicit absolute MOP_CONTROLLER_BOOTSTRAP
+Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and
 workers use distinct runtime principals without DDL/role/database creation rights;
 only maintenance can read the encryption root. Django signing material is a

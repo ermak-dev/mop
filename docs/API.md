@@ -105,6 +105,57 @@ handler registry, mandatory BaseOperation, business effects in save/signals,
 Event Sourcing, or duplicate entity/DTO for every ORM model. Return materialized
 snapshots, not live QuerySets, deferred ORM instances or shared mutable lists.
 
+### Catalogue retirement seam (#634)
+
+`Catalog.delete_project` and `forget_node` retire metadata only. They do not
+remove a VM, job, image, clone, secret or retained FK/history. The catalogue keeps
+`retired_at` and the advanced revision on the original UUID. Active uniqueness
+uses ordinary composite constraints on name/origin plus `identity_slot`: zero for
+an active target, its own UUID for a retired target. A check constraint ties those
+two states together. This requires no conditional index or backend-specific SQL.
+A repeated name/origin receives a new UUID; old requests still address the old row.
+
+The trusted composition root may bind the narrow `catalog.retirement.RemovalGuard`.
+Unbound removal refuses. `prepare_delete_project` / `prepare_forget_node` check
+current authority/revision and call `inspect_project` / `inspect_node` **outside**
+any SQL transaction. These calls return typed references to real retained receipts,
+not `quiescent`, `empty` or actor callbacks supplied by a client. A project receipt
+must cover all remaining jobs, including stopped jobs. A node receipt must cover
+both scheduler and executor occupants, with complete source identity/incarnation,
+sequence, actual receipt and bounded observation validity (at most five minutes;
+an adapter may impose a shorter window). Missing observations are unknown, not empty.
+
+`commit_delete_project` / `commit_forget_node` accept the prepared value and lock
+the exact parent UUID. They reauthorize, check the expected revision/currentness,
+reject configured node deployment membership and invoke the bound SQL-only
+`validate_project` / `validate_node`. The validator rereads the actual receipt and
+current authoritative source generations/coordination records; merely echoing the
+prepared fields is not validation. It refuses absent, superseded, incomplete or
+mismatched evidence. The catalogue validates the returned typed evidence and its
+freshness before writing the tombstone. No inspection/network/protection call
+occurs in this commit seam. Operations can put that seam and their own
+result/audit/outbox writes inside one outer `atomic`; an error rolls all of them
+back. No result/outbox implementation or generic callback is hidden in Catalog.
+
+Later #639/#643/#648 composition must serialize job/body/build admission and
+receipt invalidation on the same parent locks, deny retired targets and prove the
+source/executor fencing that makes inspection safe. A fresh timestamp alone
+cannot fence an independent external writer. If this cannot be established, the
+production guard must refuse; this core does not implement external adapters,
+physical effects, their recovery, or Operations publication.
+
+`Catalog.project_is_current(id)` and `node_is_current(id)` are minimal internal
+SQL queries over catalogue-owned models, not permission checks or public HTTP
+endpoints. Access/SessionGate and the current-catalog composition root must use
+those queries instead of backedge imports or treating any retained FK as active.
+In particular a SERVICE principal bound to a retired/missing node must be denied
+at authentication/authorization, after waits and before addressed telemetry,
+bootstrap, secret delivery or session stages. Retiring a node is not proof that
+its old credential/process disappeared. This Access integration remains a
+consumer task; #634 does not edit Access. Normal catalogue target/settings queries
+and new writes exclude/refuse retired parents. Explicit historical policy reads
+retain their history semantics and still require the owning access policy.
+
 ## Invariant ownership
 
 The owner column names the single rule owner, not an exclusive file. Structural
@@ -360,9 +411,56 @@ is a separately recorded fallible stage, never a reason to keep logical access.
 Revocation never reactivates an old grant. Role edits create a new immutable
 bundle and require a new approval; they do not change existing digest bytes.
 
+The Access ORM boundary exposes `Grants.publish_bundle`, `approve_bundle`,
+`read_bundle`, `reserve`, `reservation`, `provision`, `activate`, `revoke`,
+`expire`, `record_retirement`, `resolve_actor` and the explicit message/dispatch
+admission methods. `reserve` accepts either a credential-bound human or an active
+delegated actor, never an owner/holder/force or workspace payload. CreationIntent
+retains the first approved policy SecretVersion reference; retry queries that
+intent instead of fetching the parent's latest policy or creating a second child.
+The injected approval query must validate the exact stored intent binding, not a
+boolean approval supplied by a caller. A grant's public bundle read returns only
+its own pinned role, not other private prompts owned by the same human. Preparation owns the approval evidence;
+Access owns only its immutable reference and the creation request identity.
+
+`RetainedSecrets` is the narrow Secrets composition port used for bundle bytes
+and generated grant credentials: `prepare(actor, RetentionScope, bytes)` performs
+AEAD outside SQL; `commit(actor, PreparedRetention)` repeats target-bound authority
+and inserts those exact prepared IDs/envelope in the aggregate's transaction.
+`read(actor, scope, version_id)` is an internal protected read with checks before
+and after provider I/O, not a general API serializer.
+`check_reference(scope, version_id)` and
+`validate_policy_reference(version_id, project_id=...)` return no ORM object or
+plaintext; they validate current same-target or approved-policy references and
+are safe local checks inside the aggregate transaction. The scope names the actual
+project, human owner, aggregate UUID and purpose. This authority is explicitly
+bound by Access from the stored intent; it does not grant human secret-management
+permissions merely to provision a role's own credential. The standard DRF Token
+row is the framework's credential-bearing plaintext exception described in
+STORAGE.md; RoleBundle, CreationIntent, Grant, events and public metadata contain
+no raw token. Grant metadata refers to the encrypted SecretVersion instead.
+
+Approval, runtime-binding/activation/retirement queries and message/dispatch
+executors default to denial. Binding queries are trusted local authoritative
+reads, not network calls inside transactions. Later Preparation and Sessions
+composition supplies these queries and the physical delivery executor; an
+unbound executor refuses before an allowed effect. `token_context`,
+`current_actor` and `Access` take an explicit grant resolver; browser sessions
+and node service identities cannot become grant contexts. Grant plain-send
+admission carries no assignment claim or git identity; dispatch admission carries
+the current human owner for the separate fenced identity-before-send operation.
+No legacy registry reader, credential import or dual write is used by this path.
+
 Rotation transitions are `staged -> delivering -> active -> retiring -> retired`,
 with `reconciling` on uncertain delivery/revoke and `failed` only on a known safe
-failure. Activation requires the configured addressed receipts; old credentials
+failure. Confirmed partial application plus proven executor quiescence moves to
+`recovery_required`, preserving the known receipt subset and safe reason. It may
+start explicit `restoring_old -> old_restored -> revoking_new -> compensated`
+steps, never replay the original effect. A partially applied compensation ends
+in `partial` with both original and compensation reasons retained; it does not
+pretend rollback completed. Current authorization, version/incarnation and
+external ownership are rechecked before each recovery effect.
+Activation requires the configured addressed receipts; old credentials
 are not retired merely because a send timed out. Build records pinned inputs,
 affected bodies/resources, per-stage receipts and known prior state before any
 removal. Recovery checks current revision/incarnation before restoring anything.

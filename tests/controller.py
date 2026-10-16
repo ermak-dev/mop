@@ -1,4 +1,4 @@
-"""Полный PostgreSQL gate foundation и Auth, без внешней test-транзакции."""
+"""Полный PostgreSQL gate foundation и предметных моделей, без внешней test-транзакции."""
 import sys
 import _lib  # noqa: F401 — lifetime временных файлов
 import hermetic  # noqa: F401 — до framework и mop
@@ -6,5 +6,6 @@ from _controller_fixture import main
 
 
 if __name__ == '__main__':
-    sys.exit(main(['_ldap_cases', '_controller_cases', '_controller_restore_cases',
-                   '_catalog_cases', '_access_cases', '_execution_cases']))
+    sys.exit(main(sys.argv[1:] or ['_ldap_cases', '_controller_cases', '_controller_restore_cases',
+                   '_catalog_cases', '_catalog_retirement_cases', '_access_cases', '_secret_cases', '_grant_cases',
+                   '_execution_cases']))
