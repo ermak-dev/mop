@@ -36,6 +36,17 @@ production composition root** и не поддержка обновления с
 `MachineConfig` и strict `LaunchResponse`; `mop.node.body_launch` связывает их
 с `BindingResolver`/`ReadinessPort` #640 и `HookBridge` #641. Старый `job_spec`
 не переключается на этот путь до связывания перечисленных ниже public ports.
+`spec.api_job_spec` — отдельный renderer только новой регистрации; без всех пяти
+capabilities root (`addressed_launch_v1`, `session_scope_v1`, `scope_retirement_v1`,
+`external_image_v1`, `bootstrap_ssh_v1`) он отказывает. Эти capabilities проверяет
+composition root по настоящим adapters, они не заявляются caller JSON/ролью.
+Новый wrapper живёт прямо в job spec, с HCL `$$`, и исполняет единственный
+launcher из registered layout с public identity pins. Launcher обязан быть
+установлен root из проверенного package/template, получать private runtime
+credentials вне spec и перепроверять pins через addressed API. Renderer не
+устанавливает его и не утверждает, что этот root уже существует. Привязка
+планировщика — exact enrolled Nomad node ID, отдельно от model node UUID.
+Правка wrapper требует новой регистрации, а не allocation restart.
 
 `Registration` создаёт доверенный root из текущей assignment и конкретного
 work, не из caller JSON. Она закрепляет installation/target/incarnation/node/

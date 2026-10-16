@@ -786,6 +786,67 @@ def job_spec(name, origin, cont=False, branch=None, node=None,
 ANY_PROJECT = "any"
 
 
+# Новый путь #643 не использует старый WRAPPER/OUTER и не делает upgrade
+# живого задания. Root связывает capabilities до регистрации нового job.
+API_LAUNCH_CAPABILITIES = frozenset(('addressed_launch_v1', 'session_scope_v1',
+    'scope_retirement_v1', 'external_image_v1', 'bootstrap_ssh_v1'))
+
+API_WRAPPER = r'''set -eu
+# Nomad интерполирует даже комментарии; shell substitutions здесь с $$.
+exec "$${MOP_REGISTERED_LAUNCHER:?registered launch entry unavailable}" \
+    --target "$${MOP_TARGET_ID:?target unavailable}" \
+    --incarnation "$${MOP_INCARNATION_ID:?incarnation unavailable}" \
+    --executor-epoch "$${MOP_EXECUTOR_EPOCH:?executor unavailable}" \
+    --generation "$${MOP_GENERATION:?generation unavailable}" \
+    --bootstrap-revision "$${MOP_BOOTSTRAP_REVISION:?bootstrap revision unavailable}"
+'''
+
+
+def api_job_spec(*, layout, machine, bundle, nomad_node_id, datacenter, user,
+                 memory_mb, cpu, capabilities=frozenset()):
+    """Новая регистрация из public Root ports, не JSON команды пользователя.
+
+    Launcher — производный executable в доверенном registered layout. Его
+    установку/фактический image receipt и enrollment credential связывает Root,
+    не Nomad spec. Capabilities поступают от проверенных adapters, не из роли
+    или поля запроса. Наличие флага не создаёт отсутствующий endpoint/SessionApi.
+    Пока Root не связан, default gate отказывает ещё до регистрации задания.
+    """
+    from uuid import UUID
+    from mop.driver.launch import MachineConfig, RegisteredLayout, LaunchResponse
+    if (type(capabilities) is not frozenset or not API_LAUNCH_CAPABILITIES <= capabilities):
+        raise ValueError('new body launch capabilities are not bound')
+    if type(layout) is not RegisteredLayout or type(machine) is not MachineConfig:
+        raise ValueError('trusted registered layout and machine configuration required')
+    registration = layout.registration
+    LaunchResponse(registration, bundle, None).check(registration)
+    if bundle.manifest.runtime.driver == 'isolating' and machine.driver != 'pve':
+        raise ValueError('isolating role requires a separate body namespace')
+    if type(nomad_node_id) is not str or str(UUID(nomad_node_id)) != nomad_node_id:
+        raise ValueError('explicit enrolled scheduler node identity required')
+    if (type(datacenter) is not str or not re.fullmatch('[A-Za-z0-9_-]{1,64}', datacenter)
+            or type(user) is not str or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user)
+            or type(memory_mb) is not int or not 128 <= memory_mb < 2**31
+            or type(cpu) is not int or not 1 <= cpu < 2**31):
+        raise ValueError('bounded registered scheduler resources required')
+    w = registration.work
+    env = dict(MOP_REGISTERED_LAUNCHER=str(layout.launcher), MOP_TARGET_ID=w.target_id,
+        MOP_INCARNATION_ID=w.incarnation_id, MOP_EXECUTOR_EPOCH=w.executor_epoch,
+        MOP_GENERATION=str(w.generation), MOP_BOOTSTRAP_REVISION=registration.bootstrap_revision)
+    meta = {key: str(getattr(w, key)) for key in ('epoch', 'target_id', 'incarnation_id',
+        'node_id', 'executor_epoch', 'generation', 'role', 'bundle_digest', 'grant_id')}
+    meta.update(bootstrap_revision=registration.bootstrap_revision,
+        bootstrap_digest=registration.bootstrap_digest, image_digest=registration.image_digest,
+        launch_schema='1', launch_template=hashlib.sha256(API_WRAPPER.encode()).hexdigest())
+    return {'Job': dict(ID=w.target_id, Name=registration.display_name,
+        Datacenters=[datacenter], Type='service', Meta=meta,
+        Constraints=[dict(LTarget='${node.unique.id}', Operand='=', RTarget=nomad_node_id)],
+        TaskGroups=[dict(Name='body', Count=1, Tasks=[dict(Name='launch', Driver='raw_exec',
+            User=user, Config=dict(command='/bin/bash', args=['-c', API_WRAPPER]), Env=env,
+            Resources=dict(CPU=cpu, MemoryMB=memory_mb, MemoryMaxMB=memory_mb),
+            KillTimeout=15*10**9)])])}
+
+
 def respec(name, meta, cont=False, node=None):
     """Спека по мете джоба (JobMeta): одна дорога перерегистрации на сервере
     (#265). Её берут глагол update сервиса кластера (перерегистрация,
