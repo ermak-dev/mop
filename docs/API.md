@@ -1257,13 +1257,16 @@ projection `revision`, `deleted`, actual project/node IDs and display names,
 `state`, and explicit proxy-usage availability. `desired.revision` is the current
 Assignment CAS revision. It is **not** interchangeable with the read-projection
 revision: the latter also advances with persisted source/publication changes and
-catalogue revisions. This is a command integration mismatch, not permission to
-silently substitute counters: the root must freeze each command's admission/CAS
-binding and reconcile the public projection version with its owning aggregate's
-revision. Current #639 Assignment methods consume the latter. #642's generic
-Snapshot preserves both fields, but its Target constructor does not choose that
-binding for the caller. #627 normalizes top-level projection
-identity/revision, not the nested CAS token. Nullable application metadata uses
+catalogue revisions. Assignment commands consume the owning aggregate's CAS
+revision, never this display/publication counter. The typed client `PuppetView`
+preserves both `revision` and `desired_revision`; its `target` property binds the
+UUID and current incarnation to `desired_revision`, refusing deleted targets or
+an unavailable incarnation. CLI restart resolves that authorized detail unless
+the caller supplies the complete explicit epoch/incarnation/CAS binding. Server
+admission still rechecks the current binding; a client snapshot is not frozen
+authority. A generic Snapshot preserves the wire fields but does not substitute
+one counter for another. Browser projection convergence and complete publication
+coverage remain separate integration requirements. Nullable application metadata uses
 `applied_revision`, not an entity `revision: null`; #642 validates every entity
 revision as a decimal string. False applied receipt predicates mean unconfirmed,
 not evidence that an external application was reversed. No legacy row-format
