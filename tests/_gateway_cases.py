@@ -20,9 +20,16 @@ def bound_client(gateway, *, cookies=None, enforce_csrf_checks=False):
     """Django test handler получает тот же owned binding, что ASGI ingress."""
     from django.test import AsyncClient
     from django.test.client import AsyncClientHandler
+    from asgiref.sync import sync_to_async
     class BoundHandler(AsyncClientHandler):
         async def __call__(self, scope):
-            return await super().__call__({**scope, 'mop.gateway': gateway})
+            try:
+                return await super().__call__({**scope, 'mop.gateway': gateway})
+            finally:
+                # AsyncClient отключает request_finished DB cleanup ради test
+                # transaction. asyncio.run выносит sync middleware в отдельный
+                # thread: его соединение не закроет sync TransactionTestCase.
+                await sync_to_async(connections.close_all)()
     client = AsyncClient(enforce_csrf_checks=enforce_csrf_checks)
     client.handler = BoundHandler(enforce_csrf_checks=enforce_csrf_checks)
     if cookies is not None:
@@ -47,8 +54,8 @@ def management_get(path, *, cookies=None):
 # HYPOTHESIS: прежний HTTP gateway не подключён к Django и общему ORM breaker.
 # SOLUTION: отдельный adapter, текущая session authority и короткие ORM claims.
 # RED: PG16 — 14 собственных failures до реализации; отдельно известный restore/root.
-# RESULT: 31 gateway cases проходят на PG16 и PG17; общий runner 128/129,
-# оставшийся failure — test_failed_root_verification_cannot_leave_restored_effects_enabled.
+# RESULT: общий runner 158/158 на PG16/Python3.12 и PG17/Python3.13,
+# включая обычное удаление test DB и owned Docker cleanup; старый restore red закрыт #632.
 # STATUS: FIXED — see #647; adapter/core, не full CI или новая установка.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class GatewayBoundary(TransactionTestCase):
@@ -595,6 +602,10 @@ class GatewayExecution(TransactionTestCase):
 
     # HYPOTHESIS: первый session lookup проходит мимо обработки bounded DB errors
     # в Gateway.request и превращает backpressure/DB outage в HTTP 500.
+    # RED: PG16 — 156/158, оба исключения вышли через Django view.
+    # SOLUTION: единая HTTP-граница переводит ошибки начальной/повторной проверки.
+    # RESULT: PG16/17 — 158/158 с нормальным DB teardown; сырая причина не выходит.
+    # STATUS: FIXED — see #647
     def test_owned_session_lookup_capacity_is_stable_429_without_upstream(self):
         from mop.server.controller.runtime import Runtime
         from mop.server.gateway.service import Gateway
@@ -648,7 +659,6 @@ class GatewayExecution(TransactionTestCase):
 
     def test_slow_upstream_leaves_rest_loop_heartbeat_and_ws_transport_available(self):
         import time
-        from django.test import AsyncClient
         from mop.server.gateway.service import Gateway
         from mop.server.gateway.values import Credential, Reply
         from mop.server.controller.runtime import Runtime
@@ -676,8 +686,7 @@ class GatewayExecution(TransactionTestCase):
                     await asyncio.sleep(.005)
                 self.assertTrue(entered.is_set())
                 started = time.monotonic()
-                client = AsyncClient()
-                client.cookies = self.client.cookies
+                client = bound_client(gateway, cookies=self.client.cookies)
                 self.assertEqual((await client.get('/api/v1/health', secure=True)).status_code, 200)
                 messages = []
                 async def send(message):
@@ -803,6 +812,10 @@ class GatewayTransportContracts(TransactionTestCase):
     serialized_rollback = True
 
     # HYPOTHESIS: prebuilt Gateway может жить вне владельца ASGI shutdown.
+    # RED: PG17 — ValueError not raised до identity check в bind_http.
+    # SOLUTION: root принимает только Gateway с тем же Runtime.
+    # RESULT: PG16/17 — оба ownership assertions проходят.
+    # STATUS: FIXED — see #647
     def test_composition_refuses_gateway_owned_by_another_runtime(self):
         from mop.server.controller.runtime import Runtime
         from mop.server.gateway.composition import bind_http

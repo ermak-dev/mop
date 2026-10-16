@@ -2,6 +2,8 @@
 from django.core.exceptions import RequestDataTooBig
 from django.http import HttpResponse
 from django.middleware.csrf import get_token
+from django.db import DatabaseError
+from mop.server.controller.runtime import Backpressure
 from .authority import HumanAuthority
 from .panel import shim, adapt, CSP
 from .policy import MAX_BODY, UNSAFE
@@ -20,6 +22,15 @@ def response(reply):
 
 
 async def gateway_view(request, resource=None):
+    try:
+        return await _gateway_view(request)
+    except Backpressure:
+        return response(refusal(429, 'proxy management capacity exhausted'))
+    except DatabaseError:
+        return response(refusal(503, 'proxy management authority unavailable'))
+
+
+async def _gateway_view(request):
     path = request.path
     is_panel = path in ('/llm/management.html', '/llm/raw/management.html')
     gateway = getattr(request, 'scope', {}).get('mop.gateway')
