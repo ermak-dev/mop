@@ -23,6 +23,7 @@ class DeliveryGateway:
         self._busy = set()
         self._calls = set()
         self._loops = {}
+        self._loop_failure = None
         self._idle_pending = {}
         self._stopped = False
 
@@ -135,10 +136,18 @@ class DeliveryGateway:
             return self._loops[context][0]
         stop = asyncio.Event()
         task = asyncio.create_task(self._receive_loop(context, stop))
-        # Ошибка сохраняется в task для владельца/cleanup, не утекает в asyncio log.
-        task.add_done_callback(lambda value: None if value.cancelled() else value.exception())
+        # Завершённые tasks не остаются в registry после reconnect. Первая
+        # неожиданная ошибка сохраняется до shutdown; task остаётся у caller.
+        task.add_done_callback(lambda value: self._receiver_done(context, value))
         self._loops[context] = (task, stop)
         return task
+
+    def _receiver_done(self, context, task):
+        self._loops.pop(context, None)
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None and self._loop_failure is None:
+                self._loop_failure = error
 
     async def _receive_loop(self, context, stop):
         try:
@@ -191,5 +200,7 @@ class DeliveryGateway:
                 raise RuntimeError('private delivery shutdown incomplete: active transport work')
         for context in tuple(self._peers):
             await self.detach(context)
-        if failures:
-            raise RuntimeError('private receiver loop failed: '+type(failures[0]).__name__) from None
+        failure = self._loop_failure or (failures[0] if failures else None)
+        self._loop_failure = None
+        if failure is not None:
+            raise RuntimeError('private receiver loop failed: '+type(failure).__name__) from None

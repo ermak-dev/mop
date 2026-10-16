@@ -645,12 +645,17 @@ endpoint separately from Assignment's human owner: a User/token alone cannot
 identify which human CLI conversation owns work. A nonce is a transport binding,
 not another authentication backend or a replacement for current Django auth.
 
-`POST /api/v1/reports` accepts `schema_version:1`, `address`, UUID `message_id`,
+`POST /api/v1/reports` accepts `schema_version:1`, current installation `epoch`
+(obtained from the authenticated health query), `address`, UUID `message_id`,
 `text` (at most 64 KiB), aware `not_after` (at most 24 hours), and optional UUID
 `operation_request_id`, boolean `notify_when_idle`, priority `next|now`. The
 message identity is distinct from its delivery ID and operation request ID.
-An identical sender-principal/message key returns stored metadata even after
-presence expiry or cipher unavailability; a changed intent returns 409.
+A stale installation epoch is rejected before cipher/admission, including when
+restore lost the old message row. Disabled installation effects deny new reports
+and are checked again before dispatch, not only when a connection is acquired.
+An identical sender-principal/message key in the current epoch returns stored
+metadata even after presence expiry or cipher unavailability; a changed intent
+returns 409.
 Admission returns 202 and a delivery Location, never proof of receipt. Private
 content is retained only as purpose/recipient/delivery-bound AEAD bytes, purged
 on terminal delivery state. Results expose only IDs, state and idle evidence.
@@ -666,6 +671,11 @@ foreign recipient or old connection is rejected. `accepted` means explicit
 application acceptance, not successful completion of a task. Idle observation is
 a separate correlated immutable receipt, not acceptance or task correctness.
 No message content is exposed through events, audit or these metadata reads.
+Expired queued payloads are purged by bounded admission cleanup; they cannot
+permanently occupy shared queue capacity. Expired attempts become unknown, not
+replayable. Identity/receipt metadata is retained without automatic pruning in
+this core; retired addresses and message keys are never recycled. A deployment
+retention/erasure policy must preserve those non-replay tombstones.
 
 `create_endpoint_runtime` composes a bounded Runtime and DeliveryGateway. It owns
 peers, DB calls, effects and shutdown; peer cleanup and generation-checked lease

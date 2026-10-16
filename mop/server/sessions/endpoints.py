@@ -51,6 +51,7 @@ class Unbound:
 class EndpointAuthority:
     epoch: UUID
     installation_id: int
+    effects_enabled: bool
 
 
 def uuid_value(value):
@@ -293,11 +294,12 @@ class Endpoints:
             raise NotVisible('resource not found')
         return endpoint
 
-    def send(self, actor, *, address, message_id, text, not_after, operation_request_id=None,
+    def send(self, actor, *, expected_epoch, address, message_id, text, not_after, operation_request_id=None,
              notify_when_idle=False, priority='next', sender=None):
         if transaction.get_connection().in_atomic_block:
             raise RuntimeError('private payload encryption must be outside transaction')
         uuid_value(message_id)
+        uuid_value(expected_epoch)
         if operation_request_id is not None:
             uuid_value(operation_request_id)
         bounded_text(text, 65536, 'private message')
@@ -306,6 +308,8 @@ class Endpoints:
         if not hasattr(not_after, 'utcoffset') or not_after.utcoffset() is None:
             raise ValueError('aware delivery deadline required')
         authority = self.authority()
+        if authority.epoch != expected_epoch:
+            raise Conflict('installation epoch changed; refresh before sending')
         endpoint = self._recipient(address)
         self._sender(actor, endpoint.project_id)
         fingerprint = hashlib.sha256(json.dumps([str(authority.epoch), address, text, priority,
@@ -316,12 +320,14 @@ class Endpoints:
             if old.fingerprint != fingerprint:
                 raise Conflict('message identity has conflicting content or recipient')
             return self._result(old)
+        if not authority.effects_enabled:
+            raise Unavailable('private delivery effects are disabled')
         delivery_id = uuid4()
         # До шифрования уже выполнен auth; после потенциального I/O весь admission
         # проверяется заново. AAD закрепляет message, recipient и installation.
         sealed = self.cipher.seal(delivery_id, endpoint.pk, text.encode())
         with self._transaction() as current:
-            if current != authority:
+            if (current.epoch, current.installation_id) != (authority.epoch, authority.installation_id):
                 raise Conflict('installation epoch changed')
             endpoint = self._endpoint(endpoint.pk, lock=True)
             self._sender(actor, endpoint.project_id)
@@ -337,9 +343,15 @@ class Endpoints:
                 if old.fingerprint != fingerprint:
                     raise Conflict('message identity has conflicting content or recipient')
                 return self._result(old)
+            if not current.effects_enabled:
+                raise Unavailable('private delivery effects are disabled')
             if not timezone.now() < not_after <= timezone.now()+timedelta(hours=24):
                 raise ValueError('delivery deadline must be within 24 hours')
             # Installation lock в root защищает общий cap между gateway processes.
+            # Deadline — политика retention/admission, не доказательство доставки.
+            for expired in m.MessageDelivery.objects.select_for_update().filter(
+                    state__in=('queued', 'attempting'), not_after__lte=timezone.now()).order_by('pk'):
+                self._finish(expired, 'unknown' if expired.state == 'attempting' else 'unavailable')
             pending = m.MessageDelivery.objects.filter(state__in=('queued', 'attempting'))
             if pending.count() >= 256 or pending.filter(endpoint=endpoint).count() >= 64:
                 raise Capacity('private delivery admission capacity exhausted')
@@ -366,6 +378,15 @@ class Endpoints:
         return ActorContext(row.sender_user_id, row.sender_principal_id, PrincipalKind(row.sender_kind),
             row.sender_credential_id, row.sender_owner_id, row.sender_node_id, row.sender_grant_id)
 
+    def _sending_authority(self, row):
+        actor = self._original_actor(row)
+        self._sender(actor, row.endpoint.project_id)
+        if row.reply_endpoint_id is not None:
+            source = self._endpoint(row.reply_endpoint_id)
+            if source.session.owner_id != actor.user_id:
+                raise Denied('sending conversation ownership changed')
+            self._human(actor, 'deliver_report', source.project_id, source.session.client_id)
+
     def delivery(self, actor, delivery_id):
         self.authority()
         row = m.MessageDelivery.objects.select_related('endpoint__session').filter(pk=uuid_value(delivery_id)).first()
@@ -382,6 +403,8 @@ class Endpoints:
     def take(self, context):
         with self._transaction() as authority:
             endpoint, _ = self._connection(context, authority)
+            if not authority.effects_enabled:
+                raise Unavailable('private delivery effects are disabled')
             row = m.MessageDelivery.objects.select_for_update().filter(endpoint=endpoint, state='queued').order_by('created_at', 'pk').first()
             if row is None:
                 return None
@@ -389,7 +412,7 @@ class Endpoints:
                 self._finish(row, 'unavailable')
                 return None
             try:
-                self._sender(self._original_actor(row), endpoint.project_id)
+                self._sending_authority(row)
             except Denied:
                 self._finish(row, 'unavailable')
                 return None
@@ -408,10 +431,12 @@ class Endpoints:
     def before_dispatch(self, context, delivery_id):
         with self._transaction() as authority:
             endpoint, _ = self._connection(context, authority)
+            if not authority.effects_enabled:
+                raise Unavailable('private delivery effects are disabled')
             row = self._attempt(context, delivery_id)
             if row.state != 'attempting' or row.not_after <= timezone.now():
                 raise Conflict('private delivery is not dispatchable')
-            self._sender(self._original_actor(row), endpoint.project_id)
+            self._sending_authority(row)
             return True
 
     def _attempt(self, context, delivery_id):

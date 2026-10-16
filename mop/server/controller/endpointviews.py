@@ -14,7 +14,7 @@ def authority(*, lock=False):
         require_restore_ready(lock=lock)
         rows = Installation.objects.select_for_update() if lock else Installation.objects
         row = rows.get(pk=1)
-        return s.EndpointAuthority(row.epoch, row.pk)
+        return s.EndpointAuthority(row.epoch, row.pk, row.effects_enabled)
     except RuntimeError as error:
         raise s.Unavailable(str(error)) from None
 
@@ -129,7 +129,7 @@ class Renew(EndpointView):
 class Reports(EndpointView):
     def post(self, request):
         value = request.data
-        exact(value, ('schema_version', 'address', 'message_id', 'text', 'not_after'),
+        exact(value, ('schema_version', 'epoch', 'address', 'message_id', 'text', 'not_after'),
             ('operation_request_id', 'notify_when_idle', 'priority'))
         if type(value['not_after']) is not str:
             raise ValueError('aware delivery deadline required')
@@ -138,7 +138,8 @@ class Reports(EndpointView):
         except ValueError:
             raise ValueError('aware delivery deadline required') from None
         sender = self.context(request) if 'X-Mop-Endpoint' in request.headers else None
-        delivery = endpoints.send(request.actor, address=value['address'], message_id=uid(value['message_id']),
+        delivery = endpoints.send(request.actor, expected_epoch=uid(value['epoch']),
+            address=value['address'], message_id=uid(value['message_id']),
             text=value['text'], not_after=deadline, operation_request_id=uid(value['operation_request_id'])
             if value.get('operation_request_id') is not None else None,
             notify_when_idle=value.get('notify_when_idle', False), priority=value.get('priority', 'next'), sender=sender)

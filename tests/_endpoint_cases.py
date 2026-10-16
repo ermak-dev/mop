@@ -24,6 +24,8 @@ from django.utils import timezone
 # RED: PG16 — 19 behavioral failures (absent ClientSession/routes); отдельно был
 #      fixture flush timeout, который не считается доказательством endpoint defect.
 # RED: retry пытался шифровать снова; idle_message/root/receiver loop отсутствовали.
+# RED: stale queue держала cap, revoked sender client проходил take, reconnect
+#      удерживал finished task; epoch отсутствовал, disabled effects не запрещали send.
 # SOLUTION: portable ORM identity, bounded async gateway, AEAD retention и own UDS.
 # RESULT: PG16 — 24/24 green до добавления autonomous receiver-loop acceptance.
 # STATUS: FIXED — see #649; итоговые PG16/17 и exact-SHA CI указаны в отчёте.
@@ -54,6 +56,7 @@ class Endpoints(TransactionTestCase):
         from mop.server.controller.models import Installation
         from mop.server.secrets.crypto import XChaCha20Provider, Keyring
         initialize()
+        Installation.objects.update(effects_enabled=True)
         self.installation = Installation.objects.get()
         self.m, self.s, self.auth, self.a = m, s, auth, a
         self.project = Project.objects.create(name='one', origin='https://example.invalid/one.git')
@@ -98,7 +101,8 @@ class Endpoints(TransactionTestCase):
                                 gateway_id=gateway or uuid4())
 
     def send(self, **kwargs):
-        values = dict(address=self.endpoint.address, message_id=uuid4(), text='private message',
+        values = dict(expected_epoch=self.installation.epoch,
+                      address=self.endpoint.address, message_id=uuid4(), text='private message',
                       not_after=timezone.now()+timedelta(minutes=1))
         values.update(kwargs)
         return self.api.send(self.actor, **values)
@@ -274,6 +278,32 @@ class Endpoints(TransactionTestCase):
         with self.assertRaises(self.s.Capacity):
             self.send()
 
+    def test_stale_sender_epoch_cannot_recreate_a_message_lost_by_database_restore(self):
+        from mop.server.controller.models import Installation
+        from unittest.mock import patch
+        old_epoch = self.installation.epoch
+        Installation.objects.update(epoch=uuid4())
+        with patch.object(self.api.cipher, 'seal', side_effect=AssertionError('stale epoch must not reach cipher')):
+            with self.assertRaises(self.s.Conflict):
+                self.api.send(self.actor, address=self.endpoint.address, message_id=uuid4(),
+                    expected_epoch=old_epoch, text='old retry', not_after=timezone.now()+timedelta(minutes=1))
+        self.assertEqual(self.m.MessageDelivery.objects.count(), 0)
+
+    def test_effect_gate_blocks_new_reports_and_rechecks_before_actual_dispatch(self):
+        from mop.server.controller.models import Installation
+        context = self.connect()
+        queued = self.send()
+        Installation.objects.update(effects_enabled=False)
+        with self.assertRaises(self.s.Unavailable):
+            self.send()
+        with self.assertRaises(self.s.Unavailable):
+            self.api.take(context)
+        Installation.objects.update(effects_enabled=True)
+        self.api.take(context)
+        Installation.objects.update(effects_enabled=False)
+        with self.assertRaises(self.s.Unavailable):
+            self.api.before_dispatch(context, queued.id)
+
     def test_expired_queue_does_not_hold_global_admission_or_retain_message_bytes(self):
         self.connect()
         for _ in range(64):
@@ -289,7 +319,8 @@ class Endpoints(TransactionTestCase):
         sender_endpoint = self.api.register(self.other_actor, client_id=self.other_client.pk,
             project_id=self.project.pk, external_session_id='other-cli', display_name='same')
         sender = self.connect(sender_endpoint, self.other_actor)
-        report = self.api.send(self.other_actor, address=self.endpoint.address, message_id=uuid4(),
+        report = self.api.send(self.other_actor, expected_epoch=self.installation.epoch,
+            address=self.endpoint.address, message_id=uuid4(),
             text='addressed report', not_after=timezone.now()+timedelta(minutes=1), sender=sender)
         self.a.ClientOwnership.objects.filter(client=self.other_client).delete()
         receiver = self.api.trusted_context(self.actor, self.endpoint.id,
@@ -313,7 +344,7 @@ class Endpoints(TransactionTestCase):
     def test_rest_private_send_and_ack_have_finite_schemas(self):
         context = self.connect()
         http = Client(HTTP_AUTHORIZATION='Token '+self.key)
-        response = http.post('/api/v1/reports', {'schema_version': 1,
+        response = http.post('/api/v1/reports', {'schema_version': 1, 'epoch': str(self.installation.epoch),
             'address': self.endpoint.address, 'message_id': str(uuid4()), 'text': 'private',
             'not_after': (timezone.now()+timedelta(minutes=1)).isoformat(), 'notify_when_idle': True},
             content_type='application/json', secure=True)
@@ -599,6 +630,27 @@ class Endpoints(TransactionTestCase):
             return context
         context = asyncio.run(wrapped())
         self.assertFalse(self.m.ConnectionLease.objects.get(endpoint_id=context.endpoint_id).connected)
+
+    def test_receiver_reconnects_do_not_accumulate_finished_tasks(self):
+        from mop.server.controller.endpointroot import create_endpoint_runtime
+        async def scenario():
+            runtime, gateway = create_endpoint_runtime(self.api)
+            class Peer:
+                external_session_id = self.external
+                async def start(self): pass
+                async def ready(self): return self.external_session_id
+                async def aclose(self): pass
+            await runtime.start()
+            try:
+                for _ in range(3):
+                    context = await gateway.attach(self.actor, self.endpoint.id, Peer())
+                    task = gateway.start_receiver(context)
+                    await gateway.detach(context)
+                    await task
+                    self.assertEqual(len(gateway._loops), 0, 'finished receiver tasks must leave the owned set')
+            finally:
+                await runtime.aclose()
+        asyncio.run(scenario())
 
     def test_idle_lookup_cannot_pair_another_messages_notice(self):
         first = self.connect()

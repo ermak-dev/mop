@@ -28,6 +28,8 @@ class EndpointGrantReports(TransactionTestCase):
             codename__in=('register_endpoint', 'view_delivery', 'deliver_report')))
         api = Endpoints(authority=authority, cipher=EndpointCipher(self.provider, 'isolated-ci'),
             grants=self.api.local_authority())
+        Installation.objects.update(effects_enabled=True)
+        epoch = Installation.objects.get().epoch
         client = ClientRegistration.objects.create(installation=Installation.objects.get(), label='own')
         a.ClientOwnership.objects.create(client=client, user=self.user)
         args = dict(client_id=client.pk, project_id=self.project.pk,
@@ -41,13 +43,13 @@ class EndpointGrantReports(TransactionTestCase):
             api.addresses(actor, self.project.pk)
         with self.assertRaises(PermissionError):
             api.trusted_context(actor, endpoint.id, context.nonce)
-        report = api.send(actor, address=endpoint.address, message_id=uuid4(), text='private report',
+        report = api.send(actor, expected_epoch=epoch, address=endpoint.address, message_id=uuid4(), text='private report',
             not_after=timezone.now()+timedelta(minutes=1))
         self.assertEqual(report.state, 'queued')
         frame = api.take(context)
         self.assertEqual(frame.text, 'private report')
         self.assertEqual(api.acknowledge(context, report.id, outcome='accepted').state, 'accepted')
-        pending = api.send(actor, address=endpoint.address, message_id=uuid4(), text='revoked report',
+        pending = api.send(actor, expected_epoch=epoch, address=endpoint.address, message_id=uuid4(), text='revoked report',
             not_after=timezone.now()+timedelta(minutes=1))
         self.api.revoke(self.actor, grant.id, expected_revision=grant.revision)
         self.assertIsNone(api.take(context))
