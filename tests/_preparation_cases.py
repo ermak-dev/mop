@@ -499,6 +499,12 @@ finally:
             self.new_run(new, request_id=request, deadline=deadline)
         self.assertEqual(m.BootstrapRun.objects.count(), 1)
 
+    # HYPOTHESIS: fixture подделывает sessions.create_puppet вместо настоящего
+    # execution permission; owner gate правильно отказывает до reserve.
+    # RED: PG17 — current human owner permission required в grant reservation.
+    # SOLUTION: fake row только для отрицательной проверки, затем реальное право.
+    # RESULT: PG16/17 — по 32/32 preparation checks, first-approval retry сохранён.
+    # STATUS: FIXED — see #636
     def test_real_delegated_child_intent_inherits_first_approval_across_retry(self):
         import json
         from django.contrib.contenttypes.models import ContentType
@@ -537,6 +543,12 @@ finally:
             grants.approve_bundle(self.actor, row.id)
             return row
         parent_bundle, child_bundle = bundle('parent', ['child']), bundle('child', [])
+        with self.assertRaisesRegex(PermissionError, 'current human owner permission required'):
+            grants.reserve(self.actor, project_id=self.project.pk, bundle_id=parent_bundle.id,
+                target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
+                expires_at=timezone.now() + timedelta(hours=1))
+        self.user.user_permissions.add(Permission.objects.get(content_type__app_label='execution',
+            content_type__model='assignment', codename='create_puppet'))
         parent = grants.reserve(self.actor, project_id=self.project.pk, bundle_id=parent_bundle.id,
             target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
             expires_at=timezone.now() + timedelta(hours=1))
