@@ -14,6 +14,9 @@ from django.utils import timezone
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class MachineHttpBoundary(TransactionTestCase):
+    # Общая schema suite восстанавливает migration seeds, включая permissions.
+    serialized_rollback = True
+
     def test_machine_mutation_requires_authenticated_current_service(self):
         response = Client().post('/api/v1/machine/work/claim',
             {'schema_version': 1, 'shell': 'id'}, content_type='application/json', secure=True)
@@ -617,6 +620,7 @@ class FakeWork:
     """Тот же consumer port, без второй очереди или внешних effects."""
     def __init__(self, work):
         self.work, self.started, self.completed = work, 0, []
+        self.retirements = []
 
     def pending(self, *, node_id, executor_epoch, project_ids, limit):
         return (self.work,) if project_ids else ()
@@ -629,6 +633,9 @@ class FakeWork:
 
     def completed_result(self, work, attempt_id, outcome, evidence):
         self.completed.append((attempt_id, outcome, evidence))
+
+    def retired(self, target_id, executor_epoch):
+        self.retirements.append((target_id, executor_epoch))
 
 
 class FakeGrants:

@@ -1,26 +1,12 @@
 """DRF/composition root v1: adapters связаны явно, по умолчанию deny."""
-from uuid import UUID
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from mop.server.sessions import protocol as p
-from mop.server.sessions.services import MachineExecution, Conflict, Unavailable
-from django.db import transaction
-from .runtime import installation_snapshot, require_restore_ready
-
-
-def authority():
-    try:
-        if transaction.get_connection().in_atomic_block:
-            require_restore_ready(lock=True)
-        value = installation_snapshot()
-        return p.AuthorityV1(UUID(value['epoch']), value['effects_enabled'])
-    except RuntimeError as error:
-        raise Unavailable(str(error)) from None
-
-
-# #625 связывает existing Operation/Step port здесь, не в sessions import graph.
-# Отсутствие #635/#640 adapters — явный 503, не fake authority/вторая очередь.
-execution = MachineExecution(installation=authority)
+from mop.server.sessions.services import Conflict, Unavailable
+# #625 связывает публичные ports здесь, не в sessions import graph.
+# Несвязанный physical/approval port отказывает до admission.
+from .machinebinding import compose, authority
+execution = compose()
 
 
 def query(request, names, *, optional=()):
@@ -37,6 +23,9 @@ def query(request, names, *, optional=()):
 
 class MachineView(APIView):
     def handle_exception(self, error):
+        from mop.server.operations.service import Refused
+        if isinstance(error, Refused):
+            return super().handle_exception(error)
         if isinstance(error, (Conflict, Unavailable, ValueError)):
             status = 503 if isinstance(error, Unavailable) else 409 if isinstance(error, Conflict) else 400
             response = Response({'schema_version': 1, 'error': {
@@ -58,6 +47,27 @@ class Work(MachineView):
         rows = execution.poll(request.actor, p.uuid_value(values['node_id']),
             executor_epoch=p.uuid_value(values['executor_epoch']), limit=p.counter(values.get('limit', '10')))
         return Response({'schema_version': 1, 'work': [p.work_to_wire(row) for row in rows]})
+
+
+class ActionInput(MachineView):
+    def get(self, request):
+        values = query(request, ('schema_version', 'operation_id', 'step_id'))
+        work = execution.action_work(request.actor, operation_id=p.uuid_value(values['operation_id']),
+            step_id=p.uuid_value(values['step_id']))
+        if work.action not in ('apply_identity','restart_session','confirm_ready'):
+            raise Unavailable('protected action payload source is not bound')
+        from .machinebinding import owner_identity
+        identity = owner_identity(work.owner_id)
+        return Response({'schema_version':1, 'operation_id':str(work.operation_id),'step_id':str(work.step_id),
+            'git_name':identity.name, 'git_email':identity.email})
+
+
+class ExecutorState(MachineView):
+    def get(self, request):
+        values = query(request, ('schema_version','node_id'))
+        node_id = p.uuid_value(values['node_id'])
+        value = execution.executor_state(request.actor,node_id)
+        return Response({'schema_version':1,'node_id':str(node_id),'executor_epoch':str(value)})
 
 
 class Claim(MachineView):

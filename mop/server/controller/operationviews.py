@@ -6,7 +6,7 @@ from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..operations.commands import decode_body, InvalidCommand
+from ..operations.commands import decode_body, InvalidCommand, parse_restart
 from ..operations.node import parse
 from .runtime import operations_service
 
@@ -51,6 +51,25 @@ class DrainNode(APIView):
 
 class EnableNode(DrainNode):
     eligible = True
+
+
+@method_decorator(never_cache, name='dispatch')
+class RestartPuppet(APIView):
+    def post(self, request, target_id):
+        try:
+            command = parse_restart(target_id, decode_body(request.body))
+            # fresh требует отдельного scheduler/credential binding, не флага tmux.
+            if command.fresh:
+                raise InvalidCommand(field='fresh')
+        except InvalidCommand as error:
+            raise serializers.ValidationError(str(error)) from None
+        operation = restart_api().submit(request.actor, command)
+        return _reply(operation, status=202 if operation['state']=='accepted' else 200)
+
+
+def restart_api():
+    from .machinebinding import operations
+    return operations()
 
 
 @method_decorator(never_cache, name='dispatch')

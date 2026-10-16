@@ -12,10 +12,9 @@ from django.views.decorators.debug import sensitive_variables
 from rest_framework.authtoken.models import Token
 from ..catalog import models as catalog
 from ..catalog.services import Catalog
-from ..catalog.permissions import ACTION_PERMISSIONS
 from . import models as m
 from .context import ActorContext, PrincipalKind
-from .permissions import ACTIONS, GLOBAL_ACTIONS, SERVICE_ACTIONS
+from .permissions import ACTIONS, GLOBAL_ACTIONS, SERVICE_ACTIONS, permission_names
 
 
 class Denied(PermissionError):
@@ -198,7 +197,7 @@ def _require_permissions(user, action, reason):
     """Одна permission matrix для текущего actor и закреплённого human owner."""
     if action not in ACTIONS:
         raise Denied('action is not registered')
-    for permission in ACTION_PERMISSIONS.get(action, (action,)):
+    for permission in permission_names(action):
         app, code = permission.split('.', 1)
         if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
                 or not user.has_perm(permission)):

@@ -21,6 +21,8 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/auth/token/rotate', auth.RotateToken.as_view()),
     path('api/v1/auth/token/revoke', auth.RevokeToken.as_view()),
     path('api/v1/machine/work', machine.Work.as_view()),
+    path('api/v1/machine/work/input', machine.ActionInput.as_view()),
+    path('api/v1/machine/executor', machine.ExecutorState.as_view()),
     path('api/v1/machine/work/claim', machine.Claim.as_view()),
     path('api/v1/machine/work/result', machine.Result.as_view()),
     path('api/v1/machine/executor/restarted', machine.Restarted.as_view()),
@@ -30,6 +32,7 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/drain', operations.DrainNode.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/enable', operations.EnableNode.as_view()),
+    path('api/v1/puppets/<uuid:target_id>/commands/restart', operations.RestartPuppet.as_view()),
     path('api/v1/operations', operations.RequestLookup.as_view()),
     path('api/v1/operations/<uuid:operation_id>', operations.OperationStatus.as_view()),
 ]

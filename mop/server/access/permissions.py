@@ -30,6 +30,14 @@ SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset('execution.' + code for code in (
 ACTIONS = ACTIONS | SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work'))
 
+# Логический CONTROL namespace sessions отличается от Django app label execution.
+def permission_names(action):
+    from ..catalog.permissions import ACTION_PERMISSIONS
+    if action.startswith('sessions.'):
+        return ('execution.' + action.split('.', 1)[1],)
+    return ACTION_PERMISSIONS.get(action, (action,))
+
+
 GLOBAL_ACTIONS = frozenset(
     [x for x in ACTIONS if x.startswith('auth.')] +
     ['catalog.' + x for x in ('add_project', 'change_project', 'delete_project', 'configure_project',

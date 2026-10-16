@@ -35,6 +35,9 @@ class UnboundWork:
     def completed_result(self, work, attempt_id, outcome, evidence):
         raise Unavailable('operation work port is not bound')
 
+    def retired(self, target_id, executor_epoch):
+        raise Unavailable('operation work port is not bound')
+
 
 class UnboundGrants:
     def authorize(self, **scope):
@@ -117,6 +120,14 @@ class Assignments:
             row.generation, row.revision, m.IdentityApplication.objects.filter(**scope).exists(),
             m.ReadinessReceipt.objects.filter(**scope).exists())
 
+    def target(self, target_id, *, lock=False):
+        """Внутренний SQL-only binding; lock берётся после installation guard."""
+        if lock and not transaction.get_connection().in_atomic_block:
+            raise Unavailable('assignment locking requires caller transaction')
+        rows = m.Assignment.objects.select_for_update() if lock else m.Assignment.objects
+        row = rows.filter(pk=target_id).first()
+        return self.current(project_id=row.project_id, target_id=row.id) if row else None
+
     def create(self, actor, *, project_id, node_id, role, bundle_digest, grant_id, expires_at):
         human(actor)
         Access().authorize(actor, 'execution.assign_work', project_ids=(project_id,))
@@ -136,7 +147,7 @@ class Assignments:
         role_binding(role, bundle_digest, grant_id)
         if not isinstance(expires_at, timezone.datetime) or timezone.is_naive(expires_at) or expires_at <= timezone.now():
             raise ValueError('future assignment expiry required')
-        if transaction.get_connection().in_atomic_block:
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
             raise Unavailable('clone inspection requires no surrounding transaction')
         source = m.Assignment.objects.get(pk=target_id)
         Access().authorize(actor, 'execution.assign_work', project_ids=(source.project_id,))
@@ -363,7 +374,7 @@ class MachineExecution:
         current_actor(actor)
         # Разрешение может уйти исполнителю только после настоящего commit,
         # не после release savepoint неизвестной внешней транзакции caller.
-        if transaction.get_connection().in_atomic_block:
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
             raise Unavailable('machine admission requires no surrounding transaction')
         if type(work) is not WorkV1:
             raise ValueError('typed version 1 work required')
@@ -414,6 +425,8 @@ class MachineExecution:
         return ReceiptV1(row.id, row.attempt_id, row.resulting_revision, row.outcome, row.evidence)
 
     def result(self, actor, attempt_id, *, expected_revision, receipt_id, outcome, evidence):
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
+            raise Unavailable('machine result requires no surrounding transaction')
         try:
             return self._result(actor, attempt_id, expected_revision=expected_revision,
                 receipt_id=receipt_id, outcome=outcome, evidence=evidence)
@@ -477,7 +490,7 @@ class MachineExecution:
         human(actor)
         if type(receipt_id) is not UUID:
             raise ValueError('receipt UUID required')
-        if transaction.get_connection().in_atomic_block:
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
             raise Unavailable('effect inspection requires no surrounding transaction')
         source = m.AssignmentAttempt.objects.select_related('incarnation', 'assignment').get(pk=attempt_id)
         Access().authorize(actor, 'execution.reconcile_work', project_ids=(source.assignment.project_id,))
@@ -528,6 +541,7 @@ class MachineExecution:
         changed = []
         for attempt_id, target_id in ids:
             with transaction.atomic():
+                self._installation_state()
                 m.Assignment.objects.select_for_update().get(pk=target_id)
                 attempt = m.AssignmentAttempt.objects.select_for_update().get(pk=attempt_id)
                 if attempt.state != 'claimed' or attempt.lease_until > timezone.now():
@@ -539,11 +553,50 @@ class MachineExecution:
                 changed.append(attempt.id)
         return tuple(changed)
 
+    def action_work(self, actor, *, operation_id, step_id):
+        """Текущий addressed input gate; JSON owner/project не даёт полномочий."""
+        current_actor(actor)
+        with transaction.atomic():
+            self._installation_state()
+            source = m.AssignmentAttempt.objects.select_related('incarnation').get(
+                operation_id=operation_id, step_id=step_id, principal_id=actor.principal_id)
+            work = self._work(source)
+            self._authority(work)
+            row = self._assignment(actor, work, 'claim_work')
+            attempt = m.AssignmentAttempt.objects.select_for_update().get(pk=source.id)
+            if attempt.state != 'claimed' or attempt.lease_until <= timezone.now():
+                raise Conflict('action input admission expired or completed')
+            if self.work.current(operation_id, step_id) != work:
+                raise Conflict('action input operation changed')
+            self._admit(row, work)
+            return work
+
+    def executor_state(self, actor, node_id):
+        """Предыдущий epoch приходит из controller DB, не имени/marker нового агента."""
+        machine(actor, node_id, 'claim_work')
+        with transaction.atomic():
+            self._installation_state()
+            rows = tuple(m.Assignment.objects.select_for_update().filter(node_id=node_id).order_by('pk')[:501])
+            if len(rows) > 500:
+                raise Unavailable('executor discovery exceeds bounded assignment set')
+            epochs = set()
+            for row in rows:
+                machine(actor, node_id, 'claim_work', (row.project_id,))
+                incarnation = m.ExecutionIncarnation.objects.filter(pk=row.current_incarnation_id).first()
+                if incarnation is not None:
+                    epochs.add(incarnation.replaced_by_epoch or incarnation.executor_epoch)
+            if len(epochs) != 1:
+                raise Unavailable('executor epoch requires explicit installation registration or reconciliation')
+            return epochs.pop()
+
     def executor_restarted(self, actor, node_id, *, previous_epoch, new_epoch):
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
+            raise Unavailable('executor restart requires no surrounding transaction')
         machine(actor, node_id, 'claim_work')
         if type(previous_epoch) is not UUID or type(new_epoch) is not UUID or previous_epoch == new_epoch:
             raise ValueError('distinct executor epoch UUIDs required')
         with transaction.atomic():
+            self._installation_state()
             rows = list(m.Assignment.objects.select_for_update().filter(node_id=node_id).order_by('pk')[:501])
             if len(rows) > 500:
                 raise Unavailable('executor restart exceeds bounded assignment set')
@@ -573,6 +626,7 @@ class MachineExecution:
                     attempt.state = 'unknown'
                     attempt.revision += 1
                     attempt.save(update_fields=('state', 'revision'))
+                self.work.retired(row.id, previous_epoch)
         return new_epoch
 
     def facts(self, actor, node_id, *, kind, limit=100):
@@ -580,7 +634,7 @@ class MachineExecution:
         bound(limit, 500)
         if kind not in FACT_FIELDS:
             raise ValueError('unknown fact kind')
-        if transaction.get_connection().in_atomic_block:
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
             raise Unavailable('fact reads require no surrounding transaction')
         page = self.reader.read(node_id=node_id, kind=kind, limit=limit)
         if type(page) is not FactPageV1:

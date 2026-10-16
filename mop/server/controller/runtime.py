@@ -313,11 +313,12 @@ def operation_installation_state():
     return InstallationState(row.epoch, row.effects_enabled, generation)
 
 
-def operations_service(*, grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
+def operations_service(*, grants=None, executor=None, targets=None, restart_support=None,
+                       queue_limit=256, project_limit=64, execution_limit=8):
     """Typed composition durable Operations с настоящим restore fence и DB budget."""
     from ..operations.service import Operations
     return Operations(installation_state=operation_installation_state, transaction_scope=short_transaction,
-        grants=grants, executor=executor, queue_limit=queue_limit,
+        grants=grants, executor=executor, targets=targets, restart_support=restart_support, queue_limit=queue_limit,
         project_limit=project_limit, execution_limit=execution_limit)
 
 

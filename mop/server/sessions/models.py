@@ -19,7 +19,11 @@ class Assignment(Record):
         on_delete=models.PROTECT, related_name='+')
 
     class Meta(Record.Meta):
-        permissions = [('assign_work', 'Can assign human work')]
+        permissions = [('assign_work', 'Can assign human work')] + [(code, 'Can '+code.replace('_', ' ')) for code in (
+            'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet', 'wipe_puppet',
+            'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery', 'register_endpoint', 'deliver_report',
+            'view_history', 'view_tail', 'read_terminal', 'control_terminal', 'send_session_command',
+            'change_session_model', 'view_usage', 'view_landing')]
         constraints = Record.Meta.constraints + [models.CheckConstraint(
             condition=Q(generation__gte=1), name='assignment_generation_positive')]
 
@@ -93,7 +97,7 @@ class ResultReceipt(ImmutableRecord):
         constraints = Record.Meta.constraints + [
             models.CheckConstraint(condition=Q(expected_revision__gte=1,
                 resulting_revision=models.F('expected_revision') + 1), name='receipt_revision_successor'),
-            models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='receipt_known_outcome'),
+            models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='execution_receipt_known_outcome'),
         ]
 
 

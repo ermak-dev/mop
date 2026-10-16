@@ -20,7 +20,10 @@ class Operation(models.Model):
     node = models.ForeignKey('catalog.Node', on_delete=models.PROTECT)
     projects = models.ManyToManyField('catalog.Project')
     expected_revision = models.PositiveBigIntegerField()
-    eligible = models.BooleanField()
+    eligible = models.BooleanField(null=True)
+    target_kind = models.CharField(max_length=16, default='node')
+    target_id = models.UUIDField(null=True)
+    incarnation_id = models.UUIDField(null=True)
     not_after = models.DateTimeField()
     state = models.CharField(max_length=16, default=State.ACCEPTED)
     revision = models.PositiveBigIntegerField(default=1)
@@ -31,13 +34,17 @@ class Operation(models.Model):
     result_pruned = models.BooleanField(default=False)
 
     class Meta:
-        permissions = [('cancel_operation', 'Can cancel operation'), ('recover_operation', 'Can recover operation'),
-                       ('view_audit', 'Can view audit')]
+        permissions = [(code, 'Can '+code.replace('_', ' ')) for code in (
+            'cancel_operation', 'recover_operation', 'view_audit', 'stop_puppet_job', 'override_assignment',
+            'diagnose_pool', 'treat_pool', 'collect_pool_garbage', 'sweep_pool', 'view_node_disk')]
         constraints = [
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable')), name='operation_finite_action'),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart')), name='operation_finite_action'),
+            models.CheckConstraint(condition=(Q(target_kind='node', action__in=('drain','enable'), eligible__isnull=False,
+                target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet', action='restart',
+                eligible__isnull=True, target_id__isnull=False, incarnation_id__isnull=False)), name='operation_typed_target'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
         indexes = [models.Index(fields=('state', 'created_at'), name='operations__state_b33956_idx')]
@@ -45,8 +52,12 @@ class Operation(models.Model):
 
 class Step(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    operation = models.OneToOneField(Operation, on_delete=models.PROTECT)
+    operation = models.ForeignKey(Operation, on_delete=models.PROTECT)
     name = models.CharField(max_length=32, default='node_eligibility')
+    ordinal = models.PositiveSmallIntegerField(default=1)
+    attempt_id = models.UUIDField(null=True)
+    outcome = models.CharField(max_length=16, blank=True)
+    evidence = models.CharField(max_length=32, blank=True)
     token = models.UUIDField(null=True)
     started_at = models.DateTimeField(null=True)
     dispatched_at = models.DateTimeField(null=True)
@@ -55,7 +66,25 @@ class Step(models.Model):
 
     class Meta:
         default_permissions = ()
-        constraints = [models.CheckConstraint(condition=Q(name='node_eligibility'), name='step_finite_handler')]
+        constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
+            'restart_session', 'confirm_ready')), name='step_finite_handler'),
+            models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
+            models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
+
+
+class RestartBinding(models.Model):
+    """Снимок допуска конечного handler, не произвольный JSON workflow."""
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
+    executor_epoch = models.UUIDField()
+    owner_id = models.PositiveBigIntegerField()
+    generation = models.PositiveBigIntegerField()
+    role = models.CharField(max_length=64)
+    bundle_digest = models.CharField(max_length=64)
+    grant_id = models.UUIDField()
+
+    class Meta:
+        default_permissions = ()
 
 
 class Resource(models.Model):

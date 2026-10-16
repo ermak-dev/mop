@@ -124,19 +124,17 @@ class GrantCases(TransactionTestCase):
         self.approvals = ApprovalFixture(self.proof)
         self.bindings = BindingFixture()
         self.api = self.g.Grants(provider=self.provider, approvals=self.approvals, bindings=self.bindings)
-        # Будущие владельцы permissions ещё не имеют apps. Регистрируем только
-        # стандартные Django Permission, не ослабляем production vocabulary.
-        from django.contrib.contenttypes.models import ContentType
-        ct, _ = ContentType.objects.get_or_create(app_label='sessions', model='grant_test_fixture')
+        # Настоящие CONTROL permissions новой БД, без искусственных content types.
         for code in ('create_puppet', 'send_message', 'dispatch_task'):
-            Permission.objects.get_or_create(content_type=ct, codename=code)
             self.permit('sessions.' + code)
         self.bundle = self.publish()
 
     def permit(self, *actions):
         for action in actions:
-            app, code = action.split('.')
-            self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
+            from mop.server.access.permissions import permission_names
+            for permission in permission_names(action):
+                app, code = permission.split('.')
+                self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
 
     def publish(self, role='worker', **options):
         raw = ('# exact manifest bytes\n' + json.dumps(manifest(role, **options), ensure_ascii=False)).encode()
@@ -646,7 +644,7 @@ class GrantCases(TransactionTestCase):
     def test_owner_permission_membership_and_deactivation_are_current(self):
         row, actor = self.active()
         self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
-        permission = Permission.objects.get(content_type__app_label='sessions', codename='send_message')
+        permission = Permission.objects.get(content_type__app_label='execution', codename='send_message')
         self.user.user_permissions.remove(permission)
         with self.assertRaises(PermissionError):
             self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))

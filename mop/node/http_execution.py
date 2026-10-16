@@ -156,7 +156,7 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('POST','executor/restarted'), ('GET','facts')}
+                   ('GET','work/input'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp
@@ -215,6 +215,25 @@ class Admission:
 class MachineClient:
     def __init__(self, transport: JsonTransport):
         self.transport = transport
+
+    async def action_input(self, work):
+        value = await self.transport.request('GET','work/input',params=dict(schema_version='1',
+            operation_id=work.operation_id,step_id=work.step_id))
+        exact(value, ('schema_version','operation_id','step_id','git_name','git_email'))
+        if value['operation_id'] != work.operation_id or value['step_id'] != work.step_id:
+            raise Refused('action input address changed')
+        if any(type(item) is not str or not 1 <= len(item) <= 256 or
+                any(ord(char)<32 or ord(char)==127 for char in item)
+                for item in (value['git_name'],value['git_email'])):
+            raise Refused('confirmed owner identity required')
+        return value
+
+    async def executor_state(self, node_id):
+        value = await self.transport.request('GET','executor',params=dict(schema_version='1',node_id=uuid(node_id)))
+        exact(value, ('schema_version','node_id','executor_epoch'))
+        if value['node_id'] != node_id:
+            raise Refused('executor discovery changed node')
+        return uuid(value['executor_epoch'])
 
     async def restarted(self, node_id, previous_epoch, new_epoch):
         value = await self.transport.request('POST', 'executor/restarted', dict(
@@ -354,6 +373,8 @@ class Runtime:
         if self._closed or self._ready:
             raise Refused('runtime already started or closed')
         async with asyncio.timeout(self.shutdown_timeout):
+            if previous_epoch is None:
+                previous_epoch = await self.client.executor_state(self.node_id)
             await self.client.restarted(self.node_id, previous_epoch, self.executor_epoch)
             quiet = await self.executor.reconcile(self.node_id, previous_epoch, self.executor_epoch)
         if quiet is not True:
