@@ -38,6 +38,9 @@ def validate(method, target, body, *, panel=False):
             or any(not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}', part)
                    or part in ('.', '..') for part in parts)):
         return 400
+    # GET извлекает записи; subscriber отводит их из backlog единственного consumer.
+    if parts[:2] == ['observability', 'usage'] and parts[2:] != ['api-keys']:
+        return 403
     return None
 
 
