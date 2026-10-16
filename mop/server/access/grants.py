@@ -235,6 +235,10 @@ class Grants:
         self._owner_permission(row.owner_id, 'access.view_role', row.project_id)
         return row
 
+    def _require_seal(self, row):
+        if not m.RoleBundleSeal.objects.filter(bundle_id=row.pk).exists():
+            raise auth.Denied('role bundle is not verified and sealed')
+
     def _normalized(self, row, parsed):
         if (row.role, row.driver, row.receives_dispatch, row.dispatch, row.prompt_name) != (
                 parsed.soul, parsed.runtime.driver, parsed.runtime.receives_dispatch,
@@ -262,6 +266,7 @@ class Grants:
     def _read_bundle(self, actor, bundle_id):
         outside_transaction()
         row = self._bundle_row(actor, bundle_id)
+        self._require_seal(row)
         try:
             raw = self.secrets.read(actor, RetentionScope(row.project_id, row.owner_id, row.id, 'policy'), row.content_version_id)
         except SecretCryptoError:
@@ -303,6 +308,8 @@ class Grants:
             self._human(actor, 'access.approve_role', project_id)
             existing = m.RoleBundle.objects.filter(owner_id=owner, project_id=project_id, digest=bundle.digest).first()
             if existing:
+                self._require_seal(existing)
+                self._normalized(existing, parsed)
                 return self._bundle_metadata(existing)
             version_id = self.secrets.commit(actor, prepared)
             row = m.RoleBundle.objects.create(id=bundle_id, owner_id=owner, project_id=project_id,
@@ -317,6 +324,11 @@ class Grants:
             for kind, names in (('files', parsed.secrets.files), ('vars', parsed.secrets.vars)):
                 for name in names:
                     m.RoleSecretName.objects.create(bundle=row, kind=kind, name=name)
+            # Тот же parent lock берёт обычный ORM append. Seal появляется только
+            # после проверки всех actual children; само RoleBundle evidence не меняется.
+            m.RoleBundle.objects.select_for_update().get(pk=row.pk)
+            self._normalized(row, parsed)
+            m.RoleBundleSeal._record_verified(row)
             return self._bundle_metadata(row)
 
     def _bundle_metadata(self, row):
@@ -328,6 +340,8 @@ class Grants:
         row = self._bundle_row(actor, value.id)
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=row.project_id)
+            row = m.RoleBundle.objects.select_for_update().get(pk=row.pk)
+            self._require_seal(row)
             owner = self._human(actor, 'access.approve_role', row.project_id)
             if row.owner_id != owner:
                 raise auth.Denied('only the human bundle owner may approve')
@@ -358,6 +372,7 @@ class Grants:
         if row.state != state or row.intent.expires_at <= timezone.now():
             raise auth.Denied('grant is not currently active')
         self._owner_permission(row.intent.owner_id, 'access.view_role', row.intent.project_id)
+        self._require_seal(row.intent.bundle)
         if not m.RoleBundleApproval.objects.filter(bundle_id=row.intent.bundle_id, human_id=row.intent.owner_id).exists():
             raise auth.Denied('role bundle is not human approved')
         self._validate_policy(self._policy(row), self._policy_binding(row.intent))
@@ -466,6 +481,10 @@ class Grants:
         binding = m.CredentialBinding.objects.filter(token_user=token.user).first()
         if row is None or binding is None:
             raise auth.Denied('grant credential is not bound')
+        # Lookup по user не доказывает generation предъявленного ключа: между
+        # чтениями другая transaction могла заменить и Token, и binding UUID.
+        if not constant_time_compare(binding.token_digest, auth._digest(key)):
+            raise auth.Denied('token generation changed')
         return ActorContext(token.user_id, principal.id, PrincipalKind.GRANT, binding.id,
                             row.intent.owner_id, None, row.id)
 
