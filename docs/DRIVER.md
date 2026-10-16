@@ -28,6 +28,110 @@ hostname. Второе имя для того же означало бы вто�
 архитектура становится частным случаем, а не веткой, которую надо поддерживать
 отдельно.
 
+## Новый launch boundary #643
+
+Это подготовленный driver/node слой для новой установки #623, **не включённый
+production composition root** и не поддержка обновления старых тел.
+`mop.driver.launch` содержит immutable `Registration`, `RegisteredLayout`,
+`MachineConfig` и strict `LaunchResponse`; `mop.node.body_launch` связывает их
+с `BindingResolver`/`ReadinessPort` #640 и `HookBridge` #641. Старый `job_spec`
+не переключается на этот путь до связывания перечисленных ниже public ports.
+`spec.api_job_spec` — отдельный renderer только новой регистрации; без всех пяти
+capabilities root (`addressed_launch_v1`, `session_scope_v1`, `scope_retirement_v1`,
+`external_image_v1`, `bootstrap_ssh_v1`) он отказывает. Эти capabilities проверяет
+composition root по настоящим adapters, они не заявляются caller JSON/ролью.
+Новый wrapper живёт прямо в job spec, с HCL `$$`, и исполняет единственный
+launcher из registered layout с public identity pins. Launcher обязан быть
+установлен root из проверенного package/template, получать private runtime
+credentials вне spec и перепроверять pins через addressed API. Renderer не
+устанавливает его и не утверждает, что этот root уже существует. Привязка
+планировщика — exact enrolled Nomad node ID, отдельно от model node UUID.
+Правка wrapper требует новой регистрации, а не allocation restart.
+
+`Registration` создаёт доверенный root из текущей assignment и конкретного
+work, не из caller JSON. Она закрепляет installation/target/incarnation/node/
+executor epochs, generation, owner, role, bundle digest, grant, operation/step/
+revision/deadline, bootstrap revision/digest и image digest. Source перечитывает
+addressed данные при каждом resolve; ответ сверяется целиком. Work остаётся
+metadata DTO: путей, имени папета и argv в нём нет. Display name берётся только
+из регистрации. Пути clone/launcher/tmux выводятся из зарегистрированного layout;
+готовность не восстанавливается из `bus.json`, `node.env`, `ready.json` или
+identity markers. Prompt проверяется существующей canonical bundle digest
+функцией по исходным approved bytes, а не перечитывается из checkout.
+
+Machine config задаёт отдельно `control_origin` (verified HTTPS),
+`routing_reference` (LAN), `bootstrap_host` и `ssh_port`. HTTPS hostname не
+подменяет LAN/advertised SSH address. `BootstrapDiscovery` требует внешнего
+подтверждения image digest **на выбранном узле** (#648), затем проверки маршрута
+и bootstrap SSH с позиции контроллера. Только после этого открывается временный
+ключ и исполняется закреплённая bootstrap revision (#669/Preparation). Отзыв
+идёт в `finally`, включая lost admission reply и cancellation. Неуспех отзыва
+не превращается в успех запуска. У host и PVE собственные physical ports;
+одного HTTP heartbeat недостаточно ни для одного из них. Composite bootstrap
+adapter объявляет `supports_bootstrap` только после связывания всех четырёх
+методов; отсутствующая capability отказывает до первого внешнего вызова.
+Здесь нет новых
+root exec/write verbs или предположения, что строка image в ORM — сам образ.
+
+`SessionApiProbe` требует заранее объявленной capability `supports_launch_scope`.
+Существующий SessionApi её не предоставляет: production factory должна отказать
+**до restart effect**, а не передать executor ложный replacement port. Новый
+probe проверяет настоящий процесс (UID, boot/start identity, clone, mount
+namespace) и PID/UID владельца Unix socket через `SO_PEERCRED`. Это дополнительная
+проверка к доверенному scope query, не протокол регистрации session через файл.
+`ReadyConfirmation` принимает только exact addressed server receipt, связанный
+с scope/producer/process/model, и повторяет physical probe после HTTP await.
+Отсутствие session/model receipt не заменяется наличием tmux pane.
+
+`SessionRuntime` сначала получает exact ACK регистрации нового producer, потом
+открывает приватный IPC `HookBridge` и выдаёт только его две env переменные.
+Очередь bridge остаётся volatile/bounded, `session.py` — stdlib. При новом
+процессе нужны новый scope/producer и новая регистрация; старый socket/receipt
+не является допуском. Проверка конца прежних process scopes остаётся отдельным
+physical reconciliation port: исчезновение одного PID или tmux ACK не
+доказывает завершение descendants. Replacement port намеренно не подставлен
+до появления такого доказательства.
+
+### Минимальный запрос к server/public API, не реализованный endpoint
+
+Следующие ports должны связать владельцы Root #625/#669 и runtime images #648.
+Это предложение интерфейса, не разрешение передавать unprotected JSON, добавлять
+общий operator token или открывать новый RPC канал.
+
+- `LaunchQuery.read_launch(work_metadata)`: authenticated addressed query
+  текущего node/body. Предлагаемый endpoint — `POST /api/v1/machine/launch/query`,
+  query-only semantics, без повторяемого внешнего эффекта. Отдельный machine
+  credential имеет только этот target/incarnation/executor scope и read inputs,
+  не DB, operator или signer доступ. Current actor/owner, assignment generation,
+  grant/approval и bootstrap revision перепроверяются в одном application use
+  case, чувствительные bytes получает #669 через существующий private service.
+  Response schema v1 содержит ровно `work`, `bootstrap_revision`,
+  `bootstrap_digest`, `image_digest`, `manifest`, base64 `prompt`, `git_name`,
+  `git_email`, `message`, `peer_token`. Все pins совпадают с Registration; peer
+  credential адресный, не install/node-admin. Пути и display name не принимаются.
+- Отдельные application use cases регистрируют `SessionProof`/новый producer и
+  читают committed readiness receipt (`Registration`, `SessionScope`, PID/start,
+  receipt UUID, подтверждённый model). Не принимать эти proofs как authority из
+  hook JSON. Нужен trusted processing/launch observation adapter и actor proof;
+  Root binding к новым Work ports пока ожидает интеграции #625.
+- `BootstrapPorts` связывает approved Preparation bytes/SSH access и фактические
+  image/routing probes. Root выбирает dedicated enrollment credential и OS
+  runtime layout до доступа тела к API. Его секрет не входит в Nomad job spec;
+  config внешнего потребителя разрешён, но никогда не читается как второй реестр.
+- Physical scope owner предоставляет reconciliation/retirement proof для
+  executor epoch и replacement. Без него `LocalExecutor` запускается с
+  `replacement=None`, restart отказывает до мутации. Сначала согласовать новый
+  SessionApi scope, а не эмулировать его production подтверждение тестовым peer.
+
+Локальная проверка #643 использует новый управляемый процесс с настоящим Unix
+socket, отдельный stdlib hook → private IPC и настоящий verified HTTPS receiver
+с одноразовым fixture certificate. Проверены Token auth/401 чужого credential и
+exact machine result receipt с outcome `unknown`, без объявления готовности.
+API/approval/receipt policy/image/routing в этих checks — doubles; это не
+acceptance новой установки. Реальный PVE bootstrap, VM/reboot, внешний образ,
+production controller receipts и SessionApi требуют отдельного разрешённого
+стенда; старый пул для этих опытов не используется.
+
 ## Контракт
 
 `mop/driver/` устроен как группы doctor: один файл — один драйвер, имя файла —
