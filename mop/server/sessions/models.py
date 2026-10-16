@@ -7,6 +7,7 @@ from mop.server.catalog.models import Record, ImmutableRecord
 # Регистрация отдельных моделей #641 в execution; не импорт Access/Root.
 from .telemetry_models import (SessionObservation, TurnOutcome, ModelObservation,
     TelemetryReceipt, PrivateHistoryCursor)  # noqa: F401
+from .terminal_models import TerminalControl, TerminalAttachment  # noqa: F401
 
 
 class Assignment(Record):

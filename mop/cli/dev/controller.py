@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|telemetry] [--label dotted.test]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|telemetry] [--label dotted.test] [--realtime]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -6,6 +6,8 @@ an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The snapshot contains tracked and nonignored source,
 not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
+--realtime supplies the declared NATS binary from an owned Docker image; the
+checks start their own native TLS broker with fixture-only principals and ACLs.
 """
 import argparse
 import os
@@ -48,6 +50,7 @@ def main(argv):
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
     parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation', 'telemetry'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
+    parser.add_argument('--realtime', action='store_true', help='include the owned native TLS NATS fixture')
     args = parser.parse_args(argv)
     if args.label and args.check != 'controller':
         parser.error('--label requires --check controller')
@@ -64,6 +67,7 @@ def main(argv):
     setup = ci['.tests']['variables']['SETUP']['value']
     prefix = 'mop-controller-test-' + uuid.uuid4().hex[:16]
     database, worker = prefix + '-db', prefix + '-runner'
+    broker_image = prefix + '-nats-image'
     cleanup_errors = []
 
     def call(words, *, check=True, **kwargs):
@@ -98,7 +102,15 @@ def main(argv):
     with tempfile.TemporaryDirectory(prefix=prefix) as directory:
         snapshot = Path(directory) / 'source'
         _source_snapshot(top, snapshot)
+        broker_args = []
         try:
+            if args.realtime:
+                binary = Path(directory) / 'nats'
+                binary.mkdir()
+                call(['create', '--name', broker_image, 'nats:2.10.26'], stdout=subprocess.DEVNULL)
+                call(['cp', broker_image + ':/nats-server', str(binary / 'nats-server')])
+                broker_args = ['-v', f'{binary}:/opt/mop-nats:ro', '-e',
+                               'MOP_TEST_NATS_BINARY=/opt/mop-nats/nats-server']
             call(['network', 'create', prefix], stdout=subprocess.DEVNULL)
             call(['run', '--rm', '-d', '--name', database, '--network', prefix,
                   '--network-alias', 'postgres', '-e', 'POSTGRES_DB=mop_ci',
@@ -110,7 +122,7 @@ def main(argv):
                            '-v', 'mop-controller-fixture-pip:/root/.cache/pip',
                            '-e', 'MOP_TESTS_STRICT=1', '-e', 'MOP_TEST_POSTGRES_HOST=postgres',
                            '-e', f'POSTGRES_MAJOR={args.postgres}',
-                           '-e', f'TESTS={test_script}',
+                           '-e', f'TESTS={test_script}', *broker_args,
                            job['PYTHON_IMAGE'], 'bash', '-euc', setup], check=False).returncode
         except OSError as error:
             failure = f'isolated controller fixture unavailable: {type(error).__name__}'
@@ -121,6 +133,7 @@ def main(argv):
         finally:
             # --rm мог уже убрать завершённый runner: отсутствие — успех,
             # а недоступный daemon нельзя принять за отсутствие ресурса.
+            remove_owned('container', broker_image)
             remove_owned('container', worker)
             remove_owned('container', database)
             remove_owned('network', prefix)

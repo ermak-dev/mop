@@ -87,14 +87,22 @@ stages: [test, deploy]
       --network "mop-ci-$CI_JOB_ID" --network-alias postgres
       -e POSTGRES_DB=mop_ci -e POSTGRES_USER=mop_ci
       -e POSTGRES_PASSWORD=isolated-test-only "$POSTGRES_IMAGE"
+    # Native TLS/ACL broker запускается только тестом в owned runner namespace.
+    - mkdir "/tmp/mop-ci-nats-$CI_JOB_ID"
+    - docker create --name "mop-ci-nats-image-$CI_JOB_ID" nats:2.10.26
+    - docker cp "mop-ci-nats-image-$CI_JOB_ID:/nats-server" "/tmp/mop-ci-nats-$CI_JOB_ID/nats-server"
     - >-
       docker run --rm --network "mop-ci-$CI_JOB_ID"
       -v "$CI_PROJECT_DIR:/io" -w /io
       -v mop-ci-pip:/root/.cache/pip
+      -v "/tmp/mop-ci-nats-$CI_JOB_ID:/opt/mop-nats:ro"
+      -e MOP_TEST_NATS_BINARY=/opt/mop-nats/nats-server
       -e MOP_TESTS_STRICT -e TESTS -e POSTGRES_MAJOR -e MOP_TEST_POSTGRES_HOST=postgres
       "$PYTHON_IMAGE" bash -euc "$SETUP"
   after_script:
     - docker rm -f "mop-ci-db-$CI_JOB_ID" || true
+    - docker rm -f "mop-ci-nats-image-$CI_JOB_ID" || true
+    - rm -rf "/tmp/mop-ci-nats-$CI_JOB_ID"
     - docker network rm "mop-ci-$CI_JOB_ID" || true
     # И при отказе: контейнер оставил checkout чужим (ci, root), и
     # следующая задача раннера его бы не вычистила -- отдаём пользователю

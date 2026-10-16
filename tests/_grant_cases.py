@@ -163,6 +163,22 @@ class GrantCases(TransactionTestCase):
         token = Token.objects.get(user__principal__grant__id=row.id).key
         return row, auth.token_context(token, grants=self.api)
 
+    def test_gateway_uses_sealed_local_grant_and_rechecks_current_authority(self):
+        from mop.server.realtime.authority import Authority
+        row,actor=self.active()
+        key=Token.objects.get(user_id=actor.user_id).key
+        gateway=Authority(grants=self.api.local_authority())
+        # Физический provider запрещён: gateway не расшифровывает роль/секрет.
+        with patch.object(type(self.provider),'decrypt',side_effect=AssertionError('provider I/O in WS authority')):
+            current=gateway.authenticate(('token',key))
+            self.assertEqual(current,actor)
+            gateway.current(('token',key),actor,(self.project.pk,))
+            with self.assertRaises(PermissionError):
+                gateway.current(('token',key),actor,(self.foreign.pk,))
+            self.api.revoke(self.actor,row.id,expected_revision=row.revision)
+            with self.assertRaises(PermissionError):
+                gateway.current(('token',key),actor,(self.project.pk,))
+
     def race(self, fn):
         barrier = Barrier(2)
         def run(i):

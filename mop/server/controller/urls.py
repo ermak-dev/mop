@@ -13,6 +13,7 @@ from . import authviews as auth
 from . import operationviews as operations
 from . import machineviews as machine
 from . import telemetryviews as telemetry
+from . import terminalviews as terminal
 
 urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
@@ -32,6 +33,8 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/sessions/telemetry', telemetry.Latest.as_view()),
     path('api/v1/sessions/history', telemetry.History.as_view()),
     path('api/v1/sessions/history/reset', telemetry.ResetHistory.as_view()),
+    path('api/v1/terminal/attachments', terminal.Open.as_view()),
+    path('api/v1/terminal/attachments/<uuid:attachment_id>', terminal.Close.as_view()),
     path('api/v1/identity', auth.Identity.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
