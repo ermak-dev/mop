@@ -33,6 +33,7 @@ class Allow:
 # RESULT: реальные User/Group проверяют каждый дополнительный gate, не is_staff/superuser.
 # STATUS: FIXED — see #634
 class CatalogPermissionCases(TransactionTestCase):
+    # Migration seeds, включая restore guard, переживают flush как в foundation.
     serialized_rollback = True
 
     def user(self):
@@ -150,6 +151,7 @@ class CatalogPermissionCases(TransactionTestCase):
 
 
 class CatalogCases(TransactionTestCase):
+    # Без внешней test-транзакции; Django восстанавливает только migration seeds.
     serialized_rollback = True
 
     def setUp(self):
