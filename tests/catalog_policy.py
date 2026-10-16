@@ -13,7 +13,9 @@ STATUS: FIXED — see #634
 import importlib
 import importlib.util
 import os
+import subprocess
 import sys
+import textwrap
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
@@ -23,8 +25,89 @@ from _lib import Checks
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
+def import_without_legacy_settings(c):
+    # HYPOTHESIS: policy импортирует driver ради project_of, но его HOME
+    # при импорте читает node.env/.env даже без обращения к путям тела (#634).
+    # Свежий интерпретатор обязателен: уже загруженный driver скрывает дефект.
+    # SOLUTION: driver разрешает строки путей только при явном доступе;
+    # project_of остаётся владельцем идентичности и точкой подмены policy.
+    # RESULT: оба fresh-import сценария падали на HOME=config.get, теперь
+    # проходят; настроенные пути и подмены атрибутов также сохранены.
+    # STATUS: FIXED — see #634
+    code = textwrap.dedent('''
+        import sys
+        from unittest.mock import patch
+        from mop.common import config
+
+        assert 'mop.driver' not in sys.modules
+        def refuse(*args, **kwargs):
+            raise AssertionError('catalogue identity accessed legacy settings')
+
+        with patch.object(config, 'get', side_effect=refuse), \\
+             patch.object(config, '_file', side_effect=refuse), \\
+             patch.object(config, 'read_env', side_effect=refuse), \\
+             patch.object(config, '_load', side_effect=refuse), \\
+             patch.object(config, '_node', side_effect=refuse):
+            if sys.argv[1] == 'services':
+                from django.conf import settings
+                settings.configure(INSTALLED_APPS=['mop.server.controller', 'mop.server.catalog'],
+                                   DATABASES={}, DEFAULT_AUTO_FIELD='django.db.models.BigAutoField')
+                import django
+                django.setup()
+                from mop.server.catalog.services import Catalog
+                Catalog()
+            from mop.server.catalog import policy
+            from mop import driver
+            origin = 'git@git.example.test:team/repository.git'
+            assert driver.project_of(origin) == 'repository'
+            assert driver.parse_origin(origin)[4] == 'team/repository'
+            assert driver.project_of_name('pu-repository-1') == 'repository'
+            assert driver.valid_name('pu-repository-1')
+            assert policy.project_origin(origin).name == 'repository'
+            with patch.object(driver, 'project_of', return_value='canonical') as derive:
+                assert policy.project_origin(origin).name == 'canonical'
+                derive.assert_called_once_with(origin)
+
+        # Явный доступ к старым путям обязан брать настроенный дом, не дефолт.
+        with patch.object(config, 'get', return_value='/configured/body') as get:
+            assert driver.HOME == '/configured/body'
+            assert driver.SECRETS_FILE == '/configured/body/.config/mop/secrets.env'
+            assert driver.SERVER_PUB == '/configured/body/.config/mop/bootstrap.pub'
+            from mop.driver import HOME, SECRETS_FILE, SERVER_PUB
+            assert (HOME, SECRETS_FILE, SERVER_PUB) == (
+                '/configured/body', '/configured/body/.config/mop/secrets.env',
+                '/configured/body/.config/mop/bootstrap.pub')
+            assert driver.clone_dir('pu-r-1') == '/configured/body/puppets/pu-r-1'
+            assert driver.target_dir('pu-r-1') == '/configured/body/.cache/target-pu-r-1'
+            assert driver.project_creds('r') == '/configured/body/.config/mop/bus-r.json'
+            assert driver.soul_dir('pu-r-1', '2') == '/configured/body/.config/mop/souls/pu-r-1/2'
+            assert driver.project_secrets_dir('r') == '/configured/body/.config/mop/project-secrets/r'
+            assert get.call_args_list
+            assert all(call.args == ('MOP_HOME',) for call in get.call_args_list)
+            with patch.object(driver, 'HOME', '/patched/body'):
+                assert driver.clone_dir('pu-r-1') == '/patched/body/puppets/pu-r-1'
+                assert driver.SECRETS_FILE == '/patched/body/.config/mop/secrets.env'
+                assert driver.SERVER_PUB == '/patched/body/.config/mop/bootstrap.pub'
+            with patch.object(driver, 'SECRETS_FILE', '/patched/secrets'), \\
+                 patch.object(driver, 'SERVER_PUB', '/patched/key'):
+                assert driver.SECRETS_FILE == '/patched/secrets'
+                assert driver.SERVER_PUB == '/patched/key'
+        assert driver.project_of(origin) == 'repository'
+    ''')
+    for mode in ('policy', 'services'):
+        if mode == 'services' and importlib.util.find_spec('django') is None:
+            hermetic.skip('catalogue services import', 'declared server extra is not installed')
+            continue
+        result = subprocess.run([sys.executable, '-c', code, mode],
+                                cwd=os.path.dirname(os.path.dirname(__file__)),
+                                capture_output=True, text=True)
+        c.check(f'fresh {mode} import and identity avoid legacy settings; runtime paths remain configured',
+                result.returncode == 0, result.stdout + result.stderr)
+
+
 def main():
     c = Checks()
+    import_without_legacy_settings(c)
     try:
         present = importlib.util.find_spec("mop.server.catalog.policy") is not None
     except ModuleNotFoundError:

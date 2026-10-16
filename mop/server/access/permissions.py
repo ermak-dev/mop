@@ -2,7 +2,8 @@
 CATALOG_CUSTOM = {
     'project': ('view_pool', 'configure_project', 'set_project_limit', 'build_project', 'recover_build'),
     'node': ('configure_node', 'drain_node', 'enable_node', 'forget_node',
-             'record_node_application', 'observe_node', 'record_settings_application'),
+             'record_node_application', 'observe_node'),
+    'installationconfiguration': ('record_settings_application',),
     'projectpolicysnapshot': ('pin_project_policy',),
 }
 CATALOG_MODELS = ('project', 'node', 'installationsetting', 'nodesetting', 'projectpolicysnapshot',

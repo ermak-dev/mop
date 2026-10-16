@@ -12,6 +12,7 @@ from django.views.decorators.debug import sensitive_variables
 from rest_framework.authtoken.models import Token
 from ..catalog import models as catalog
 from ..catalog.services import Catalog
+from ..catalog.permissions import ACTION_PERMISSIONS
 from . import models as m
 from .context import ActorContext, PrincipalKind
 from .permissions import ACTIONS, GLOBAL_ACTIONS, SERVICE_ACTIONS
@@ -234,9 +235,11 @@ class Access:
                 raise Denied('installation-wide scope required')
         if action not in ACTIONS:
             raise Denied('action is not registered')
-        app, code = action.split('.', 1)
-        if not Permission.objects.filter(content_type__app_label=app, codename=code).exists() or not user.has_perm(action):
-            raise Denied('action permission required')
+        for permission in ACTION_PERMISSIONS.get(action, (action,)):
+            app, code = permission.split('.', 1)
+            if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
+                    or not user.has_perm(permission)):
+                raise Denied('action permission required')
 
 
 class AuthorizedCatalog(Catalog):

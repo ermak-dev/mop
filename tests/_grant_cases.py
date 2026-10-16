@@ -29,6 +29,8 @@ from mop.server.secrets.crypto import Keyring, XChaCha20Provider
 # RESULT: все 33 собственных cases проходят на изолированных PG16/17; из 131 cases
 # остаётся только прежний Foundation restore/root failure. Пул не использовался.
 # STATUS: FIXED — see #635; late approval/runtime/executor bindings ещё не приёмка.
+# Combined accepted dependencies: migration seeds сохранены serialized_rollback;
+# прежний restore/root setup failure больше не основание пропускать Grant checks.
 
 
 def manifest(role='worker', *, spawn=(), dispatch=False, receives=True):
@@ -64,6 +66,9 @@ class BindingFixture:
 
 
 class RetainedSecretContract(TransactionTestCase):
+    # RestoreGuard и прочие migration seeds сохраняются после flush.
+    serialized_rollback = True
+
     def test_prepared_retention_is_public_atomic_target_bound_and_default_deny(self):
         from mop.server.secrets import services as secrets
         self.assertTrue(hasattr(secrets, 'RetainedSecrets'), 'public prepared retention port is missing')
@@ -91,6 +96,9 @@ class RetainedSecretContract(TransactionTestCase):
 
 
 class GrantCases(TransactionTestCase):
+    # Как остальные ORM cases: flush не удаляет seeds новой установки.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(hasattr(access, 'RoleBundle'), 'immutable ORM RoleBundle is missing')
         self.assertTrue(hasattr(access, 'Grant'), 'ORM delegated grant lifecycle is missing')
@@ -166,6 +174,98 @@ class GrantCases(TransactionTestCase):
                 connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             return list(pool.map(run, (0, 1)))
+
+    # HYPOTHESIS: machine claim требует SQL-only проверки receiving grant,
+    # а _chain расшифровывает bundle вне transaction и проверяет acting authority.
+    # RESULT: четыре receiving-gate red и acting-factory red, затем проверен
+    # полный token-context порт; итоговые PG16/17 — по 216/216 green.
+    # STATUS: FIXED — see #635 / #639
+    def execution_query(self):
+        query = getattr(self.api, 'authorize_execution', None)
+        self.assertTrue(callable(query), 'public ORM-only execution binding check is missing')
+        return query
+
+    def test_execution_binding_is_current_inside_transaction_without_provider_io(self):
+        query = self.execution_query()
+        row, _ = self.active()
+        class ForbiddenProvider:
+            def encrypt(self, *args):
+                raise AssertionError('execution authority invoked crypto provider')
+            decrypt = encrypt
+        self.api.secrets.provider = ForbiddenProvider()
+        with self.assertRaisesRegex(ValueError, 'caller transaction'):
+            query(row.binding)
+        with transaction.atomic():
+            self.assertIsNone(query(row.binding))
+        self.bindings.bindings[(row.project_id, row.target_id)] = replace(row.binding, incarnation=uuid.uuid4())
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(row.binding)
+
+    def test_execution_binding_cannot_substitute_any_part_of_its_recipient_identity(self):
+        query = self.execution_query()
+        row, _ = self.active()
+        for field, value in (('project_id', self.foreign.pk), ('target_id', uuid.uuid4()),
+                ('incarnation', uuid.uuid4()), ('role', 'another'), ('digest', 'b' * 64),
+                ('grant_id', uuid.uuid4()), ('human_owner_id', self.user.pk + 1)):
+            with self.subTest(field=field), transaction.atomic(), self.assertRaises(PermissionError):
+                query(replace(row.binding, **{field: value}))
+        self.approvals.enabled = False
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(row.binding)
+
+    def test_execution_binding_rechecks_ancestor_credentials_and_current_owner(self):
+        query = self.execution_query()
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        child, _ = self.active(actor=parent_actor)
+        with transaction.atomic():
+            self.assertIsNone(query(child.binding))
+        permission = Permission.objects.get(content_type__app_label='access', codename='view_role')
+        self.user.user_permissions.remove(permission)
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(child.binding)
+        self.user.user_permissions.add(permission)
+        with transaction.atomic():
+            self.assertIsNone(query(child.binding))
+        Token.objects.filter(user__principal__pk=parent.principal_id).delete()
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(child.binding)
+
+    def test_execution_binding_refuses_reserved_or_unbound_recipient(self):
+        query = self.execution_query()
+        reserved = self.reserve()
+        self.api.provision(self.actor, reserved.id, expected_revision=reserved.revision)
+        self.bindings.bindings[(reserved.project_id, reserved.target_id)] = reserved.binding
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(reserved.binding)
+        row, _ = self.active()
+        unavailable = self.g.Grants(provider=self.provider, approvals=self.approvals)
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            unavailable.authorize_execution(row.binding)
+
+    def test_local_acting_authority_uses_approved_normalized_caps_without_decryption(self):
+        factory = getattr(self.api, 'local_authority', None)
+        self.assertTrue(callable(factory), 'transaction-local acting grant authority is missing')
+        row, actor = self.active()
+        class ForbiddenProvider:
+            def encrypt(self, *args):
+                raise AssertionError('local authorization invoked crypto provider')
+            decrypt = encrypt
+        self.api.secrets.provider = ForbiddenProvider()
+        local = factory()
+        token = Token.objects.get(user__principal__pk=row.principal_id).key
+        self.assertEqual(auth.token_context(token, grants=local), actor)
+        authority = auth.Access(grants=local)
+        with transaction.atomic():
+            self.assertEqual(local.resolve_actor(actor), actor)
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        self.permit('catalog.change_project')
+        with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'capabilities'):
+            authority.authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.foreign.pk,))
+        Token.objects.filter(user__principal__pk=row.principal_id).delete()
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
 
     def test_exact_bytes_canonical_digest_normalized_caps_and_immutable_write_paths(self):
         value = self.api.read_bundle(self.actor, self.bundle.id)
@@ -252,6 +352,33 @@ class GrantCases(TransactionTestCase):
         encrypted = SecretVersion.objects.get(pk=row.credential_version_id)
         self.assertNotIn(key.encode(), bytes(encrypted.envelope))
         self.assertFalse(hasattr(row, 'token'))
+
+    # BUG: trusted view resolver проходит permission, но Identity повторяет default-deny lookup.
+    # HYPOTHESIS: handler заново создаёт context без resolver вместо request.actor.
+    # RED: PG16/17 вернули 403 delegation resolver is not bound вместо 200.
+    # SOLUTION: revalidate request.actor тем же trusted view resolver, grant_id из context.
+    # RESULT: PG16/17 203/203; активный grant принят, отсутствие resolver/отзыв отказаны.
+    # STATUS: FIXED — see #635.
+    def test_http_identity_uses_accepted_grant_context_and_rechecks_revocation(self):
+        from mop.server.controller.authviews import Identity
+        from rest_framework.test import APIRequestFactory
+        row, actor = self.active()
+        key = Token.objects.get(user_id=actor.user_id).key
+        view = type('BoundIdentity', (Identity,), {'grant_resolver': self.api}).as_view()
+        factory = APIRequestFactory()
+        response = view(factory.get('/identity', HTTP_AUTHORIZATION='Token ' + key))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['kind'], 'grant')
+        self.assertEqual(response.data['principal_id'], str(actor.principal_id))
+        self.assertEqual(response.data['human_owner_id'], self.user.pk)
+        self.assertEqual(response.data['grant_id'], str(row.id))
+        # Никакой настройки из payload: без trusted root прежний deny обязателен.
+        unbound = Identity.as_view()(factory.get('/identity?grant_resolver=accepted',
+                                                HTTP_AUTHORIZATION='Token ' + key))
+        self.assertEqual(unbound.status_code, 403)
+        self.api.revoke(self.actor, row.id, expected_revision=row.revision)
+        refused = view(factory.get('/identity', HTTP_AUTHORIZATION='Token ' + key))
+        self.assertEqual(refused.status_code, 403)
 
     def test_grant_auth_default_denies_node_is_not_grant_and_token_revoke_is_live(self):
         row, actor = self.active()
@@ -568,6 +695,129 @@ class GrantCases(TransactionTestCase):
         self.api.approve_bundle(self.actor, bundle.id)
         with self.assertRaises(PermissionError):
             self.reserve(actor=actor, bundle=bundle)
+
+    # BUG: окончательное решение теряло credential предка, policy/binding и
+    # точный credential создателя после provider wait.
+    # HYPOTHESIS: повторная проверка обязана читать весь текущий authority,
+    # а activation — сохранённую capability, не первый credential принципала.
+    # RED: /tmp/mop-635-live-red-seeded-pg17.log: шесть reported defects и
+    # подмена capability воспроизведены поведением (6 failures + 1 Denied).
+    # SOLUTION: final ancestor credentials; live policy/binding на retention;
+    # owner issue permission; credential activation; UUID capability в intent.
+    # RESULT: 40/40 grant cases green на PG16/17. Полный collector: 164 tests,
+    # два прежних DRF transport failures #632; это не зелёный общий gate.
+    # STATUS: FIXED — see #635 (семь safety regressions, не приёмка epic).
+    def test_ancestor_token_revoke_during_recipient_decrypt_fences_delivery(self):
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        source, actor = self.active(actor=parent_actor)
+        target, _ = self.active(bundle=self.publish('target-role'))
+        target_version = access.RoleBundle.objects.get(pk=target.bundle_id).content_version_id
+        provider = self.provider
+        class RevokeDuringDecrypt:
+            fired = False
+            def encrypt(inner, value, context):
+                return provider.encrypt(value, context)
+            def decrypt(inner, envelope, context):
+                value = provider.decrypt(envelope, context)
+                if context.record == target_version.bytes and not inner.fired:
+                    inner.fired = True
+                    Token.objects.filter(user_id=parent_actor.user_id).delete()
+                return value
+        class Delivery:
+            calls = []
+            def send(inner, decision, message):
+                inner.calls.append(decision)
+        self.api.secrets.provider = RevokeDuringDecrypt()
+        self.api.messages = Delivery()
+        try:
+            self.api.send(actor, target_id=target.target_id, message=b'blocked after ancestor revoke')
+        except PermissionError:
+            pass
+        self.assertFalse(Token.objects.filter(user_id=parent_actor.user_id).exists())
+        self.assertEqual(self.api.messages.calls, [], 'delivery effect ran after ancestor token revocation')
+
+    def test_token_revocation_before_activation_blocks_active_state(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
+        Token.objects.filter(user__principal__grant__id=row.id).delete()
+        try:
+            self.api.activate(row.id, expected_revision=provisioned.revision)
+        except PermissionError:
+            pass
+        self.assertEqual(access.Grant.objects.get(pk=row.id).state, 'reserved',
+            'activation accepted a revoked grant credential')
+
+    def test_retained_credential_requires_current_incarnation(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = replace(row.binding, incarnation=uuid.uuid4())
+        from mop.server.secrets.services import RetentionScope
+        scope = RetentionScope(self.project.pk, self.user.pk, row.id, 'grant')
+        with self.assertRaises(PermissionError, msg='stale-incarnation credential plaintext was delivered'):
+            self.api.secrets.read(self.actor, scope, provisioned.credential_version_id)
+
+    def test_policy_revocation_during_credential_decrypt_blocks_plaintext(self):
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        from mop.server.secrets.services import RetentionScope
+        scope = RetentionScope(self.project.pk, self.user.pk, row.id, 'grant')
+        provider = self.provider
+        class RevokeApprovalDuringDecrypt:
+            def encrypt(inner, value, context):
+                return provider.encrypt(value, context)
+            def decrypt(inner, envelope, context):
+                value = provider.decrypt(envelope, context)
+                if context.record == provisioned.credential_version_id.bytes:
+                    self.approvals.enabled = False
+                return value
+        self.api.secrets.provider = RevokeApprovalDuringDecrypt()
+        with self.assertRaises(PermissionError, msg='credential plaintext escaped a revoked policy'):
+            self.api.secrets.read(self.actor, scope, provisioned.credential_version_id)
+
+    def test_delegation_cannot_bypass_current_owner_issue_permission(self):
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        permission = Permission.objects.get(content_type__app_label='access', codename='issue_grant')
+        self.user.user_permissions.remove(permission)
+        with self.assertRaises(PermissionError):
+            self.reserve()
+        with self.assertRaises(PermissionError, msg='delegated issuance amplified owner permissions'):
+            self.reserve(actor=parent_actor)
+
+    def test_activation_does_not_substitute_another_valid_creator_credential(self):
+        from django.test import Client
+        browser = Client()
+        response = browser.post('/api/v1/auth/login',
+            {'username': 'owner', 'password': 'test-only-password'},
+            content_type='application/json', secure=True)
+        self.assertEqual(response.status_code, 200)
+        browser_actor = auth.session_context(browser.session.session_key)
+        # Старая реализация выбирает первый token binding вместо capability
+        # браузера; после logout этот token не должен продолжить его намерение.
+        access.CredentialBinding.objects.filter(pk=self.actor.credential_id).update(id=uuid.UUID(int=0))
+        row = self.reserve(actor=browser_actor)
+        provisioned = self.api.provision(browser_actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
+        browser.logout()
+        with self.assertRaises(PermissionError, msg='activation substituted another creator credential'):
+            self.api.activate(row.id, expected_revision=provisioned.revision)
+
+    def test_expired_unrelated_browser_session_does_not_block_token_creation(self):
+        from django.contrib.sessions.models import Session
+        row = self.reserve()
+        provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
+        principal, identity = auth._principal(self.user)
+        expired = Session.objects.create(session_key='expired-other-browser', session_data='',
+            expire_date=timezone.now() - timedelta(hours=1))
+        access.CredentialBinding.objects.create(id=uuid.UUID(int=0), session=expired,
+            **auth._binding_values(principal, identity))
+        auth.current_actor(self.actor)
+        activated = self.api.activate(row.id, expected_revision=provisioned.revision)
+        self.assertEqual(activated.state, 'active')
 
     def test_crypto_provider_never_runs_in_sql_and_no_unsupported_effect_port(self):
         with transaction.atomic():

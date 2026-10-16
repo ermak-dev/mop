@@ -51,6 +51,7 @@ class Configuration:
     nested_ad: bool
     starttls: bool
     ca_secret_ref: str
+    subject_attribute: str = 'entryUUID'
 
 
 class DirectoryProvider(Protocol):
@@ -63,13 +64,16 @@ class UnboundDirectory:
         raise DirectoryUnavailable('directory bind secret resolver is not bound')
 
 
-def _configuration(source):
-    row = m.DirectoryConfiguration.objects.filter(source=source).first()
+def _configuration(source, *, lock=False):
+    rows = m.DirectoryConfiguration.objects
+    if lock:
+        rows = rows.select_for_update()
+    row = rows.filter(source=source).first()
     if row is None:
         raise DirectoryUnavailable('directory configuration is unavailable')
     return Configuration(source.pk, source.revision, row.url, row.bind_dn, row.bind_secret_ref,
         row.user_base, row.group_base or row.user_base, row.login_attribute,
-        row.nested_ad, row.starttls, row.ca_secret_ref)
+        row.nested_ad, row.starttls, row.ca_secret_ref, row.subject_attribute)
 
 
 def _mapping(source, account):
@@ -92,7 +96,7 @@ def _revoke_owned(user, source):
         user.groups.remove(ownership.group)
 
 
-def apply_directory(source_id, revision, result):
+def apply_directory(source_id, revision, result, *, configuration=None, expected_user_id=None):
     """Только результат trusted mapping, не JSON. CAS после внешнего I/O."""
     if type(result) is not DirectoryResult or not set(result.permissions) <= ACTIONS:
         raise ValueError('invalid directory projection')
@@ -101,6 +105,14 @@ def apply_directory(source_id, revision, result):
         if not source.enabled or source.kind != 'ldap' or source.revision != revision:
             raise DirectoryUnavailable('directory policy changed during validation')
         identity = m.LoginIdentity.objects.filter(source=source, external_subject=result.subject).first()
+        if configuration is not None:
+            if _configuration(source, lock=True) != configuration:
+                raise DirectoryUnavailable('directory configuration changed during validation')
+            # Найденный под другим именем subject не присваивает существующий User.
+            # Bound login также не создаёт replacement, если связь исчезла за I/O.
+            if (identity is not None and identity.user_id != expected_user_id
+                    or identity is None and expected_user_id is not None):
+                raise PermissionDenied('directory identity belongs to another login')
         if identity is None:
             if not result.allowed:
                 raise PermissionDenied('directory account is not authorized')
@@ -196,11 +208,13 @@ class Router(ModelBackend):
                 raise PermissionDenied('directory identity changed')
             result = _mapping(source, account)
             if not result.allowed:
-                apply_directory(source.pk, source.revision, result)
+                apply_directory(source.pk, source.revision, result, configuration=configuration,
+                    expected_user_id=bound.user_id if bound else None)
                 raise PermissionDenied('directory account is not authorized')
             if not self.provider.check_password(configuration, account.bind_dn or account.subject, password):
                 raise PermissionDenied('authentication refused')
-            user_id = apply_directory(source.pk, source.revision, result)
+            user_id = apply_directory(source.pk, source.revision, result, configuration=configuration,
+                expected_user_id=bound.user_id if bound else None)
             user = get_user_model().objects.get(pk=user_id)
             if not user.is_active:
                 raise PermissionDenied('identity is inactive')

@@ -25,7 +25,7 @@ from ..secrets.crypto import SecretCryptoError
 from . import models as m, services as auth
 from .context import ActorContext, PrincipalKind
 from .delegation import (ApprovedPolicy, RoleBinding, BundleContent, GrantInfo,
-                         MessageAuthority, PolicyBinding, RetirementReceipt, allows, allows_spawn, uuid_value)
+                         MessageAuthority, PolicyBinding, RetirementReceipt, allows, allows_capabilities, allows_spawn, uuid_value)
 
 
 class Conflict(ValueError):
@@ -104,10 +104,53 @@ class _RetentionAuthority:
             if (row.intent.owner_id, row.intent.project_id) != (scope.owner_id, scope.project_id):
                 raise auth.Denied('credential provisioning target mismatch')
             api._creation_actor(actor, row)
-            if row.state != 'reserved' or row.intent.expires_at <= timezone.now():
-                raise auth.Denied('credential provisioning is no longer reserved')
+            api._check_row(row, state='reserved')
+            actual = api.bindings.current(scope.project_id, row.intent.target_id)
+            # До регистрации runtime может ещё отсутствовать; другая инкарнация
+            # уже заняла имя — сохранённый credential выдавать нельзя.
+            if actual is not None and actual != api._info(row).binding:
+                raise auth.Denied('credential provisioning binding changed')
         else:
             raise auth.Denied('unsupported retained access value')
+
+
+class LocalGrantAuthority:
+    """Immutable capabilities проверены при publish/approval; здесь нет secret I/O."""
+    def __init__(self, grants):
+        self._grants = grants
+
+    @storage_boundary
+    @sensitive_variables('key')
+    def token_context(self, key):
+        with transaction.atomic():
+            return self.resolve_actor(self._grants._token_actor(key))
+
+    @storage_boundary
+    def resolve_actor(self, actor):
+        with transaction.atomic():
+            row = self._grants._credential(actor)
+            self._grants._execution_rows(self._grants._info(row).binding)
+            self._grants._credential(actor)
+        return actor
+
+    @storage_boundary
+    def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
+        with transaction.atomic():
+            row = self._grants._credential(actor)
+            chain = self._grants._execution_rows(self._grants._info(row).binding)
+            if set(project_ids) != {row.intent.project_id} or node_ids or client_ids:
+                raise auth.Denied('grant action scope mismatch')
+            self._grants._owner_permission(row.intent.owner_id, action, row.intent.project_id)
+            for current in chain:
+                capabilities = tuple(m.RoleCapability.objects.filter(bundle_id=current.intent.bundle_id)
+                                     .values_list('scope', 'verb'))
+                caps = soul.Capabilities(tuple(verb for scope, verb in capabilities if scope == 'node'),
+                    tuple(verb for scope, verb in capabilities if scope == 'cluster'),
+                    current.intent.bundle.dispatch, ())
+                if not allows_capabilities(caps, action):
+                    raise auth.Denied('action is outside pinned delegated capabilities')
+            self._grants._credential(actor)
+            self._grants._owner_permission(row.intent.owner_id, action, row.intent.project_id)
 
 
 class Grants:
@@ -352,7 +395,7 @@ class Grants:
         return tuple(chain)
 
     def _recheck(self, actor, chain):
-        self._credential(actor)
+        self._check_ancestors_local(self._credential(actor))
         for info, content in chain:
             row = self._row(info.id)
             self._check_row(row)
@@ -362,15 +405,54 @@ class Grants:
                 raise auth.Denied('grant runtime binding changed')
             self._normalized(row.intent.bundle, soul.parse(content.manifest.decode()))
 
+    def _execution_rows(self, binding):
+        if type(binding) is not RoleBinding:
+            raise ValueError('complete execution role binding required')
+        if not transaction.get_connection().in_atomic_block:
+            raise ValueError('execution authority requires a caller transaction')
+        row, identifiers = self._row(binding.grant_id), []
+        while True:
+            if row.id in identifiers or len(identifiers) >= 32:
+                raise auth.Denied('invalid delegation ancestry')
+            identifiers.append(row.id)
+            if row.intent.parent_id is None:
+                break
+            row = self._row(row.intent.parent_id)
+        # Immutable ancestry собирается до упорядоченных Grant locks.
+        # Binding/approval ports не должны брать reverse resource locks.
+        locked = tuple(m.Grant.objects.select_for_update().filter(pk__in=identifiers)
+                       .order_by('pk').values_list('pk', flat=True))
+        if len(locked) != len(identifiers):
+            raise auth.Denied('grant ancestry is unavailable')
+        row = self._row(binding.grant_id)
+        if self._info(row).binding != binding:
+            raise auth.Denied('execution role binding mismatch')
+        credential = m.CredentialBinding.objects.filter(token_user_id=row.principal.user_id).first()
+        if credential is None:
+            raise auth.Denied('grant credential revoked')
+        self._credential(ActorContext(row.principal.user_id, row.principal_id, PrincipalKind.GRANT,
+            credential.id, binding.human_owner_id, None, row.id))
+        self._check_row(row)
+        self._check_ancestors_local(row)
+        if self.bindings.current(binding.project_id, binding.target_id) != binding:
+            raise auth.Denied('grant runtime binding changed')
+        return tuple(self._row(identifier) for identifier in identifiers)
+
+    @storage_boundary
+    def authorize_execution(self, binding):
+        """Проверка получающего grant без provider I/O; инициатора проверяет WorkPort."""
+        self._execution_rows(binding)
+
+    def local_authority(self):
+        return LocalGrantAuthority(self)
+
     @storage_boundary
     def resolve_actor(self, actor):
         self._chain(actor)
         return actor
 
-    @storage_boundary
     @sensitive_variables('key')
-    def token_context(self, key):
-        outside_transaction()
+    def _token_actor(self, key):
         token = Token.objects.select_related('user__principal').filter(key=key).first()
         if token is None:
             raise auth.Denied('token revoked or rotated')
@@ -381,8 +463,14 @@ class Grants:
         binding = m.CredentialBinding.objects.filter(token_user=token.user).first()
         if row is None or binding is None:
             raise auth.Denied('grant credential is not bound')
-        actor = ActorContext(token.user_id, principal.id, PrincipalKind.GRANT, binding.id,
-                             row.intent.owner_id, None, row.id)
+        return ActorContext(token.user_id, principal.id, PrincipalKind.GRANT, binding.id,
+                            row.intent.owner_id, None, row.id)
+
+    @storage_boundary
+    @sensitive_variables('key')
+    def token_context(self, key):
+        outside_transaction()
+        actor = self._token_actor(key)
         self.resolve_actor(actor)
         return actor
 
@@ -397,9 +485,11 @@ class Grants:
 
     def _creation_actor(self, actor, row):
         intent = row.intent
-        if self._owner(actor) != intent.owner_id or actor.principal_id != intent.actor_id:
+        if (self._owner(actor) != intent.owner_id or actor.principal_id != intent.actor_id
+                or actor.credential_id != intent.actor_credential_id):
             raise auth.Denied('creation actor or owner mismatch')
         self._owner_permission(intent.owner_id, 'sessions.create_puppet', intent.project_id)
+        self._owner_permission(intent.owner_id, 'access.issue_grant', intent.project_id)
         if actor.kind is PrincipalKind.HUMAN:
             self._human(actor, 'access.issue_grant', intent.project_id)
         else:
@@ -439,6 +529,7 @@ class Grants:
         else:
             self._human(actor, 'access.issue_grant', project_id)
         self._owner_permission(owner, 'sessions.create_puppet', project_id)
+        self._owner_permission(owner, 'access.issue_grant', project_id)
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
             get_user_model().objects.select_for_update().get(pk=owner)
@@ -447,6 +538,7 @@ class Grants:
             else:
                 self._human(actor, 'access.issue_grant', project_id)
             self._owner_permission(owner, 'sessions.create_puppet', project_id)
+            self._owner_permission(owner, 'access.issue_grant', project_id)
             existing = m.CreationIntent.objects.filter(owner_id=owner, actor_id=actor.principal_id,
                 project_id=project_id, request_id=request_id).first()
             if existing:
@@ -465,6 +557,7 @@ class Grants:
             self._validate_policy(proof, policy_binding)
             self._normalized(bundle, soul.parse(content.manifest.decode()))
             intent = m.CreationIntent.objects.create(id=intent_id, owner_id=owner, actor_id=actor.principal_id,
+                actor_credential_id=actor.credential_id,
                 project_id=project_id, bundle=bundle, parent_id=parent_id, request_id=request_id,
                 target_id=target_id, incarnation=incarnation, expires_at=expires_at,
                 policy_approval_id=proof.approval_id, policy_version_id=proof.version_id, policy_digest=proof.digest)
@@ -548,7 +641,7 @@ class Grants:
 
     def _intent_actor(self, row):
         principal = m.Principal.objects.get(pk=row.intent.actor_id)
-        binding = m.CredentialBinding.objects.filter(principal=principal).order_by('id').first()
+        binding = m.CredentialBinding.objects.filter(pk=row.intent.actor_credential_id, principal=principal).first()
         if binding is None:
             raise auth.Denied('creation credential is no longer available')
         if principal.kind == 'human':
@@ -586,6 +679,11 @@ class Grants:
                 self._check_ancestors_local(row)
             if self.bindings.activation(grant_id) != receipt:
                 raise auth.Denied('activation receipt changed')
+            binding = m.CredentialBinding.objects.filter(token_user_id=row.principal.user_id).first()
+            if binding is None:
+                raise auth.Denied('activation credential revoked')
+            self._credential(ActorContext(row.principal.user_id, row.principal_id, PrincipalKind.GRANT,
+                binding.id, row.intent.owner_id, None, row.id))
             self._cas(row, state=row.next_state('activate'))
             self._event(row, None, 'activate')
             return self._info(row)

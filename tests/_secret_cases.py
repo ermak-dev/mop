@@ -60,6 +60,9 @@ class CurrentVerifier:
 
 
 class SecretCases(TransactionTestCase):
+    # Foundation guard — migration seed, не runtime fallback после test flush.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertIsNotNone(importlib.util.find_spec('mop.server.secrets.services'),
                              'missing encrypted ORM store commands')
@@ -311,7 +314,10 @@ class SecretCases(TransactionTestCase):
         r = svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=current.revision)
         before = self.m.SecretAudit.objects.count()
         with self.assertRaisesRegex(self.s.Conflict, 'unresolved credential rotation'):
-            self.binding(current)
+            # Новый допустимый recipient slot, не дубль уже занятого node/role.
+            self.api.bind(self.actor, current.id, expected_revision=current.revision,
+                node_id=self.n.pk, role='late-role', digest='b' * 64, incarnation=uuid.uuid4(),
+                grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
         self.assertEqual(self.m.SecretAudit.objects.count(), before)
         self.assertEqual(set(self.m.SecretBinding.objects.filter(secret_id=a.id).values_list('id', flat=True)), {b.id})
         self.assertEqual(set(self.m.RotationRecipient.objects.filter(rotation_id=r.id).values_list('binding_id', flat=True)), {b.id})
@@ -334,8 +340,13 @@ class SecretCases(TransactionTestCase):
                 locked, attempted = threading.Event(), threading.Event()
                 def command(kind):
                     try:
+                        # Membership допускает один current node/role: гоняем
+                        # новый допустимый slot, а не запрещённую замену incarnation.
                         result = (svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
-                                  if kind == 'stage' else self.binding(current))
+                                  if kind == 'stage' else self.api.bind(self.actor, current.id,
+                                      expected_revision=current.revision, node_id=self.n.pk,
+                                      role='late-role', digest='b' * 64, incarnation=uuid.uuid4(),
+                                      grant_id=uuid.uuid4(), assignment_id=uuid.uuid4()))
                         return 'ok', result
                     except (self.s.Conflict, self.s.Refused) as error:
                         return 'refused', error
@@ -826,6 +837,25 @@ class SecretCases(TransactionTestCase):
             self.m.SecretBinding.objects.create(secret_id=a.id, node_id=b.node_id,
                 role='another-role', digest=b.digest, incarnation=uuid.uuid4(),
                 grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
+
+    # HYPOTHESIS: ранний frozen-set guard после сборки двух исправлений
+    # запрещает точный retry bind, хотя он лишь читает прежнее решение.
+    # Retry обязан сохранить audit, membership и rotation revision без изменений.
+    # SOLUTION: frozen-set guard стоит только перед новой записью, после exact retry.
+    # RED: combined PG16 202 cases — оба exact retry получили unresolved rotation.
+    # RESULT: combined PG16/17 203/203, включая оба frozen retry и запрет новых bindings.
+    # STATUS: FIXED — see #635.
+    def test_exact_bind_retry_during_frozen_rotation_has_no_write_effect(self):
+        svc, a, new, b, r = self.rotation()
+        before = self.m.SecretAudit.objects.count()
+        repeated = self.api.bind(self.actor, a.id, expected_revision=2, node_id=b.node_id,
+            role=b.role, digest=b.digest, incarnation=b.incarnation,
+            grant_id=b.grant_id, assignment_id=b.assignment_id)
+        self.assertEqual(repeated, b)
+        self.assertEqual(self.m.SecretAudit.objects.count(), before)
+        self.assertEqual(svc.metadata(self.actor, r.id), r)
+        self.assertEqual(tuple(self.m.SecretBinding.objects.filter(secret_id=a.id)
+                               .values_list('id', flat=True)), (b.id,))
 
     def test_binding_stage_and_retirement_race_with_independent_connections(self):
         a = self.secret()

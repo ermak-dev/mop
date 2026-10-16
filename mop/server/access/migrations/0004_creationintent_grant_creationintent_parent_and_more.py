@@ -10,7 +10,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('access', '0002_identity_binding_subject'),
+        ('access', '0003_directory_immutable_subject'),
         ('catalog', '0002_action_permissions'),
         ('secrets', '0002_credentialrotation_rotation_pending_enum_and_more'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),

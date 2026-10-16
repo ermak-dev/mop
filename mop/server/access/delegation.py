@@ -157,15 +157,18 @@ ACTION_CAPABILITIES = {
 }
 
 
-def allows(bundle, action):
+def allows_capabilities(caps, action):
     capability = ACTION_CAPABILITIES.get(action)
     if capability is None:
         return False
     scope, verb = capability
-    caps = bundle.capabilities
     if scope == 'dispatch':
         return caps.dispatch
     return verb in (caps.node_verbs if scope == 'node' else caps.cluster_verbs)
+
+
+def allows(bundle, action):
+    return allows_capabilities(bundle.capabilities, action)
 
 
 def allows_spawn(parent, child):
