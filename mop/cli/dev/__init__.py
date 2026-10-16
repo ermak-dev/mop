@@ -4,6 +4,7 @@
   mop dev ci    pipelines, job logs, lint and runners: GitLab CI from the terminal
   mop dev docs  regenerate docs/CLI.md, the CLI reference, from the docstrings
   mop dev test  run the checks in tests/, all or the named ones
+  mop dev controller  isolated PostgreSQL foundation checks in Docker
   mop dev web   build the dashboard (web/dist) and check the committed build
 
 Run from a working copy of the project: the coordinates come from its git

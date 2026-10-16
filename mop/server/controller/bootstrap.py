@@ -15,33 +15,68 @@ class Bootstrap(dict):
     __str__ = __repr__
 
 
-def private_bytes(path):
-    """Открыть принадлежащий процессу файл без symlink и публичного доступа."""
+def _protected_open(path, *, private=False, key=False):
+    """Проверить всю цепочку через dirfd, не раскрывая путь в ошибке."""
     if not isinstance(path, (str, os.PathLike)):
         raise RuntimeError('bootstrap path must be an absolute filesystem path')
-    path = Path(path)
-    if not path.is_absolute():
-        raise RuntimeError('bootstrap paths must be absolute')
+    raw = os.fspath(path)
+    if not isinstance(raw, str) or '\x00' in raw:
+        raise RuntimeError('bootstrap path must be an absolute filesystem path')
+    path = Path(raw)
+    if not path.is_absolute() or '..' in path.parts:
+        raise RuntimeError('bootstrap paths must be absolute without parent traversal')
+    uid = os.geteuid()
+    trusted = {0, uid}
+    directory = fd = None
     try:
-        for parent in path.parents:
-            if parent.is_symlink():
-                raise RuntimeError('bootstrap requires a regular path without symlinks')
-        parent = path.parent.stat()
-        if parent.st_uid != os.geteuid() or parent.st_mode & 0o077:
-            raise RuntimeError('bootstrap directory must be private and owned by this user')
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, 'rb') as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise RuntimeError('bootstrap requires a regular file without symlinks')
-            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
-                raise RuntimeError('bootstrap file must be private and owned by this user')
-            data = stream.read(65537)
-            if len(data) > 65536:
-                raise RuntimeError('bootstrap file exceeds size limit')
-            return data
-    except OSError as exc:
-        raise RuntimeError('bootstrap file unavailable or not a regular file (symlink refused)') from exc
+        directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for part in (*path.parts[1:-1], None):
+            info = os.fstat(directory)
+            if info.st_uid not in trusted or (info.st_mode & 0o022 and
+                                              not info.st_mode & stat.S_ISVTX):
+                raise RuntimeError('bootstrap path directory permits untrusted replacement')
+            # Sticky-каталог не даёт чужому uid заменить доверенного потомка.
+            # Владельца каждого потомка проверяем до перехода дальше или чтения.
+            if part is None:
+                if private and (info.st_uid != uid or info.st_mode & 0o077):
+                    raise RuntimeError('bootstrap directory must be private and owned by this user')
+                break
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=directory)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError('bootstrap requires a regular file without symlinks')
+        if private and (info.st_uid != uid or info.st_mode & 0o077):
+            raise RuntimeError('bootstrap file must be private and owned by this user')
+        if info.st_uid not in trusted or info.st_mode & 0o022:
+            raise RuntimeError('bootstrap TLS file must have trusted ownership and no untrusted writes')
+        if key and stat.S_IMODE(info.st_mode) not in {0o400, 0o600}:
+            raise RuntimeError('bootstrap TLS private key requires mode 0600 or 0400')
+        stream = os.fdopen(fd, 'rb')
+        fd = None
+        return stream
+    except OSError:
+        # Исключение ОС содержит имя файла: не сохраняем его даже в context.
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if directory is not None:
+            os.close(directory)
+    raise RuntimeError('bootstrap file unavailable or not a regular file (symlink refused)')
+
+
+def private_bytes(path):
+    """Открыть принадлежащий процессу файл без symlink и публичного доступа."""
+    with _protected_open(path, private=True) as stream:
+        data = stream.read(65537)
+    if len(data) > 65536:
+        raise RuntimeError('bootstrap file exceeds size limit')
+    return data
 
 
 def load(path):
@@ -78,14 +113,22 @@ def load(path):
         raise RuntimeError('bootstrap database requires verify-full TLS or explicit isolated-test disable')
     if opts.get('sslmode') == 'verify-full' and not opts.get('sslrootcert'):
         raise RuntimeError('bootstrap database TLS trust is required')
+    if ('sslcert' in opts) != ('sslkey' in opts):
+        raise RuntimeError('bootstrap database TLS client certificate and key must be supplied together')
+    for name in ('sslrootcert', 'sslcert', 'sslkey'):
+        if name in opts:
+            with _protected_open(opts[name], key=name == 'sslkey'):
+                pass
     if data['role'] != 'maintenance' and 'root_key' in data:
         raise RuntimeError('root key must not be supplied to web, worker or gateway')
     if data['role'] == 'maintenance':
         root = private_bytes(data.get('root_key', ''))
         if len(root) < 32:
             raise RuntimeError('bootstrap root key must contain at least 32 bytes')
-    if 'django_key' in data and len(private_bytes(data['django_key'])) < 50:
-        raise RuntimeError('bootstrap Django signing key must contain at least 50 bytes')
+    if 'django_key' in data:
+        signing_key = private_bytes(data['django_key'])
+        if len(signing_key) < 50 or not signing_key.isascii():
+            raise RuntimeError('bootstrap Django signing key must contain at least 50 ASCII bytes')
     return Bootstrap(data)
 
 

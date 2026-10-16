@@ -8,9 +8,12 @@ from .runtime import installation_snapshot
 def exception_handler(error, context):
     """Отказ DB, включая auth lookup, не становится anonymous/empty success."""
     if isinstance(error, DatabaseError):
+        unknown = getattr(error.__cause__, 'outcome_unknown', False)
         response = Response({'schema_version': 1, 'error': {
-            'code': 'database_unavailable', 'message': 'controller database unavailable',
-            'retryable': True}}, status=503)
+            'code': 'database_outcome_unknown' if unknown else 'database_unavailable',
+            'message': ('database commit outcome unknown; reconcile before retry' if unknown
+                        else 'controller database unavailable'),
+            'retryable': not unknown}}, status=503)
         response['Cache-Control'] = 'no-store'
         return response
     from django.core.exceptions import ObjectDoesNotExist
