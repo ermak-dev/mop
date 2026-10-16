@@ -8,4 +8,4 @@ from _controller_fixture import main
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1:] or ['_ldap_cases', '_controller_cases', '_controller_restore_cases',
                    '_catalog_cases', '_catalog_retirement_cases', '_access_cases', '_secret_cases', '_grant_cases',
-                   '_execution_cases', '_endpoint_cases']))
+                   '_execution_cases', '_endpoint_cases', '_endpoint_grant_cases']))

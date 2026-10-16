@@ -21,15 +21,23 @@ from django.utils import timezone
 # HYPOTHESIS: presence row/socket publish сейчас не имеют общего durable receipt.
 # SPEC: два MCP одного externalSessionID объединяются только внутри actual user/client;
 #       timeout/restart не разрешает повтор сообщения; nonce не заменяет Django auth.
-# STATUS: RED pending — see #649.
+# RED: PG16 — 19 behavioral failures (absent ClientSession/routes); отдельно был
+#      fixture flush timeout, который не считается доказательством endpoint defect.
+# RED: retry пытался шифровать снова; idle_message/root/receiver loop отсутствовали.
+# SOLUTION: portable ORM identity, bounded async gateway, AEAD retention и own UDS.
+# RESULT: PG16 — 24/24 green до добавления autonomous receiver-loop acceptance.
+# STATUS: FIXED — see #649; итоговые PG16/17 и exact-SHA CI указаны в отчёте.
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class EndpointBoundary(TransactionTestCase):
+    serialized_rollback = True
+
     def test_presence_and_send_are_authenticated_routes_not_missing_routes(self):
         for method, path in [('get', '/api/v1/addresses'), ('post', '/api/v1/reports'),
                              ('post', '/api/v1/endpoints')]:
             result = getattr(Client(), method)(path, {}, content_type='application/json', secure=True)
-            self.assertIn(result.status_code, (401, 403), path)
+            with self.subTest(path=path):
+                self.assertIn(result.status_code, (401, 403), path)
 
 
 class Endpoints(TransactionTestCase):
@@ -57,7 +65,14 @@ class Endpoints(TransactionTestCase):
         self.other_client = ClientRegistration.objects.create(installation=self.installation, label='same')
         a.ClientOwnership.objects.create(client=self.client, user=self.user)
         a.ClientOwnership.objects.create(client=self.other_client, user=self.other_user)
-        self.api = s.Endpoints(provider=XChaCha20Provider(Keyring('test', {'test': b'k'*32})))
+        from mop.server.controller.endpointviews import authority
+        from mop.server.controller.endpointcrypto import EndpointCipher
+        self.api = s.Endpoints(authority=authority,
+            cipher=EndpointCipher(XChaCha20Provider(Keyring('test', {'test': b'k'*32})), 'isolated-ci'))
+        from unittest.mock import patch
+        binding = patch('mop.server.controller.endpointviews.endpoints', self.api)
+        binding.start()
+        self.addCleanup(binding.stop)
         self.external = 'external-conversation-1'
         self.endpoint = self.register()
 
@@ -183,6 +198,32 @@ class Endpoints(TransactionTestCase):
         self.api.disconnect(old)
         self.assertEqual(self.api.trusted_context(self.actor, self.endpoint.id, new.nonce), new)
 
+    def test_independent_restart_gateways_fence_one_old_attempt_without_replay(self):
+        old = self.connect()
+        report = self.send()
+        self.api.take(old)
+        self.m.ConnectionLease.objects.filter(endpoint_id=old.endpoint_id).update(
+            expires_at=timezone.now()-timedelta(seconds=1))
+        barrier = Barrier(2)
+        def restart(_):
+            connections.close_all()
+            try:
+                barrier.wait(timeout=10)
+                try:
+                    return self.connect(gateway=uuid4())
+                except self.s.Conflict:
+                    return None
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            contexts = [value for value in workers.map(restart, range(2)) if value is not None]
+        self.assertEqual(len(contexts), 1)
+        self.assertGreater(contexts[0].generation, old.generation)
+        self.assertIsNone(self.api.take(contexts[0]))
+        self.assertEqual(self.api.delivery(self.actor, report.id).state, 'unknown')
+        with self.assertRaises(PermissionError):
+            self.api.acknowledge(old, report.id, outcome='accepted')
+
     def test_revocation_membership_and_client_ownership_are_current(self):
         context = self.connect()
         report = self.send()
@@ -233,6 +274,29 @@ class Endpoints(TransactionTestCase):
         with self.assertRaises(self.s.Capacity):
             self.send()
 
+    def test_expired_queue_does_not_hold_global_admission_or_retain_message_bytes(self):
+        self.connect()
+        for _ in range(64):
+            self.send()
+        self.m.MessageDelivery.objects.filter(state='queued').update(not_after=timezone.now()-timedelta(seconds=1))
+        report = self.send()
+        self.assertEqual(report.state, 'queued')
+        self.assertEqual(self.m.MessageDelivery.objects.filter(state='queued').count(), 1)
+        self.assertFalse(self.m.MessageDelivery.objects.filter(state='unavailable', payload__isnull=False).exists())
+
+    def test_disconnected_senders_client_cannot_authorize_queued_private_content(self):
+        self.connect()
+        sender_endpoint = self.api.register(self.other_actor, client_id=self.other_client.pk,
+            project_id=self.project.pk, external_session_id='other-cli', display_name='same')
+        sender = self.connect(sender_endpoint, self.other_actor)
+        report = self.api.send(self.other_actor, address=self.endpoint.address, message_id=uuid4(),
+            text='addressed report', not_after=timezone.now()+timedelta(minutes=1), sender=sender)
+        self.a.ClientOwnership.objects.filter(client=self.other_client).delete()
+        receiver = self.api.trusted_context(self.actor, self.endpoint.id,
+            self.m.ConnectionLease.objects.get(endpoint_id=self.endpoint.id).nonce)
+        self.assertIsNone(self.api.take(receiver))
+        self.assertEqual(self.api.delivery(self.actor, report.id).state, 'unavailable')
+
     def test_disconnect_expiry_and_revoked_token_do_not_confirm_delivery(self):
         context = self.connect()
         report = self.send()
@@ -278,7 +342,10 @@ class Endpoints(TransactionTestCase):
                 received = []
                 async def external(reader, writer):
                     try:
-                        frame = json.loads(await reader.readline())
+                        line = await reader.readline()
+                        if not line:
+                            return
+                        frame = json.loads(line)
                         received.append(frame)
                         callback = frame['from'][4:]
                         r, w = await asyncio.open_unix_connection(callback)
@@ -306,7 +373,7 @@ class Endpoints(TransactionTestCase):
                     self.assertIsNone(await gateway.deliver_one(context))
                     server.close()
                     await server.wait_closed()
-                    os.unlink(path)
+                    Path(path).unlink(missing_ok=True)
                     report = await runtime.database(self.send)
                     result = await gateway.deliver_one(context)
                     self.assertEqual(result.state, 'unavailable')
@@ -330,9 +397,13 @@ class Endpoints(TransactionTestCase):
                 path = str(Path(directory)/'external.sock')
                 frames = []
                 async def silent(reader, writer):
-                    frames.append(json.loads(await reader.readline()))
-                    writer.close()
-                    await writer.wait_closed()
+                    try:
+                        line = await reader.readline()
+                        if line:
+                            frames.append(json.loads(line))
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
                 server = await asyncio.start_unix_server(silent, path=path)
                 os.chmod(path, 0o600)
                 bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.05)
@@ -358,7 +429,10 @@ class Endpoints(TransactionTestCase):
                 frames = []
                 async def external(reader, writer):
                     try:
-                        frame = json.loads(await reader.readline())
+                        line = await reader.readline()
+                        if not line:
+                            return
+                        frame = json.loads(line)
                         frames.append(frame)
                         _, reply = await asyncio.open_unix_connection(frame['from'][4:])
                         action = 'peer_idle_notice' if frame['type'] == 'control' else 'message_accepted'
@@ -406,6 +480,137 @@ class Endpoints(TransactionTestCase):
                 await gateway.aclose()
                 await runtime.aclose()
         asyncio.run(scenario())
+
+    def test_root_receiver_loop_delivers_real_socket_and_correlated_idle(self):
+        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.server.controller.endpointroot import create_endpoint_runtime
+        async def scenario():
+            with tempfile.TemporaryDirectory(prefix='mop-endpoint-') as directory:
+                os.chmod(directory, 0o700)
+                path = str(Path(directory)/'external.sock')
+                frames = []
+                async def external(reader, writer):
+                    try:
+                        line = await reader.readline()
+                        if not line:
+                            return
+                        frame = json.loads(line)
+                        frames.append(frame)
+                        _, reply = await asyncio.open_unix_connection(frame['from'][4:])
+                        action = 'peer_idle_notice' if frame['type'] == 'control' else 'message_accepted'
+                        reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': action,
+                            'orig_msg_id': frame['msg_id']})+'\n').encode())
+                        await reply.drain()
+                        reply.close()
+                        await reply.wait_closed()
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                server = await asyncio.start_unix_server(external, path=path)
+                os.chmod(path, 0o600)
+                runtime, gateway = create_endpoint_runtime(self.api)
+                await runtime.start()
+                try:
+                    bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.3)
+                    context = await gateway.attach(self.actor, self.endpoint.id, bridge)
+                    task = gateway.start_receiver(context)
+                    report = await runtime.database(self.send, notify_when_idle=True)
+                    async def acknowledged():
+                        while True:
+                            status = await runtime.database(self.api.delivery, self.actor, report.id)
+                            if status.state == 'accepted' and status.idle:
+                                return status
+                            await asyncio.sleep(.01)
+                    await asyncio.wait_for(acknowledged(), 3)
+                    self.assertEqual(frames[0]['msg_id'], str(report.message_id))
+                    self.assertEqual(frames[1]['action'], 'notify_when_idle')
+                    await runtime.aclose()
+                    self.assertTrue(task.done())
+                    self.assertEqual(runtime.pending, 0)
+                finally:
+                    await runtime.aclose()
+                    server.close()
+                    await server.wait_closed()
+        asyncio.run(scenario())
+
+    def test_duplicate_identity_survives_cipher_outage_and_expired_presence(self):
+        from unittest.mock import patch
+        self.connect()
+        message_id, deadline = uuid4(), timezone.now()+timedelta(minutes=1)
+        first = self.send(message_id=message_id, not_after=deadline)
+        self.m.Endpoint.objects.filter(pk=self.endpoint.id).update(expires_at=timezone.now()-timedelta(seconds=1))
+        with patch.object(self.api.cipher, 'seal', side_effect=AssertionError('retry must not encrypt again')):
+            self.assertEqual(self.send(message_id=message_id, not_after=deadline), first)
+
+    def test_slow_delivery_does_not_hold_sql_transaction_and_rechecks_revocation(self):
+        from mop.common.endpoint import ApplicationAcceptance
+        from mop.server.sessions.delivery import DeliveryGateway
+        from mop.server.controller.runtime import Runtime
+        async def scenario():
+            runtime = Runtime()
+            entered, release = asyncio.Event(), asyncio.Event()
+            class Peer:
+                external_session_id = self.external
+                async def start(self): pass
+                async def ready(self): return self.external_session_id
+                async def aclose(self): pass
+                async def deliver(self, frame):
+                    entered.set()
+                    await release.wait()
+                    return ApplicationAcceptance('accepted')
+            gateway = DeliveryGateway(runtime, self.api)
+            await runtime.start()
+            try:
+                context = await gateway.attach(self.actor, self.endpoint.id, Peer())
+                report = await runtime.database(self.send)
+                task = asyncio.create_task(gateway.deliver_one(context))
+                await asyncio.wait_for(entered.wait(), 2)
+                # Независимый SQL worker получает тот же ресурс пока socket ждёт.
+                await asyncio.wait_for(runtime.database(self.a.ProjectMembership.objects.filter(user=self.user).delete), 2)
+                release.set()
+                with self.assertRaises(PermissionError):
+                    await task
+                row = await runtime.database(lambda: self.m.MessageDelivery.objects.get(pk=report.id).state)
+                self.assertEqual(row, 'attempting')
+                await gateway.detach(context)
+                self.assertEqual(await runtime.database(lambda: self.m.MessageDelivery.objects.get(pk=report.id).state), 'unknown')
+            finally:
+                release.set()
+                await gateway.aclose()
+                await runtime.aclose()
+        asyncio.run(scenario())
+
+    def test_composition_root_owns_gateway_clients_and_shutdown_leases(self):
+        from mop.server.controller.endpointroot import create_endpoint_runtime
+        # ORM assertion идёт после остановки event loop, не через async unsafe.
+        async def wrapped():
+            runtime, gateway = create_endpoint_runtime(self.api)
+            closed = []
+            class Peer:
+                external_session_id = self.external
+                async def start(self): pass
+                async def ready(self): return self.external_session_id
+                async def aclose(self): closed.append(True)
+            await runtime.start()
+            context = await gateway.attach(self.actor, self.endpoint.id, Peer())
+            await runtime.aclose()
+            self.assertEqual(closed, [True])
+            self.assertEqual(runtime.pending, 0)
+            return context
+        context = asyncio.run(wrapped())
+        self.assertFalse(self.m.ConnectionLease.objects.get(endpoint_id=context.endpoint_id).connected)
+
+    def test_idle_lookup_cannot_pair_another_messages_notice(self):
+        first = self.connect()
+        report = self.send(notify_when_idle=True)
+        self.api.take(first)
+        self.api.acknowledge(first, report.id, outcome='accepted')
+        self.assertEqual(self.api.idle_message(first, report.id), report.message_id)
+        plain = self.send()
+        self.api.take(first)
+        self.api.acknowledge(first, plain.id, outcome='accepted')
+        with self.assertRaises(self.s.Conflict):
+            self.api.idle_message(first, plain.id)
 
     def test_bridge_and_common_wire_have_no_framework_or_legacy_discovery_import(self):
         for module in ('mop.client.local_bridge', 'mop.common.endpoint'):
