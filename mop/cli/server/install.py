@@ -2,6 +2,7 @@
 
   plan          validate protected topology and show ordered prerequisites (stdlib)
   provisioning  review OS accounts/directories and explicit PostgreSQL topology
+    --apply     prepare a new local Debian host/PVE guest (sudo, external DB only)
   database      create a new DB and four least-privilege roles over verified TLS
     --provision-bootstrap PATH  separate protected database-only admin document
     --passwords-file PATH       protected JSON of four new DB role passwords
@@ -10,7 +11,7 @@
   prepare --bootstrap PATH    direct maintenance: migrations then trust initialization
   configure --bootstrap PATH --settings-file PATH --username NAME
                 authenticate privately and initialize fresh ORM settings once
-  render --bootstrap PATH --username NAME  render ORM desired state; no apply receipt
+  render --bootstrap PATH --username NAME  render ORM desired state and service units; no apply receipt
   retention --keep N [--delete]  preview/apply native dump retention in protected backup dir
   apply         refuse until runtime executors and realtime composition are accepted
 
@@ -19,11 +20,33 @@ The finite JSON specification contains only installation identity, PostgreSQL
 It contains no passwords, root bytes or general settings. No legacy input is
 read and no old service is stopped. Plan does not execute provisioning.
 Dependencies use mop server controller setup --venv PATH and its declared server
-extra; PostgreSQL OS provisioning is an operator action, never an inferred host.
-Full installed runtime and host/PVE reboot acceptance is a later integration gate.
+extra. Explicit provisioning --apply prepares only fresh local accounts, private
+roots, signing material and matching PostgreSQL client tools, before venv setup.
+It refuses existing trees/accounts and provisioned-DB topology: PostgreSQL server
+TLS/network provisioning needs its own explicit operator input. It starts no service,
+does not connect to the DB, does not invoke PVE and never claims runtime readiness.
+The same local command can run inside a host or an explicitly created PVE guest.
+Rendered units are review artifacts; worker/credential/realtime bindings remain
+separately gated. Full runtime and host/PVE reboot acceptance is a later gate.
 """
 import argparse
 import json
+
+
+def provision_target():
+    """Привилегированный stdlib frontend того же installer, без другого commandlet."""
+    import subprocess
+    import sys
+    from mop.server.install_provision import prepare
+    try:
+        prepare(json.load(sys.stdin))
+    except (ValueError, RuntimeError) as error:
+        print(json.dumps({'error': str(error)}))
+        return 1
+    except (OSError, subprocess.SubprocessError):
+        print(json.dumps({'error': 'OS preparation unavailable; partial resources retained; explicit maintenance required'}))
+        return 1
+    return 0
 
 
 def main(argv):
@@ -47,7 +70,10 @@ def _main(argv):
     parser.add_argument('--username')
     parser.add_argument('--keep', type=int, default=7)
     parser.add_argument('--delete', action='store_true')
+    parser.add_argument('--apply', action='store_true')
     args = parser.parse_args(argv)
+    if args.apply and args.action != 'provisioning':
+        parser.error('--apply is only valid with provisioning')
     from mop.server import installation as install
     from mop.server.controller.bootstrap import private_bytes
     spec = install.load_specification(args.spec)
@@ -56,7 +82,11 @@ def _main(argv):
     if args.action == 'plan':
         print(json.dumps(install.plan(spec), sort_keys=True))
     elif args.action == 'provisioning':
-        print(json.dumps(install.provisioning_artifact(spec), sort_keys=True))
+        if args.apply:
+            from mop.server.install_provision import apply
+            apply(spec, apply=True)
+        else:
+            print(json.dumps(install.provisioning_artifact(spec), sort_keys=True))
     elif args.action == 'retention':
         result = install.retain_backups(dict(spec.paths)['backup'], keep=args.keep, apply=args.delete)
         if not args.delete:
@@ -141,7 +171,7 @@ def _main(argv):
                         raise RuntimeError('initial settings document is not valid JSON') from None
                     install.initialize_configuration(actor, values)
                 else:
-                    print(json.dumps(install.render_catalog(actor), sort_keys=True))
+                    print(json.dumps(install.render_catalog(actor, spec=spec), sort_keys=True))
         finally:
             close_pools()
     return 0
