@@ -160,8 +160,8 @@ CSS.
 
 | Что | Где |
 |---|---|
-| собрать `dist` | `mop dev web build` (`npm ci` и `vite build`; нужен node 22) |
-| сверить `dist` со свежей сборкой | `mop dev web build --check`: собирает в сторону, различия — списком, код 1 |
+| собрать `dist` | `mop dev web build` (`npm ci` и `vite build`; нужен node 22); та же команда пишет упакованное зеркало `mop/server/controller/dist` (#627/#644) — пакет везёт дашборд с собой |
+| сверить `dist` со свежей сборкой | `mop dev web build --check`: собирает в сторону, сверяет и `web/dist`, и зеркало байт в байт, различия — списком, код 1 |
 | на каждый push | все три frontend-гейта в `test:py3.12` (#678): `mop dev web build --check`, `mop dev web test --types`, `mop dev web test`; `deploy:mop` от него зависит |
 | тесты компонентов | `mop dev web test [file ...]` (Vitest + Testing Library) |
 | проверка TypeScript | `mop dev web test --types` |
@@ -171,6 +171,14 @@ CSS.
 байт. Правка страницы — это правка в `web/src` и пересобранный `dist` в том же
 коммите; `web/node_modules` в пакет не едет (список исключений один,
 `deploy/group_vars/all.yml`).
+
+С #627/#644 тот же собранный дашборд лежит второй раз в
+`mop/server/controller/dist` и уезжает в wheel: сервер не имеет ни node, ни
+рабочей копии репозитория, а новый контроллер Django отдаёт страницу тем же
+origin, что `/api/v1` (`mop/server/controller/dashboard.py`: `index`
+no-store, ассеты с хешем в имени — год immutable). Зеркало пишет и сверяет
+та же единственная команда `mop dev web build [--check]` — двух правд и
+ручно скопированного dist нет.
 
 ## Приватный чат и терминал
 

@@ -1,12 +1,13 @@
-"""Только стандартный Admin: предметные endpoints добавляют их владельцы."""
+"""Только стандартный Admin; предметные endpoints добавляют их владельцы."""
 from django.contrib import admin
-from django.urls import path
+from django.urls import path, re_path
 
 # Стандартный token admin раскрывает bearer key; общий Admin его не публикует.
 from rest_framework.authtoken.models import TokenProxy
 if admin.site.is_registered(TokenProxy):
     admin.site.unregister(TokenProxy)
 from .views import Health
+from . import dashboard
 
 from django.views.decorators.cache import never_cache
 from . import authviews as auth
@@ -71,4 +72,9 @@ urlpatterns = [
     path('api/v1/puppets/<uuid:target_id>/commands/restart', operations.RestartPuppet.as_view()),
     path('api/v1/operations', operations.RequestLookup.as_view()),
     path('api/v1/operations/<uuid:operation_id>', operations.OperationStatus.as_view()),
+    # Упакованный дашборд (#627/#644): тот же origin, что API; глубже
+    # маршрутов страница сама разбирает hash-путь. Плоское имя -- в самой
+    # отдаче, здесь только буквенно-цифровые с точкой и дефисом.
+    path('', dashboard.index),
+    re_path(r'^assets/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)$', dashboard.asset),
 ]

@@ -66,6 +66,11 @@ def check_dependencies_351(c):
     # скилла мастера: у каждой роли soul.yaml и промпт (docs/SOUL.md).
     c.check("#351 the role catalogue ships as package data",
             "skills/*/*" in data.get("mop", []))
+    # #627/#644: контроллер везёт собранный дашборд (index и ассеты), сервер
+    # не имеет ни node, ни рабочей копии. Живая отдача -- tests/packaged_dashboard.py.
+    controller = data.get("mop.server.controller", [])
+    c.check("#627 the packaged dashboard ships in the wheel",
+            "dist/index.html" in controller and "dist/assets/*" in controller)
 
 
 def check_console_351(c):
