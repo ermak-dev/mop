@@ -19,6 +19,8 @@ from django.utils import timezone
 # RESULT: schema, live credential, scope и source projection проверяются реальной БД.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class AuthenticationBoundary(TransactionTestCase):
+    serialized_rollback = True
+
     def test_login_requires_csrf_even_for_anonymous_browser(self):
         response = Client(enforce_csrf_checks=True).post('/api/v1/auth/login',
             {'username': 'human', 'password': 'not-a-real-secret'}, secure=True)
@@ -38,6 +40,8 @@ class AuthenticationBoundary(TransactionTestCase):
 
 
 class AccessContracts(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         # Отсутствующий app — собственный проверяемый red, а не ошибка импорта.
         self.assertTrue(apps.is_installed('mop.server.access'), 'Access schema must be installed')

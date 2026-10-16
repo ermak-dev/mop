@@ -59,4 +59,6 @@ class GatewayHTTP:
 
 
 def bind_http(http, runtime, gateway=None):
+    if gateway is not None and gateway.runtime is not runtime:
+        raise ValueError('proxy management gateway runtime must match controller owner')
     return GatewayHTTP(http, gateway if gateway is not None else Gateway(runtime=runtime))

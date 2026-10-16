@@ -1,7 +1,7 @@
 """Проверки единственного владельца чистых правил management gateway #647."""
 import json
 import sys
-import _lib  # noqa: F401
+from _lib import Checks
 from mop.server import management_policy as p
 
 # HYPOTHESIS: ранний return маскирует второй ключ; PATCH возвращает старые bytes.
@@ -9,10 +9,8 @@ from mop.server import management_policy as p
 # STATUS: FIXED — see #647
 
 def main():
-    failures = []
-    def check(name, value):
-        if not value:
-            failures.append(name)
+    checks = Checks()
+    check = checks.check
     result = p.guard_management_write('PUT', '/v8/management/config',
         b'{"secret-key":"managed-by-mop","management":{"secret-key":"replacement"}}', lambda: 'key')
     check('placeholder must not hide a second replacement', result.get('status') == 403)
@@ -55,9 +53,7 @@ def main():
     check('redaction expansion remains bounded', p.redact_management_read('/v8/management/config', body) is None)
     check('allowed HTTP response header names are case insensitive',
         p.response_headers({'x-cpa-version':'fixture', 'set-cookie':'private'}) == {'X-Cpa-Version':'fixture'})
-    for name in failures:
-        print('FAIL: ' + name)
-    return bool(failures)
+    return checks.report('gateway_policy')
 
 if __name__ == '__main__':
     sys.exit(main())

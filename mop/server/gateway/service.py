@@ -103,8 +103,9 @@ class Gateway:
                 return refusal(504 if method in UNSAFE else 502,
                     'proxy management write outcome unknown' if method in UNSAFE else 'proxy management upstream unavailable')
         finally:
-            # Runtime.blocking ждёт quiescence даже при отмене caller. При
-            # отмене ДО старта можно освободить claim, ПОСЛЕ — только receipt.
+            # Runtime.effect сохраняет весь use case после отмены caller;
+            # blocking и фиксация receipt остаются внутри owned effect.
+            # До старта claim освобождается, после — завершается только receipt.
             await self.runtime.database(self.breaker.complete, claim, status if started else 400)
         await self.runtime.database(self._authorize, actor, credential)
         if status in (401, 403):

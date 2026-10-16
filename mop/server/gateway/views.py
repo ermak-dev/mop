@@ -2,7 +2,6 @@
 from django.core.exceptions import RequestDataTooBig
 from django.http import HttpResponse
 from django.middleware.csrf import get_token
-from mop.server.controller.runtime import database_call
 from .authority import HumanAuthority
 from .panel import shim, adapt, CSP
 from .policy import MAX_BODY, UNSAFE
@@ -23,9 +22,13 @@ def response(reply):
 async def gateway_view(request, resource=None):
     path = request.path
     is_panel = path in ('/llm/management.html', '/llm/raw/management.html')
+    gateway = getattr(request, 'scope', {}).get('mop.gateway')
+    if gateway is None:
+        return response(refusal(503, 'proxy management gateway is not bound'))
     try:
-        # Никаких token fallback/request.user flags. Session сверяется с БД.
-        actor = await database_call(HumanAuthority().session, request.session.session_key)
+        # Никаких token fallback/request.user flags. Session сверяется с БД
+        # только через Runtime, которым владеет ASGI composition.
+        actor = await gateway.runtime.database(HumanAuthority().session, request.session.session_key)
     except (PermissionError, ValueError):
         return response(refusal(403, 'proxy management permission required'))
     if is_panel and request.method != 'GET':
@@ -36,9 +39,6 @@ async def gateway_view(request, resource=None):
         from .values import Reply
         get_token(request)
         return response(Reply(200, shim(), (('Content-Type', 'text/html; charset=utf-8'),)))
-    gateway = getattr(request, 'scope', {}).get('mop.gateway')
-    if gateway is None:
-        return response(refusal(503, 'proxy management gateway is not bound'))
     try:
         length = request.headers.get('Content-Length', '0')
         if not length.isdecimal():

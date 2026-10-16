@@ -43,6 +43,8 @@ class Gate:
 
 
 class SecretCases(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         self.assertIsNotNone(importlib.util.find_spec('mop.server.secrets.services'),
                              'missing encrypted ORM store commands')

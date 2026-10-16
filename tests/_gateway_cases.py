@@ -16,6 +16,34 @@ from django.utils import timezone
 from _gateway_process import process_gateway as _process_gateway
 
 
+def bound_client(gateway, *, cookies=None, enforce_csrf_checks=False):
+    """Django test handler получает тот же owned binding, что ASGI ingress."""
+    from django.test import AsyncClient
+    from django.test.client import AsyncClientHandler
+    class BoundHandler(AsyncClientHandler):
+        async def __call__(self, scope):
+            return await super().__call__({**scope, 'mop.gateway': gateway})
+    client = AsyncClient(enforce_csrf_checks=enforce_csrf_checks)
+    client.handler = BoundHandler(enforce_csrf_checks=enforce_csrf_checks)
+    if cookies is not None:
+        client.cookies = cookies
+    return client
+
+
+def management_get(path, *, cookies=None):
+    from mop.server.controller.runtime import Runtime
+    from mop.server.gateway.service import Gateway
+    async def run():
+        runtime = Runtime()
+        await runtime.start()
+        try:
+            client = bound_client(Gateway(runtime=runtime), cookies=cookies)
+            return await client.get(path, secure=True)
+        finally:
+            await runtime.aclose()
+    return asyncio.run(run())
+
+
 # HYPOTHESIS: прежний HTTP gateway не подключён к Django и общему ORM breaker.
 # SOLUTION: отдельный adapter, текущая session authority и короткие ORM claims.
 # RED: PG16 — 14 собственных failures до реализации; отдельно известный restore/root.
@@ -24,10 +52,12 @@ from _gateway_process import process_gateway as _process_gateway
 # STATUS: FIXED — see #647; adapter/core, не full CI или новая установка.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class GatewayBoundary(TransactionTestCase):
+    serialized_rollback = True
+
     def test_gateway_is_registered_and_guest_never_gets_panel(self):
         self.assertTrue(apps.is_installed('mop.server.gateway'), 'gateway app must be installed')
         for path in ('/llm/management.html', '/llm/raw/management.html', '/v8/management/config'):
-            response = Client().get(path, secure=True)
+            response = management_get(path)
             self.assertEqual(response.status_code, 403)
             self.assertIn('no-store', response.headers.get('Cache-Control', ''))
 
@@ -46,17 +76,20 @@ class GatewayBoundary(TransactionTestCase):
         bind_local_identity(user.pk)
         client = Client()
         client.force_login(user)
-        response = client.get('/llm/management.html', secure=True)
+        response = management_get('/llm/management.html', cookies=client.cookies)
         self.assertEqual(response.status_code, 403)
         permission = Permission.objects.get(content_type__app_label='gateway', codename='manage_proxy')
         user.user_permissions.add(permission)
-        response = client.get('/v8/management/config', secure=True)
+        response = management_get('/v8/management/config', cookies=client.cookies)
         self.assertEqual(response.status_code, 503)
+        self.assertIn(b'proxy management upstream is not bound', response.content)
         user.user_permissions.clear()
-        self.assertEqual(client.get('/llm/management.html', secure=True).status_code, 403)
+        self.assertEqual(management_get('/llm/management.html', cookies=client.cookies).status_code, 403)
 
 
 class GatewayPolicies(TransactionTestCase):
+    serialized_rollback = True
+
     def test_guard_and_redaction_have_one_owner_for_old_and_new_adapters(self):
         self.assertTrue(apps.is_installed('mop.server.gateway'), 'gateway app must be installed')
         from mop.server import management_policy as policy, web
@@ -72,6 +105,8 @@ class GatewayPolicies(TransactionTestCase):
 
 
 class GatewayCoordination(TransactionTestCase):
+    serialized_rollback = True
+
     def test_breaker_claims_are_durable_singleflight_not_local_locks(self):
         self.assertTrue(apps.is_installed('mop.server.gateway'), 'gateway ORM must be installed')
         from mop.server.gateway.breaker import Breaker
@@ -105,6 +140,8 @@ class GatewayCoordination(TransactionTestCase):
 
 
 class GatewayExecution(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(apps.is_installed('mop.server.gateway'), 'gateway app must be installed')
         from mop.server.access.services import bind_local_identity, session_context
@@ -408,7 +445,6 @@ class GatewayExecution(TransactionTestCase):
 
     def test_stock_panel_csrf_adapter_and_unsafe_django_session_requests(self):
         import re
-        from django.test import AsyncClient
         from mop.server.controller.runtime import Runtime
         from mop.server.gateway.service import Gateway
         from mop.server.gateway.values import Credential, Reply
@@ -429,13 +465,7 @@ class GatewayExecution(TransactionTestCase):
             await runtime.start()
             try:
                 gateway = Gateway(runtime=runtime, source=Source(), transport=Transport())
-                from django.test.client import AsyncClientHandler
-                class BoundHandler(AsyncClientHandler):
-                    async def __call__(self, scope):
-                        return await super().__call__({**scope, 'mop.gateway': gateway})
-                client = AsyncClient(enforce_csrf_checks=True)
-                client.handler = BoundHandler(enforce_csrf_checks=True)
-                client.cookies = self.client.cookies
+                client = bound_client(gateway, cookies=self.client.cookies, enforce_csrf_checks=True)
                 panel = await client.get('/llm/raw/management.html', secure=True)
                 self.assertEqual(panel.status_code, 200)
                 text = panel.content.decode()
@@ -563,12 +593,58 @@ class GatewayExecution(TransactionTestCase):
         self.assertEqual(missing_reply.status, 503)
         self.assertIn(b'proxy management secret is missing', missing_reply.body)
 
+    # HYPOTHESIS: первый session lookup проходит мимо обработки bounded DB errors
+    # в Gateway.request и превращает backpressure/DB outage в HTTP 500.
+    def test_owned_session_lookup_capacity_is_stable_429_without_upstream(self):
+        from mop.server.controller.runtime import Runtime
+        from mop.server.gateway.service import Gateway
+        entered, release = threading.Event(), threading.Event()
+        def busy():
+            entered.set()
+            release.wait(3)
+        async def run():
+            runtime = Runtime(database_limit=1, queue_limit=0)
+            await runtime.start()
+            task = asyncio.create_task(runtime.database(busy))
+            try:
+                async with asyncio.timeout(2):
+                    while not entered.is_set():
+                        await asyncio.sleep(.005)
+                client = bound_client(Gateway(runtime=runtime), cookies=self.client.cookies)
+                reply = await client.get('/llm/management.html', secure=True)
+                self.assertEqual(reply.status_code, 429)
+                self.assertIn(b'proxy management capacity exhausted', reply.content)
+            finally:
+                release.set()
+                await task
+                await runtime.aclose()
+        asyncio.run(run())
+
+    def test_owned_session_lookup_database_outage_is_stable_503(self):
+        from django.db import DatabaseError
+        from mop.server.controller.runtime import Runtime
+        from mop.server.gateway.service import Gateway
+        async def run():
+            runtime = Runtime()
+            await runtime.start()
+            try:
+                client = bound_client(Gateway(runtime=runtime), cookies=self.client.cookies)
+                with patch('mop.server.gateway.authority.HumanAuthority.session',
+                           side_effect=DatabaseError('private-driver-error')):
+                    reply = await client.get('/llm/management.html', secure=True)
+                self.assertEqual(reply.status_code, 503)
+                self.assertIn(b'proxy management authority unavailable', reply.content)
+                self.assertNotIn(b'private-driver-error', reply.content)
+            finally:
+                await runtime.aclose()
+        asyncio.run(run())
+
     def test_service_and_grant_never_proxy_even_with_staff_superuser_flags(self):
         from mop.server.access.models import Principal
         for kind in ('service', 'grant'):
             Principal.objects.filter(user=self.user).update(kind=kind)
             get_user_model().objects.filter(pk=self.user.pk).update(is_staff=True, is_superuser=True)
-            self.assertEqual(self.client.get('/llm/management.html', secure=True).status_code, 403)
+            self.assertEqual(management_get('/llm/management.html', cookies=self.client.cookies).status_code, 403)
 
     def test_slow_upstream_leaves_rest_loop_heartbeat_and_ws_transport_available(self):
         import time
@@ -669,6 +745,7 @@ class GatewayExecution(TransactionTestCase):
         from mop.server.controller.runtime import Runtime
         key = Credential(self.key_id, 'fixture-cancel-key')
         entered, release = threading.Event(), threading.Event()
+        calls = []
         class Source:
             def get(self, actor):
                 return key
@@ -676,26 +753,36 @@ class GatewayExecution(TransactionTestCase):
                 return credential == key
         class Slow:
             def call(self, *args):
+                calls.append(args[1])
                 entered.set()
                 release.wait(3)
                 return Reply(200, b'{}', ())
         async def run():
             runtime = Runtime(blocking_limit=2, effect_limit=2, queue_limit=2)
             await runtime.start()
-            gateway = Gateway(runtime=runtime, source=Source(), transport=Slow())
+            gateway = Gateway(runtime=runtime, source=Source(), transport=Slow(), wait_seconds=.1)
             task = asyncio.create_task(gateway.request(self.actor, 'PUT', '/v8/management/config', b'{}', {}))
             try:
-                while not entered.is_set():
-                    await asyncio.sleep(.005)
+                async with asyncio.timeout(3):
+                    while not entered.is_set():
+                        await asyncio.sleep(.005)
                 task.cancel()
-                await asyncio.sleep(.02)
-                self.assertFalse(task.done())
+                # Отмена caller быстрая; owned effect, HTTP и claim остаются живы.
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=.2)
                 self.assertGreater(runtime.pending, 0)
                 self.assertEqual(await runtime.database(lambda: Circuit.objects.get(pk=1).state), 'running')
+                waiter = await gateway.request(self.actor, 'GET', '/v8/management/config', b'', {})
+                self.assertEqual(waiter.status, 429)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(await runtime.database(lambda: Circuit.objects.get(pk=1).state), 'running')
                 release.set()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
-                self.assertEqual(await runtime.database(lambda: Circuit.objects.get(pk=1).state), 'idle')
+                async with asyncio.timeout(2):
+                    while await runtime.database(lambda: Circuit.objects.get(pk=1).state) != 'idle':
+                        await asyncio.sleep(.005)
+                    while runtime.pending:
+                        await asyncio.sleep(.005)
+                self.assertEqual(len(calls), 1)
             finally:
                 release.set()
                 await runtime.aclose()
@@ -713,6 +800,26 @@ class GatewayExecution(TransactionTestCase):
 
 
 class GatewayTransportContracts(TransactionTestCase):
+    serialized_rollback = True
+
+    # HYPOTHESIS: prebuilt Gateway может жить вне владельца ASGI shutdown.
+    def test_composition_refuses_gateway_owned_by_another_runtime(self):
+        from mop.server.controller.runtime import Runtime
+        from mop.server.gateway.composition import bind_http
+        from mop.server.gateway.service import Gateway
+        async def run():
+            owner, other = Runtime(), Runtime()
+            async def http(*args):
+                pass
+            try:
+                with self.assertRaisesRegex(ValueError, 'runtime'):
+                    bind_http(http, owner, Gateway(runtime=other))
+                self.assertIs(bind_http(http, owner, Gateway(runtime=owner)).gateway.runtime, owner)
+            finally:
+                await owner.aclose()
+                await other.aclose()
+        asyncio.run(run())
+
     def test_owned_http_fixture_enforces_body_headers_deadline_and_never_uses_proxy_env(self):
         import os
         import time
@@ -804,6 +911,8 @@ class GatewayTransportContracts(TransactionTestCase):
 
 
 class ProxyCredentialBoundary(TransactionTestCase):
+    serialized_rollback = True
+
     def test_controller_secret_gate_is_purpose_bound_and_rechecks_after_decryption(self):
         from mop.server.secrets.services import SecretStore
         from mop.server.secrets.crypto import Keyring, XChaCha20Provider

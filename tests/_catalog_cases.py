@@ -28,6 +28,8 @@ class Allow:
 
 
 class CatalogCases(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(hasattr(services, 'Catalog'), 'missing catalogue domain API: Catalog')
         for name in ('Project', 'Node', 'NodeProject', 'InstallationSetting', 'NodeSetting',
