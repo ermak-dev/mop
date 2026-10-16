@@ -127,6 +127,13 @@ class GrantInfo:
 
 
 @dataclass(frozen=True)
+class AddressedPolicy:
+    """Sealed allowlist и точные текущие версии всей цепочки, без secret bytes."""
+    required_names: tuple[tuple[str, str], ...]
+    grants: tuple[GrantInfo, ...]
+
+
+@dataclass(frozen=True)
 class MessageAuthority:
     source: RoleBinding
     target: RoleBinding

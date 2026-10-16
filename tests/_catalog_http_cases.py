@@ -81,6 +81,26 @@ class CatalogHTTP(TransactionTestCase):
         self.project.refresh_from_db()
         self.assertEqual(self.project.revision, 1)
 
+    # RED: PG17 — duplicate origin принят с 201 и записью второго значения.
+    # SOLUTION: bounded JSON parser использует общий strict decoder до serializers.
+    # RESULT: PG16/17 — по 6/6 green; duplicate CAS тоже отклонён без записи.
+    # STATUS: FIXED — see #634
+    def test_duplicate_json_fields_are_rejected_before_configuration(self):
+        self.user.is_superuser = True
+        self.user.save(update_fields=['is_superuser'])
+        body = '{"origin":"https://example.invalid/first.git","origin":"https://example.invalid/second.git"}'
+        response = self.authenticated_client().post('/api/v1/projects', body,
+            content_type='application/json', secure=True)
+        self.assertEqual(response.status_code, 400, response.content)
+        from mop.server.catalog.models import Project
+        self.assertFalse(Project.objects.filter(name__in=('first', 'second')).exists())
+        body = '{"origin":"' + self.project.origin + '","puppet_limit":4,"expected_revision":"0","expected_revision":"1"}'
+        response = self.authenticated_client().put('/api/v1/projects/' + str(self.project.pk), body,
+            content_type='application/json', secure=True)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.revision, 1)
+
     def test_browser_mutation_requires_csrf(self):
         client = Client(enforce_csrf_checks=True)
         client.force_login(self.user)

@@ -357,6 +357,10 @@ class Operations:
             projects, code, reason = self._scope(row), None, None
             try:
                 self._authorize(_actor(row), 'catalog.' + row.action + '_node', row.node_id, projects)
+                if self.executor is None or self.executor.kind is not PrincipalKind.SERVICE:
+                    raise Denied('enrolled node executor required for effect dispatch')
+                self._authorize(self.executor, 'catalog.record_node_application', row.node_id, projects)
+                self._authorize(self.executor, 'catalog.observe_node', row.node_id, projects)
             except Denied as error:
                 code, reason = 'access_denied', str(error)
             node = Node.objects.select_for_update().get(pk=row.node_id)
@@ -489,11 +493,27 @@ class Operations:
         self._require_binding()
         return m.Step.objects.get(operation_id=operation_id).name
 
-    def pending(self, *, limit=8):
+    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build'), node_id=None):
         self._require_binding()
-        if not 1 <= limit <= 8:
+        if type(limit) is not int or not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
+    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop'), node_id=None):
+        self._require_binding()
+        if type(limit) is not int or not 1 <= limit <= 8:
+            raise ValueError('worker batch exceeds controller safety caps')
+        if not handlers or not set(handlers) <= {'node_eligibility', 'image_build', 'scheduler_stop'}:
+            raise ValueError('finite controller worker handlers required')
+        # Stop lane (#625) остаётся в общем discovery: worker исполняет её только
+        # с_bound stops портом, что задаёт его handlers tuple.
         work = Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action='stop_job') | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
+        work &= Q(step__name__in=handlers)
+        if node_id is not None:
+            # Service enrollment касается только node-eligibility lane. Build
+            # scope — весь pinned plan, не его storage anchor Operation.node_id.
+            work &= ~Q(step__name='node_eligibility') | Q(node_id=node_id)
+        # Фильтр capability до LIMIT: чужая lane не вытесняет исполнимую работу.
+        # Stale lease разрешает только inspection прежнего token, не новый apply.
+        return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
         # Stale lease разрешает только inspection прежнего token, не новый apply.
         return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
 

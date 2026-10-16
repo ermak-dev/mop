@@ -108,8 +108,8 @@ class CredentialClient:
             'value': p.encoded(value), 'expected_revision': expected_revision})
         return self._result(p.SecretInfo, result)
 
-    def issue_addressed(self, auth: p.Credential) -> tuple[p.DeliveredSecret, ...]:
-        result = self._invoke(auth, p.Command.ADDRESSED, {})
+    def issue_addressed(self, auth: p.Credential, *, target_id: UUID) -> tuple[p.DeliveredSecret, ...]:
+        result = self._invoke(auth, p.Command.ADDRESSED, {'target_id': str(target_id)})
         if type(result) is not list or len(result) > 128:
             raise p.CredentialError('invalid credential delivery response')
         return tuple(self._result(p.DeliveredSecret, row) for row in result)

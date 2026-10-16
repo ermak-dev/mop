@@ -116,17 +116,21 @@ def main():
     c.check("#459 update calls the shared operation",
             calls.seen and calls.seen[0][0] == "update", calls.seen)
 
-    # ── restart: командлет зовёт ops.restart ────────────────────────────
+    # #642: restart — тот же HTTPS handler, не прежний клиентский workflow.
+    # Полный wire/unknown/CAS проверяется отдельно в control_consumers.
     from mop.cli.core import restart as cli_restart
-    calls = Calls(ops.outcome(ops.ACCEPTED, "pu-mop-9"), "restart")
-    with patched(lib, note=lambda *a: None), \
-            patched(cli_restart.puppets, running_alloc=lambda n: True), \
-            patched(bus, call_cluster=lambda verb, **kw: {"ok": True}), \
-            patched(bus, login=lambda: "ermak"), \
-            patched(ops, restart=calls):
-        code = cli_restart.main(["pu-mop-9"])
-    c.check("#459 restart calls the shared operation",
-            calls.seen and calls.seen[0][0] == "restart", calls.seen)
+    from mop.cli import _control
+    routed = []
+    def https(surface, argv):
+        routed.append((surface, argv))
+        return 3
+    def no_old_restart(*args, **kwargs):
+        raise AssertionError('restart reached legacy client orchestration')
+    args = ['9db85243-4ae1-4511-8acc-bf6c8140cf2c']
+    with patched(_control, invoke=https), patched(ops, restart=no_old_restart):
+        code = cli_restart.main(args)
+    c.expect('#642 restart passes unchanged args to the HTTPS handler', routed, [('restart', args)])
+    c.expect('#642 restart preserves the outstanding operation exit', code, 3)
 
     # ── channel.send_to_puppet -- тонкая обёртка ops.send_to_puppet ────
     from mop.client import channel

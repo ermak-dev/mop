@@ -23,7 +23,7 @@ from ..secrets.services import RetainedSecrets, RetentionScope, outside_transact
 from ..secrets.crypto import SecretCryptoError
 from . import models as m, services as auth
 from .context import ActorContext, PrincipalKind
-from .delegation import (ApprovedPolicy, RoleBinding, BundleContent, GrantInfo,
+from .delegation import (ApprovedPolicy, RoleBinding, BundleContent, GrantInfo, AddressedPolicy,
                          MessageAuthority, PolicyBinding, RetirementReceipt, allows, allows_capabilities, allows_spawn, uuid_value)
 
 
@@ -445,6 +445,22 @@ class Grants:
     def authorize_execution(self, binding):
         """Проверка получающего grant без provider I/O; инициатора проверяет WorkPort."""
         self._execution_rows(binding)
+
+    @storage_boundary
+    def addressed_policy(self, binding):
+        """Текущий получающий grant + sealed names; только SQL внутри caller transaction.
+
+        Проверка seal позволяет не расшифровывать immutable manifest под locks.
+        Это не activation: зарезервированный или отозванный grant здесь закрыт.
+        """
+        chain = self._execution_rows(binding)
+        self._owner_permission(binding.human_owner_id, 'secrets.deliver_secret', binding.project_id)
+        names = tuple(m.RoleSecretName.objects.filter(bundle_id=chain[0].intent.bundle_id)
+            .order_by('kind', 'name').values_list('kind', 'name')[:129])
+        if not names or len(names) > 128:
+            raise auth.Denied('bounded nonempty approved project secret allowlist required')
+        required = tuple(sorted(('variable' if kind == 'vars' else 'file', name) for kind, name in names))
+        return AddressedPolicy(required, tuple(self._info(row) for row in chain))
 
     def local_authority(self):
         return LocalGrantAuthority(self)

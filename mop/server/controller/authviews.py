@@ -10,7 +10,8 @@ from django.views.decorators.debug import sensitive_post_parameters, sensitive_v
 from django.views.decorators.http import require_GET
 from rest_framework import serializers
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.exceptions import PermissionDenied, Throttled
+from rest_framework.exceptions import ParseError, PermissionDenied, Throttled
+from rest_framework.parsers import BaseParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -186,6 +187,17 @@ def _project(row):
             'revision': str(row.revision), 'puppet_limit': row.puppet_limit}
 
 
+class ProjectJSONParser(BaseParser):
+    media_type = 'application/json'
+
+    def parse(self, stream, media_type=None, parser_context=None):
+        from mop.server.operations.commands import decode_body, InvalidCommand, MAX_BODY_BYTES
+        try:
+            return decode_body(stream.read(MAX_BODY_BYTES + 1))
+        except InvalidCommand as error:
+            raise ParseError(str(error)) from None
+
+
 class CatalogRevision(serializers.Field):
     def to_internal_value(self, value):
         if (type(value) is not str or not value.isascii() or not value.isdecimal()
@@ -227,6 +239,8 @@ def _catalog_mutation(function, *, created=False):
 
 
 class Projects(PrivateView):
+    parser_classes = (ProjectJSONParser,)
+
     def post(self, request):
         serializer = ProjectCreate(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -247,6 +261,8 @@ class Projects(PrivateView):
 
 
 class Project(PrivateView):
+    parser_classes = (ProjectJSONParser,)
+
     def put(self, request, project_id):
         serializer = ProjectConfiguration(data=request.data)
         serializer.is_valid(raise_exception=True)

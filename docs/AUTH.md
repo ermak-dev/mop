@@ -23,6 +23,8 @@ The HTTP composition root binds these routes:
 | `POST /api/v1/auth/token/revoke` | Same authority; no token returned; session-based repeat is idempotent |
 | `GET /api/v1/identity` | Current identity metadata only, never a credential reference or permission snapshot |
 | `GET /api/v1/projects[/{uuid}]` | Catalog read use cases with the bound Access authorizer; foreign detail is 404, in-scope missing action is 403 |
+| `POST /api/v1/projects` | Strict Catalog creation, current global scope and action permissions; duplicate identity is 409, never an implicit update |
+| `PUT /api/v1/projects/{uuid}` | Catalog configuration with a positive decimal-string `expected_revision`; stale CAS is 409 without a write; session requests require CSRF |
 
 Project lists filter before counts and pagination. `page_size` is 1..500 (default
 100); the signed, five-minute `next_cursor` is bound to credential, current scoped
@@ -51,9 +53,12 @@ a transferable JSON credential; its construction belongs to the trusted boundary
 user-ID-selected application endpoint. `bind_local_identity` is an idempotent local
 maintenance hook used by initial administrator creation; it never resets a password.
 `enroll_service` is the privileged local enrollment hook for a new node-bound User,
-with unusable password, no staff/superuser flags and only the finite observation/
-application-receipt permission allowlist. Its caller must enforce maintenance
-identity and deliver the returned token through authorized enrollment, not a log.
+with unusable password, no staff/superuser flags and only the finite machine-work,
+observation, application-receipt and addressed project-secret permission allowlist.
+Its caller must enforce maintenance identity and deliver the returned token through
+authorized enrollment, not a log. Enrollment alone supplies no readiness, grant
+activation, transport retirement or installation-secret authority; addressed secret
+issuance independently validates the current execution and approved role proofs.
 
 `Access.authorize` implements Catalog's existing authorizer port. It separates
 ordinary Django action permission, actual Catalog FK scope, client ownership and
@@ -70,6 +75,16 @@ Standard `view_project`/`view_node` are not declared twice. The fresh-install
 catalog migration graph has one permissions leaf, `0002_action_permissions`.
 Access's role/grant actions live on Principal. Later owning apps register their
 CONTROL actions before the evaluator can admit them.
+
+The logical `sessions.*` CONTROL namespace maps to Django `execution.*` permissions
+through `access.permissions.permission_names`; it is not the built-in Django sessions app.
+Inventing a `sessions.create_puppet` Permission row cannot authorize the action.
+Django identifies an effective permission by `app_label.codename`, while rows are
+unique by ContentType and codename. Multiple registered models can therefore
+supply the same logical action, such as `execution.view_delivery`. Fixtures select
+their intended registered ContentType by natural key. Removing one row does not
+prove revocation while another direct or group grant still supplies that action;
+source-owned directory revocation removes only that source's grants.
 
 ### Transaction-local delegated authority (#635 / #639)
 

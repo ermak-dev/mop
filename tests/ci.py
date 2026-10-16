@@ -215,28 +215,104 @@ def check_group(c):
 
 
 def check_pipeline_yaml(c):
-    """#525 убрал дубликат Python-only прогона. #632 добавляет отдельную
-    семантику PostgreSQL 17; deploy ждёт оба backend gate, а не только 3.12.
-    HYPOTHESIS: зелёные 3.12/web разрешают rollout до завершения PG17.
-    SOLUTION: PG17 — обязательный needs и полный строгий прогон.
-    STATUS: FIXED — see #632
+    """#678: один обязательный Python 3.12 / PostgreSQL 17 job с web gate.
+
+    HYPOTHESIS: прежние две комбинации и отдельный web job не соответствуют
+    новому контракту; ранний Python failure не должен скрывать web-проверку,
+    а ранний отказ web-гейта -- остальные frontend-гейты.
+    RED: прежний YAML нарушал 10 проверок; второй test runtime -- ещё 5;
+    CHECK с одним build --check не запускал types и полный Vitest (fake mop
+    logged only python+web-build).
+    SOLUTION: один Python 3.12 container, PG17 и read-only Node toolchain;
+    CHECK -- три frontend-гейта, каждый со своим кодом, без fail-fast.
+    RESULT: все четыре команды выполняются при шести сочетаниях exit codes;
+    actual --check client --web прошёл build-гейт, а types и полный Vitest
+    выполнились и честно покрасили fixture своими отказами (см. #678).
+    STATUS: FIXED — see #678
     """
+    import json
+    from pathlib import Path
+    import subprocess
+    import tempfile
     import yaml
 
-    path = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.realpath(__file__))), ".gitlab-ci.yml")
-    try:
-        ci = yaml.safe_load(open(path, encoding="utf-8")) or {}
-    except FileNotFoundError:
-        c.fail("#525 .gitlab-ci.yml", "not found")
-        return
-    c.check("#525 the py3.13 test job is gone",
-            "test:py3.13" not in ci, sorted(k for k in ci if "3.13" in k))
-    c.check("#525 the py3.12 test job stays",
-            "test:py3.12" in ci and "extends" in (ci.get("test:py3.12") or {}), ci.get("test:py3.12"))
-    needs = (ci.get("deploy:mop") or {}).get("needs")
-    c.expect("#632 deploy needs both PostgreSQL gates and the dashboard", needs,
-             ["test:py3.12", "controller:pg17", "web:dist"])
+    path = Path(__file__).resolve().parents[1] / '.gitlab-ci.yml'
+    ci = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+    jobs = {name: value for name, value in ci.items() if not name.startswith('.')
+            and isinstance(value, dict) and ('script' in value or 'extends' in value)}
+    c.expect('#678 one test job and the separately guarded deployment', sorted(jobs),
+             ['deploy:mop', 'test:py3.12'])
+    template = ci['.tests']
+    variables = {**template.get('variables', {}), **ci['test:py3.12'].get('variables', {})}
+    c.expect('#678 one test stage', template.get('stage'), 'test')
+    c.expect('#678 strict mode is mandatory', variables.get('MOP_TESTS_STRICT'), '1')
+    c.expect('#678 the complete suite is retained', variables.get('TESTS'), 'bin/mop dev test -v')
+    c.expect('#678 only Python 3.12', variables.get('PYTHON_IMAGE'), 'python:3.12-slim-trixie')
+    c.expect('#678 only PostgreSQL 17', variables.get('POSTGRES_IMAGE'), 'postgres:17-bookworm')
+    c.expect('#678 matching PostgreSQL clients', variables.get('POSTGRES_MAJOR'), '17')
+    c.expect('#678 declared Node toolchain', variables.get('NODE_IMAGE'), 'node:22-bookworm')
+    check = variables.get('CHECK')
+    check_script = check.get('value') if isinstance(check, dict) else check
+    c.check('#678 dashboard verification remains mandatory',
+            isinstance(check_script, str) and 'bin/mop dev web build --check' in check_script)
+    c.check('#678 full frontend type checking remains mandatory',
+            isinstance(check_script, str) and 'bin/mop dev web test --types' in check_script)
+    c.check('#678 every frontend interaction test is selected',
+            isinstance(check_script, str) and any(line.strip().startswith('bin/mop dev web test ||')
+                                                for line in check_script.splitlines()))
+    c.expect('#678 deploy waits for the combined gate', ci['deploy:mop'].get('needs'), ['test:py3.12'])
+    c.expect('#678 deploy still requires the default branch and explicit target',
+             ci['deploy:mop'].get('rules'),
+             [{'if': '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET'}])
+    script = template['script'][-1]
+    with tempfile.TemporaryDirectory(prefix='mop-ci-contract-') as directory:
+        root = Path(directory)
+        binary = root / 'docker'
+        binary.write_text('#!' + sys.executable + '\n' + '''import json, os, subprocess, sys
+if os.environ['PYTHON_IMAGE'] not in sys.argv:
+    with open(os.environ['CALL_LOG'], 'a') as stream:
+        stream.write(json.dumps('wrong-image') + '\\n')
+    sys.exit(91)
+env = dict(os.environ)
+for index, value in enumerate(sys.argv[1:], 1):
+    if value == '-e' and '=' in sys.argv[index + 1]:
+        key, item = sys.argv[index + 1].split('=', 1)
+        env[key] = item
+sys.exit(subprocess.run(['bash', '-euc', env['TESTS']], cwd=env['CI_PROJECT_DIR'], env=env).returncode)
+''')
+        binary.chmod(0o700)
+        (root / 'bin').mkdir()
+        command = root / 'bin' / 'mop'
+        command.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
+cases = {
+    ('dev', 'test', '-v'): ('python', 'PYTHON_RESULT'),
+    ('dev', 'web', 'build', '--check'): ('web-build', 'WEB_BUILD_RESULT'),
+    ('dev', 'web', 'test', '--types'): ('web-types', 'WEB_TYPES_RESULT'),
+    ('dev', 'web', 'test'): ('web-tests', 'WEB_TEST_RESULT'),
+}
+kind, result = cases.get(tuple(sys.argv[1:]), ('other', None))
+with open(os.environ['CALL_LOG'], 'a') as stream:
+    stream.write(json.dumps(kind) + '\\n')
+sys.exit(int(os.environ[result]) if result else 92)
+''')
+        command.chmod(0o700)
+        log = root / 'calls.jsonl'
+        for codes in ((0, 0, 0, 0), (7, 0, 0, 0), (0, 9, 0, 0),
+                      (0, 0, 11, 0), (0, 0, 0, 13), (7, 9, 11, 13)):
+            python_result, build_result, types_result, tests_result = codes
+            log.write_text('')
+            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ.get('PATH', ''),
+                'CI_PROJECT_DIR': str(root), 'CI_JOB_ID': '678-fixture',
+                'PYTHON_IMAGE': str(variables['PYTHON_IMAGE']), 'NODE_IMAGE': str(variables.get('NODE_IMAGE', 'node:22-bookworm')),
+                'PYTHON_RESULT': str(python_result), 'WEB_BUILD_RESULT': str(build_result),
+                'WEB_TYPES_RESULT': str(types_result), 'WEB_TEST_RESULT': str(tests_result), 'CALL_LOG': str(log),
+                'TESTS': 'bin/mop dev test -v', 'CHECK': check_script or '', 'SETUP': 'unused'}
+            result = subprocess.run(['bash', '-euc', script], env=env, text=True, capture_output=True)
+            c.expect(f'#678 every check runs for exit codes {codes}',
+                     [json.loads(line) for line in log.read_text().splitlines()],
+                     ['python', 'web-build', 'web-types', 'web-tests'])
+            c.expect(f'#678 any failed check rejects the job {codes}',
+                     result.returncode == 0, all(code == 0 for code in codes))
 
 
 def main():

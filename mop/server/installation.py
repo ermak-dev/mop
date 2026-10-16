@@ -246,7 +246,53 @@ def initialize_configuration(actor, values):
         return catalog.set_installation_settings(actor, values, expected_revision=1)
 
 
-def render_catalog(actor):
+def service_artifact(spec, values):
+    """Производные units; не install/start и не proof готовности executors."""
+    from urllib.parse import urlsplit
+    from .catalog.definitions import DEFINITIONS
+    keys = ('public_origin', 'http_bind', 'http_port', 'db_pool_max',
+            'instance_db_connections', 'admin_db_headroom')
+    if type(values.get('public_origin')) is not str or not values['public_origin'].startswith('https://'):
+        raise ValueError('service composition requires an explicit HTTPS public origin')
+    settings = {key: DEFINITIONS[key].validate(values[key]) for key in keys}
+    origin = urlsplit(settings['public_origin'])
+    budget = connection_budget({role: (1, settings['db_pool_max']) for role in RUNTIME_ROLES},
+        runtime=settings['instance_db_connections'], maintenance=settings['admin_db_headroom'])
+    paths, users = dict(spec.paths), dict(spec.identities)
+    units = {}
+    for role in ('web', 'worker'):
+        config, state = paths['configuration'] + '/' + role, paths['state'] + '/' + role
+        command = paths['venv'] + '/bin/mop server controller '
+        if role == 'web':
+            command += ('serve --host ' + settings['http_bind'] + ' --port ' + str(settings['http_port']) +
+                        ' --hostname ' + origin.hostname + ' --tls-cert ' + config + '/tls.crt' +
+                        ' --tls-key ' + config + '/tls.key')
+        else:
+            command += 'worker'
+        units[role] = '\n'.join([
+            '[Unit]', 'Description=Fresh mop ' + role, 'After=network-online.target',
+            '[Service]', 'Type=simple', 'User=' + users[role], 'Group=' + users[role],
+            'WorkingDirectory=' + state,
+            'Environment=MOP_CONTROLLER_BOOTSTRAP=' + config + '/bootstrap.json',
+            'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
+            'TimeoutStartSec=30', 'TimeoutStopSec=30', 'KillSignal=SIGTERM',
+            'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only',
+            'PrivateTmp=true', 'UMask=0077', 'TasksMax=64', 'LimitNOFILE=1024',
+            'CapabilityBoundingSet=' + ('CAP_NET_BIND_SERVICE' if role == 'web' and settings['http_port'] < 1024 else ''),
+            'AmbientCapabilities=' + ('CAP_NET_BIND_SERVICE' if role == 'web' and settings['http_port'] < 1024 else ''),
+            'ReadWritePaths=' + state,
+            'InaccessiblePaths=' + paths['root_trust'] + ' ' + paths['backup'] + ' ' +
+                paths['configuration'] + '/maintenance',
+            '[Install]', 'WantedBy=multi-user.target', ''])
+    return {'units': units, 'connections': budget, 'applied': False, 'runtime_bound': False,
+            'required_artifacts': {'web': ['bootstrap.json', 'django.key', 'tls.crt', 'tls.key'],
+                                   'worker': ['bootstrap.json', 'django.key']},
+            'blocked_services': {'worker': [625], 'credentials': [669], 'builder': [648],
+                                 'gateway': [628]},
+            'services_started': False}
+
+
+def render_catalog(actor, *, spec=None):
     """Только derived desired artifact: никакого record_*_application за рендер."""
     from .access.services import AuthorizedCatalog
     from .catalog.definitions import DEFINITIONS
@@ -267,10 +313,13 @@ def render_catalog(actor):
                 if current.revision != node.revision:
                     raise RuntimeError('node changed while rendering; retry from a fresh catalog snapshot')
                 nodes.append(node_artifact(current, local))
-        return {'definition_keys': sorted(DEFINITIONS), 'desired_revision': effective.installation_revision,
-                'settings': values, 'connections': budget, 'nodes': nodes, 'applied': False,
-                'receipt': None, 'runtime_bound': False,
-                'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS]}
+        result = {'definition_keys': sorted(DEFINITIONS), 'desired_revision': effective.installation_revision,
+                  'settings': values, 'connections': budget, 'nodes': nodes, 'applied': False,
+                  'receipt': None, 'runtime_bound': False,
+                  'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS]}
+        if spec is not None:
+            result['services'] = service_artifact(spec, values)
+        return result
 
 
 def require_runtime_integration():

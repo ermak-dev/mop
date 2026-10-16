@@ -223,7 +223,7 @@ def parse_request(data):
     shapes = {Command.CREATE: ('project_id', 'name', 'kind', 'purpose', 'value'),
               Command.STAGE: ('secret_id', 'value', 'expected_revision'),
               Command.UPDATE: ('secret_id', 'value', 'expected_revision'),
-              Command.ADDRESSED: (), Command.ROTATION: ('rotation_id', 'claim_id', 'generation'),
+              Command.ADDRESSED: ('target_id',), Command.ROTATION: ('rotation_id', 'claim_id', 'generation'),
               Command.BUNDLE: ('bundle_id',),
               Command.PUBLISH_BUNDLE: ('project_id', 'manifest', 'prompt', 'provenance'),
               Command.APPROVE_BUNDLE: ('bundle_id',),

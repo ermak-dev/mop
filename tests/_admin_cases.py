@@ -57,7 +57,11 @@ class OperationBackedAdmin(TransactionTestCase):
     def allow(self, *names):
         for name in names:
             app, code = name.split('.')
-            self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
+            if app == 'controller':
+                permission = Permission.objects.get_by_natural_key(code, app, 'domainpermission')
+            else:
+                permission = Permission.objects.get(content_type__app_label=app, codename=code)
+            self.user.user_permissions.add(permission)
 
     def global_scope(self):
         a.AllProjectMembership.objects.get_or_create(user=self.user, source=self.source)
@@ -550,11 +554,31 @@ class OperationBackedAdmin(TransactionTestCase):
         a.ProjectMembership.objects.filter(user=self.user).delete()
         self.assertNotContains(self.get('/admin/'), str(self.project.pk))
 
+    # HYPOTHESIS: manage_proxy зарегистрирован у DomainPermission и Installation;
+    # положительная фикстура должна выбирать ContentType, не случайную строку.
+    # SOLUTION: natural key DomainPermission; отзыв удаляет оба grants действия,
+    # сохраняя независимое view_project и проверку отсутствующей gateway-ссылки.
+    # RESULT: положительная фикстура выбирает зарегистрированный ContentType;
+    # отзыв логического действия скрывает ссылку без очистки прочих разрешений.
+    # STATUS: FIXED — see #638 (только интеграционная фикстура).
+    def test_admin_fixture_grants_registered_controller_permission(self):
+        self.allow('controller.manage_proxy')
+        self.assertEqual(list(self.user.user_permissions.filter(
+            content_type__app_label='controller').values_list('content_type__model', 'codename')),
+            [('domainpermission', 'manage_proxy')])
+
     def test_authorized_admin_index_links_separate_management_gateway(self):
         self.global_scope()
         self.allow('controller.manage_proxy')
         response = self.get('/admin/')
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '/llm/management.html')
-        self.user.user_permissions.clear()
+        self.user.user_permissions.add(Permission.objects.get_by_natural_key(
+            'manage_proxy', 'controller', 'installation'))
+        self.assertEqual(self.user.user_permissions.filter(
+            content_type__app_label='controller', codename='manage_proxy').count(), 2)
+        self.user.user_permissions.remove(*Permission.objects.filter(
+            content_type__app_label='controller', codename='manage_proxy'))
         self.assertNotContains(self.get('/admin/'), '/llm/management.html')
+        self.assertTrue(self.user.user_permissions.filter(
+            content_type__app_label='catalog', codename='view_project').exists())

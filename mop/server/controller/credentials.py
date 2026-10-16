@@ -15,6 +15,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db import transaction
 
 from mop.common import credentials as p
 from mop.server.access import services as access
@@ -30,9 +31,26 @@ from .runtime import Runtime, Backpressure, require_restore_ready, verify_instal
 
 
 class AwaitAssignment:
-    """#639: не выдавать по permission/token/operation id вместо реального proof."""
+    """Адресная post-readiness выдача: locator из wire, authority из owner APIs."""
+    def __init__(self, application, target_id=None):
+        self.application, self.target_id = application, target_id
+
     def resolve(self, actor):
-        raise PermissionError('current assignment and addressed delivery composition is not bound')
+        app = self.application
+        # Только короткие SQL-only queries. Provider вызывается SecretStore уже
+        # после выхода; resolve повторяется с нуля после любого crypto wait.
+        with transaction.atomic():
+            app.fence()
+            if not app.snapshot['effects_enabled']:
+                raise access.Denied('installation effects are disabled')
+            proof = Assignments().credential_proof(actor, self.target_id, epoch=UUID(app.snapshot['epoch']))
+            binding = proof.binding
+            policy = app.grants.addressed_policy(RoleBinding(binding.project_id, binding.target_id,
+                binding.incarnation_id, binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id))
+            return app.store.addressed_selection(actor, project_id=binding.project_id, node_id=binding.node_id,
+                assignment_id=binding.target_id, incarnation=binding.incarnation_id, role=binding.role,
+                digest=binding.bundle_digest, grant_id=binding.grant_id, required_names=policy.required_names,
+                current_proof=(proof, policy))
 
 
 class CurrentBindings:
@@ -102,7 +120,7 @@ class CredentialApplication:
         # RetentionAuthority port, не переносим Access/Grants ORM в Root.
         self.grants.secrets.authority = CurrentRetention(self, self.grants.secrets.authority)
         self.store = secrets.SecretStore(provider=provider, authorizer=CurrentAccess(self),
-            delivery_gate=delivery_gate if delivery_gate is not None else AwaitAssignment())
+            delivery_gate=delivery_gate if delivery_gate is not None else AwaitAssignment(self))
 
     @secrets.storage_errors
     def fence(self):
@@ -129,7 +147,11 @@ class CredentialApplication:
         elif command is p.Command.UPDATE:
             result = self.store.update(actor, **args)
         elif command is p.Command.ADDRESSED:
-            result = self.store.issue_addressed(actor)
+            # Gate принадлежит одному запросу; concurrent socket tasks не меняют
+            # target общего store и не могут подменить друг другу selection.
+            store = secrets.SecretStore(provider=self.store.provider, authorizer=self.store.authorizer,
+                delivery_gate=AwaitAssignment(self, **args))
+            result = store.issue_addressed(actor)
         elif command is p.Command.ROTATION:
             result = self.store.issue_rotation(actor, **args)
         elif command is p.Command.PUBLISH_BUNDLE:

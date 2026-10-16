@@ -1,15 +1,21 @@
-"""mop dev controller [--postgres 16|17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres] [--label dotted.test] [--realtime] [--cross-uid]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
 
-Runs the selected check with the declared server extra and matching PostgreSQL
-client tools in fresh Docker containers, using the same setup as CI. Requires
+Runs the selected check on Python 3.12 and PostgreSQL 17 with the declared server
+extra and matching client tools in fresh Docker containers, using the same setup as CI. Requires
 an existing Docker installation and a mop Git working copy; installs no host
-packages and uses no pool. The snapshot contains tracked and nonignored source,
-not installation inputs or .git. No host ports, installation credentials or
+packages and uses no pool. The client check runs clean-wheel HTTPS checks and
+native Django/PostgreSQL client contracts. The snapshot contains tracked and
+nonignored source, not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
 checks start their own native TLS broker with fixture-only principals and ACLs.
 --cross-uid runs only credential_service as root inside the owned container to
 exercise distinct OS peers; the default suite still runs as unprivileged ci.
+--web adds the frontend gates — the dashboard build check, full TypeScript
+checking and the complete Vitest interaction suite — with Node tools in the
+same Python 3.12 container; every check runs under its own exit status and any
+failure rejects the fixture. It cannot be combined with the narrow root-only
+--cross-uid mode.
 """
 import argparse
 import os
@@ -49,18 +55,27 @@ def _source_snapshot(top, destination):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--postgres', choices=('16', '17'), default='17')
-    parser.add_argument('--check', choices=('controller', 'controller_runtime', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage', 'fresh_postgres'), default='controller')
+    parser.add_argument('--postgres', choices=('17',), default='17')
+    parser.add_argument('--check', choices=('controller', 'controller_runtime', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage', 'fresh_postgres', 'client'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     parser.add_argument('--realtime', action='store_true', help='include the owned native TLS NATS fixture')
     parser.add_argument('--cross-uid', action='store_true')
+    parser.add_argument('--web', action='store_true', help='include the dashboard gate in the same Python container')
     args = parser.parse_args(argv)
+    if args.cross_uid and args.web:
+        parser.error('--web cannot extend the root-only credential fixture')
     if args.cross_uid and args.check != 'credential_service':
         parser.error('--cross-uid requires --check credential_service')
     if args.label and args.check != 'controller':
         parser.error('--label requires --check controller')
-    check_script = 'proxy_usage_store' if args.check == 'usage' else args.check
+    check_script = {'usage': 'proxy_usage_store', 'client': 'control_tls'}.get(args.check, args.check)
     test_script = shlex.join(['python3', f'tests/{check_script}.py', *args.label])
+    if args.check == 'client':
+        test_script += ' && ' + shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])
+    if args.web:
+        test_script = ('python_status=0; bash -c ' + shlex.quote(test_script) + ' || python_status=$?; '
+            'web_status=0; python3 tests/_web_dist_fixture.py || web_status=$?; '
+            'test "$python_status" -eq 0 && test "$web_status" -eq 0')
     docker = shutil.which('docker')
     if not docker:
         raise RuntimeError('isolated controller checks require an existing Docker installation')
@@ -69,7 +84,7 @@ def main(argv):
     top = Path(root())
     with (top / '.gitlab-ci.yml').open() as stream:
         ci = yaml.safe_load(stream)
-    job = ci['test:py3.12' if args.postgres == '16' else 'controller:pg17']['variables']
+    job = ci['test:py3.12']['variables']
     setup = ci['.tests']['variables']['SETUP']['value']
     if args.cross_uid:
         command = 'exec su ci -s /bin/bash -c "$TESTS"'
@@ -79,6 +94,7 @@ def main(argv):
     prefix = 'mop-controller-test-' + uuid.uuid4().hex[:16]
     database, worker = prefix + '-db', prefix + '-runner'
     broker_image = prefix + '-nats-image'
+    node_image = prefix + '-node-image'
     cleanup_errors = []
 
     def call(words, *, check=True, **kwargs):
@@ -114,7 +130,21 @@ def main(argv):
         snapshot = Path(directory) / 'source'
         _source_snapshot(top, snapshot)
         broker_args = []
+        node_args = []
         try:
+            if args.web:
+                tools = Path(directory) / 'node'
+                (tools / 'bin').mkdir(parents=True)
+                (tools / 'lib' / 'node_modules').mkdir(parents=True)
+                call(['create', '--name', node_image, job['NODE_IMAGE']], stdout=subprocess.DEVNULL)
+                call(['cp', node_image + ':/usr/local/bin/node', str(tools / 'bin' / 'node')])
+                call(['cp', node_image + ':/usr/local/lib/node_modules/npm', str(tools / 'lib' / 'node_modules') + '/'])
+                (tools / 'bin' / 'npm').symlink_to('../lib/node_modules/npm/bin/npm-cli.js')
+                (tools / 'bin' / 'npx').symlink_to('../lib/node_modules/npm/bin/npx-cli.js')
+                for path in (tools, tools / 'bin', tools / 'lib', tools / 'lib' / 'node_modules'):
+                    path.chmod(0o755)
+                node_args = ['-v', f'{tools}:/opt/mop-node:ro',
+                             '-v', 'mop-controller-fixture-npm:/tmp/ci-home/.npm']
             if args.realtime:
                 binary = Path(directory) / 'nats'
                 binary.mkdir()
@@ -146,7 +176,7 @@ def main(argv):
                            '-v', 'mop-controller-fixture-pip:/root/.cache/pip',
                            '-e', 'MOP_TESTS_STRICT=1', '-e', 'MOP_TEST_POSTGRES_HOST=postgres',
                            '-e', f'POSTGRES_MAJOR={args.postgres}',
-                           '-e', f'TESTS={test_script}', *broker_args,
+                           '-e', f'TESTS={test_script}', *broker_args, *node_args,
                            job['PYTHON_IMAGE'], 'bash', '-euc', setup], check=False).returncode
         except OSError as error:
             failure = f'isolated controller fixture unavailable: {type(error).__name__}'
@@ -158,6 +188,7 @@ def main(argv):
             # --rm мог уже убрать завершённый runner: отсутствие — успех,
             # а недоступный daemon нельзя принять за отсутствие ресурса.
             remove_owned('container', broker_image)
+            remove_owned('container', node_image)
             remove_owned('container', worker)
             remove_owned('container', database)
             remove_owned('network', prefix)
