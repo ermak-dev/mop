@@ -715,8 +715,33 @@ live writer connection.
 Reconnect requires fresh authorization/control/PTY inspection; it does not create
 a second PTY behind the first. Disconnect/revoke cancels subscriptions and releases
 live handles with generation checks; a persisted control record is not evidence
-that its socket or PTY is alive. Private history has a separately authorized read
-endpoint and explicit retention, never a broad project event.
+that its socket or PTY is alive. A bound writer in `unknown` retains the exclusive
+SQL fence: lease expiry, REST detach, cancellation and detach timeout do not prove
+physical retirement. An unbound reservation can close without a physical proof.
+Before physical start, pin the instance ID and conversation/terminal epochs to the
+credential/principal, target/incarnation/executor, gateway/connection and generation.
+Every write attempt and resize checks current authority after waits and a synchronous
+physical identity guard immediately before the syscall. A retired instance cannot
+reopen; closing a borrowed attachment never changes the body owner's FD flags or
+kills its process. A consumed input sequence with unknown outcome cannot replay.
+
+The trusted Root resolver must explicitly provide `preflight`, `resolve` and
+`inspect`. Preflight refuses unsupported physical identity/fencing/retirement
+capabilities before WS bind; resolving a reconnect must not spawn a body. The
+current local adapter requires an already nonblocking PTY, a synchronous node-side
+guard, and actual conversation/terminal epochs. `RootTerminalStream.inspect` and
+`reconcile` are public composition-service seams, not extra WS commands or mounted
+HTTP endpoints: inspection must identify the original durably pinned physical
+instance, and reconciliation repeats current authorization after inspection.
+Only a Root-issued, instance-bound retirement capability can close the old SQL
+fence; neither a JSON quiescence flag, an ORM row, a substitute retired handle nor
+`LeaseExpired` qualifies. A lost Root needs trusted inspection of that original
+instance; if this cannot be established, the fence remains unresolved. Default
+Root is deliberately unbound; remote physical node integration remains #643, not
+a claimed supported terminal backend.
+
+Private history has a separately authorized read endpoint and explicit retention,
+never a broad project event.
 
 ## Offline and repair boundary
 

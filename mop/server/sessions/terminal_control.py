@@ -22,23 +22,30 @@ def size(cols, rows):
         raise ValueError('terminal size must be within 20..500 by 5..200')
 
 
+BINDING = ('id','target_id','incarnation_id','credential_id','principal_id',
+           'gateway_id','connection_id','generation','mode')
+
+
 def _dto(row):
-    return {name: str(getattr(row,name)) if name in ('id','target_id','incarnation_id','gateway_id','connection_id')
-            else getattr(row,name) for name in ('id','target_id','incarnation_id','gateway_id','connection_id',
-                                               'mode','generation','cols','rows','sequence')}
+    result={name: str(getattr(row,name)) if name.endswith('_id') or name=='id'
+            else getattr(row,name) for name in (*BINDING,'physical_instance_id','conversation_epoch',
+                                                 'terminal_epoch','cols','rows','sequence')}
+    result['executor_epoch']=str(row.incarnation.executor_epoch)
+    return result
 
 
 class Terminals:
     """Один control fence на target; state старого socket не оживает при restart."""
-    def __init__(self, *, authorizer=None):
+    def __init__(self, *, authorizer=None, retirement_authority=None):
         self.authorizer=authorizer or Access()
+        self.retirement_authority=retirement_authority
 
-    def _scope(self, actor, target, mode):
+    def _scope(self, actor, target, mode, *, current=True):
         if actor.kind is not PrincipalKind.HUMAN:
             raise Denied('terminal requires a human principal')
         self.authorizer.authorize(actor,'sessions.control_terminal' if mode=='rw' else 'sessions.read_terminal',
                                   project_ids=(target.project_id,))
-        if target.expires_at <= timezone.now() or target.current_incarnation_id is None:
+        if current and (target.expires_at <= timezone.now() or target.current_incarnation_id is None):
             raise Conflict('terminal target is not current')
         if mode=='rw' and target.owner_id not in (None,actor.user_id):
             raise Denied('terminal cannot control another human assignment')
@@ -57,8 +64,11 @@ class Terminals:
                 raise Conflict('terminal incarnation changed')
             control,_=TerminalControl.objects.get_or_create(target=target)
             now=timezone.now()
-            TerminalAttachment.objects.filter(target=target,state__in=('reserved','active'),expires_at__lte=now).update(state='unknown')
-            active=TerminalAttachment.objects.filter(target=target,state__in=('reserved','active'))
+            # Не связанный reserve ещё не мог дойти до resolver. Bound unknown
+            # сохраняет fence даже после срока: expiry не доказывает retirement.
+            TerminalAttachment.objects.filter(target=target,state='reserved',expires_at__lte=now).update(state='closed')
+            TerminalAttachment.objects.filter(target=target,state='active',expires_at__lte=now).update(state='unknown')
+            active=TerminalAttachment.objects.filter(target=target,state__in=('reserved','active','unknown'))
             if mode=='rw' and active.filter(mode='rw').exists():
                 raise Conflict('terminal writer is already reserved')
             if mode=='ro' and active.filter(mode='ro').count() >= 8:
@@ -71,13 +81,19 @@ class Terminals:
                 generation=control.generation,cols=cols,rows=rows,expires_at=now+timedelta(seconds=30))
             return _dto(row)
 
-    def _row(self, actor, attachment_id):
-        row=TerminalAttachment.objects.select_for_update().filter(pk=attachment_id).first()
-        if row is None:
+    def _locked(self, attachment_id):
+        target_id=TerminalAttachment.objects.filter(pk=attachment_id).values_list('target_id',flat=True).first()
+        if target_id is None:
             raise NotVisible('resource not found')
+        # Как в open: Assignment, затем attachment. Никаких inverse row locks.
+        target=Assignment.objects.select_for_update().get(pk=target_id)
+        row=TerminalAttachment.objects.select_for_update().get(pk=attachment_id)
+        return target,row
+
+    def _row(self, actor, attachment_id):
+        target,row=self._locked(attachment_id)
         if row.credential_id != actor.credential_id or row.principal_id != actor.principal_id:
             raise Denied('terminal attachment belongs to another credential or browser')
-        target=Assignment.objects.get(pk=row.target_id)
         self._scope(actor,target,row.mode)
         if (row.expires_at <= timezone.now() or target.current_incarnation_id != row.incarnation_id or
                 not row.incarnation.accepting):
@@ -102,6 +118,19 @@ class Terminals:
             raise Conflict('terminal control connection changed')
         return row
 
+    def pin_instance(self, actor, context, *, physical_instance_id, conversation_epoch, terminal_epoch):
+        instance=UUID(physical_instance_id)
+        if any(type(value) is not str or not 1<=len(value)<=128 for value in (conversation_epoch,terminal_epoch)):
+            raise ValueError('complete physical terminal epochs required')
+        with transaction.atomic():
+            row=self._live(actor,context)
+            if row.physical_instance_id is not None or row.sequence:
+                raise Conflict('physical terminal instance is already pinned')
+            row.physical_instance_id=instance
+            row.conversation_epoch,row.terminal_epoch=conversation_epoch,terminal_epoch
+            row.save(update_fields=['physical_instance_id','conversation_epoch','terminal_epoch'])
+            return _dto(row)
+
     def validate(self, actor, context):
         with transaction.atomic():
             row=self._live(actor,context)
@@ -125,12 +154,59 @@ class Terminals:
             return _dto(row)
 
     def release(self, actor, context):
-        # Cleanup не требует ещё действующего допуска; binding не позволяет
-        # отозванному caller закрыть чужой новый attach.
-        return TerminalAttachment.objects.filter(id=UUID(context['id']),credential_id=actor.credential_id,
-            connection_id=UUID(context['connection_id']),gateway_id=UUID(context['gateway_id']),
-            generation=context['generation'],state='active').update(state='closed')
+        # Отмена/revocation разрешает остановить собственный attach, но не
+        # объявить физический эффект завершённым. Нет доказательства — unknown.
+        with transaction.atomic():
+            _,row=self._locked(UUID(context['id']))
+            if (row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id or
+                    any(_dto(row)[key]!=context[key] for key in BINDING)):
+                raise Denied('terminal cleanup binding changed')
+            if row.state=='active':
+                row.state='unknown'
+                row.save(update_fields=['state'])
+
+    def retire(self, context, proof):
+        # Только composition-root capability. JSON/LeaseExpired/наличие ORM row
+        # не являются свидетельством закрытия конкретного physical instance.
+        if self.retirement_authority is None:
+            raise Conflict('physical terminal retirement authority is not bound')
+        self.retirement_authority.verify_retirement(context,proof)
+        with transaction.atomic():
+            _,row=self._locked(UUID(context['id']))
+            actual=_dto(row)
+            if (any(actual[key]!=context[key] for key in (*BINDING,'executor_epoch')) or
+                    actual['physical_instance_id']!=proof.instance_id or
+                    actual['conversation_epoch']!=proof.conversation_epoch or actual['terminal_epoch']!=proof.terminal_epoch):
+                raise Conflict('terminal retirement binding or physical instance changed')
+            row.state='closed'
+            row.save(update_fields=['state'])
+
+    def reconcile(self, actor, context, proof):
+        with transaction.atomic():
+            target,row=self._locked(UUID(context['id']))
+            self._scope(actor,target,row.mode,current=False)
+            if row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id:
+                raise Denied('terminal reconciliation belongs to another credential or browser')
+            self.retire(context,proof)
+
+    def inspect(self, actor, attachment_id):
+        # Public service seam для trusted inspector, не обход current authority.
+        with transaction.atomic():
+            target,row=self._locked(attachment_id)
+            self._scope(actor,target,row.mode,current=False)
+            if row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id:
+                raise Denied('terminal attachment belongs to another credential or browser')
+            return {**_dto(row),'state':row.state}
 
     def abandon(self, actor, attachment_id):
-        return TerminalAttachment.objects.filter(pk=attachment_id,credential_id=actor.credential_id,
-            state__in=('reserved','active')).update(state='closed')
+        with transaction.atomic():
+            try:
+                target,row=self._locked(attachment_id)
+            except NotVisible:
+                return
+            self._scope(actor,target,row.mode,current=False)
+            if row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id:
+                raise Denied('terminal attachment belongs to another credential or browser')
+            if row.state in ('reserved','active'):
+                row.state='closed' if row.connection_id is None else 'unknown'
+                row.save(update_fields=['state'])

@@ -44,8 +44,8 @@ class Gateway:
         self.subscriber=subscriber or UnboundSubscriber()
         self.history=history or UnboundHistory()
         self.authority=authority or Authority()
-        self.terminals=terminals or Terminals()
         self.streams=streams or RootTerminalStream()
+        self.terminals=terminals or Terminals(retirement_authority=self.streams)
         # Три секунды idle + не более двух на SQL authority: доступ не остаётся
         # открытым на 5s sleep плюс ещё один полный DB timeout.
         self.interval,self.maximum=min(recheck_interval,3),maximum
@@ -90,6 +90,7 @@ class Gateway:
         if self.connections:
             await asyncio.gather(*(consumer.done.wait() for consumer in tuple(self.connections)))
         await self.subscriber.aclose()
+        self.streams.require_retired()
 
 
 class OwnedConsumer(AsyncJsonWebsocketConsumer):
@@ -112,15 +113,24 @@ class OwnedConsumer(AsyncJsonWebsocketConsumer):
             if dispatch in completed:
                 await dispatch
         finally:
-            dispatch.cancel()
-            stopped.cancel()
-            for task in self.tasks:
-                task.cancel()
-            await asyncio.gather(dispatch,stopped,*self.tasks,return_exceptions=True)
-            try:
-                await self.cleanup()
-            finally:
-                self.done.set()
+            async def shutdown():
+                dispatch.cancel()
+                stopped.cancel()
+                for task in self.tasks:
+                    task.cancel()
+                await asyncio.gather(dispatch,stopped,*self.tasks,return_exceptions=True)
+                try:
+                    await self.cleanup()
+                finally:
+                    self.done.set()
+            cleanup=asyncio.create_task(shutdown())
+            # Повторная отмена владельца не отменяет уже начатый detach/SQL.
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
 
     async def send_json(self, content, close=False):
         async with self.send_lock:
@@ -306,6 +316,8 @@ class Terminal(OwnedConsumer):
         if self.scope.get('query_string'):
             raise ValueError('terminal credentials and handles are not query parameters')
         attachment_id=UUID(self.scope['path'].removeprefix('/ws/v1/terminal/'))
+        reservation=await self.gateway.runtime.database(self.gateway.terminals.inspect,self.actor,attachment_id)
+        await self.gateway.streams.preflight(reservation)
         task=asyncio.create_task(self.gateway.runtime.database(self.gateway.terminals.bind,self.actor,uuid4(),
             attachment_id,gateway_id=self.gateway.run_id))
         try:
@@ -313,7 +325,7 @@ class Terminal(OwnedConsumer):
         except asyncio.CancelledError:
             self.context=await task
             raise
-        task=asyncio.create_task(self.gateway.streams.open(self.context))
+        task=asyncio.create_task(self.gateway.streams.open(self.context,current=self.recheck,pin=self.pin_physical))
         try:
             async with asyncio.timeout(5):
                 self.stream=await asyncio.shield(task)
@@ -330,6 +342,16 @@ class Terminal(OwnedConsumer):
             'epoch':str(self.gateway.run_id),'generation':str(self.context['generation']),'mode':self.context['mode']})
         self.background(self.output)
         self.background(self.periodic)
+
+    async def pin_physical(self, instance):
+        task=asyncio.create_task(self.gateway.runtime.database(self.gateway.terminals.pin_instance,
+            self.actor,self.context,**instance))
+        try:
+            self.context=await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self.context=await task
+            raise
+        return self.context
 
     async def recheck(self):
         async with asyncio.timeout(2):
@@ -388,11 +410,15 @@ class Terminal(OwnedConsumer):
             pass  # Receipt unknown; sequence уже сохранён, автоматического replay нет.
         await self.recheck()
         await self.send_json({'type':'ack','seq':content['seq'],'outcome':outcome})
+        if outcome=='unknown':
+            await self.finish(4409)
 
     async def cleanup(self):
-        try:
-            if getattr(self,'stream',None) is not None:
-                await self.stream.aclose()
-        finally:
-            if getattr(self,'context',None) is not None:
-                await self.gateway.runtime.database(self.gateway.terminals.release,self.actor,self.context)
+        if getattr(self,'context',None) is None:
+            return
+        # Сначала запретить SQL допуск, затем дождаться physical retirement.
+        # Ошибка/timeout detach оставляет unknown и эксклюзивный fence.
+        await self.gateway.runtime.database(self.gateway.terminals.release,self.actor,self.context)
+        proof=await self.gateway.streams.detach(self.context)
+        await self.gateway.runtime.database(self.gateway.terminals.retire,self.context,proof)
+        self.gateway.streams.forget(self.context,proof)

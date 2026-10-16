@@ -34,7 +34,7 @@ class Open(APIView):
 
 class Close(APIView):
     def delete(self,request,attachment_id:UUID):
-        # SQL fence закрыт сразу; socket отцепляется при recheck до следующей
-        # приватной доставки. Assignment/PTY body этот endpoint не останавливает.
+        # SQL допуск закрыт сразу; bound writer остаётся unknown до actual
+        # retirement proof. Assignment/PTY body этот endpoint не останавливает.
         Terminals().abandon(actor_for_request(request),attachment_id)
         return Response(status=204)
