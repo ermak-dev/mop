@@ -46,7 +46,7 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
-    parser.add_argument('--check', choices=('controller', 'hermetic'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     args = parser.parse_args(argv)
     if args.label and args.check != 'controller':
