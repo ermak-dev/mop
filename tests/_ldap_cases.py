@@ -181,6 +181,45 @@ class DirectoryIdentityContracts(TransactionTestCase):
     def login(self, username='person'):
         return self.router.authenticate(None, username=username, password='test-password')
 
+    # HYPOTHESIS: app.codename — логическое право Django, не уникальная строка
+    # Permission; несколько ContentTypes не должны срывать directory projection.
+    # RED: PG17 — MultipleObjectsReturned и сырой DoesNotExist до исправления.
+    # SOLUTION: все эквивалентные Django rows; отсутствие даёт DirectoryUnavailable.
+    # RESULT: PG16/17 — по 13/13 LDAP checks green, локальные права не затронуты.
+    # STATUS: FIXED — see #670
+    def test_duplicate_permission_codenames_preserve_authority_and_source_revocation(self):
+        from django.contrib.auth.models import Permission
+        choices = Permission.objects.filter(content_type__app_label='execution', codename='view_usage')
+        self.assertGreater(choices.count(), 1)
+        rule = self.m.DirectoryGroupRule.objects.get(source=self.source, group_dn=GROUP)
+        rule.permissions.add(choices.get(content_type__model='usagesource'))
+        user = self.login()
+        self.assertTrue(user.has_perm('execution.view_usage'))
+        self.assertFalse(user.has_perm('execution.assign_work'))
+        local = Permission.objects.get(content_type__app_label='catalog', codename='view_project')
+        user.user_permissions.add(local)
+        self.assertEqual(self.login().pk, user.pk)
+        self.assertEqual(get_user_model().objects.count(), 1)
+        rule.permissions.clear()
+        self.assertEqual(self.login().pk, user.pk)
+        current = get_user_model().objects.get(pk=user.pk)
+        self.assertFalse(current.has_perm('execution.view_usage'))
+        self.assertTrue(current.has_perm('catalog.view_project'))
+        self.assertTrue(self.m.ProjectMembership.objects.filter(user=user, source=self.source,
+                                                               project=self.project).exists())
+
+    def test_missing_permission_is_unavailable_not_partial_directory_acceptance(self):
+        from django.contrib.auth.models import Permission
+        from mop.server.access.directory import DirectoryResult, apply_directory
+        Permission.objects.filter(content_type__app_label='execution', codename='view_usage').delete()
+        result = DirectoryResult(UID_A, 'person', (GROUP,), (self.project.pk,), False,
+                                 ('execution.view_usage',))
+        with self.assertRaises(DirectoryUnavailable):
+            apply_directory(self.source.pk, self.source.revision, result)
+        self.assertFalse(get_user_model().objects.exists())
+        self.assertFalse(self.m.LoginIdentity.objects.exists())
+        self.assertFalse(self.m.ProjectMembership.objects.exists())
+
     def test_delete_recreate_same_dn_cannot_inherit_local_grants_or_ownership(self):
         from django.contrib.auth.models import Permission
         from mop.server.catalog.models import ClientRegistration
