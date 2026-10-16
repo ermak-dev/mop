@@ -203,6 +203,16 @@ retained root version; rotation composition must explicitly retain providers for
 old identifiers until all referencing envelopes are safely retired. It does not
 grant root access to ordinary web, worker, gateway or node processes.
 
+When Secrets is installed, native restore authenticates every retained SecretVersion
+in bounded batches against its actual relational context and envelope metadata,
+using the separately protected bootstrap root. This runs after the new epoch and
+`effects_enabled=False` commit, but before the independent restore guard becomes
+ready. A corrupt tag, incompatible key, inconsistent metadata or unavailable
+storage leaves the guard closed for maintenance recovery. Matching the public
+root fingerprint alone is not proof that the encrypted archive is readable.
+The verification assumes the restore precondition: services and other writers
+are stopped; it does not create a concurrent online re-encryption procedure.
+
 Bootstrap storage retains the exact accepted source bytes, validated execution
 snapshot, approval/digest relationship and per-run log/progress content. A
 hash plus a path is insufficient: losing the path must not lose the approved
