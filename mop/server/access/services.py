@@ -93,12 +93,18 @@ def _session_user(session, user):
 
 
 @sensitive_variables('key')
-def token_context(key):
+def token_context(key, *, grants=None):
     if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{40}', key):
         raise Denied('token is unavailable')
     user_id = Token.objects.filter(key=key).values_list('user_id', flat=True).first()
     if user_id is None:
         raise Denied('token revoked or rotated')
+    if m.Principal.objects.filter(user_id=user_id, kind='grant').exists():
+        if grants is None:
+            raise Denied('delegation resolver is not bound')
+        # Проверенный resolver делает provider I/O вне SQL. Human/service path
+        # остаётся штатным; сессия браузера не становится grant credential.
+        return grants.token_context(key)
     with transaction.atomic():
         user = get_user_model().objects.select_for_update().get(pk=user_id)
         if not Token.objects.filter(user=user, key=key).exists():
@@ -172,7 +178,11 @@ def _resolve(actor):
     return user, principal
 
 
-def current_actor(actor):
+def current_actor(actor, *, grants=None):
+    if type(actor) is ActorContext and actor.kind is PrincipalKind.GRANT:
+        if grants is None:
+            raise Denied('delegation resolver is not bound')
+        return grants.resolve_actor(actor)
     _resolve(actor)
     return actor
 
@@ -193,7 +203,15 @@ def visible_project_ids(actor):
 
 class Access:
     """Реализация Catalog.Authorizer; никаких callback из request/payload."""
+    def __init__(self, *, grants=None):
+        self.grants = grants
+
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
+        if type(actor) is ActorContext and actor.kind is PrincipalKind.GRANT:
+            if self.grants is None:
+                raise Denied('delegation resolver is not bound')
+            return self.grants.authorize(actor, action, project_ids=project_ids,
+                                         node_ids=node_ids, client_ids=client_ids)
         user, principal = _resolve(actor)
         projects, nodes, clients = set(project_ids), set(node_ids), set(client_ids)
         if principal.kind == 'service':

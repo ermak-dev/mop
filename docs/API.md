@@ -360,9 +360,56 @@ is a separately recorded fallible stage, never a reason to keep logical access.
 Revocation never reactivates an old grant. Role edits create a new immutable
 bundle and require a new approval; they do not change existing digest bytes.
 
+The Access ORM boundary exposes `Grants.publish_bundle`, `approve_bundle`,
+`read_bundle`, `reserve`, `reservation`, `provision`, `activate`, `revoke`,
+`expire`, `record_retirement`, `resolve_actor` and the explicit message/dispatch
+admission methods. `reserve` accepts either a credential-bound human or an active
+delegated actor, never an owner/holder/force or workspace payload. CreationIntent
+retains the first approved policy SecretVersion reference; retry queries that
+intent instead of fetching the parent's latest policy or creating a second child.
+The injected approval query must validate the exact stored intent binding, not a
+boolean approval supplied by a caller. A grant's public bundle read returns only
+its own pinned role, not other private prompts owned by the same human. Preparation owns the approval evidence;
+Access owns only its immutable reference and the creation request identity.
+
+`RetainedSecrets` is the narrow Secrets composition port used for bundle bytes
+and generated grant credentials: `prepare(actor, RetentionScope, bytes)` performs
+AEAD outside SQL; `commit(actor, PreparedRetention)` repeats target-bound authority
+and inserts those exact prepared IDs/envelope in the aggregate's transaction.
+`read(actor, scope, version_id)` is an internal protected read with checks before
+and after provider I/O, not a general API serializer.
+`check_reference(scope, version_id)` and
+`validate_policy_reference(version_id, project_id=...)` return no ORM object or
+plaintext; they validate current same-target or approved-policy references and
+are safe local checks inside the aggregate transaction. The scope names the actual
+project, human owner, aggregate UUID and purpose. This authority is explicitly
+bound by Access from the stored intent; it does not grant human secret-management
+permissions merely to provision a role's own credential. The standard DRF Token
+row is the framework's credential-bearing plaintext exception described in
+STORAGE.md; RoleBundle, CreationIntent, Grant, events and public metadata contain
+no raw token. Grant metadata refers to the encrypted SecretVersion instead.
+
+Approval, runtime-binding/activation/retirement queries and message/dispatch
+executors default to denial. Binding queries are trusted local authoritative
+reads, not network calls inside transactions. Later Preparation and Sessions
+composition supplies these queries and the physical delivery executor; an
+unbound executor refuses before an allowed effect. `token_context`,
+`current_actor` and `Access` take an explicit grant resolver; browser sessions
+and node service identities cannot become grant contexts. Grant plain-send
+admission carries no assignment claim or git identity; dispatch admission carries
+the current human owner for the separate fenced identity-before-send operation.
+No legacy registry reader, credential import or dual write is used by this path.
+
 Rotation transitions are `staged -> delivering -> active -> retiring -> retired`,
 with `reconciling` on uncertain delivery/revoke and `failed` only on a known safe
-failure. Activation requires the configured addressed receipts; old credentials
+failure. Confirmed partial application plus proven executor quiescence moves to
+`recovery_required`, preserving the known receipt subset and safe reason. It may
+start explicit `restoring_old -> old_restored -> revoking_new -> compensated`
+steps, never replay the original effect. A partially applied compensation ends
+in `partial` with both original and compensation reasons retained; it does not
+pretend rollback completed. Current authorization, version/incarnation and
+external ownership are rechecked before each recovery effect.
+Activation requires the configured addressed receipts; old credentials
 are not retired merely because a send timed out. Build records pinned inputs,
 affected bodies/resources, per-stage receipts and known prior state before any
 removal. Recovery checks current revision/incarnation before restoring anything.
