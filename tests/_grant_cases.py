@@ -253,6 +253,29 @@ class GrantCases(TransactionTestCase):
         self.assertNotIn(key.encode(), bytes(encrypted.envelope))
         self.assertFalse(hasattr(row, 'token'))
 
+    # BUG: trusted view resolver проходит permission, но Identity повторяет default-deny lookup.
+    # HYPOTHESIS: handler заново создаёт context без resolver вместо request.actor.
+    def test_http_identity_uses_accepted_grant_context_and_rechecks_revocation(self):
+        from mop.server.controller.authviews import Identity
+        from rest_framework.test import APIRequestFactory
+        row, actor = self.active()
+        key = Token.objects.get(user_id=actor.user_id).key
+        view = type('BoundIdentity', (Identity,), {'grant_resolver': self.api}).as_view()
+        factory = APIRequestFactory()
+        response = view(factory.get('/identity', HTTP_AUTHORIZATION='Token ' + key))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['kind'], 'grant')
+        self.assertEqual(response.data['principal_id'], str(actor.principal_id))
+        self.assertEqual(response.data['human_owner_id'], self.user.pk)
+        self.assertEqual(response.data['grant_id'], str(row.id))
+        # Никакой настройки из payload: без trusted root прежний deny обязателен.
+        unbound = Identity.as_view()(factory.get('/identity?grant_resolver=accepted',
+                                                HTTP_AUTHORIZATION='Token ' + key))
+        self.assertEqual(unbound.status_code, 403)
+        self.api.revoke(self.actor, row.id, expected_revision=row.revision)
+        refused = view(factory.get('/identity', HTTP_AUTHORIZATION='Token ' + key))
+        self.assertEqual(refused.status_code, 403)
+
     def test_grant_auth_default_denies_node_is_not_grant_and_token_revoke_is_live(self):
         row, actor = self.active()
         key = Token.objects.get(user_id=actor.user_id).key
