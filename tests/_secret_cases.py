@@ -314,7 +314,10 @@ class SecretCases(TransactionTestCase):
         r = svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=current.revision)
         before = self.m.SecretAudit.objects.count()
         with self.assertRaisesRegex(self.s.Conflict, 'unresolved credential rotation'):
-            self.binding(current)
+            # Новый допустимый recipient slot, не дубль уже занятого node/role.
+            self.api.bind(self.actor, current.id, expected_revision=current.revision,
+                node_id=self.n.pk, role='late-role', digest='b' * 64, incarnation=uuid.uuid4(),
+                grant_id=uuid.uuid4(), assignment_id=uuid.uuid4())
         self.assertEqual(self.m.SecretAudit.objects.count(), before)
         self.assertEqual(set(self.m.SecretBinding.objects.filter(secret_id=a.id).values_list('id', flat=True)), {b.id})
         self.assertEqual(set(self.m.RotationRecipient.objects.filter(rotation_id=r.id).values_list('binding_id', flat=True)), {b.id})
@@ -337,8 +340,13 @@ class SecretCases(TransactionTestCase):
                 locked, attempted = threading.Event(), threading.Event()
                 def command(kind):
                     try:
+                        # Membership допускает один current node/role: гоняем
+                        # новый допустимый slot, а не запрещённую замену incarnation.
                         result = (svc.stage(self.actor, a.id, new.id, (b.id,), expected_revision=2)
-                                  if kind == 'stage' else self.binding(current))
+                                  if kind == 'stage' else self.api.bind(self.actor, current.id,
+                                      expected_revision=current.revision, node_id=self.n.pk,
+                                      role='late-role', digest='b' * 64, incarnation=uuid.uuid4(),
+                                      grant_id=uuid.uuid4(), assignment_id=uuid.uuid4()))
                         return 'ok', result
                     except (self.s.Conflict, self.s.Refused) as error:
                         return 'refused', error
