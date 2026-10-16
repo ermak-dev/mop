@@ -2,7 +2,7 @@
 from datetime import timedelta
 from uuid import UUID
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Q, F
 from django.utils import timezone
 from mop.server.access.context import PrincipalKind
 from mop.server.access.services import Access, Denied, current_actor
@@ -11,7 +11,8 @@ from mop.server.catalog.services import snapshot
 from . import models as m
 from .protocol import (WorkV1, AuthorityV1, ReceiptV1, FactPageV1, FACT_FIELDS,
     positive, role_binding, result_codes, WorkPort, GrantAuthority, FactReader,
-    InstallationQuery, InspectionV1, EffectInspector, CleanCloneQuery, FactV1, AssignmentBinding)
+    InstallationQuery, InspectionV1, EffectInspector, CleanCloneQuery, FactV1, AssignmentBinding,
+    CredentialAssignment)
 
 
 class Conflict(ValueError):
@@ -140,6 +141,40 @@ class Assignments:
         rows = m.Assignment.objects.select_for_update() if lock else m.Assignment.objects
         row = rows.filter(pk=target_id).first()
         return self.current(project_id=row.project_id, target_id=row.id) if row else None
+
+    def credential_proof(self, actor, target_id, *, epoch):
+        """SQL-only query в caller transaction; grant/secret versions проверяет Root.
+
+        Assignment lock сохраняет verdict до commit, не переживает provider wait.
+        Ready/identity — подтверждённые результаты именно текущего admission,
+        не lease/claim и не просто наличие старого marker/receipt. Expiry попытки
+        не отменяет подтверждённый эффект и ничего не говорит о transport revoke.
+        """
+        current_actor(actor)
+        if actor.kind is not PrincipalKind.SERVICE:
+            raise Denied('enrolled node service required for addressed credentials')
+        if type(target_id) is not UUID or type(epoch) is not UUID:
+            raise Denied('current assignment target and installation epoch required')
+        binding = self.target(target_id, lock=True)
+        if binding is None:
+            raise Denied('current addressed assignment is unavailable')
+        Access().authorize(actor, 'secrets.deliver_secret', project_ids=(binding.project_id,),
+            node_ids=(binding.node_id,))
+        scope = dict(attempt__assignment_id=binding.target_id, attempt__incarnation_id=binding.incarnation_id,
+            attempt__generation=binding.generation, attempt__assignment_revision=binding.revision,
+            attempt__owner_id=binding.owner_id, attempt__role=binding.role,
+            attempt__bundle_digest=binding.bundle_digest, attempt__grant_id=binding.grant_id,
+            attempt__executor_epoch=binding.executor_epoch, attempt__epoch=epoch,
+            attempt__state='succeeded', receipt__attempt_id=F('attempt_id'),
+            receipt__outcome='succeeded', receipt__resulting_revision=F('attempt__revision'),
+            receipt__expected_revision=F('attempt__revision') - 1)
+        identity = m.IdentityApplication.objects.filter(**scope, attempt__action='apply_identity',
+            receipt__evidence='identity-applied').order_by('id').values_list('receipt_id', flat=True).first()
+        ready = m.ReadinessReceipt.objects.filter(**scope, attempt__action='confirm_ready',
+            receipt__evidence='ready').order_by('id').values_list('receipt_id', flat=True).first()
+        if identity is None or ready is None:
+            raise Denied('current identity and readiness confirmations required for addressed credentials')
+        return CredentialAssignment(binding, epoch, identity, ready)
 
     def create(self, actor, *, project_id, node_id, role, bundle_digest, grant_id, expires_at):
         human(actor)

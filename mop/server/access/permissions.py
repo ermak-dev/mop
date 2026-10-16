@@ -27,6 +27,9 @@ ACTIONS = frozenset(
 # #639: конечный машинный протокол; общие RPC/shell actions не регистрируются.
 SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'poll_work', 'claim_work', 'report_result', 'read_facts', 'ingest_telemetry', 'ingest_observations'))
+# Адресная выдача всё ещё требует конкретное текущее назначение и grant;
+# enrollment этой одной permission не даёт secret management/human authority.
+SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset(('secrets.deliver_secret',))
 ACTIONS = ACTIONS | SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work', 'read_history', 'view_usage'))
 
