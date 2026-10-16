@@ -28,7 +28,8 @@ class Held(ValueError):
 
 
 def _autocommit():
-    if transaction.get_connection().in_atomic_block:
+    connection = transaction.get_connection()
+    if connection.in_atomic_block or not connection.get_autocommit():
         raise Unavailable('usage admission requires no surrounding transaction')
 
 

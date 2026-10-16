@@ -92,6 +92,22 @@ class ProxyUsage(TransactionTestCase):
             self.begin()
         self.assertEqual(self.m.UsageReadIntent.objects.count(), 1)
 
+    # HYPOTHESIS: atomic внутри manual transaction не коммитит read intent.
+    # SOLUTION: admission требует autocommit=True и отсутствие внешнего atomic.
+    # RESULT: PG16 red (Unavailable не raised), затем PG16/17 по 18/18 green.
+    # STATUS: FIXED — see #656
+    def test_manual_transaction_cannot_return_an_uncommitted_read_permit(self):
+        connection = connections['default']
+        transaction.set_autocommit(False)
+        try:
+            self.assertFalse(connection.in_atomic_block)
+            with self.assertRaises(self.s.Unavailable):
+                self.begin()
+        finally:
+            transaction.rollback()
+            transaction.set_autocommit(True)
+        self.assertFalse(self.m.UsageReadIntent.objects.filter(source_id=self.source).exists())
+
     def test_outer_transaction_cannot_return_a_read_permit(self):
         with transaction.atomic():
             with self.assertRaises(self.s.Unavailable):
