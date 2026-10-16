@@ -84,6 +84,18 @@ def bound(limit, maximum):
     return limit
 
 
+def unbound_target_fence(*args, **kwargs):
+    raise Unavailable('shared target fence query is not bound')
+
+
+def unclaimed(query, target_id, *, excluding_operation=None):
+    held = query(target_id, excluding_operation=excluding_operation)
+    if type(held) is not bool:
+        raise Unavailable('shared target fence query returned an untyped value')
+    if held:
+        raise Conflict('unresolved operation holds target')
+
+
 class UnboundClone:
     def observe(self, **scope):
         raise Unavailable('fresh addressed clone query is not bound')
@@ -91,8 +103,9 @@ class UnboundClone:
 
 class Assignments:
     """Человек владеет работой; этот lifecycle не worker lease и не PTY handle."""
-    def __init__(self, *, clones: CleanCloneQuery | None = None, clone_freshness_seconds=10):
+    def __init__(self, *, clones: CleanCloneQuery | None = None, clone_freshness_seconds=10, target_fence=None):
         self.clones = clones if clones is not None else UnboundClone()
+        self.target_fence = target_fence if target_fence is not None else unbound_target_fence
         self.clone_freshness_seconds = bound(clone_freshness_seconds, 60)
 
     def current(self, *, project_id, target_id):
@@ -168,6 +181,7 @@ class Assignments:
         FactPageV1(source.node_id, 'clone', True, (proof,)).validate(node_id=source.node_id, kind='clone', limit=1)
         with transaction.atomic():
             row = m.Assignment.objects.select_for_update().get(pk=target_id)
+            unclaimed(self.target_fence, row.pk)
             human(actor)
             Access().authorize(actor, 'execution.assign_work', project_ids=(row.project_id,))
             expected(row, expected_revision)
@@ -191,6 +205,7 @@ class Assignments:
     def _owned(self, actor, target_id):
         human(actor)
         row = m.Assignment.objects.select_for_update().get(pk=target_id)
+        unclaimed(self.target_fence, row.pk)
         Access().authorize(actor, 'execution.assign_work', project_ids=(row.project_id,))
         if row.owner_id != actor.user_id:
             raise Denied('assignment belongs to another human')
@@ -279,7 +294,8 @@ class Landing:
 class MachineExecution:
     def __init__(self, *, work: WorkPort | None = None, grants: GrantAuthority | None = None,
                  facts: FactReader | None = None, installation: InstallationQuery | None = None,
-                 inspector: EffectInspector | None = None, lease_seconds=30):
+                 inspector: EffectInspector | None = None, lease_seconds=30, target_fence=None):
+        self.target_fence = target_fence if target_fence is not None else unbound_target_fence
         self.work = work if work is not None else UnboundWork()
         self.grants = grants if grants is not None else UnboundGrants()
         self.reader = facts if facts is not None else UnboundFacts()
@@ -385,6 +401,7 @@ class MachineExecution:
                 # Infrastructure restore fence предшествует предметным locks.
                 self._authority(work)
                 row = self._assignment(actor, work, 'claim_work')
+                unclaimed(self.target_fence, row.pk, excluding_operation=work.operation_id)
                 # current обязуется проверить initiating actor/operation и не делать I/O.
                 if self.work.current(work.operation_id, work.step_id) != work:
                     raise Conflict('admitted operation step changed')

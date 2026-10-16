@@ -313,13 +313,58 @@ def operation_installation_state():
     return InstallationState(row.epoch, row.effects_enabled, generation)
 
 
+def _composed_operations(*, transaction_scope, grants=None, executor=None, targets=None, restart_support=None, queue_limit=256, project_limit=64, execution_limit=8):
+    from ..operations.service import Operations
+    from ..builds.service import Builds
+    service = Operations(installation_state=operation_installation_state, transaction_scope=transaction_scope,
+        grants=grants, executor=executor, targets=targets, restart_support=restart_support, queue_limit=queue_limit,
+        project_limit=project_limit, execution_limit=execution_limit)
+    service.builds = Builds(service)
+    return service
+
+
 def operations_service(*, grants=None, executor=None, targets=None, restart_support=None,
                        queue_limit=256, project_limit=64, execution_limit=8):
     """Typed composition durable Operations с настоящим restore fence и DB budget."""
-    from ..operations.service import Operations
-    return Operations(installation_state=operation_installation_state, transaction_scope=short_transaction,
-        grants=grants, executor=executor, targets=targets, restart_support=restart_support, queue_limit=queue_limit,
+    return _composed_operations(transaction_scope=short_transaction, grants=grants, executor=executor,
+        targets=targets, restart_support=restart_support, queue_limit=queue_limit,
         project_limit=project_limit, execution_limit=execution_limit)
+
+
+@contextmanager
+def build_transaction():
+    """Долгий blocking build не удерживает idle connection общего controller pool."""
+    connection = connections['default']
+    outer = not connection.in_atomic_block
+    try:
+        with short_transaction():
+            yield
+    finally:
+        if outer:
+            connection.close()
+
+
+def builds_service(*, scheduler=None, image_builder=None, node_executor=None, grants=None):
+    """Trusted named ports: HTTP получает только admission/status, не adapters."""
+    from ..builds.service import Builds
+    operations = _composed_operations(transaction_scope=build_transaction, grants=grants)
+    builds = Builds(operations, scheduler=scheduler, image_builder=image_builder, node_executor=node_executor)
+    operations.builds = builds
+    return builds
+
+
+def assignments_service(**options):
+    """Root связывает shared target fence без обратного domain import."""
+    from ..sessions.services import Assignments
+    from ..operations.resources import target_held
+    return Assignments(target_fence=target_held, **options)
+
+
+def machine_execution_service(**options):
+    """NodeService scope не даёт прав privileged image executor."""
+    from ..sessions.services import MachineExecution
+    from ..operations.resources import target_held
+    return MachineExecution(target_fence=target_held, **options)
 
 
 def installation_snapshot(using='default'):
