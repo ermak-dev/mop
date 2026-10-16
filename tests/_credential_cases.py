@@ -9,8 +9,11 @@ SOLUTION: отдельная credential-композиция, конечный s
 RED: 11 missing-service FAIL на PG16/17; затем PermissionError not raised для
 выдачи без authorizer, installation scope и изменённого root trust; потерянная
 безопасная причина restore fence воспроизведена отдельным behavioral FAIL.
-RESULT: PG16 — 21/21, в том числе отдельный daemon с restricted DB login,
-stdlib frontend process и сохранённый owned task после timeout. Не live pool.
+RESULT: PG16/17 — 23/23, в том числе отдельный daemon с restricted DB login,
+stdlib frontend process и сохранённый owned task после timeout. Combined PG17
+до двух cleanup checks — 232/232. Дополнительный lifecycle red: main-thread
+checkout переживал compose, исчезнувший endpoint ломал shutdown; close_pools
+на границе startup и inode-aware cleanup устраняют оба отказа. Не live pool.
 STATUS: FIXED — see #637; реальные #639 assignment bindings не подменены fixture.
 """
 import asyncio
@@ -419,6 +422,19 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             await server.runtime.database(lambda: RestoreGuard.objects.filter(pk=1).update(state='restoring'))
             with self.assertRaisesRegex(self.Error, 'restore guard is not ready'):
                 await asyncio.to_thread(self.create, client)
+        self.run_socket(body)
+
+    def test_composition_releases_startup_connection_before_async_runtime(self):
+        # Этот test отделяет cleanup от elevated fixture login; настоящий
+        # restricted DB startup проверен отдельным daemon-process test выше.
+        with override_settings(BOOTSTRAP=self.bootstrap), patch.object(self.service, 'maintenance'):
+            self.service.compose(key_id='root-v1')
+            self.assertIsNone(connection.connection, 'startup held a runtime pool checkout')
+
+    def test_shutdown_tolerates_already_removed_owned_socket(self):
+        async def body(client, server):
+            await asyncio.to_thread(self.create, client)
+            Path(self.path).unlink()
         self.run_socket(body)
 
     def test_runtime_role_cannot_enter_maintenance_or_export_provider(self):

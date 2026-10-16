@@ -23,7 +23,7 @@ from mop.server.secrets import services as secrets
 from mop.server.secrets.crypto import SecretCryptoError
 from . import bootstrap
 from .models import Installation
-from .runtime import Runtime, Backpressure, require_restore_ready, verify_installation, maintenance
+from .runtime import Runtime, Backpressure, require_restore_ready, verify_installation, maintenance, close_pools
 
 
 class AwaitAssignment:
@@ -127,8 +127,13 @@ def compose(*, key_id):
     # Сюда нельзя попасть через обычный web/worker или с elevated DB principal.
     if settings.BOOTSTRAP['role'] != 'credential':
         raise RuntimeError('credential service requires its separate credential bootstrap and DB principal')
-    maintenance('check')
-    return application(key_id=key_id)
+    try:
+        maintenance('check')
+        return application(key_id=key_id)
+    finally:
+        # Startup идёт на main thread. Его checkout нельзя оставить за
+        # пределами Runtime: worker cleanup не закрывает чужой thread-local.
+        close_pools()
 
 
 def _failure(exc):
@@ -266,7 +271,10 @@ class CredentialService:
         if self._directory is None:
             return
         try:
-            info = os.stat(self.path.name, dir_fd=self._directory, follow_symlinks=False)
+            try:
+                info = os.stat(self.path.name, dir_fd=self._directory, follow_symlinks=False)
+            except FileNotFoundError:
+                return
             if stat.S_ISSOCK(info.st_mode) and info.st_ino == self._inode:
                 os.unlink(self.path.name, dir_fd=self._directory)
         finally:
