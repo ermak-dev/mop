@@ -32,6 +32,14 @@ class BootstrapRevision(Record):
         permissions = [('approve_bootstrap', 'Can approve exact bootstrap bytes')]
 
 
+class BootstrapSecretReference(Record):
+    revision = models.ForeignKey(BootstrapRevision, on_delete=models.PROTECT)
+    version = models.ForeignKey('secrets.SecretVersion', on_delete=models.PROTECT)
+
+    class Meta(Record.Meta):
+        constraints = [models.UniqueConstraint(fields=('revision', 'version'), name='prep_secret_reference')]
+
+
 class BootstrapApproval(Record):
     revision = models.OneToOneField(BootstrapRevision, on_delete=models.PROTECT)
     human = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)

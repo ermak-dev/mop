@@ -1,5 +1,7 @@
 """Bootstrap #636: реальные ORM-байты, approval, fencing и restart readback."""
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 from datetime import timedelta
 import importlib
 import importlib.util
@@ -159,6 +161,22 @@ class PreparationCases(PreparationFixture):
                 self.publish(**kw)
         self.assertEqual(m.BootstrapRevision.objects.count(), 0)
 
+    def test_secret_references_are_relational_pinned_scoped_and_never_values(self):
+        store = SecretStore(provider=self.provider, authorizer=auth.Access())
+        secret = store.create(self.actor, project_id=self.project.pk, name='bootstrap-secret',
+                              kind='vars', purpose='project', value=b'protected-variable')
+        revision, approval = self.approved(secret_refs=(secret.active_version_id,))
+        self.assertEqual(self.api.read_revision(self.actor, revision.id).secret_refs, (secret.active_version_id,))
+        self.assertEqual(m.BootstrapSecretReference.objects.get(revision_id=revision.id).version_id, secret.active_version_id)
+        store.revoke(self.actor, secret.id, expected_revision=secret.revision)
+        with self.assertRaises((ValueError, PermissionError)):
+            self.api.payload(self.actor, self.run(approval).binding)
+
+    def test_unavailable_host_preserves_failure_budget_without_claiming_unknown_success(self):
+        run = self.result(self.begin(self.run()), outcome='unavailable')
+        self.assertEqual((run.state, run.failures), ('failed', 0))
+        self.assertFalse(self.api.readback(self.actor, run.binding).confirmed)
+
     def test_new_revision_or_incarnation_does_not_inherit_old_success(self):
         revision, approval = self.approved()
         run = self.success(self.run(approval))
@@ -201,6 +219,27 @@ class PreparationCases(PreparationFixture):
         step = again.steps(self.actor, run.binding)[0]
         self.assertEqual((step.failures, step.attempt), (2, 2))
 
+    def test_new_request_cannot_reset_gave_up_or_uncertain_target(self):
+        run = self.result(self.begin(self.run(failure_limit=1)), outcome='failed')
+        with self.assertRaises(self.s.Conflict):
+            self.run(approval=self.api.get_approval(self.actor, run.binding.approval_id))
+        other, approval = self.approved(tasks=b'new reviewed policy')
+        fresh = self.begin(self.run(approval))
+        fresh = self.api.mark_unknown(self.actor, fresh.binding, expected_version=fresh.version)
+        with self.assertRaises(self.s.Conflict):
+            self.run(approval)
+        self.assertEqual(m.BootstrapRun.objects.count(), 2)
+
+    def test_empty_steps_and_oversized_raw_output_are_rejected_without_mutation(self):
+        for steps in ((), ('duplicate', 'duplicate'), ('x',) * 65):
+            with self.assertRaises(ValueError):
+                self.run(steps=steps)
+        run = self.begin(self.run())
+        with self.assertRaises(ValueError):
+            self.api.progress(self.actor, run.binding, 0, percent=1, log=b'x' * 65537,
+                              expected_version=run.version)
+        self.assertEqual(self.api.get_run(self.actor, run.id).version, run.version)
+
     def test_lost_reply_is_readback_not_automatic_repeat_of_unknown_effect(self):
         run = self.begin(self.run())
         run = self.api.mark_unknown(self.actor, run.binding, expected_version=run.version)
@@ -218,6 +257,24 @@ class PreparationCases(PreparationFixture):
         self.assertEqual(read.run.state, 'unknown')
         self.assertEqual(read.run.failures, 0)
         self.assertFalse(read.confirmed)
+
+    def test_step_claim_cas_has_one_winner_on_independent_connections(self):
+        from django.db import connections
+        run = self.run()
+        barrier = Barrier(2)
+        def claim(_):
+            try:
+                barrier.wait(timeout=20)
+                return self.begin(run).version
+            except self.s.Conflict:
+                return 'conflict'
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(claim, (0, 1)))
+        self.assertEqual(outcomes.count('conflict'), 1)
+        self.assertIn(2, outcomes)
+        self.assertEqual(self.api.steps(self.actor, run.binding)[0].attempt, 1)
 
     def test_refusal_is_not_failure_or_automatic_retry(self):
         run = self.result(self.begin(self.run()), outcome='refused')
@@ -299,6 +356,11 @@ class PreparationCases(PreparationFixture):
             query.validate(proof, replace(binding, owner_id=self.user.pk + 1))
         with self.assertRaises(PermissionError):
             query.validate(replace(proof, digest='c' * 64), binding)
+        self.user.user_permissions.clear()
+        with self.assertRaises(PermissionError):
+            query.validate(proof, binding)
+        permission = Permission.objects.get(content_type__app_label='preparation', codename='approve_bootstrap')
+        self.user.user_permissions.add(permission)
         self.api.revoke(self.actor, approval.id)
         with self.assertRaises(PermissionError):
             query.validate(proof, binding)
