@@ -162,6 +162,11 @@ class NomadStopScheduler:
             job = copy.deepcopy(value)
             job['Stop'] = True
             job['Meta'].update({'mop.stop_operation':str(ticket.operation_id),'mop.stop_token':str(ticket.token)})
+            # Preflight GET занял живое wall time: intent перепроверяется
+            # немедленно перед эффектом, не только на входе (#679). Истёкший
+            # intent теряет силу оператора -- POST не уходит.
+            if ticket.not_after <= datetime.now(timezone.utc):
+                return StopProof('failed','conditional-refusal')
             status, _ = self._request('POST','/v1/jobs',ticket.job.namespace,
                 {'Job':job,'EnforceIndex':True,'JobModifyIndex':ticket.job.modify_index})
             # Nomad index conflict: атомарно отвергнут именно conditional write.
