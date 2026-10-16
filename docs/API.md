@@ -409,7 +409,8 @@ applied or overwrite that revision's observation; the result explicitly reports
 |---|---|
 | Production drain/enable effects | #639 NodeExecutor adapter, runtime/incarnation and physical receipt fencing; bind its managed lifecycle in the controller root |
 | Restart/send | Typed pure inputs exist, but no ORM admission endpoint or effect handler; #639/#640 must provide session identity, encrypted delivery and confirmation ports |
-| Create/update/recycle/delete/wipe, project build, grant activation, credential rotation, terminal and maintenance operations | Finite subject-owned handlers and receipt/recovery rules; not an arbitrary callback registry and not accepted as implemented commands |
+| Create/update/recycle/delete/wipe, grant activation, credential rotation, terminal and maintenance operations | Finite subject-owned handlers and receipt/recovery rules; not an arbitrary callback registry and not accepted as implemented commands |
+| Project build | #648 has finite DRF admission/status and the durable build process manager below; real scheduler/body/image consumers and privileged deployment remain root bindings, not automatic-success defaults |
 | Worker process | Bounded Runtime-owned `Worker.run_one`/`run_pending` exist; root must wire the real executor, wake/poll and shutdown ownership rather than reuse the old web worker |
 | Realtime publication | Durable outbox publishing seam exists, including duplicate event IDs after lost ACK; #626 connects authorized event fan-out and resync |
 | Grants | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it |
@@ -418,6 +419,72 @@ applied or overwrite that revision's observation; the result explicitly reports
 
 This checkpoint does not authorize an old-pool deployment or imply that those
 remaining handlers have passed transport, crash or performance acceptance.
+
+## Durable image builds (#648)
+
+`POST /api/v1/projects/{id}/commands/build` accepts schema version, epoch,
+request ID, expected project revision, execution deadline, an immutable policy ID,
+`mode` (`missing`, `update`, `rebuild`), explicit `target_nodes` and boolean
+`force_safety`. Build deadlines are bounded to two hours (not the short node
+eligibility command's five-minute horizon); each owned subprocess is additionally
+bounded by its remaining execution deadline. Branch, exact commit and manifest digest come from the saved
+policy, not request-supplied shell/argv/paths. Acceptance requires current
+`catalog.build_project`, `operations.view_operation` and their existing scope;
+forcing clone safety additionally requires the actual `builds.force_build`
+permission. Confidential policies are refused until protected manifest
+materialization is bound; ciphertext is never treated as an executable manifest.
+
+The handler uses the same `Operation`, `Step`, admission counts, request identity,
+audit/outbox and resource claims. `BuildRun`, `BuildNodePlan`,
+`AffectedTargetPlan`, stage intents and receipts are metadata with protected
+foreign keys, not another queue or a generic saga description. Claims for the
+shared `build:mirror`, projects, nodes and affected targets remain held across
+unknown outcomes and expired leases. The common worker discovers stale build
+steps for inspection using the original token, never a new destructive attempt.
+
+The complete affected-target plan commits before the first clear. Each target
+records assignment identity, incarnation, revision, generation, role/grant and
+exact source-spec bytes/digest. Clear, wipe, bake, restore and announce have
+separate durable intents. A previously committed intent allows inspection, not
+blind replay. Restoration attempts every affected target whose clear was
+attempted; newer identities/revisions are not overwritten. Original failures and
+individual compensation failures remain separate. Process quiescence and a
+known effect outcome are distinct persisted facts. An unknown-but-stopped process
+still needs effect readback before resource release.
+
+`missing` may skip only with fresh external availability for the pinned source
+digest, persisted as addressed evidence. Desired ORM image state, project
+registration or an Ansible exit code alone are not proof. Host nodes never have
+container templates cleared/baked; mixed scopes send only PVE targets to the image
+adapter. `GET /api/v1/operations/{id}` and request lookup expose bounded stage
+progress, unresolved intents and failure details without a realtime subscription.
+
+The privileged Unix executor checks both OS peer identity and the root-provided
+Step/claim gate. It runs under a distinct non-root UID, never a node-bound
+`Access.kind=service` identity. Its finite protocol carries durable IDs and tokens,
+not keys, inventory, shell or arbitrary arguments. Dispatch consumption commits
+before privileged execution; replay is denied. Disconnect does not undo a result
+or authorize resource release. The isolated Docker SETUP fixture proves separate
+UIDs, an owned socket, rejected foreign peers, scoped dispatch/inspection and a
+real owned subprocess. It is not a PVE build acceptance test.
+
+Root composition supplies named Scheduler, ImageBuilder and NodeExecutor ports
+and their capability preflight. `SafeAnsibleSubprocess` owns process groups through
+timeout/cancel quiescence and bounds output/private log retention; actual known
+secrets are redacted across pipe chunks and excluded from argv/environment.
+Inventory, playbook, private workspace, secret inventory and physical inspection
+are trusted deployment bindings. The Unix client advertises image-builder
+capability only when a fresh physical availability reader is also supplied.
+
+Remaining integration boundaries are explicit: bind real conditional scheduler
+and body consumers (including external spec/body identity fencing), physical image
+revision/readback and Nomad announcement, wire confirmed catalog image projection,
+protected manifest materialization, and configure the worker/executor lifecycle
+and restricted OS/DB credentials in the installation root. No legacy build RPC
+or file journal is used by this handler. Legacy consumer removal belongs to the
+epic cutover; their presence in this source tree is not a runtime fallback.
+Real builds on a new container/PVE installation still require operator-provided
+resources. No old pool or image is an acceptance fixture.
 
 ## Operation, claim and compensation lifecycle
 

@@ -23,7 +23,7 @@ ACTIONS = frozenset(
       'cancel_operation', 'view_operation', 'view_audit', 'diagnose_pool', 'treat_pool',
       'collect_pool_garbage', 'sweep_pool', 'view_node_disk')] +
     ['secrets.' + code for code in ('view_secret_metadata', 'manage_project_secret', 'deliver_secret', 'rotate_proxy_key')] +
-    ['preparation.approve_bootstrap', 'controller.manage_proxy', 'controller.view_models'])
+    ['preparation.approve_bootstrap', 'controller.manage_proxy', 'controller.view_models', 'builds.force_build'])
 # #639: конечный машинный протокол; общие RPC/shell actions не регистрируются.
 SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'poll_work', 'claim_work', 'report_result', 'read_facts'))
@@ -39,4 +39,4 @@ GLOBAL_ACTIONS = frozenset(
     ['sessions.' + x for x in ('view_history', 'view_tail', 'read_terminal', 'control_terminal')] +
     ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation', 'view_audit',
       'diagnose_pool', 'treat_pool', 'collect_pool_garbage', 'sweep_pool', 'view_node_disk')] +
-    ['secrets.rotate_proxy_key', 'controller.manage_proxy'])
+    ['secrets.rotate_proxy_key', 'controller.manage_proxy', 'builds.force_build'])

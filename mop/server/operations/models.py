@@ -37,7 +37,7 @@ class Operation(models.Model):
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable')), name='operation_finite_action'),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'build')), name='operation_finite_action'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
         indexes = [models.Index(fields=('state', 'created_at'), name='operations__state_b33956_idx')]
@@ -55,7 +55,7 @@ class Step(models.Model):
 
     class Meta:
         default_permissions = ()
-        constraints = [models.CheckConstraint(condition=Q(name='node_eligibility'), name='step_finite_handler')]
+        constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'image_build')), name='step_finite_handler')]
 
 
 class Resource(models.Model):

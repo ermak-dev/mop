@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from ..access.context import ActorContext, PrincipalKind
@@ -97,7 +98,7 @@ def _snapshot(row):
 
 def _event(row):
     values = dict(operation=row, revision=row.revision, state=row.state, code=row.code,
-                  target_revision=Node.objects.get(pk=row.node_id).revision)
+                  target_revision=(row.projects.get().revision if row.action == 'build' else Node.objects.get(pk=row.node_id).revision))
     m.AuditEvent.objects.create(reason=row.reason, **values)
     m.OutboxEvent.objects.create(**values)
 
@@ -130,6 +131,7 @@ class Operations:
         self.access = Access(grants=grants)
         self.grants = grants
         self.executor = executor
+        self.builds = None
         self.queue_limit, self.project_limit, self.execution_limit = queue_limit, project_limit, execution_limit
 
     def _require_binding(self):
@@ -158,6 +160,10 @@ class Operations:
         return tuple(row.projects.values_list('pk', flat=True))
 
     def _disclose(self, actor, row):
+        if row.action == 'build':
+            if self.builds is None:
+                raise Refused('controller_unavailable')
+            return self.builds.disclose(actor, row)
         self._authorize(actor, 'operations.view_operation', row.node_id, self._scope(row))
         # Запрос по request_id принадлежит actor; ID disclosure допускает отдельное
         # view_operation право в актуальном scope, не владеет правом execution.
@@ -237,6 +243,9 @@ class Operations:
         with self._transaction():
             installation = self._installation()
             row = m.Operation.objects.select_for_update().get(pk=operation_id)
+            if row.action == 'build':
+                # Конечный build-handler вызывается Worker отдельно, не node adapter.
+                return None
             if row.state != State.ACCEPTED:
                 return None
             if row.epoch != installation.epoch or row.restore_generation != installation.generation or not installation.effects_enabled:
@@ -441,11 +450,17 @@ class Operations:
             _move(row, State.CANCELLED, 'cancelled_before_start', expected_revision=expected_revision)
             return _snapshot(row)
 
+    def handler(self, operation_id):
+        self._require_binding()
+        return m.Step.objects.get(operation_id=operation_id).name
+
     def pending(self, *, limit=8):
         self._require_binding()
         if not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
-        return tuple(m.Operation.objects.filter(state=State.ACCEPTED).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
+        work = Q(state=State.ACCEPTED) | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
+        # Stale lease разрешает только inspection прежнего token, не новый apply.
+        return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
 
     def prune(self):
         _independent()
@@ -465,7 +480,9 @@ class Operations:
         value = {'event_id': str(event.event_id), 'epoch': str(event.operation.epoch),
             'operation_id': str(event.operation_id), 'revision': str(event.revision),
             'state': event.state, 'code': event.code, 'type': 'operation.changed',
-            'target': {'kind': 'node', 'id': str(event.operation.node_id), 'revision': str(event.target_revision)},
+            'target': {'kind': 'project' if event.operation.action == 'build' else 'node',
+                'id': str(event.operation.projects.get().pk if event.operation.action == 'build' else event.operation.node_id),
+                'revision': str(event.target_revision)},
             'project_ids': [str(pk) for pk in event.operation.projects.values_list('pk', flat=True)]}
         # Duplicate delivery при потере ACK — штатна; event_id стабилен.
         publisher(value)

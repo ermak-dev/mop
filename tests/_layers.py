@@ -110,6 +110,7 @@ SUBJECTS = {
     'preparation': {'catalog', 'access', 'secrets'},
     'operations': {'catalog', 'access', 'secrets', 'preparation'},
     'sessions': {'catalog', 'access'},
+    'builds': {'catalog', 'access', 'operations', 'sessions'},
 }
 
 

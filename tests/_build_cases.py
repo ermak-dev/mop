@@ -15,6 +15,12 @@ from _operation_cases import DurableOperations
 # FEATURE: образ — конечный восстанавливаемый process manager общей Operation.
 # HYPOTHESIS: отсутствие DRF build и durable intents теряет частично снятые тела.
 # SOLUTION: pinned BuildRun, полный plan до clear, receipts и fenced compensation.
+# RED: PG16 — build REST 404; PG17 — replay dispatch, busy skip, force и driver;
+#      PG16/17 — shared target fence, unknown/quiescent, restart queue, immutable
+#      inputs, mixed host/PVE и long-build deadline показали отдельные отказы.
+# RESULT: реальные PG16/17 crash/claim/recovery и regressions зелёные;
+#         отдельная UID/Unix fixture проверяет настоящий owned subprocess.
+# STATUS: FIXED — see #648; реальная новая PVE установка не проверена.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class ImageBuilds(TransactionTestCase):
     serialized_rollback = True
@@ -52,13 +58,13 @@ class ImageBuilds(TransactionTestCase):
         body['mode'] = 'update'
         self.assertEqual(client.post(url, body, content_type='application/json', secure=True).status_code, 409)
 
-    def setup_build(self, *, mode='rebuild', targets=2):
+    def setup_build(self, *, mode='rebuild', targets=2, driver='pve'):
         from mop.server.controller.runtime import builds_service
         from mop.server.builds.commands import parse
         from mop.server.sessions.models import Assignment, ExecutionIncarnation
         from mop.server.catalog.models import Node
         self.permission()
-        Node.objects.filter(pk=self.node.pk).update(driver='pve')
+        Node.objects.filter(pk=self.node.pk).update(driver=driver)
         self.fake = BuildPorts()
         for _ in range(targets):
             assignment = Assignment.objects.create(project=self.project, node=self.node,
@@ -160,10 +166,20 @@ class ImageBuilds(TransactionTestCase):
         import os
         from _build_process import claim
         self.setup_build()
+        from mop.server.catalog.models import Project, Node, NodeProject, ProjectPolicySnapshot
+        project = Project.objects.create(name='other', origin='https://example.invalid/other.git')
+        node = Node.objects.create(name='other', driver='pve', ssh_host='example.invalid',
+            control_origin='https://example.invalid', lan_address='example.invalid', bootstrap_address='example.invalid')
+        NodeProject.objects.create(node=node, project=project)
+        policy = ProjectPolicySnapshot.objects.create(project=project, sequence=1, content=b'{}',
+            digest=hashlib.sha256(b'{}').hexdigest(), source_commit='b'*40, source_ref='main', provenance='test', cpu=1, memory_mb=64, disk_mb=64)
+        other = self.builds.submit(self.actor, replace(self.command, request_id=uuid4(), project_id=project.pk,
+            policy_id=policy.pk, target_nodes=(node.pk,)))
         context = multiprocessing.get_context('spawn')
         ready, output = context.Event(), context.Queue()
+        # Эти Operation не делят project/node: единственный общий ресурс — mirror.
         children = [context.Process(target=claim, args=(connections['default'].settings_dict['NAME'],
-            os.environ['MOP_CONTROLLER_BOOTSTRAP'], UUID(self.operation['id']), ready, output)) for _ in range(2)]
+            os.environ['MOP_CONTROLLER_BOOTSTRAP'], UUID(operation_id), ready, output)) for operation_id in (self.operation['id'], other['id'])]
         for child in children:
             child.start()
         ready.set()
@@ -180,6 +196,182 @@ class ImageBuilds(TransactionTestCase):
                     child.terminate()
                     child.join(timeout=5)
             output.close()
+
+    def test_privileged_root_gate_consumes_dispatch_once_but_retains_inspection(self):
+        self.setup_build(targets=0)
+        claim = self.builds.claim(UUID(self.operation['id']))
+        self.builds._plan(claim)
+        ticket, fresh, result = self.builds._intent(claim, 'build')
+        from mop.server.access.services import Denied
+        request = dict(intent_id=ticket.id, step_id=claim.step_id, token=claim.token, epoch=claim.epoch)
+        self.assertEqual(self.builds.resolve_ticket(**request, verb='apply').id, ticket.id)
+        with self.assertRaisesRegex(Denied, 'dispatch|replay'):
+            self.builds.resolve_ticket(**request, verb='apply')
+        self.assertEqual(self.builds.resolve_ticket(**request, verb='inspect').id, ticket.id)
+
+    def test_fresh_available_image_does_not_stop_a_busy_clone(self):
+        self.setup_build(mode='missing')
+        self.fake.available = True
+        self.fake.targets[0]['free'] = False
+        result = self.builds.run(UUID(self.operation['id']))
+        self.assertEqual(result['state'], 'succeeded')
+        self.assertEqual([x[0] for x in self.fake.calls], ['announce'])
+
+    def crash_after(self, stage):
+        self.setup_build(targets=0 if stage in ('build','announce') else 2)
+        self.fake.crash = stage
+        with self.assertRaises(SimulatedCrash):
+            self.builds.run(UUID(self.operation['id']))
+        self.fake.crash = None
+        result = self.builds.run(UUID(self.operation['id']))
+        self.assertEqual(result['state'], 'succeeded')
+        expected = 2 if stage in ('clear','wipe','restore') else 1
+        self.assertEqual(len([x for x in self.fake.calls if x[0] == stage]), expected)
+
+    def test_crash_after_clear(self):
+        self.crash_after('clear')
+
+    def test_crash_after_wipe(self):
+        self.crash_after('wipe')
+
+    def test_crash_after_build(self):
+        self.crash_after('build')
+
+    def test_crash_after_restore(self):
+        self.crash_after('restore')
+
+    def test_crash_after_announce(self):
+        self.crash_after('announce')
+
+    def test_force_safety_needs_explicit_server_permission_not_just_build_right(self):
+        from django.test import Client
+        self.permission()
+        body = self.body(self.policy())
+        body['force_safety'] = True
+        response = Client(HTTP_AUTHORIZATION='Token '+self.token).post(
+            '/api/v1/projects/'+str(self.project.pk)+'/commands/build', body, content_type='application/json', secure=True)
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(self.m.Operation.objects.exists())
+
+    def test_db_outage_after_physical_clear_preserves_intent_and_readbacks_once(self):
+        from unittest.mock import patch
+        from django.db import OperationalError
+        self.setup_build()
+        original = self.builds._record
+        def outage(claim, ticket, result):
+            if ticket.stage == 'clear':
+                raise OperationalError('fixture outage after external clear')
+            return original(claim, ticket, result)
+        with patch.object(self.builds, '_record', side_effect=outage):
+            with self.assertRaises(OperationalError):
+                self.builds.run(UUID(self.operation['id']))
+        self.assertEqual(self.builds.run(UUID(self.operation['id']))['state'], 'succeeded')
+        self.assertEqual(len([x for x in self.fake.calls if x[0] == 'clear']), 2)
+
+    def test_driver_cannot_change_under_accepted_pinned_plan(self):
+        self.setup_build(targets=0)
+        from mop.server.catalog.models import Node
+        Node.objects.filter(pk=self.node.pk).update(driver='host')
+        result = self.builds.run(UUID(self.operation['id']))
+        self.assertNotEqual(result['state'], 'succeeded')
+        self.assertEqual(self.fake.calls, [])
+
+    def test_host_strategy_does_not_build_templates_or_wipe_host(self):
+        self.setup_build(targets=0, driver='host')
+        self.assertEqual(self.builds.run(UUID(self.operation['id']))['state'], 'succeeded')
+        self.assertEqual(self.fake.calls, [])
+
+    def test_runtime_worker_dispatches_build_outside_event_loop_and_owns_cancelled_waiter(self):
+        import asyncio
+        from threading import Event
+        from mop.server.controller.runtime import Runtime
+        from mop.server.operations.worker import Worker
+        self.setup_build()
+        entered, release = Event(), Event()
+        self.fake.before_clear = lambda: (entered.set(), release.wait(timeout=10))
+        async def exercise():
+            runtime = Runtime(blocking_limit=1, effect_limit=1)
+            worker = Worker(runtime, self.builds.operations, None, image_builds=self.builds)
+            waiter = asyncio.create_task(worker.run_one(UUID(self.operation['id'])))
+            for _ in range(500):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.01)
+            self.assertTrue(entered.is_set())
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+            self.assertGreater(runtime.pending, 0)
+            release.set()
+            await runtime.aclose(timeout=10)
+        asyncio.run(exercise())
+        self.assertEqual(self.builds.operations.status(self.actor, UUID(self.operation['id']))['state'], 'succeeded')
+
+    def test_assignment_release_cannot_cross_unresolved_build_target_claim(self):
+        self.setup_build()
+        self.user.user_permissions.add(Permission.objects.get(content_type__app_label='execution', codename='assign_work'))
+        from mop.server.sessions.services import Conflict
+        from mop.server.controller.runtime import assignments_service
+        claim = self.builds.claim(UUID(self.operation['id']))
+        self.builds._plan(claim)
+        with self.assertRaisesRegex(Conflict, 'unresolved'):
+            assignments_service().release(self.actor, self.fake.targets[0]['target_id'], expected_revision=1)
+
+    def test_unknown_but_quiescent_is_not_a_final_success_or_failed_receipt(self):
+        from unittest.mock import patch
+        from mop.server.builds.contracts import StageResult
+        self.setup_build()
+        apply = self.fake.apply
+        def incomplete(ticket):
+            result = apply(ticket)
+            return StageResult('unknown', True, 'process stopped; effect still unknown') if ticket.stage == 'wipe' else result
+        with patch.object(self.fake, 'apply', side_effect=incomplete):
+            self.assertEqual(self.builds.run(UUID(self.operation['id']))['state'], 'unknown')
+        self.assertEqual(self.builds.run(UUID(self.operation['id']))['state'], 'succeeded')
+
+    def test_restarted_worker_discovers_unresolved_build_in_the_same_operation_queue(self):
+        self.setup_build(targets=0)
+        self.fake.crash = 'build'
+        with self.assertRaises(SimulatedCrash):
+            self.builds.run(UUID(self.operation['id']))
+        self.m.Step.objects.filter(operation_id=self.operation['id']).update(lease_until=timezone.now()-timedelta(seconds=1))
+        self.assertIn(UUID(self.operation['id']), self.builds.operations.pending())
+
+    def test_build_outbox_uses_project_identity_not_anchor_node(self):
+        self.setup_build(targets=0)
+        events = []
+        self.builds.operations.publish_one(events.append)
+        self.assertEqual(events[0]['target']['kind'], 'project')
+        self.assertEqual(events[0]['target']['id'], str(self.project.pk))
+
+    def test_pinned_build_inputs_cannot_be_edited_through_orm_save_or_queryset(self):
+        self.setup_build(targets=0)
+        from mop.server.builds.models import BuildRun
+        run = BuildRun.objects.get(operation_id=self.operation['id'])
+        run.source_commit = 'b'*40
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            run.save(update_fields=('source_commit',))
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            BuildRun.objects.filter(pk=run.pk).update(mode='update')
+
+    def test_mixed_host_and_pve_scope_builds_only_the_container_targets(self):
+        self.setup_build(targets=0)
+        from mop.server.catalog.models import Node, NodeProject
+        node = Node.objects.create(name='host-only', driver='host', ssh_host='example.invalid',
+            control_origin='https://example.invalid', lan_address='example.invalid', bootstrap_address='example.invalid')
+        NodeProject.objects.create(node=node, project=self.project)
+        self.builds.operations.cancel(self.actor, UUID(self.operation['id']), expected_revision=1)
+        command = replace(self.command, request_id=uuid4(), target_nodes=tuple(sorted((node.pk,self.node.pk), key=str)))
+        operation = self.builds.submit(self.actor, command)
+        self.assertEqual(self.builds.run(UUID(operation['id']))['state'], 'succeeded')
+        self.assertEqual(self.fake.build_input.target_nodes, (self.node.pk,))
+
+    def test_real_ansible_build_has_bounded_long_deadline_not_node_five_minute_cap(self):
+        self.setup_build(targets=0)
+        command = replace(self.command, request_id=uuid4(), not_after=timezone.now()+timedelta(hours=1))
+        operation = self.builds.submit(self.actor, command)
+        self.assertEqual(operation['state'], 'accepted')
+        self.assertEqual(self.m.Operation.objects.get(pk=operation['id']).not_after, command.not_after)
 
     def test_denied_permission_has_no_operation_or_effect(self):
         from django.test import Client

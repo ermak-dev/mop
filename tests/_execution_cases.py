@@ -10,6 +10,7 @@ from django.contrib.auth.models import Permission
 from django.db import close_old_connections
 from django.test import TransactionTestCase, Client, override_settings
 from django.utils import timezone
+from mop.server.controller.runtime import assignments_service, machine_execution_service
 
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -62,10 +63,10 @@ class MachineExecution(TransactionTestCase):
             permissions=['execution.poll_work', 'execution.claim_work', 'execution.report_result', 'execution.read_facts'])
         self.actor = auth.token_context(self.key)
         self.boot = uuid4()
-        self.target = services.Assignments().create(self.owner, project_id=self.project.pk,
+        self.target = assignments_service().create(self.owner, project_id=self.project.pk,
             node_id=self.node.pk, role='worker', bundle_digest='a'*64, grant_id=uuid4(),
             expires_at=timezone.now()+timedelta(hours=1))
-        self.inc = services.Assignments().activate(self.owner, self.target.id,
+        self.inc = assignments_service().activate(self.owner, self.target.id,
             expected_revision=1, executor_epoch=self.boot)
         self.target = self.m.Assignment.objects.get(pk=self.target.id)
         self.work = protocol.WorkV1(epoch=self.epoch, owner_id=self.human.id,
@@ -76,7 +77,7 @@ class MachineExecution(TransactionTestCase):
             action='restart_session', not_after=timezone.now()+timedelta(minutes=2))
         self.port = FakeWork(self.work)
         self.grants = FakeGrants()
-        self.service = services.MachineExecution(work=self.port, grants=self.grants,
+        self.service = machine_execution_service(work=self.port, grants=self.grants,
             installation=lambda: protocol.AuthorityV1(self.epoch, True))
 
     def claim(self, request_id=None):
@@ -85,7 +86,7 @@ class MachineExecution(TransactionTestCase):
     def test_claim_is_durable_and_receipt_retry_is_idempotent(self):
         request = uuid4()
         attempt = self.claim(request)
-        self.service = self.s.MachineExecution(work=self.port, grants=self.grants,
+        self.service = machine_execution_service(work=self.port, grants=self.grants,
             installation=lambda: self.p.AuthorityV1(self.epoch, True))
         self.assertEqual(self.claim(request).id, attempt.id)
         self.assertEqual(self.m.AssignmentAttempt.objects.count(), 1)
@@ -159,9 +160,9 @@ class MachineExecution(TransactionTestCase):
         self.assertEqual(self.port.started, 1)
 
     def test_existing_target_reassignment_requires_fresh_clean_clone_and_fences_old_rollback(self):
-        self.s.Assignments().release(self.owner, self.target.id, expected_revision=self.target.revision)
+        assignments_service().release(self.owner, self.target.id, expected_revision=self.target.revision)
         target = self.m.Assignment.objects.get(pk=self.target.id)
-        self.assertTrue(callable(getattr(self.s.Assignments(), 'reassign', None)),
+        self.assertTrue(callable(getattr(assignments_service(), 'reassign', None)),
                         'human assignment needs a protected existing-target reassign use case')
         now = timezone.now()
         class Clone:
@@ -171,7 +172,7 @@ class MachineExecution(TransactionTestCase):
                 self.assertFalse(connection.in_atomic_block)
                 return self.p.FactV1(target_id, incarnation_id, 1, now, now, 'fresh', (('clean', inner.clean),))
         clone = Clone()
-        assignments = self.s.Assignments(clones=clone)
+        assignments = assignments_service(clones=clone)
         values = dict(expected_revision=target.revision, role='worker', bundle_digest='b'*64,
             grant_id=uuid4(), expires_at=timezone.now()+timedelta(hours=1))
         with self.assertRaises(self.s.Conflict):
@@ -189,7 +190,7 @@ class MachineExecution(TransactionTestCase):
         attempt = self.claim()
         self.service.executor_restarted(self.actor, self.node.id, previous_epoch=self.boot, new_epoch=uuid4())
         revision = self.m.Assignment.objects.values_list('revision', flat=True).get(pk=self.target.id)
-        self.s.Assignments().release(self.owner, self.target.id, expected_revision=revision)
+        assignments_service().release(self.owner, self.target.id, expected_revision=revision)
         target = self.m.Assignment.objects.get(pk=self.target.id)
         attempt = self.m.AssignmentAttempt.objects.get(pk=attempt.id)
         self.human.user_permissions.add(Permission.objects.get(content_type__app_label='execution', codename='reconcile_work'))
@@ -207,7 +208,7 @@ class MachineExecution(TransactionTestCase):
                 self.service.reconcile(self.owner, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4())
                 return clean_before_effect_finished
         with self.assertRaises(self.s.Conflict):
-            self.s.Assignments(clones=RacingClone()).reassign(self.owner, target.id,
+            assignments_service(clones=RacingClone()).reassign(self.owner, target.id,
                 expected_revision=target.revision, role='worker', bundle_digest='b'*64,
                 grant_id=uuid4(), expires_at=timezone.now()+timedelta(hours=1))
         self.assertIsNone(self.m.Assignment.objects.get(pk=target.id).owner_id)
@@ -215,7 +216,7 @@ class MachineExecution(TransactionTestCase):
     def test_activation_consumes_operation_reserved_incarnation_and_grant_values(self):
         reserved_incarnation, reserved_grant = uuid4(), uuid4()
         try:
-            incarnation = self.s.Assignments().activate(self.owner, self.target.id,
+            incarnation = assignments_service().activate(self.owner, self.target.id,
                 expected_revision=self.target.revision, executor_epoch=self.boot,
                 incarnation_id=reserved_incarnation, grant_id=reserved_grant)
         except TypeError:
@@ -230,7 +231,7 @@ class MachineExecution(TransactionTestCase):
     def test_new_incarnation_cannot_replace_unresolved_effect(self):
         self.claim()
         with self.assertRaises(self.s.Conflict):
-            self.s.Assignments().activate(self.owner, self.target.id,
+            assignments_service().activate(self.owner, self.target.id,
                 expected_revision=self.target.revision, executor_epoch=uuid4())
 
     def test_node_restart_requires_reconciliation_not_old_claim_replay(self):
@@ -248,7 +249,7 @@ class MachineExecution(TransactionTestCase):
         current = self.m.Assignment.objects.get(pk=self.target.id)
         self.assertGreater(current.revision, old_revision)
         with self.assertRaises(self.s.Conflict):
-            self.s.Assignments().activate(self.owner, current.id,
+            assignments_service().activate(self.owner, current.id,
                 expected_revision=old_revision, executor_epoch=self.boot)
         self.assertEqual(self.m.Assignment.objects.get(pk=current.id).current_incarnation_id, self.inc.id)
 
@@ -256,7 +257,7 @@ class MachineExecution(TransactionTestCase):
         new_epoch = uuid4()
         self.service.executor_restarted(self.actor, self.node.id, previous_epoch=self.boot, new_epoch=new_epoch)
         current = self.m.Assignment.objects.get(pk=self.target.id)
-        active = self.s.Assignments().activate(self.owner, current.id,
+        active = assignments_service().activate(self.owner, current.id,
             expected_revision=current.revision, executor_epoch=new_epoch)
         try:
             self.assertEqual(self.service.executor_restarted(self.actor, self.node.id,
@@ -299,9 +300,9 @@ class MachineExecution(TransactionTestCase):
 
     def test_late_rollback_does_not_revoke_new_human_assignment(self):
         old_generation = self.target.generation
-        self.s.Assignments().release(self.owner, self.target.id, expected_revision=self.target.revision)
+        assignments_service().release(self.owner, self.target.id, expected_revision=self.target.revision)
         with self.assertRaises(self.s.Conflict):
-            self.s.Assignments().release(self.owner, self.target.id,
+            assignments_service().release(self.owner, self.target.id,
                 expected_revision=self.target.revision, expected_generation=old_generation)
         self.target = self.m.Assignment.objects.get(pk=self.target.id)
         self.assertGreater(self.target.generation, old_generation)
@@ -325,7 +326,7 @@ class MachineExecution(TransactionTestCase):
             close_old_connections()
             try:
                 barrier.wait(timeout=10)
-                self.s.Assignments().release(self.owner, self.target.id, expected_revision=self.target.revision)
+                assignments_service().release(self.owner, self.target.id, expected_revision=self.target.revision)
             finally:
                 close_old_connections()
         with ThreadPoolExecutor(max_workers=2) as workers:
@@ -382,7 +383,7 @@ class MachineExecution(TransactionTestCase):
 
     def test_default_ports_deny_even_with_valid_machine_auth(self):
         with self.assertRaises(self.s.Unavailable):
-            self.s.MachineExecution().poll(self.actor, self.node.id, executor_epoch=self.boot, limit=10)
+            machine_execution_service().poll(self.actor, self.node.id, executor_epoch=self.boot, limit=10)
 
     @override_settings(ALLOWED_HOSTS=['testserver'])
     def test_drf_routes_use_current_auth_and_reject_arbitrary_rpc(self):
@@ -421,12 +422,12 @@ class MachineExecution(TransactionTestCase):
         self.assertEqual(receipt.outcome, 'succeeded')
         self.assertEqual(self.m.AssignmentAttempt.objects.get(pk=attempt.id).state, 'succeeded')
         current = self.m.Assignment.objects.get(pk=self.target.id)
-        self.s.Assignments().activate(self.owner, current.id, expected_revision=current.revision, executor_epoch=uuid4())
+        assignments_service().activate(self.owner, current.id, expected_revision=current.revision, executor_epoch=uuid4())
         with self.assertRaises(self.s.Conflict):
             self.claim()
 
     def test_public_binding_query_resolves_live_canonical_scope_without_private_model_imports(self):
-        assignments = self.s.Assignments()
+        assignments = assignments_service()
         self.assertTrue(callable(getattr(assignments, 'current', None)),
                         'Access/Secrets composition needs a public current assignment binding query')
         binding = assignments.current(project_id=self.project.id, target_id=self.target.id)
@@ -488,7 +489,7 @@ class MachineExecution(TransactionTestCase):
         foreign = Project.objects.create(name='foreign', origin='https://example.invalid/foreign.git')
         NodeProject.objects.create(node=self.node, project=foreign)
         try:
-            result = self.s.Assignments().create(self.owner, project_id=self.project.id,
+            result = assignments_service().create(self.owner, project_id=self.project.id,
                 node_id=self.node.id, role='worker', bundle_digest='a'*64, grant_id=uuid4(),
                 expires_at=timezone.now()+timedelta(hours=1))
         except PermissionError:
@@ -497,15 +498,15 @@ class MachineExecution(TransactionTestCase):
 
     def test_receipt_identity_race_on_different_resources_is_a_conflict(self):
         from dataclasses import replace
-        target = self.s.Assignments().create(self.owner, project_id=self.project.id,
+        target = assignments_service().create(self.owner, project_id=self.project.id,
             node_id=self.node.id, role='worker', bundle_digest='a'*64, grant_id=uuid4(),
             expires_at=timezone.now()+timedelta(hours=1))
-        incarnation = self.s.Assignments().activate(self.owner, target.id,
+        incarnation = assignments_service().activate(self.owner, target.id,
             expected_revision=1, executor_epoch=self.boot)
         target = self.m.Assignment.objects.get(pk=target.id)
         second_work = replace(self.work, operation_id=uuid4(), step_id=uuid4(), target_id=target.id,
             incarnation_id=incarnation.id, generation=target.generation, revision=target.revision, grant_id=target.grant_id)
-        second = self.s.MachineExecution(work=FakeWork(second_work), grants=self.grants,
+        second = machine_execution_service(work=FakeWork(second_work), grants=self.grants,
             installation=lambda: self.p.AuthorityV1(self.epoch, True))
         attempts = (self.claim(), second.claim(self.actor, second_work, request_id=uuid4()))
         barrier, receipt_id = Barrier(2), uuid4()
@@ -567,11 +568,11 @@ class MachineExecution(TransactionTestCase):
         self.assertEqual(self.m.AssignmentAttempt.objects.count(), 0)
 
     def test_epoch_change_or_disabled_effects_cannot_reuse_admission(self):
-        self.service = self.s.MachineExecution(work=self.port, grants=self.grants,
+        self.service = machine_execution_service(work=self.port, grants=self.grants,
             installation=lambda: self.p.AuthorityV1(uuid4(), True))
         with self.assertRaises(self.s.Conflict):
             self.claim()
-        self.service = self.s.MachineExecution(work=self.port, grants=self.grants,
+        self.service = machine_execution_service(work=self.port, grants=self.grants,
             installation=lambda: self.p.AuthorityV1(self.epoch, False))
         with self.assertRaises(self.s.Unavailable):
             self.claim()

@@ -69,6 +69,8 @@ stages: [test, deploy]
         pip wheel -q --disable-pip-version-check --wheel-dir /opt/mop-wheels '.[server]' jinja2 'setuptools>=64'
         pip install -q --root-user-action=ignore --disable-pip-version-check --no-index --find-links /opt/mop-wheels 'mop[server]' jinja2
         export PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/mop-wheels
+        # Только новая owned Docker fixture: отдельный uid и Unix executor.
+        python3 tests/_build_uid_fixture.py
         for attempt in $(seq 1 60); do
           pg_isready -h postgres -U mop_ci && break
           test "$attempt" -lt 60

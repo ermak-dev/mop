@@ -12,6 +12,7 @@ from django.views.decorators.cache import never_cache
 from . import authviews as auth
 from . import operationviews as operations
 from . import machineviews as machine
+from .buildviews import BuildProject
 
 urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
@@ -28,6 +29,7 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/identity', auth.Identity.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
+    path('api/v1/projects/<uuid:project_id>/commands/build', BuildProject.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/drain', operations.DrainNode.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/enable', operations.EnableNode.as_view()),
     path('api/v1/operations', operations.RequestLookup.as_view()),
