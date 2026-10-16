@@ -1,13 +1,12 @@
-// Приватные чтения карточки папета (#463, контракт #462): GET
-// /api/puppet/<имя> и .../tail (#507: чтение stderr ушло вместе с кнопкой
-// «лог»). Только admin и только по явной цели:
-// ни опроса, ни хранения -- записи живут в состоянии компонента, смена
-// источника (роль, цель) стирает их в тот же рендер, а опоздавший ответ
-// прежнего запроса не воскресит их. Поколение -- как в useJournal: принят
-// бывает только ответ, начатый позже последнего принятого.
+// Карточка читает тот же versioned Entity, что таблица и команды (#627).
+// target — стабильный ID, не runtime name. HTTP/detail принадлежит poolNetwork.
+// Отдельный tail ниже пока относится к прежнему private workspace; он не
+// участвует в REST/WS store и не является fallback источником pool entities.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Puppet } from "./types";
 import type { Session } from "./useSession";
+import { poolNetwork, presentPuppet, sessionKey, usePoolState } from './poolNetwork';
+import { entityKey } from './poolStore';
 
 export interface PuppetCardState { card: Puppet | null; error: string | null }
 
@@ -19,61 +18,17 @@ const words: Record<number, string> = { 401: DENIED, 403: DENIED, 404: NO_SUCH }
 
 export const refuseText = (status: number): string => words[status] ?? SILENT;
 
-/** Карточка -- строка ростера по имени (#462). Цель нет -- спрашивать
- *  нечего; не-admin -- синхронный отказ без запроса. */
+/** Без отдельной копии подтверждённых фактов в компоненте. */
 export function usePuppetCard(session: Session, target: string | null): PuppetCardState {
-  const [state, setState] = useState<PuppetCardState>({ card: null, error: null });
-  const accepted = useRef(0);
-  const seq = useRef(0);
-  // источник состояния: чья карточка. Смена -- первый рендер уже без
-  // прежних фактов; prev пишется только эффектом (как useJournal).
-  const source = `${session.login ?? ""}\0${session.role ?? ""}\0${target ?? ""}`;
-  const prev = useRef(source);
-  const stale = prev.current !== source;
-
+  const state = usePoolState();
+  const key = sessionKey(session);
   useEffect(() => {
-    if (session.role !== "admin" || !target) {
-      prev.current = source;
-      setState(session.role === "admin" || !target
-        ? { card: null, error: null }
-        : { card: null, error: DENIED });
-      return;
-    }
-    const ctrl = new AbortController();
-    let alive = true;
-    const at = ++seq.current;
-    prev.current = source;
-    setState({ card: null, error: null });
-    fetch(`/api/puppet/${encodeURIComponent(target)}`,
-          { credentials: "same-origin", signal: ctrl.signal })
-      .then(async (r) => {
-        if (!alive || at <= accepted.current) return;
-        if (r.ok) {
-          const body = (await r.json()) as { puppet: Puppet };
-          if (!alive || at <= accepted.current) return;
-          accepted.current = at;
-          setState({ card: body.puppet, error: null });
-        } else {
-          accepted.current = at;
-          setState({ card: null, error: refuseText(r.status) });
-        }
-      })
-      .catch(() => {
-        if (!alive || at <= accepted.current) return;
-        accepted.current = at;
-        setState({ card: null, error: SILENT });
-      });
-    return () => {
-      alive = false;
-      accepted.current = seq.current;
-      ctrl.abort();
-    };
-    // target в зависимостях: смена цели -- другой источник
-  }, [session.login, session.role, target, source]);
-
-  if (session.role !== "admin" && target) return { card: null, error: DENIED };
-  if (stale) return { card: null, error: null };
-  return state;
+    if (target && poolNetwork.matches(session)) return poolNetwork.watchDetail(target);
+  }, [key, target]);
+  if (!target || !poolNetwork.matches(session)) return { card: null, error: null };
+  const error = poolNetwork.detailError(session, target);
+  const row = poolNetwork.puppet(target);
+  return { card: row && !error ? presentPuppet(row, Date.now(), state.entities[entityKey(row)]?.invalidated) : null, error };
 }
 
 export interface PuppetTailState {
