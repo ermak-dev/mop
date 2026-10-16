@@ -11,14 +11,15 @@ configure()
 
 class ControllerApplication:
     """HTTP/gateway и adapters имеют одного владельца запуска и остановки."""
-    def __init__(self, *, runtime=None, startup=validate_asgi_startup, http=None, http_limit=16, gateway=None):
+    def __init__(self, *, runtime=None, startup=validate_asgi_startup, http=None, http_limit=16, gateway=None, realtime_gateway=None):
         if not 1 <= http_limit <= 16:
             raise ValueError('HTTP concurrency must be within 16 requests')
         self.runtime = runtime or Runtime()
         self.startup = startup
         from mop.server.realtime.gateway import Gateway
-        self.gateway = gateway or Gateway(runtime=self.runtime)
-        self.router = ProtocolTypeRouter({'http': http or get_asgi_application(),
+        from mop.server.gateway.composition import bind_http
+        self.gateway = realtime_gateway or Gateway(runtime=self.runtime)
+        self.router = ProtocolTypeRouter({'http': bind_http(http or get_asgi_application(), self.runtime, gateway),
                                           'websocket': self.gateway})
         self.http_limit = http_limit
         self.active = 0
