@@ -11,6 +11,7 @@ from .views import Health
 from django.views.decorators.cache import never_cache
 from . import authviews as auth
 from . import machineviews as machine
+from . import projectionviews as projection
 
 urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
@@ -24,6 +25,14 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/machine/work/result', machine.Result.as_view()),
     path('api/v1/machine/executor/restarted', machine.Restarted.as_view()),
     path('api/v1/machine/facts', machine.Facts.as_view()),
+    path('api/v1/puppets', projection.PoolSnapshot.as_view()),
+    path('api/v1/puppets/<uuid:target_id>', projection.PuppetDetail.as_view()),
+    path('api/v1/snapshot', projection.PoolSnapshot.as_view()),
+    path('api/v1/events', projection.ProjectionEvents.as_view()),
+    path('api/v1/machine/observations', projection.Observations.as_view()),
+    path('api/v1/machine/observation-producers', projection.Producers.as_view()),
+    path('api/v1/machine/observation-producers/<uuid:target_id>/<str:kind>', projection.ProducerStatus.as_view()),
+    path('api/v1/machine/observation-context', projection.ObservationContext.as_view()),
     path('api/v1/identity', auth.Identity.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),

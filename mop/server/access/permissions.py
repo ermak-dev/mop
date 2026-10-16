@@ -26,7 +26,7 @@ ACTIONS = frozenset(
     ['preparation.approve_bootstrap', 'controller.manage_proxy', 'controller.view_models'])
 # #639: конечный машинный протокол; общие RPC/shell actions не регистрируются.
 SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset('execution.' + code for code in (
-    'poll_work', 'claim_work', 'report_result', 'read_facts'))
+    'poll_work', 'claim_work', 'report_result', 'read_facts', 'ingest_observations'))
 ACTIONS = ACTIONS | SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work'))
 

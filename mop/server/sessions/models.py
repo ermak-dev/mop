@@ -93,7 +93,7 @@ class ResultReceipt(ImmutableRecord):
         constraints = Record.Meta.constraints + [
             models.CheckConstraint(condition=Q(expected_revision__gte=1,
                 resulting_revision=models.F('expected_revision') + 1), name='receipt_revision_successor'),
-            models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='receipt_known_outcome'),
+            models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='execution_receipt_known_outcome'),
         ]
 
 
@@ -105,6 +105,11 @@ class IdentityApplication(ImmutableRecord):
 class ReadinessReceipt(ImmutableRecord):
     attempt = models.OneToOneField(AssignmentAttempt, on_delete=models.PROTECT)
     receipt = models.OneToOneField(ResultReceipt, on_delete=models.PROTECT)
+
+
+# Django регистрирует отдельный leaf моделей параллельно telemetry/endpoints.
+from .projection_models import (ProjectionRuntime, ProjectionClock, SourceProducer, ProducerEpoch, SourceObservation,
+                                ProjectSequence, ProjectionEvent, ReadSnapshot)  # noqa: F401,E402
 
 
 class LandingToken(Record):

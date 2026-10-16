@@ -7,6 +7,7 @@ from django.core.exceptions import PermissionDenied
 from mop.server.access import services as access
 from mop.server.access.models import LoginIdentity, Principal
 from mop.server.catalog.models import Project
+from mop.server.sessions.models import Assignment
 
 
 def _actor(request):
@@ -116,3 +117,49 @@ class ProjectAdmin(admin.ModelAdmin):
         except access.Denied as error:
             raise PermissionDenied(str(error)) from None
         obj.revision = result.revision
+
+
+@admin.register(Assignment)
+class AssignmentReadAdmin(admin.ModelAdmin):
+    """Admin не получает отдельную authority/write path или Collector."""
+    list_display = ('id',)
+    fields = ('read_projection',)
+    readonly_fields = ('read_projection',)
+    actions = None
+
+    def has_module_permission(self, request):
+        return _allowed(request, 'catalog.view_pool')
+
+    def has_view_permission(self, request, obj=None):
+        return _allowed(request, 'catalog.view_pool', (obj.project_id,) if obj else ())
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        from .projectionviews import queries
+        try:
+            ids = queries().visible_ids(_actor(request))
+        except access.Denied as error:
+            raise PermissionDenied(str(error)) from None
+        return super().get_queryset(request).filter(pk__in=ids)
+
+    def get_object(self, request, object_id, from_field=None):
+        from .projectionviews import queries
+        obj = super().get_object(request, object_id, from_field)
+        if obj is not None:
+            # Только request-local Model instance; Admin singleton не хранит actor/DTO.
+            obj._read_projection = queries().detail(_actor(request), obj.pk)['puppet']
+        return obj
+
+    @admin.display(description='Read projection')
+    def read_projection(self, obj):
+        import json
+        # Django экранирует readonly string; недоверенные branch/label не HTML.
+        return json.dumps(obj._read_projection, ensure_ascii=False, indent=2)

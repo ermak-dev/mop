@@ -817,3 +817,147 @@ needs no artificial failing test. The full strict suite and web:dist gate exact
 issue and epic merge SHAs in CI; Django gates are added by #632, so today's old
 suite cannot be reported as Django acceptance. Report source inspection, local
 checks, CI and live experiments separately, including anything unverified.
+
+## Unified read implementation seam (#626)
+
+The initial query owner is `sessions.projections.PoolQueries`, constructed with
+an explicit live SQL-only `epoch` reader. A cached ControllerRun is not a query
+authority port; the root rechecks the restore fence and current installation on
+each call. DRF
+`GET /api/v1/puppets`, `GET /api/v1/snapshot` and the read-only Assignment Admin
+use it; `GET /api/v1/puppets/<uuid>` returns a `puppet` object. List/snapshot
+responses contain `schema_version`, installation `epoch`, `results`, server-owned
+`snapshot_id`, an opaque project-vector `cursor`, and nullable `next_cursor`.
+`project_id` is a canonical catalogue UUID; `page_size` is 1..500, default 100.
+Unknown/repeated query fields fail. Display names and aliases are never authority;
+Assignments currently have no published runtime-name binding, so `name` is null
+and `aliases` is empty rather than reconstructed from a reused name.
+
+A puppet object contains `kind`, UUID `id`, current `incarnation`, decimal-string
+projection `revision`, `deleted`, actual project/node IDs and display names,
+`desired`, receipt-derived `applied`, freshness-bearing `observed`, pure-policy
+`state`, and explicit proxy-usage availability. `desired.revision` is the current
+Assignment CAS revision. It is **not** interchangeable with the read-projection
+revision: the latter also advances with persisted source/publication changes and
+catalogue revisions. This is a command integration mismatch, not permission to
+silently substitute counters: the root must freeze each command's admission/CAS
+binding and reconcile the public projection version with its owning aggregate's
+revision. Current #639 Assignment methods consume the latter. #642's generic
+Snapshot preserves both fields, but its Target constructor does not choose that
+binding for the caller. #627 normalizes top-level projection
+identity/revision, not the nested CAS token. Nullable application metadata uses
+`applied_revision`, not an entity `revision: null`; #642 validates every entity
+revision as a decimal string. False applied receipt predicates mean unconfirmed,
+not evidence that an external application was reversed. No legacy row-format
+adapter exists.
+
+At PostgreSQL read committed, the authoritative row, catalogue joins, applied
+receipt predicates, source observations, projection clock and project sequence
+are correlated in **one ORM SELECT**. There is no `prefetch` or lazy ORM work in
+the projector. Scope and installation epoch are reauthorized/rechecked around
+materialization; a change returns reset, never a mixed success. Initial limits
+are 5,000 targets, 2 MiB of materialized safe rows and a 4,096-byte opaque vector
+cursor. A scope whose vector exceeds that wire bound must select a project;
+it never receives a cursor that the client cannot submit. A one-page read performs no
+writes. Multi-page reads retain only a derived ORM snapshot for five minutes,
+with at most eight active snapshots per user; an explicit bounded maintenance
+port removes expired snapshots. Subsequent pages serve those original rows even
+if an independent transaction commits. Every page rechecks current credential,
+project scope, epoch and controller run. Unknown/expired/foreign cursors reset.
+This is a database consistency boundary, not a simultaneous snapshot of nodes.
+
+`ProjectionWriter.begin_run(epoch)` is an explicit controller startup hook. GET
+never initializes a run, repairs assignments, polls sources or starts effects.
+Authenticated `GET /api/v1/machine/observation-context` returns the current run
+challenge. `POST /api/v1/machine/observations` accepts exactly schema version 1,
+`controller_run`, target/incarnation UUIDs, `producer_epoch`, decimal-string
+`sequence`, `kind`, UTC `observed_at`, `payload`, `status` and finite safe `reason`.
+The receiving credential must be a current enrolled service for the actual node
+and project, with the independently registered `execution.ingest_observations`
+permission. `execution.read_facts` alone cannot write observations. A producer is
+explicitly enrolled by `POST /api/v1/machine/observation-producers`, naming the
+controller run, target/incarnation, **separate** executor and producer epochs,
+kind and expected registration revision (`"0"` only for known absence). Retry of
+the same binding is idempotent; replacement uses CAS, and minimal immutable
+ProducerEpoch records prevent reusing a retired producer epoch. The addressed
+`GET /api/v1/machine/observation-producers/<target-uuid>/<kind>` returns the current
+registration without creating one. The producer must match that registration and
+the current execution incarnation. Old run/incarnation/producer replies are
+refused, and an equal/older producer sequence cannot refresh facts merely by
+incrementing a controller counter. Executor epoch is never implicit enrollment.
+
+The current finite source kinds are `state` (explicit session status/alive/listen),
+`clone` (dirty/ahead plus optional branch/default branch) and `size` (disk bytes).
+Each retains producer identity/sequence, observed/received times, controller run,
+and freshness/reason independently. State/clone expire after 30 s, size after
+300 s. Unobserved/stale facts are unknown; an explicitly unavailable source is
+silent, never free/dead. Only fresh session/clone facts reach `state.verdict`.
+Freshness is evaluated at materialization time; frozen pagination rows keep that
+snapshot's values. Consumers must honor each immutable `expires_at`, not cache a
+`free` verdict indefinitely because an entity revision stayed unchanged. The
+#627 presentation/expiry adapter and server freshness publication lifecycle still
+need integration; this core does not invent a new read counter to hide that gap.
+Both ingest and read validate the payload whitelist; history, messages, terminal
+bytes, environment and secrets cannot pass through generic JSON. Inventory is
+not this endpoint: empty, partial or unknown inventory never means deletion.
+
+`ProjectionWriter.changed`/`retire` are SQL-only mutation-owner ports. The owning
+composition takes `lock_projects` before aggregate locks and invokes publication
+inside the **same** atomic block as its aggregate/result/audit changes. The port
+advances the persisted per-target clock and locked per-project sequence and
+appends a safe outbox invalidation; rollback removes all of them. It imports no
+Operations private model or controller root and installs no global signals.
+`events_after` and `GET /api/v1/events?cursor=...` read that scoped durable history.
+Its cursor is a signed project vector, not max(auto-increment ID). Retired target
+UUIDs remain tombstones and cannot be revived by late observations. A recreated
+name must be bound by its owner to a new UUID.
+
+`SourceCollector` accepts explicit async source and SQL sink/database ports,
+bounded batches (500), concurrency (at most eight) and deadlines (at most 30 s).
+Kinds have independent lanes; source I/O occurs outside database callbacks.
+Raw transport failures are explicit safe categories, not successful empty facts.
+A trusted adapter's typed `SourceRefusal` and SQL/use-case refusals preserve their
+already-safe reasons and drain sibling tasks; they are not sanitized again or
+hidden behind a generic task-group message. No production
+scheduler/telemetry/proxy collector is silently selected by these ports.
+
+Remaining integration is deliberately visible in `coverage` and
+`handshake_complete: false`, not represented as an empty successful product:
+
+* Catalog/Assignment queries and addressed observations are real. Existing
+  mutation consumers must bind the explicit publication port before aggregate
+  mutations can claim complete outbox coverage; #625's separate operation outbox
+  is not imported or relabeled as this project-vector history. Pending Operations
+  are not fabricated as an empty list. The current #642 Snapshot convenience field
+  defaults omitted pending operations to an empty tuple: consumers must inspect
+  coverage and cannot treat that default as a completed recovery handshake.
+  Standard foundation auth/database errors also need a shared versioned error
+  adapter: some currently omit `epoch` or use codes outside #642's finite set.
+  The foundation's separate `/api/v1/projects` responses also omit `epoch`; they
+  are not silently accepted as this snapshot envelope. The current pool query
+  scope is human credentials; grant disclosure needs its current Access scope
+  adapter bound at the root, not a synthetic human membership or token fallback.
+* #639 FactPage v1 `states` has running/dirty/session-count fields, not the complete
+  session status/liveness facts required by this `state` schema; its clone facet
+  also lacks the required ahead/unpushed evidence. It lacks the separately
+  enrolled producer and this controller-run challenge. It cannot be translated
+  into fresh/free facts by assigning a new read counter or inventing clean data.
+* The developing #641 `Latest` query has no public projection revision or complete
+  source/session binding in its result, and its read path currently creates an
+  observation. That is not a compatible side-effect-free roster source. Freeze a
+  non-mutating current-session/model query before composing it into this snapshot.
+* #649's published EndpointPresence identifies the real external conversation and
+  reports registered/live separately. It has no monotonic entity revision or
+  retirement/incarnation version for #627 convergence. No User/ClientRegistration
+  row is substituted for that missing versioned endpoint query. Its `addresses`
+  query is owner-private and requires delivery permission; pool-view permission
+  cannot silently broaden that audience. Human endpoints remain a distinct kind,
+  never puppet capacity or a Nomad action target.
+* #656 is the sole future usage source. Until its safe aggregate query is bound,
+  usage is explicitly unavailable; no transcript usage collector is imported.
+  Scheduler/image observations without producer generations remain unverified.
+
+These seams do not claim CLI/WS integration, a gap-free subscribe handshake,
+external effect parity, deletion of every old reader elsewhere in the repository,
+or acceptance on a new live installation. Those require the owning consumers and
+combined epic checks; old-pool fallback is not an integration strategy.
