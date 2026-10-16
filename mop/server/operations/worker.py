@@ -5,20 +5,24 @@ class Worker:
     Production adapter не задан по умолчанию: #639 связывает receipt с настоящим
     node/incarnation fence. Fake доступен только composition теста, не endpoint.
     """
-    def __init__(self, runtime, operations, node_executor, *, image_builds=None):
+    def __init__(self, runtime, operations, node_executor, *, image_builds=None, node_id=None):
         self.runtime, self.operations, self.node_executor = runtime, operations, node_executor
-        self.image_builds = image_builds
+        self.image_builds, self.node_id = image_builds, node_id
+        self.handlers = tuple(name for name, port in (
+            ('node_eligibility', node_executor), ('image_build', image_builds)) if port is not None)
 
     async def run_one(self, operation_id):
+        if not self.runtime.accepting:
+            return None
         return await self.runtime.effect(self._execute, operation_id)
 
     async def _execute(self, operation_id):
         if not self.runtime.accepting:
             return None
         handler = await self.runtime.database(self.operations.handler, operation_id)
+        if handler not in self.handlers:
+            raise RuntimeError(f'controller worker handler {handler} is not configured')
         if handler == 'image_build':
-            if self.image_builds is None:
-                return None
             return await self.runtime.blocking(self._build, operation_id)
         claim = await self.runtime.database(self.operations.claim, operation_id)
         if claim is None:
@@ -48,5 +52,10 @@ class Worker:
         if not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
         import asyncio
-        ids = await self.runtime.database(self.operations.pending, limit=limit)
+        if not self.handlers:
+            raise RuntimeError('controller worker capabilities are not configured')
+        if not self.runtime.accepting:
+            return []
+        ids = await self.runtime.database(self.operations.pending, limit=limit,
+            handlers=self.handlers, node_id=self.node_id)
         return await asyncio.gather(*(self.run_one(operation_id) for operation_id in ids))
