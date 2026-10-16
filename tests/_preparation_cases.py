@@ -28,6 +28,10 @@ from mop.server.secrets.services import SecretStore
 
 
 class PreparationFixture(TransactionTestCase):
+    # После flush восстанавливаем migration seeds (RestoreGuard), не создаём
+    # runtime repair/fallback и не трогаем restore fencing в production.
+    serialized_rollback = True
+
     def setUp(self):
         initialize()
         self.project = Project.objects.create(name='alpha', origin='https://example.invalid/alpha.git')
@@ -107,7 +111,7 @@ class PreparationCases(PreparationFixture):
         revision = self.publish(**kw)
         return revision, self.api.approve(self.actor, revision.id)
 
-    def run(self, approval=None, **kw):
+    def new_run(self, approval=None, **kw):
         if approval is None:
             _, approval = self.approved()
         args = dict(approval_id=approval.id, target_id=self.target, incarnation=self.incarnation,
@@ -163,27 +167,27 @@ class PreparationCases(PreparationFixture):
 
     def test_secret_references_are_relational_pinned_scoped_and_never_values(self):
         store = SecretStore(provider=self.provider, authorizer=auth.Access())
-        secret = store.create(self.actor, project_id=self.project.pk, name='bootstrap-secret',
-                              kind='vars', purpose='project', value=b'protected-variable')
+        secret = store.create(self.actor, project_id=self.project.pk, name='BOOTSTRAP_SECRET',
+                              kind='variable', purpose='project', value=b'protected-variable')
         revision, approval = self.approved(secret_refs=(secret.active_version_id,))
         self.assertEqual(self.api.read_revision(self.actor, revision.id).secret_refs, (secret.active_version_id,))
         self.assertEqual(m.BootstrapSecretReference.objects.get(revision_id=revision.id).version_id, secret.active_version_id)
         store.revoke(self.actor, secret.id, expected_revision=secret.revision)
         with self.assertRaises((ValueError, PermissionError)):
-            self.api.payload(self.actor, self.run(approval).binding)
+            self.api.payload(self.actor, self.new_run(approval).binding)
 
     def test_unavailable_host_preserves_failure_budget_without_claiming_unknown_success(self):
-        run = self.result(self.begin(self.run()), outcome='unavailable')
+        run = self.result(self.begin(self.new_run()), outcome='unavailable')
         self.assertEqual((run.state, run.failures), ('failed', 0))
         self.assertFalse(self.api.readback(self.actor, run.binding).confirmed)
 
     def test_new_revision_or_incarnation_does_not_inherit_old_success(self):
         revision, approval = self.approved()
-        run = self.success(self.run(approval))
+        run = self.success(self.new_run(approval))
         self.assertEqual(run.state, 'succeeded')
         self.assertTrue(self.api.readback(self.actor, run.binding).confirmed)
         other, other_approval = self.approved(tasks=b'new bytes')
-        fresh = self.run(other_approval)
+        fresh = self.new_run(other_approval)
         self.assertFalse(self.api.readback(self.actor, fresh.binding).confirmed)
         self.assertFalse(self.api.readback(self.actor, replace(run.binding, revision_id=other.id)).confirmed)
         self.assertFalse(self.api.readback(self.actor, replace(run.binding, incarnation=uuid.uuid4())).confirmed)
@@ -191,7 +195,7 @@ class PreparationCases(PreparationFixture):
         self.assertNotEqual(other.id, revision.id)
 
     def test_partial_or_foreign_run_and_stale_versions_cannot_record(self):
-        run = self.run()
+        run = self.new_run()
         with self.assertRaises(self.s.Conflict):
             self.api.finish(self.actor, run.binding, expected_version=run.version)
         running = self.begin(run)
@@ -206,7 +210,7 @@ class PreparationCases(PreparationFixture):
         self.assertEqual(self.api.get_run(self.actor, run.id).version, running.version)
 
     def test_retry_failure_counters_and_gave_up_are_durable(self):
-        run = self.run(failure_limit=2)
+        run = self.new_run(failure_limit=2)
         run = self.result(self.begin(run), outcome='failed', log=b'private-token failure')
         self.assertEqual((run.failures, run.state), (1, 'running'))
         run = self.result(self.begin(run), outcome='failed')
@@ -220,28 +224,28 @@ class PreparationCases(PreparationFixture):
         self.assertEqual((step.failures, step.attempt), (2, 2))
 
     def test_new_request_cannot_reset_gave_up_or_uncertain_target(self):
-        run = self.result(self.begin(self.run(failure_limit=1)), outcome='failed')
+        run = self.result(self.begin(self.new_run(failure_limit=1)), outcome='failed')
         with self.assertRaises(self.s.Conflict):
-            self.run(approval=self.api.get_approval(self.actor, run.binding.approval_id))
+            self.new_run(approval=self.api.get_approval(self.actor, run.binding.approval_id))
         other, approval = self.approved(tasks=b'new reviewed policy')
-        fresh = self.begin(self.run(approval))
+        fresh = self.begin(self.new_run(approval))
         fresh = self.api.mark_unknown(self.actor, fresh.binding, expected_version=fresh.version)
         with self.assertRaises(self.s.Conflict):
-            self.run(approval)
+            self.new_run(approval)
         self.assertEqual(m.BootstrapRun.objects.count(), 2)
 
     def test_empty_steps_and_oversized_raw_output_are_rejected_without_mutation(self):
         for steps in ((), ('duplicate', 'duplicate'), ('x',) * 65):
             with self.assertRaises(ValueError):
-                self.run(steps=steps)
-        run = self.begin(self.run())
+                self.new_run(steps=steps)
+        run = self.begin(self.new_run())
         with self.assertRaises(ValueError):
             self.api.progress(self.actor, run.binding, 0, percent=1, log=b'x' * 65537,
                               expected_version=run.version)
         self.assertEqual(self.api.get_run(self.actor, run.id).version, run.version)
 
     def test_lost_reply_is_readback_not_automatic_repeat_of_unknown_effect(self):
-        run = self.begin(self.run())
+        run = self.begin(self.new_run())
         run = self.api.mark_unknown(self.actor, run.binding, expected_version=run.version)
         self.assertEqual(run.state, 'unknown')
         with self.assertRaises(self.s.Conflict):
@@ -251,7 +255,7 @@ class PreparationCases(PreparationFixture):
             self.api.finish(self.actor, run.binding, expected_version=run.version)
 
     def test_expired_running_step_becomes_unknown_not_failed_or_success(self):
-        run = self.begin(self.run())
+        run = self.begin(self.new_run())
         m.BootstrapRun.objects.filter(pk=run.id).update(deadline=timezone.now() - timedelta(seconds=1))
         read = self.api.readback(self.actor, run.binding)
         self.assertEqual(read.run.state, 'unknown')
@@ -260,7 +264,7 @@ class PreparationCases(PreparationFixture):
 
     def test_step_claim_cas_has_one_winner_on_independent_connections(self):
         from django.db import connections
-        run = self.run()
+        run = self.new_run()
         barrier = Barrier(2)
         def claim(_):
             try:
@@ -277,14 +281,14 @@ class PreparationCases(PreparationFixture):
         self.assertEqual(self.api.steps(self.actor, run.binding)[0].attempt, 1)
 
     def test_refusal_is_not_failure_or_automatic_retry(self):
-        run = self.result(self.begin(self.run()), outcome='refused')
+        run = self.result(self.begin(self.new_run()), outcome='refused')
         self.assertEqual((run.state, run.failures), ('refused', 0))
         with self.assertRaises(self.s.Conflict):
             self.begin(run)
 
     def test_revocation_after_long_effect_prevents_readback_and_payload(self):
         revision, approval = self.approved()
-        run = self.success(self.run(approval))
+        run = self.success(self.new_run(approval))
         self.api.revoke(self.actor, approval.id)
         with self.assertRaises(PermissionError):
             self.api.payload(self.actor, run.binding)
@@ -293,7 +297,7 @@ class PreparationCases(PreparationFixture):
         self.assertEqual(m.BootstrapApproval.objects.get(pk=approval.id).revision_id, revision.id)
 
     def test_current_authority_rechecked_before_returning_private_result(self):
-        run = self.success(self.run())
+        run = self.success(self.new_run())
         self.gate.allowed = False
         with self.assertRaises(PermissionError):
             self.api.readback(self.actor, run.binding)
@@ -303,7 +307,7 @@ class PreparationCases(PreparationFixture):
             self.api.payload(self.actor, run.binding)
 
     def test_sanitized_log_retention_and_progress_are_bounded_private(self):
-        run = self.begin(self.run())
+        run = self.begin(self.new_run())
         run = self.api.progress(self.actor, run.binding, 0, percent=75,
             log=b'private-token\x1b[31m\n' + b'z' * 6000, expected_version=run.version)
         step = self.api.steps(self.actor, run.binding)[0]
@@ -325,7 +329,7 @@ class PreparationCases(PreparationFixture):
                 self.api.read_revision(self.actor, revision.id)
             with self.assertRaises(ValueError):
                 self.publish()
-        run = self.begin(self.run(approval))
+        run = self.begin(self.new_run(approval))
         with transaction.atomic():
             with self.assertRaises(ValueError):
                 self.api.progress(self.actor, run.binding, 0, percent=10, log=b'output', expected_version=run.version)
@@ -334,11 +338,11 @@ class PreparationCases(PreparationFixture):
         _, approval = self.approved()
         request = uuid.uuid4()
         deadline = timezone.now() + timedelta(minutes=5)
-        run = self.run(approval, request_id=request, deadline=deadline)
-        self.assertEqual(self.run(approval, request_id=request, deadline=deadline), run)
+        run = self.new_run(approval, request_id=request, deadline=deadline)
+        self.assertEqual(self.new_run(approval, request_id=request, deadline=deadline), run)
         _, new = self.approved(tasks=b'new')
         with self.assertRaises(self.s.Conflict):
-            self.run(new, request_id=request, deadline=deadline)
+            self.new_run(new, request_id=request, deadline=deadline)
         self.assertEqual(m.BootstrapRun.objects.count(), 1)
 
     def test_grants_approval_query_pins_exact_revision_and_validates_old_not_latest(self):
