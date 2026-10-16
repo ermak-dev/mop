@@ -8,7 +8,7 @@ from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.db import close_old_connections, transaction
-from django.test import TransactionTestCase, Client, override_settings
+from django.test import TransactionTestCase, SimpleTestCase, Client, override_settings
 from django.utils import timezone
 
 # FEATURE: один ORM read model без Collector, с адресованными наблюдениями.
@@ -497,7 +497,7 @@ class ProjectionQueries(TransactionTestCase):
         self.assertEqual(response.status_code, 400, response.content)
 
 
-class PureProjection(TransactionTestCase):
+class PureProjection(SimpleTestCase):
     def test_state_policy_reused_and_payload_whitelist_has_no_transcript(self):
         from mop.server.sessions import projections
         from unittest.mock import patch

@@ -14,6 +14,10 @@ from django.utils import timezone
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class MachineHttpBoundary(TransactionTestCase):
+    # Иначе post_migrate создаёт новые ContentType PK перед следующим
+    # serialized class, и восстановление seed сталкивается с natural key.
+    serialized_rollback = True
+
     def test_machine_mutation_requires_authenticated_current_service(self):
         response = Client().post('/api/v1/machine/work/claim',
             {'schema_version': 1, 'shell': 'id'}, content_type='application/json', secure=True)
