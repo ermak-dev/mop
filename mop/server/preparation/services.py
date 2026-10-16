@@ -299,10 +299,6 @@ class Preparation:
     @storage_boundary
     def create_run(self, actor, *, approval_id, target_id, incarnation, request_id, deadline, steps, failure_limit=3):
         exact_uuid(approval_id, target_id, incarnation, request_id)
-        now = timezone.now()
-        if (not isinstance(deadline, timezone.datetime) or timezone.is_naive(deadline)
-                or not now < deadline <= now + timedelta(hours=1)):
-            raise ValueError('bounded future bootstrap deadline required')
         if (type(steps) is not tuple or not 1 <= len(steps) <= 64
                 or any(type(name) is not str or not re.fullmatch('[a-zA-Z0-9_.-]{1,64}', name) for name in steps)
                 or len(set(steps)) != len(steps)
@@ -313,11 +309,16 @@ class Preparation:
             Project.objects.select_for_update().get(pk=approval.revision.project_id)
             row = m.BootstrapRun.objects.filter(target_id=target_id, incarnation=incarnation, request_id=request_id).first()
             if row:
-                self._run_authority(actor, row, 'create')
+                self._run_authority(actor, row, 'readback')
                 names = tuple(row.steps.order_by('ordinal').values_list('name', flat=True))
                 if (row.approval_id, row.deadline, row.failure_limit, names) != (approval_id, deadline, failure_limit, steps):
                     raise Conflict('bootstrap request already names another intent')
                 return run_info(row)
+            # Replay выше раскрывает прежний результат, но не продлевает допуск.
+            now = timezone.now()
+            if (not isinstance(deadline, timezone.datetime) or timezone.is_naive(deadline)
+                    or not now < deadline <= now + timedelta(hours=1)):
+                raise ValueError('bounded future bootstrap deadline required')
             prior = m.BootstrapRun.objects.filter(target_id=target_id, incarnation=incarnation).order_by('-created_at').first()
             if prior and prior.state in ('accepted', 'running', 'unknown'):
                 raise Conflict('bootstrap target has an unresolved run')

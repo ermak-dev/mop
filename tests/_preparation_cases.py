@@ -456,6 +456,38 @@ finally:
             with self.assertRaises(ValueError):
                 self.api.progress(self.actor, run.binding, 0, percent=10, log=b'output', expected_version=run.version)
 
+    def test_identical_expired_request_recovers_run_without_effect_admission(self):
+        # HYPOTHESIS: admission deadline проверяется до durable request lookup.
+        # RED: PG17, 31 green + ValueError bounded future bootstrap deadline required.
+        # SOLUTION: существующий intent проверяется с readback authority до admission.
+        # RESULT: retry читает run без нового effect; deadline и unknown guards остаются.
+        # STATUS: FIXED — see #636.
+        from unittest.mock import patch
+        _, approval = self.approved()
+        request = uuid.uuid4()
+        deadline = timezone.now() + timedelta(minutes=5)
+        run = self.begin(self.new_run(approval, request_id=request, deadline=deadline))
+        run = self.api.mark_unknown(self.actor, run.binding, expected_version=run.version)
+        with patch.object(self.s.timezone, 'now', return_value=deadline + timedelta(seconds=1)):
+            self.gate.calls.clear()
+            self.assertEqual(self.new_run(approval, request_id=request, deadline=deadline), run)
+            self.assertEqual([action for _, action, _ in self.gate.calls], ['readback'])
+            with self.assertRaises(self.s.Conflict):
+                self.begin(run)
+            with self.assertRaises(self.s.Conflict):
+                self.new_run(approval, request_id=request, deadline=deadline + timedelta(minutes=1))
+            with self.assertRaises(ValueError):
+                self.new_run(approval, deadline=deadline)
+            self.gate.allowed = False
+            with self.assertRaises(PermissionError):
+                self.new_run(approval, request_id=request, deadline=deadline)
+            self.gate.allowed = True
+            self.api.revoke(self.actor, approval.id)
+            with self.assertRaises(PermissionError):
+                self.new_run(approval, request_id=request, deadline=deadline)
+        self.assertEqual(m.BootstrapRun.objects.count(), 1)
+        self.assertEqual(m.BootstrapRun.objects.get(pk=run.binding.run_id).state, 'unknown')
+
     def test_replay_same_request_preserves_approval_and_payload_conflicts(self):
         _, approval = self.approved()
         request = uuid.uuid4()
