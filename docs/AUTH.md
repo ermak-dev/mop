@@ -1,5 +1,95 @@
 # AUTH: как люди получают доступ к пулу
 
+## New controller (#633, epic #623)
+
+This section concerns the isolated Django controller, not the deployed file-backed
+pool described below. It has no old-user/hash/cookie import or fallback. The issue
+branch is not a rollout or an accepted epic integration. API.md remains normative.
+
+`mop/server/access` composes standard Django User, Group, Permission and database
+sessions with Principal, LoginIdentity/IdentitySource, source-owned project and
+all-project memberships, and ClientOwnership pointing at Catalog's client. There
+is no second Project, custom User, custom bearer table or object-permission backend.
+
+The HTTP composition root binds these routes:
+
+| Route | Credential and policy |
+|---|---|
+| `GET /api/v1/auth/csrf` | No-store CSRF cookie bootstrap; not authentication |
+| `POST /api/v1/auth/login` | Authoritative password backend; CSRF even when anonymous; bounded DB-backed account/source and origin rate limits |
+| `POST /api/v1/auth/logout` | CSRF-protected Django logout of this browser session only |
+| `POST /api/v1/auth/token` | CLI password authentication over HTTPS; browser issuance instead requires a recently authenticated CSRF-protected session |
+| `POST /api/v1/auth/token/rotate` | Current token, or CSRF/recent password-authenticated session; replaces the shared user token atomically |
+| `POST /api/v1/auth/token/revoke` | Same authority; no token returned; session-based repeat is idempotent |
+| `GET /api/v1/identity` | Current identity metadata only, never a credential reference or permission snapshot |
+| `GET /api/v1/projects[/{uuid}]` | Catalog read use cases with the bound Access authorizer; foreign detail is 404, in-scope missing action is 403 |
+
+Project lists filter before counts and pagination. `page_size` is 1..500 (default
+100); the signed, five-minute `next_cursor` is bound to credential, current scoped
+projection and installation epoch, not a stored permission grant. A changed scope
+or invalid cursor returns 410 with `reset_required`, never an unfiltered next page.
+
+DRF TokenAuthentication remains standard: one token per User, no automatic expiry
+and no per-device logout. Only explicit issuance/rotation responses contain its
+key. The framework Token table is the API/STORAGE credential-storage exception;
+it is not AEAD/hashed token storage. Token/session records and their private binding
+references require protected DB/backup access and are not registered in Admin.
+CredentialBinding stores a token HMAC generation check or a reference to the actual
+Django Session, never an additional plaintext token store. ActorContext contains
+only immutable IDs/kind/owner/node references, never token/session keys or grants.
+
+`token_context`, `session_context`, `current_actor` and `Access.authorize` reload
+current User, identity source/subject fingerprint, credential generation, session
+hash/expiry and scope. A changed external subject/provider invalidates old bindings;
+a new request cannot silently rebind an existing token. Migration
+`access.0002_identity_binding_subject` deliberately leaves existing binding fingerprints
+empty, requiring authorized reauthentication/rotation rather than adopting a new identity.
+Action permissions use a fresh User, not a retained `_perm_cache`. Every consumer
+must reauthorize before execution/retry/delivery and after a wait. A context is not
+a transferable JSON credential; its construction belongs to the trusted boundary.
+`issue_token(user_id)` is an internal post-password-authentication hook, not a
+user-ID-selected application endpoint. `bind_local_identity` is an idempotent local
+maintenance hook used by initial administrator creation; it never resets a password.
+`enroll_service` is the privileged local enrollment hook for a new node-bound User,
+with unusable password, no staff/superuser flags and only the finite observation/
+application-receipt permission allowlist. Its caller must enforce maintenance
+identity and deliver the returned token through authorized enrollment, not a log.
+
+`Access.authorize` implements Catalog's existing authorizer port. It separates
+ordinary Django action permission, actual Catalog FK scope, client ownership and
+principal-kind fences. `is_staff` only permits Admin login. A human superuser has
+explicit global scope, not a service/grant/ownership bypass. Service users cannot
+be elevated by editing User flags. Grant-kind principals fail closed until #635
+binds its resolver. Catalog configuration retains ordinary model permissions;
+`set_project_limit` is a separate action. Catalog's extra permissions are declared
+on Project/Node/ProjectPolicySnapshot; standard `view_project`/`view_node` are not
+declared twice. Access's role/grant actions live on Principal. Later owning apps
+register their CONTROL actions before the evaluator can admit them.
+
+The authoritative Router respects an existing LoginIdentity before source order.
+Otherwise the first knowing source decides, including wrong password, ambiguous
+login, absent groups and outage; no backend fall-through adopts another identity.
+LDAP users retain unusable local passwords. Direct/nested AD groups map to ordinary
+Django permissions and explicit project/all-project rows. Refresh removes only the
+source-owned scope and managed Group; unrelated local grants remain. LDAP I/O is
+outside SQL, followed by source-revision CAS. Expired validation or a changed
+configuration revision fails closed until authoritative refresh. This validation
+freshness limit is not DRF token expiry.
+
+The real ldap3 adapter accepts explicit ORM configuration and a protected bind/CA
+secret-reader port. Its default reader refuses before network I/O: #637 must bind
+the concrete protected secret resolver. It never consults `.env`, an old bind file
+or the legacy identity provider. Fake-provider contract tests do not establish a
+real LDAP deployment; real-directory acceptance and secret binding remain separate.
+
+Legacy `identity`, `operators`, `websession`, callout/bootstrap and `server web`
+consumers still belong to the deployed old release. CLI/node/gateway replacement,
+operations/realtime integration, source-management Admin adapters and the remaining
+reader deletion are later epic tasks, not a new-auth fallback. This code does not
+kill running puppets on logout, revoke or deactivation.
+
+## Existing file-backed release
+
 Руководство администратора установки: как завести человека, как подключить
 каталог организации, как отозвать доступ и что смотреть, когда вход не
 проходит. Внутреннее устройство — субъекты, права, JWT, callout — описано в

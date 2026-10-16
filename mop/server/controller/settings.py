@@ -14,9 +14,10 @@ ROOT_URLCONF = 'mop.server.controller.urls'
 ASGI_APPLICATION = 'mop.server.controller.asgi.application'
 INSTALLED_APPS = [
     'django.contrib.auth', 'django.contrib.contenttypes', 'django.contrib.sessions',
-    'django.contrib.messages', 'django.contrib.staticfiles', 'django.contrib.admin',
+    'django.contrib.messages', 'django.contrib.staticfiles',
+    'mop.server.controller.adminapps.ControllerAdminConfig',
     'rest_framework', 'rest_framework.authtoken', 'channels',
-    'mop.server.controller',
+    'mop.server.controller.apps.ControllerConfig', 'mop.server.catalog', 'mop.server.access',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -54,6 +55,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 USE_TZ = True
 TIME_ZONE = 'UTC'
 STATIC_URL = '/static/'
+AUTHENTICATION_BACKENDS = ['mop.server.controller.authbackend.ControllerBackend']
+CSRF_FAILURE_VIEW = 'mop.server.controller.authviews.csrf_failure'
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_SECURE = True
 SESSION_COOKIE_HTTPONLY = True
@@ -73,6 +76,6 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication'],
-    'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+    'DEFAULT_PERMISSION_CLASSES': ['mop.server.controller.authentication.CurrentActorRequired'],
     'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
 }
