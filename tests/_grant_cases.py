@@ -1,10 +1,11 @@
 """Контракты immutable ролей и делегирования #635 на настоящем PostgreSQL."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import replace
 from datetime import timedelta
 import importlib
 import json
-from threading import Barrier
+from threading import Barrier, Event
+from unittest.mock import patch
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -311,6 +312,211 @@ class GrantCases(TransactionTestCase):
         Token.objects.filter(user__principal__pk=row.principal_id).delete()
         with transaction.atomic(), self.assertRaises(PermissionError):
             authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+
+    # BUG: обычный append расширяет утверждённые capabilities локального gate;
+    # token lookup по user усыновляет binding выпущенного параллельно ключа.
+    # HYPOTHESIS: отсутствуют durable seal полного child set и pin presented digest.
+    # RED: PG16/17 принимают append и старый ключ после реального transaction rotation;
+    # approval не удерживает parent lock, publisher не сверяет actual normalized set.
+    # SOLUTION: publisher проверяет полный set и пишет immutable seal; ORM children
+    # и approval берут один parent lock, общий token helper сверяет presented digest.
+    # RESULT: approved fixture с matching native tools — PG16 и PG17 по 224/224;
+    # восемь новых checks и прежние пять local/receiving checks проходят без ослабления.
+    # STATUS: FIXED — see #635
+    def test_published_child_sets_reject_ordinary_append_before_and_after_approval(self):
+        for approved in (False, True):
+            raw = json.dumps(manifest('sealed-' + str(approved).lower())).encode()
+            bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+                manifest=raw, prompt=b'prompt', provenance='seal test')
+            if approved:
+                self.api.approve_bundle(self.actor, bundle.id)
+            for model, values in ((access.RoleCapability, dict(scope='cluster', verb='restart')),
+                    (access.RoleSpawn, dict(role='unapproved')),
+                    (access.RoleSecretName, dict(kind='vars', name='UNAPPROVED'))):
+                with self.subTest(approved=approved, model=model.__name__):
+                    with self.assertRaisesRegex(ValueError, 'sealed'):
+                        model.objects.create(bundle_id=bundle.id, **values)
+
+    def test_local_and_full_authority_cannot_gain_appended_restart(self):
+        row, actor = self.active()
+        from django.contrib.contenttypes.models import ContentType
+        ct, _ = ContentType.objects.get_or_create(app_label='sessions', model='grant_test_fixture')
+        Permission.objects.get_or_create(content_type=ct, codename='restart_puppet')
+        self.permit('sessions.restart_puppet')
+        for authority in (self.api, self.api.local_authority()):
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            with self.assertRaises(PermissionError):
+                authority.authorize(actor, 'sessions.restart_puppet', project_ids=(self.project.pk,))
+        with self.assertRaisesRegex(ValueError, 'sealed'):
+            access.RoleCapability.objects.create(bundle_id=row.bundle_id, scope='cluster', verb='restart')
+        for authority in (self.api, self.api.local_authority()):
+            with self.assertRaises(PermissionError):
+                authority.authorize(actor, 'sessions.restart_puppet', project_ids=(self.project.pk,))
+
+    def test_presented_old_token_never_adopts_concurrently_replaced_binding(self):
+        for local in (False, True):
+            with self.subTest(local=local):
+                row, actor = self.active()
+                old_key = Token.objects.get(user_id=actor.user_id).key
+                authority = self.api.local_authority() if local else self.api
+                rotated, replacement = False, None
+
+                def rotate():
+                    try:
+                        with transaction.atomic():
+                            Token.objects.filter(user_id=actor.user_id).delete()
+                            access.CredentialBinding.objects.filter(pk=actor.credential_id).delete()
+                            token = Token.objects.create(user_id=actor.user_id)
+                            principal = access.Principal.objects.get(pk=actor.principal_id)
+                            binding = access.CredentialBinding.objects.create(token_user_id=actor.user_id,
+                                token_digest=auth._digest(token.key), **auth._binding_values(principal, None))
+                            return token.key, binding.pk
+                    finally:
+                        connections.close_all()
+
+                def after_token_read(execute, sql, params, many, context):
+                    nonlocal rotated, replacement
+                    if not rotated and sql.startswith('SELECT') and 'access_credentialbinding' in sql:
+                        rotated = True
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            replacement = pool.submit(rotate).result(timeout=15)
+                    return execute(sql, params, many, context)
+
+                with connections['default'].execute_wrapper(after_token_read):
+                    with self.assertRaises(PermissionError, msg='old token adopted newly issued credential'):
+                        auth.token_context(old_key, grants=authority)
+                self.assertTrue(rotated)
+                self.assertFalse(Token.objects.filter(key=old_key).exists())
+                current = auth.token_context(replacement[0], grants=authority)
+                self.assertEqual(current.credential_id, replacement[1])
+                self.assertNotEqual(current.credential_id, actor.credential_id)
+
+    def test_verified_seal_and_children_have_no_ordinary_orm_mutation_bypass(self):
+        self.assertTrue(hasattr(access, 'RoleBundleSeal'), 'verified publication seal is missing')
+        value = manifest('all-children', spawn=('worker',))
+        value['secrets'] = {'vars': ['APPROVED'], 'files': ['approved.txt']}
+        bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+            manifest=json.dumps(value).encode(), prompt=b'prompt', provenance='all child models')
+        for model in (access.RoleBundleSeal, access.RoleCapability, access.RoleSpawn, access.RoleSecretName):
+            row = model.objects.filter(bundle_id=bundle.id).first()
+            self.assertIsNotNone(row)
+            for change in (lambda: row.save(), lambda: row.delete(),
+                    lambda: model.objects.filter(pk=row.pk).delete(),
+                    lambda: model.objects.filter(pk=row.pk).update(bundle_id=self.bundle.id),
+                    lambda: model.objects.bulk_update([row], ['bundle']),
+                    lambda: model.objects.bulk_create([row])):
+                with self.subTest(model=model.__name__, change=change), self.assertRaises(ValueError):
+                    change()
+        with self.assertRaisesRegex(ValueError, 'publication'):
+            access.RoleBundleSeal.objects.create(bundle_id=self.bundle.id)
+
+    def test_unsealed_preexisting_data_is_not_implicitly_trusted_or_resealed(self):
+        self.assertTrue(hasattr(access, 'RoleBundleSeal'), 'verified publication seal is missing')
+        row, actor = self.active()
+        # Историческая модель имитирует данные до schema migration; не штатный ORM bypass.
+        from django.db.migrations.loader import MigrationLoader
+        historical = MigrationLoader(connections['default']).project_state().apps
+        historical.get_model('access', 'RoleBundleSeal').objects.filter(bundle_id=row.bundle_id).delete()
+        local = self.api.local_authority()
+        for authority in (self.api, local):
+            with self.assertRaisesRegex(PermissionError, 'sealed'):
+                authority.resolve_actor(actor)
+            with self.assertRaisesRegex(PermissionError, 'sealed'):
+                authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'sealed'):
+            self.api.authorize_execution(row.binding)
+        with self.assertRaisesRegex(PermissionError, 'sealed'):
+            self.api.approve_bundle(self.actor, row.bundle_id)
+        raw = ('# exact manifest bytes\n' + json.dumps(manifest(), ensure_ascii=False)).encode()
+        with self.assertRaisesRegex(PermissionError, 'sealed'):
+            self.api.publish_bundle(self.actor, project_id=self.project.pk,
+                manifest=raw, prompt=b'private role prompt\r\n', provenance='retry cannot trust old rows')
+        self.assertFalse(access.RoleBundleSeal.objects.filter(bundle_id=row.bundle_id).exists())
+
+    def test_approval_and_append_share_parent_lock_before_final_normalized_check(self):
+        raw = json.dumps(manifest('approval-race')).encode()
+        bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+            manifest=raw, prompt=b'prompt', provenance='approval append race')
+        at_check, release, at_append = Event(), Event(), Event()
+        normalized = self.api._normalized
+
+        def checked(row, parsed):
+            if row.pk == bundle.id and connections['default'].in_atomic_block:
+                at_check.set()
+                if not release.wait(15):
+                    raise AssertionError('approval race was not released')
+            return normalized(row, parsed)
+
+        def approve():
+            try:
+                return self.api.approve_bundle(self.actor, bundle.id)
+            finally:
+                connections.close_all()
+
+        def append():
+            def observe(execute, sql, params, many, context):
+                if ((sql.startswith('SELECT') and 'access_rolebundle' in sql and 'FOR UPDATE' in sql)
+                        or (sql.startswith('INSERT') and 'access_rolecapability' in sql)):
+                    at_append.set()
+                return execute(sql, params, many, context)
+            try:
+                # Событие отмечает реальный SQL конкурента, не запуск потока.
+                with connections['default'].execute_wrapper(observe):
+                    with self.assertRaisesRegex(ValueError, 'sealed'):
+                        access.RoleCapability.objects.create(bundle_id=bundle.id, scope='cluster', verb='restart')
+            finally:
+                connections.close_all()
+
+        with patch.object(self.api, '_normalized', checked), ThreadPoolExecutor(max_workers=2) as pool:
+            approval = pool.submit(approve)
+            try:
+                self.assertTrue(at_check.wait(15))
+                appender = pool.submit(append)
+                self.assertTrue(at_append.wait(15))
+                with self.assertRaises(TimeoutError, msg='append did not wait on approval parent lock'):
+                    appender.result(timeout=0.5)
+            finally:
+                release.set()
+            approval.result(timeout=15)
+            appender.result(timeout=15)
+        self.api.read_bundle(self.actor, bundle.id)
+
+    def test_publication_checks_actual_complete_child_sets_before_recording_seal(self):
+        self.assertTrue(hasattr(access, 'RoleBundleSeal'), 'verified publication seal is missing')
+        value = manifest('seal-order', spawn=('worker',))
+        value['secrets'] = {'vars': ['APPROVED'], 'files': ['approved.txt']}
+        observed = []
+        normalized = self.api._normalized
+
+        def check(row, parsed):
+            observed.append(row.pk)
+            self.assertFalse(access.RoleBundleSeal.objects.filter(bundle=row).exists())
+            self.assertEqual(set(access.RoleCapability.objects.filter(bundle=row).values_list('scope', 'verb')),
+                {('node', 'send'), ('node', 'state'), ('cluster', 'add'), ('cluster', 'roster')})
+            self.assertEqual(list(access.RoleSpawn.objects.filter(bundle=row).values_list('role', flat=True)), ['worker'])
+            self.assertEqual(set(access.RoleSecretName.objects.filter(bundle=row).values_list('kind', 'name')),
+                {('vars', 'APPROVED'), ('files', 'approved.txt')})
+            normalized(row, parsed)
+
+        with patch.object(self.api, '_normalized', check):
+            bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+                manifest=json.dumps(value).encode(), prompt=b'prompt', provenance='seal order')
+        self.assertEqual(observed, [bundle.id])
+        self.assertTrue(access.RoleBundleSeal.objects.filter(bundle_id=bundle.id).exists())
+        self.assertFalse(access.RoleBundleApproval.objects.filter(bundle_id=bundle.id).exists())
+
+    def test_publication_cannot_seal_a_mismatching_actual_child_set(self):
+        normalized = self.api._normalized
+
+        def append_before_verify(row, parsed):
+            access.RoleCapability.objects.create(bundle=row, scope='cluster', verb='restart')
+            return normalized(row, parsed)
+
+        with patch.object(self.api, '_normalized', append_before_verify):
+            with self.assertRaisesRegex(PermissionError, 'normalized capabilities mismatch'):
+                self.api.publish_bundle(self.actor, project_id=self.project.pk,
+                    manifest=json.dumps(manifest('seal-mismatch')).encode(), prompt=b'prompt', provenance='mismatch')
+        self.assertFalse(access.RoleBundle.objects.filter(role='seal-mismatch').exists())
 
     def test_exact_bytes_canonical_digest_normalized_caps_and_immutable_write_paths(self):
         value = self.api.read_bundle(self.actor, self.bundle.id)

@@ -1,7 +1,7 @@
 """Связи стандартного Auth, provenance и credential generation, не новый User."""
 import uuid
 from django.conf import settings
-from django.db import models
+from django.db import models, router, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -198,7 +198,37 @@ class RoleBundle(Evidence):
             models.CheckConstraint(condition=Q(driver__in=('any', 'isolating')), name='access_bundle_driver')]
 
 
-class RoleCapability(Evidence):
+class RoleBundleSeal(Evidence):
+    """Доказательство проверки полного normalized set, не автоматическое доверие старым rows."""
+    bundle = models.OneToOneField(RoleBundle, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def save(self, *args, **kwargs):
+        raise ValueError('use verified bundle publication')
+
+    @classmethod
+    def _record_verified(cls, bundle):
+        # Только publisher: parent уже locked, все children сверены с actual bytes.
+        seal = cls(bundle=bundle)
+        Evidence.save(seal)
+        return seal
+
+
+class BundleChild(Evidence):
+    """Обычный append сериализован с проверкой publisher и человеческим approval."""
+    def save(self, *args, **kwargs):
+        using = kwargs.get('using') or router.db_for_write(type(self), instance=self)
+        with transaction.atomic(using=using):
+            RoleBundle.objects.using(using).select_for_update().get(pk=self.bundle_id)
+            if RoleBundleSeal.objects.using(using).filter(bundle_id=self.bundle_id).exists():
+                raise ValueError('role bundle normalized set is sealed')
+            return super().save(*args, **kwargs)
+
+    class Meta(Evidence.Meta):
+        abstract = True
+
+
+class RoleCapability(BundleChild):
     bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
     scope = models.CharField(max_length=8)
     verb = models.CharField(max_length=32)
@@ -213,7 +243,7 @@ class RoleCapability(Evidence):
             models.CheckConstraint(condition=Q(scope__in=('node', 'cluster')), name='access_capability_scope')]
 
 
-class RoleSpawn(Evidence):
+class RoleSpawn(BundleChild):
     bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
     role = models.CharField(max_length=128)
 
@@ -226,7 +256,7 @@ class RoleSpawn(Evidence):
         constraints = [models.UniqueConstraint(fields=('bundle', 'role'), name='access_bundle_spawn')]
 
 
-class RoleSecretName(Evidence):
+class RoleSecretName(BundleChild):
     bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
     kind = models.CharField(max_length=8)
     name = models.CharField(max_length=256)
@@ -240,6 +270,14 @@ class RoleBundleApproval(Evidence):
     bundle = models.OneToOneField(RoleBundle, on_delete=models.PROTECT)
     human = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
+
+    def save(self, *args, **kwargs):
+        using = kwargs.get('using') or router.db_for_write(type(self), instance=self)
+        with transaction.atomic(using=using):
+            RoleBundle.objects.using(using).select_for_update().get(pk=self.bundle_id)
+            if not RoleBundleSeal.objects.using(using).filter(bundle_id=self.bundle_id).exists():
+                raise ValueError('role bundle is not verified and sealed')
+            return super().save(*args, **kwargs)
 
     def clean(self):
         if self.human_id != self.bundle.owner_id:
