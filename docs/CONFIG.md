@@ -30,7 +30,7 @@ rules below must not create a second authentication or authorization path.
 ## New release: one installation authority
 
 Django models and the ORM hold installation values, node definitions,
-project policy, credentials, user/access records and client/workspace
+project policy, credentials, Actor/access records and client/workspace
 bindings. Code supplies typed schemas and defaults. Accepted values and their
 revisions are durable ORM state; a process's environment is not a universal
 higher-precedence settings layer.
