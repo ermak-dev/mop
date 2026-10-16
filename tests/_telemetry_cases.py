@@ -23,13 +23,12 @@ import _execution_cases as fixture
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class Telemetry(TransactionTestCase):
+    # Data migrations нужны каждому test; post_migrate не восстанавливает их.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(any(model.__name__ == 'SessionObservation' for model in apps.get_models()),
                         'session telemetry must be installed in execution, not Django sessions')
-        # TransactionTestCase.flush не воспроизводит data migrations. Локальный
-        # инфраструктурный fixture не подменяет production admission/authority.
-        from mop.server.controller.models import RestoreGuard
-        RestoreGuard.objects.get_or_create(pk=1)
         fixture.MachineExecution.setUp(self)
         from mop.server.sessions.telemetry import Telemetry as Service
         from mop.common.telemetry import SessionScope, CurrentSession, SourceRef, SourceAttributedTurn

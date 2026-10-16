@@ -43,6 +43,9 @@ def _process_reader(capability, owner, barrier, result):
 
 
 class ProxyUsage(TransactionTestCase):
+    # Flush не должен пересоздавать ContentTypes с другими PK между классами.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertIsNotNone(apps.get_app_config('execution').models.get('usagesource'),
             'proxy source/read intent/events/aggregates must be durable ORM state')
