@@ -24,7 +24,14 @@ from mop.server.secrets.services import SecretStore
 # HYPOTHESIS: изменяемая ORM-строка может подменить одобренные bytes и старый
 # результат может подтвердить другое incarnation/version без адресного readback.
 # SOLUTION: immutable encrypted revisions/approval, CAS run/step и локальные ports.
-# RED: записывается после настоящего PG-прогона, до реализации services/guards.
+# RED: PG16, test-only 1db27e30: ValueError not raised при переписывании
+# approved digest и approval. Import/setup/RestoreGuard ошибки red не считались.
+# Дополнительный red: PG16 — raw redactor exception, revoked receipt и
+# unknown -> refused; PG17 — missing step подтверждал success, старый approval
+# сбрасывал gave_up после прогона другой revision.
+# RESULT: immutable encrypted bytes и SQL-only approval port; полный ordinal
+# plan проверяется на readback, budget адресован approval/target/incarnation.
+# STATUS: FIXED — see #636. Runtime/node cutover и live run — зависимые задачи.
 
 
 class PreparationFixture(TransactionTestCase):
@@ -146,6 +153,37 @@ class PreparationCases(PreparationFixture):
         self.assertNotEqual(changed.content_version_id, revision.content_version_id)
         self.assertEqual(self.api.approve(self.actor, revision.id), approval)
 
+    def test_schema_is_repeatable_and_protected_bytes_are_not_plaintext_columns(self):
+        from django.core.management import call_command
+        from mop.server.secrets.models import SecretVersion
+        call_command('migrate', verbosity=0, interactive=False)
+        call_command('makemigrations', check=True, dry_run=True, verbosity=0)
+        revision, _ = self.approved()
+        version = SecretVersion.objects.get(pk=revision.content_version_id)
+        self.assertNotIn(b'answer: 42', bytes(version.envelope))
+        self.assertNotIn(b'debug: msg=hello', bytes(version.envelope))
+        for provider in (None, XChaCha20Provider(Keyring('test', {'test': b'w' * 32}))):
+            with self.assertRaises(ValueError):
+                self.s.Preparation(provider=provider, authorizer=auth.Access()).read_revision(self.actor, revision.id)
+
+    def test_malformed_collections_and_redactor_exceptions_are_safe(self):
+        with self.assertRaises(ValueError):
+            self.publish(secret_refs=({},))
+        with self.assertRaises(ValueError):
+            self.new_run(steps=([],))
+    def test_redactor_exception_cannot_expose_raw_output_or_update_progress(self):
+        class Broken:
+            def sanitize(inner, raw):
+                raise RuntimeError('private-token in untrusted redactor exception')
+        run = self.begin(self.new_run())
+        self.api.redactor = Broken()
+        with self.assertRaises(ValueError) as raised:
+            self.api.progress(self.actor, run.binding, 0, percent=10,
+                              log=b'private-token', expected_version=run.version)
+        self.assertNotIn('private-token', str(raised.exception))
+        self.assertIsNone(raised.exception.__context__)
+        self.assertEqual(self.api.get_run(self.actor, run.id).version, run.version)
+
     def test_default_auth_and_delivery_gate_are_closed(self):
         with self.assertRaises(PermissionError):
             self.s.Preparation(provider=self.provider).publish(self.actor, project_id=self.project.pk,
@@ -234,6 +272,20 @@ class PreparationCases(PreparationFixture):
             self.new_run(approval)
         self.assertEqual(m.BootstrapRun.objects.count(), 2)
 
+    def test_older_approval_cannot_reset_budget_after_a_different_revision_run(self):
+        _, approval = self.approved()
+        gave_up = self.result(self.begin(self.new_run(approval, failure_limit=1)), outcome='failed')
+        self.assertEqual(gave_up.state, 'gave_up')
+        _, changed = self.approved(tasks=b'replacement')
+        self.success(self.new_run(changed))
+        with self.assertRaises(self.s.Conflict):
+            self.new_run(approval, failure_limit=1)
+
+    def test_missing_required_step_cannot_confirm_a_successful_run(self):
+        run = self.success(self.new_run())
+        m.BootstrapStep.objects.filter(run_id=run.id, ordinal=1).delete()
+        self.assertFalse(self.api.readback(self.actor, run.binding).confirmed)
+
     def test_empty_steps_and_oversized_raw_output_are_rejected_without_mutation(self):
         for steps in ((), ('duplicate', 'duplicate'), ('x',) * 65):
             with self.assertRaises(ValueError):
@@ -296,6 +348,28 @@ class PreparationCases(PreparationFixture):
             self.api.readback(self.actor, run.binding)
         self.assertEqual(m.BootstrapApproval.objects.get(pk=approval.id).revision_id, revision.id)
 
+    def test_result_after_approval_revocation_is_retained_as_refused_not_success(self):
+        _, approval = self.approved()
+        run = self.begin(self.new_run(approval))
+        self.api.revoke(self.actor, approval.id)
+        # Текущий authenticated receipt writer остаётся владельцем exact run;
+        # отзыв запрещает новые эффекты/выдачу, но не стирает факт их завершения.
+        run = self.result(run)
+        self.assertEqual(run.state, 'refused')
+        self.assertIn('revoked', run.reason)
+        self.assertEqual(m.BootstrapStep.objects.get(run_id=run.id, ordinal=0).state, 'succeeded')
+        with self.assertRaises(PermissionError):
+            self.api.payload(self.actor, run.binding)
+
+    def test_revocation_does_not_turn_unknown_effect_into_retryable_refusal(self):
+        _, approval = self.approved()
+        run = self.begin(self.new_run(approval))
+        self.api.revoke(self.actor, approval.id)
+        run = self.result(run, outcome='unknown')
+        self.assertEqual(run.state, 'unknown')
+        self.assertIsNone(run.finished_at)
+        self.assertEqual(run.failures, 0)
+
     def test_current_authority_rechecked_before_returning_private_result(self):
         run = self.success(self.new_run())
         self.gate.allowed = False
@@ -344,6 +418,68 @@ class PreparationCases(PreparationFixture):
         with self.assertRaises(self.s.Conflict):
             self.new_run(new, request_id=request, deadline=deadline)
         self.assertEqual(m.BootstrapRun.objects.count(), 1)
+
+    def test_real_delegated_child_intent_inherits_first_approval_across_retry(self):
+        import json
+        from django.contrib.contenttypes.models import ContentType
+        from rest_framework.authtoken.models import Token
+        from mop.server.access.grants import Grants
+        from mop.server.access.delegation import RoleBinding
+        revision, approval = self.approved()
+        for action in ('access.approve_role', 'access.view_role', 'access.issue_grant'):
+            app, code = action.split('.')
+            self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
+        ct, _ = ContentType.objects.get_or_create(app_label='sessions', model='bootstrap_fixture')
+        permission, _ = Permission.objects.get_or_create(content_type=ct, codename='create_puppet')
+        self.user.user_permissions.add(permission)
+        query = self.api.approval_query()
+        class Approvals:
+            calls = 0
+            def pin(inner, binding):
+                inner.calls += 1
+                return query.pin(binding)
+            def validate(inner, proof, binding):
+                return query.validate(proof, binding)
+        class Bindings:
+            current_value = None
+            def current(inner, project_id, target_id):
+                return inner.current_value
+            def activation(inner, grant_id):
+                return inner.current_value
+        approvals, bindings = Approvals(), Bindings()
+        grants = Grants(provider=self.provider, approvals=approvals, bindings=bindings)
+        def bundle(role, spawn):
+            raw = json.dumps({'soul': role, 'version': 1, 'runtime': {'driver': 'any', 'receives_dispatch': True},
+                'capabilities': {'node_verbs': ['send', 'state'], 'cluster_verbs': ['add', 'roster'],
+                                 'dispatch': False, 'spawn': spawn}, 'prompt': 'soul.md'}).encode()
+            row = grants.publish_bundle(self.actor, project_id=self.project.pk, manifest=raw,
+                                        prompt=b'private prompt', provenance='test source')
+            grants.approve_bundle(self.actor, row.id)
+            return row
+        parent_bundle, child_bundle = bundle('parent', ['child']), bundle('child', [])
+        parent = grants.reserve(self.actor, project_id=self.project.pk, bundle_id=parent_bundle.id,
+            target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
+            expires_at=timezone.now() + timedelta(hours=1))
+        grants.provision(self.actor, parent.id, expected_revision=parent.revision)
+        parent = grants.get(self.actor, parent.id)
+        bindings.current_value = RoleBinding(parent.project_id, parent.target_id, parent.incarnation,
+            parent.role, parent.digest, parent.id, self.user.pk)
+        grants.activate(parent.id, expected_revision=parent.revision)
+        key = Token.objects.get(user__principal__grant__id=parent.id).key
+        delegated = auth.token_context(key, grants=grants)
+        newer, _ = self.approved(tasks=b'new snapshot after first parent intent')
+        args = dict(project_id=self.project.pk, bundle_id=child_bundle.id, target_id=uuid.uuid4(),
+            incarnation=uuid.uuid4(), request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
+        child = grants.reserve(delegated, **args)
+        retry = grants.reserve(delegated, **args)
+        self.assertEqual(child, retry)
+        self.assertEqual((child.policy.approval_id, child.policy.version_id, child.policy.digest),
+                         (approval.id, revision.content_version_id, revision.digest))
+        self.assertNotEqual(child.policy.digest, newer.digest)
+        self.assertEqual(approvals.calls, 1)
+        with self.assertRaises(PermissionError):
+            self.api.publish(delegated, project_id=self.project.pk, tasks=b'own policy', variables=b'',
+                             provenance='forbidden role upload', commit='b' * 40)
 
     def test_grants_approval_query_pins_exact_revision_and_validates_old_not_latest(self):
         revision, approval = self.approved()

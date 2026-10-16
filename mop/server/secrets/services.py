@@ -318,6 +318,26 @@ class RetainedSecrets:
         self._reference(scope, version_id)
 
     @storage_errors
+    def check_project_references(self, version_ids, *, project_id):
+        """Локальный metadata-only guard для immutable preparation references.
+
+        Не выдаёт значения или authority; caller отдельно проверяет action и
+        actual project. Установочные keys/токены не являются project input.
+        """
+        ids = tuple(version_ids)
+        if len(ids) > 32 or any(type(value) is not uuid.UUID for value in ids) or len(set(ids)) != len(ids):
+            raise Refused('invalid project secret references')
+        rows = tuple(m.SecretVersion.objects.select_related('secret').filter(pk__in=ids))
+        if len(rows) != len(ids):
+            raise Refused('project secret reference is unavailable')
+        for version in rows:
+            row = version.secret
+            if (row.project_id != project_id or row.purpose != 'project'
+                    or row.kind not in ('variable', 'file') or row.active_version_id != version.id):
+                raise Refused('project secret reference mismatch')
+            available(row)
+
+    @storage_errors
     def validate_policy_reference(self, version_id, *, project_id):
         version = m.SecretVersion.objects.select_related('secret').get(pk=version_id)
         if version.secret.project_id != project_id or version.secret.purpose != 'policy':

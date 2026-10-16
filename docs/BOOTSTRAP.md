@@ -10,6 +10,70 @@
 `tests/layers.py`), командлет — `mop server bootstrap`, плейбук прогона —
 `deploy/bootstrap.yml`, роль сервера — `deploy/roles/bootstrap`.
 
+## Новая установка #623: граница Preparation (#636)
+
+`mop.server.preparation` — отдельный ORM-владелец данных новой установки, не
+fallback старого bootstrap. Описанная ниже файловая реализация относится только
+к прежней версии; новый модуль её не читает и не импортирует.
+
+| Инвариант | Владелец / путь изменения | Граница |
+|---|---|---|
+| Exact tasks/vars, provenance, commit, digest и ссылки секретов | `Preparation.publish` → immutable `BootstrapRevision` | Шифрование через публичный `RetainedSecrets.prepare` вне SQL; ciphertext и revision коммитятся вместе |
+| Approval одобряет одну версию, не latest pointer | `approve`; отзыв — отдельный immutable `ApprovalRevocation` | Короткая локальная SQL-транзакция, текущий human action/project/owner; approved bytes не переписываются |
+| Child наследует первый подтверждённый снимок | `approval_query().pin/validate` → `access.Grants` | Совместимый `ApprovedPolicy` (#635), exact approval/version/digest; retry валидирует старый proof, не выбирает новый latest |
+| Результат адресован одному run/version/incarnation | `create_run`, `begin_step`, `progress`, `record_step`, `finish`, `readback` | `RunBinding` + expected version, row lock/CAS; provider, redactor и effect не входят в SQL |
+| Неопределённый эффект не повторяется | `mark_unknown`, deadline readback | Unknown не failure и не success; повторное claim неизвестного run закрыто, reconciliation принадлежит executor |
+| Приватные bytes не становятся публичным audit | `read_revision`/`payload`, `steps` | Повторная текущая authority и assigned-target gate, никакого generic serializer/Admin |
+
+Содержимое хранится в AEAD `SecretVersion` (#637), а не в `FileField` и не в
+прежнем каталоге. Задачи ограничены 256 KiB, vars — 128 KiB, ссылки — 32
+защищённые версии. Provenance до 1024 символов, commit — hex object id; digest
+покрывает весь канонический envelope, включая точные bytes и ссылки.
+Материализация файлов исполнителем может быть только временной производной.
+
+У run не более 64 конкретных шагов, не произвольный workflow DSL. Предел
+провалов 1–10: подтверждённая ошибка задачи увеличивает счёт, недоступность,
+отказ и unknown его не увеличивают; успех сбрасывает. Новый request_id не
+обнуляет gave_up той же revision/incarnation и не обходит неизвестный run.
+Новая одобренная revision или incarnation — новая область подготовки, но
+safety внешнего эффекта по-прежнему проверяет execution gate.
+
+Произвольный stdout не хранится по умолчанию. Для сохранения приватного tail
+composition root обязан связать доверенный redactor, удаляющий реальные
+значения credentials, включая секреты модулей Ansible. Его отсутствие —
+отказ записи stdout, не passthrough. Один вход ограничен 64 KiB, tail шага —
+4 KiB UTF-8, совокупный верхний предел logs run — 256 KiB; управляющие
+последовательности вычищаются. Логи доступны только приватному readback,
+не публичному журналу. Удаление evidence требует отдельной retention-политики;
+произвольный delete/переписывание revision/approval запрещены.
+
+### Явно оставшиеся подключения
+
+Это data/approval/readback, не готовый запуск Ansible. `RuntimeGate.check`
+должен быть локальным sync query с актуальным authenticated actor, assigned
+node/target, project, полным role/digest/incarnation, pinned creation intent,
+active grant/owner permissions и fencing. Незаданный gate закрыт. Он повторяется
+при выдаче payload и readback после долгого прогона. Для `record` gate
+аутентифицирует текущего exact receipt writer и назначение, но запись факта
+уже выполненного эффекта не требует живого approval: при отзыве step outcome
+сохраняется, run получает отказ с причиной, а неизвестный эффект остаётся
+unknown. Это не допуск к новому эффекту или credential release. Сам `Operation` id не
+даёт права получить bytes или credentials. Preparation возвращает ссылки
+секретов, не их значения; адресная выдача остаётся публичным защищённым
+`SecretStore.issue_addressed` с gate #637/#639.
+
+- #625/#639 связывают эти use cases с admission/worker/execution claim,
+  assigned-node query, reconciliation unknown, outbox и актуальной доставкой.
+- #639 и назначенные задачи node/driver удаляют потребителей старого
+  `server/bootstrap.py`, файловые readers/writers, NATS bootstrap RPC и
+  подключают disposable materialization. В этой задаче они не переключены
+  и не объявлены устранёнными; новый ORM-модуль их не вызывает.
+- SSH private key bootstrap и Nomad token — отдельные защищённые credentials
+  #637; эта схема не принимает их как vars или metadata.
+- DRF/Admin, composition-root binding, live run на новой цели и итоговая
+  проверка отзыва во время реального I/O — зависимые задачи и приёмка эпика,
+  не доказательство локального ORM gate. Старый пул не используется.
+
 ## Зачем
 
 До #62 манифест при подъёме не играл никто: единственным механизмом было

@@ -11,7 +11,6 @@ from typing import Protocol
 import uuid
 
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Permission
 from django.db import DatabaseError, models, transaction
 from django.utils import timezone
 from django.utils.crypto import constant_time_compare
@@ -125,18 +124,7 @@ class Grants:
         return row
 
     def _owner_permission(self, owner_id, action, project_id):
-        user = get_user_model().objects.get(pk=owner_id)
-        principal, _ = auth._principal(user)
-        if principal.kind != 'human':
-            raise auth.Denied('human owner required')
-        if not (auth._global(user) or m.ProjectMembership.objects.filter(
-                user=user, project_id=project_id, source__enabled=True).exists()):
-            raise auth.Denied('human owner no longer belongs to project')
-        app, code = action.split('.', 1)
-        if (action not in auth.ACTIONS or not Permission.objects.filter(
-                content_type__app_label=app, codename=code).exists() or not user.has_perm(action)):
-            raise auth.Denied('current human owner permission required')
-        return user
+        auth.Access().authorize_owner(owner_id, action, project_ids=(project_id,))
 
     def _human(self, actor, action, project_id):
         if type(actor) is not ActorContext or actor.kind is not PrincipalKind.HUMAN:

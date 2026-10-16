@@ -14,7 +14,38 @@ class Record(models.Model):
         default_permissions = ()
 
 
-class BootstrapRevision(Record):
+class EvidenceQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValueError('immutable preparation evidence')
+
+    def bulk_update(self, *args, **kwargs):
+        raise ValueError('immutable preparation evidence')
+
+    def bulk_create(self, *args, **kwargs):
+        raise ValueError('use preparation commands')
+
+    def delete(self):
+        raise ValueError('preparation evidence requires retention review')
+
+
+class Evidence(Record):
+    objects = EvidenceQuerySet.as_manager()
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError('immutable preparation evidence')
+        self.clean()
+        kwargs['force_insert'] = True
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('preparation evidence requires retention review')
+
+    class Meta(Record.Meta):
+        abstract = True
+
+
+class BootstrapRevision(Evidence):
     project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     number = models.PositiveBigIntegerField()
@@ -26,13 +57,20 @@ class BootstrapRevision(Record):
     vars_size = models.PositiveIntegerField()
     created_at = models.DateTimeField(default=timezone.now)
 
+    def clean(self):
+        import re
+        if (not re.fullmatch('[0-9a-f]{64}', self.digest or '')
+                or not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', self.commit or '')
+                or not 0 <= self.task_size <= 262144 or not 0 <= self.vars_size <= 131072):
+            raise ValueError('invalid bootstrap revision')
+
     class Meta(Record.Meta):
         constraints = [models.UniqueConstraint(fields=('project', 'owner', 'number'), name='prep_revision_number'),
             models.CheckConstraint(condition=Q(number__gte=1, task_size__lte=262144, vars_size__lte=131072), name='prep_revision_sizes')]
         permissions = [('approve_bootstrap', 'Can approve exact bootstrap bytes')]
 
 
-class BootstrapSecretReference(Record):
+class BootstrapSecretReference(Evidence):
     revision = models.ForeignKey(BootstrapRevision, on_delete=models.PROTECT)
     version = models.ForeignKey('secrets.SecretVersion', on_delete=models.PROTECT)
 
@@ -40,13 +78,18 @@ class BootstrapSecretReference(Record):
         constraints = [models.UniqueConstraint(fields=('revision', 'version'), name='prep_secret_reference')]
 
 
-class BootstrapApproval(Record):
+class BootstrapApproval(Evidence):
     revision = models.OneToOneField(BootstrapRevision, on_delete=models.PROTECT)
     human = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
 
 
-class ApprovalRevocation(Record):
+    def clean(self):
+        if self.human_id != self.revision.owner_id:
+            raise ValueError('bootstrap approval requires its human owner')
+
+
+class ApprovalRevocation(Evidence):
     approval = models.OneToOneField(BootstrapApproval, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
 
@@ -58,8 +101,10 @@ class BootstrapRun(Record):
     request_id = models.UUIDField()
     version = models.PositiveBigIntegerField(default=1)
     state = models.CharField(max_length=16, default='accepted')
+    reason = models.CharField(max_length=256, blank=True, default='')
     failures = models.PositiveIntegerField(default=0)
     failure_limit = models.PositiveIntegerField(default=3)
+    step_count = models.PositiveIntegerField()
     deadline = models.DateTimeField()
     started_at = models.DateTimeField(null=True)
     finished_at = models.DateTimeField(null=True)
@@ -67,7 +112,7 @@ class BootstrapRun(Record):
 
     class Meta(Record.Meta):
         constraints = [models.UniqueConstraint(fields=('target_id', 'incarnation', 'request_id'), name='prep_run_request'),
-            models.CheckConstraint(condition=Q(version__gte=1, failures__lte=10, failure_limit__gte=1, failure_limit__lte=10), name='prep_run_counters'),
+            models.CheckConstraint(condition=Q(version__gte=1, failures__lte=10, failure_limit__gte=1, failure_limit__lte=10, step_count__gte=1, step_count__lte=64), name='prep_run_counters'),
             models.CheckConstraint(condition=Q(state__in=('accepted', 'running', 'succeeded', 'failed', 'refused', 'unknown', 'gave_up')), name='prep_run_state')]
 
 
