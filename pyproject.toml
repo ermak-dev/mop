@@ -11,7 +11,7 @@ description = "A pool of claude puppets on top of Nomad, a message bus on top of
 requires-python = ">=3.12"
 # Зависимости -- в setup.py из mop/common/deps.py: список один на узел,
 # тело, CI и клиента, второго здесь не заводим.
-dynamic = ["dependencies"]
+dynamic = ["dependencies", "optional-dependencies"]
 
 [project.scripts]
 mop = "mop.cli:console"
