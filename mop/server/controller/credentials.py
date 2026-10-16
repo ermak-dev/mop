@@ -1,8 +1,8 @@
 """Отдельная credential OS-служба: root/provider остаются внутри процесса.
 
 Socket принимает конечные application commands, не ciphertext/AAD/actor claims.
-Ни HTTP, ни произвольного RPC, ни собственного credential store. Реальный
-Preparation approval связан; отсутствие assignment/runtime порта всегда отказ.
+Ни HTTP, ни произвольного RPC, ни собственного credential store. Реальные
+Preparation approval и current Assignment связаны; непроверенные delivery proofs запрещены.
 """
 import asyncio
 from dataclasses import fields
@@ -19,6 +19,8 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from mop.common import credentials as p
 from mop.server.access import services as access
 from mop.server.access.grants import Grants, Conflict as GrantConflict, StorageUnavailable as GrantUnavailable
+from mop.server.access.delegation import RoleBinding
+from mop.server.sessions.services import Assignments
 from mop.server.secrets import services as secrets
 from mop.server.preparation import services as preparation
 from mop.server.secrets.crypto import SecretCryptoError
@@ -31,6 +33,25 @@ class AwaitAssignment:
     """#639: не выдавать по permission/token/operation id вместо реального proof."""
     def resolve(self, actor):
         raise PermissionError('current assignment and addressed delivery composition is not bound')
+
+
+class CurrentBindings:
+    """SQL-only public Assignment projection, не activation/transport receipt."""
+    def __init__(self):
+        self.assignments = Assignments()
+
+    def current(self, project_id, target_id):
+        binding = self.assignments.current(project_id=project_id, target_id=target_id)
+        if binding is None:
+            return None
+        return RoleBinding(binding.project_id, binding.target_id, binding.incarnation_id,
+            binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id)
+
+    def activation(self, grant_id):
+        raise access.Denied('trusted grant activation receipt composition is not bound')
+
+    def retirement(self, grant_id, revision):
+        raise access.Denied('transport retirement receipt composition is not bound')
 
 
 class CurrentAccess:
@@ -69,9 +90,9 @@ class CredentialApplication:
     """Доверенная композиция: аргументы конструктора не берутся из wire."""
     def __init__(self, provider, snapshot, generation, *, delivery_gate=None):
         self.snapshot, self.generation = snapshot, generation
-        # Metadata grant callbacks используют только публичный SQL-only port.
-        # Runtime binding остаётся deny-default до concrete Sessions query.
-        self.grants = Grants(provider=provider)
+        # Metadata grant callbacks используют только публичные SQL-only ports.
+        # Assignment projection не подменяет отдельные activation/delivery proofs.
+        self.grants = Grants(provider=provider, bindings=CurrentBindings())
         self.local_grants = self.grants.local_authority()
         self.preparation = preparation.Preparation(provider=provider,
             authorizer=CurrentPreparationAccess(self))

@@ -255,15 +255,22 @@ There is no raw `RetainedSecrets.prepare/commit` socket pair: passing an opaque
 prepared envelope back would widen the interface and putting socket I/O inside
 an aggregate SQL transaction is forbidden.
 
-Addressed and rotation issuance still await the real #639 assignment query:
-authenticated node, current assignment, exact role/digest/incarnation, active
-grant/ancestors, current owner rights and pinned required-name set. The production
-composition deliberately binds `AwaitAssignment`, which denies even a permitted
-human. The public SecretStore also checks full Secrets delivery action/scope on
-both selections, before/after crypto; a bound assignment port alone is not
-permission. Grants' runtime binding/activation/retirement queries remain default-deny until
-concrete #639 queries are bound. `provision_grant` calls the real Grants owner,
-but successful provisioning is not claimed while that query is unbound.
+Grants' current binding query uses the public SQL-only
+`Assignments.current(project_id, target_id)` projection: exact project, target,
+incarnation, owner, role, bundle digest and grant. `provision_grant` calls the real
+Grants owner and can retain a new credential without returning its token. A live
+mismatched assignment is refused before provider work and checked again before
+the retained commit. Bundles must be published through Grants, which seals their
+complete normalized sets; manually populated approval rows are not authority.
+
+Activation and transport retirement remain explicitly unbound: a current read
+projection is not a trusted activation or retirement receipt. Addressed and
+rotation issuance also remain denied by `AwaitAssignment`, even for a permitted
+human. They require an authenticated enrolled node, current assignment, exact
+role/digest/incarnation, active grant/ancestors, current owner rights and pinned
+required-name set, not merely the new current-binding adapter. The public
+SecretStore checks full Secrets delivery action/scope before/after crypto; a
+binding alone is not permission. No node-addressed proof or receipt is fabricated.
 
 The implemented rootless aggregate boundary publishes/reads exact encrypted role
 and Preparation bytes, approves them, and reserves grants with the real
@@ -282,6 +289,19 @@ purpose plus OS-peer authority and a concrete current-resource query; forwarding
 an arbitrary human owner ID as actor authority is not permitted. They remain
 closed rather than weakening admission or giving ordinary roles a CryptoProvider.
 #644 separately owns service identities, units and DB provisioning.
+
+This adapter does not provide a role-create admission workflow. Public
+`Assignments.create` currently takes a grant ID while generating the target ID;
+`Grants.reserve` takes the target/incarnation while generating the grant ID.
+Connecting those identities for a new target still needs an accepted owning
+admission use case. The current Operations vertical is node drain/enable, not a
+generic role-create/stage handler. Socket tests with persisted matching
+assignments prove the binding checks, not that missing end-to-end workflow.
+Grants also requires the registered `sessions.create_puppet` permission; the
+current execution app installs `execution.*`, not that role-create permission.
+The socket fixture explicitly supplies it. Production admission must own its
+registration rather than treating a superuser or caller-selected owner as a
+substitute for a missing capability.
 
 Owned source-only socket checks can exercise actual distinct OS UIDs with
 `mop dev controller --postgres 16 --check credential_service --cross-uid`

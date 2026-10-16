@@ -100,6 +100,27 @@ class ClientBoundary(unittest.TestCase):
             with self.subTest(refs=repr(refs)[:50]), self.assertRaises(p.CredentialError):
                 p.parse_request({**request, 'args': {**request['args'], 'secret_refs': refs}})
 
+    # HYPOTHESIS: изолированные subject suites скрывают одинаковые DB constraint names.
+    # SOLUTION: execution receipt получает собственное имя в модели и initial schema.
+    # RESULT: actual PG16 models.E032 для receipt_known_outcome до механического fix;
+    # после переименования schema check пропускает реальные behavioral cases.
+    # STATUS: FIXED — see #669.
+    def test_composed_domain_constraint_names_are_globally_unique(self):
+        root = Path(__file__).resolve().parents[1]
+        names = {}
+        for path in (root / 'mop/server').glob('*/models.py'):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr not in ('CheckConstraint', 'UniqueConstraint'):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg == 'name' and isinstance(keyword.value, ast.Constant):
+                        name = keyword.value.value
+                        if type(name) is str and '%' not in name:
+                            self.assertFalse(name in names, f'composed constraint collision: {name}')
+                            names[name] = path
+
     def test_private_bundle_provenance_and_payload_never_enter_receipt_repr(self):
         from mop.common import credentials as p
         from dataclasses import FrozenInstanceError

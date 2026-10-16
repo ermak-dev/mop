@@ -403,6 +403,155 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
     # generic unknown. Fixture projection live ORM исправлена отдельно, не red.
     # RESULT: PG17 — 29 socket checks green, включая actual distinct UID.
     # STATUS: FIXED — see #669 (stage: bytes/approval/reservation; binding всё ещё deny).
+    # HYPOTHESIS: unbound BindingQuery блокирует provision при реальных owner APIs.
+    # SOLUTION: Root использует SQL-only Assignments.current и полный RoleBinding;
+    # activation/retirement/addressed proof не выводятся из простой projection.
+    # RESULT: actual PG16 — два отказа runtime binding query is not bound до fix;
+    # затем provision/current прошли, старый stage-only assertion обновлён под
+    # новый контракт; mismatch до/после crypto проверяется без token/commit.
+    # STATUS: FIXED — see #669 (current/provision, не delivery acceptance).
+    def test_public_assignment_query_maps_complete_binding_inside_sql(self):
+        from datetime import timedelta
+        import uuid
+        from django.db import transaction
+        from django.utils import timezone
+        from mop.server.catalog.models import Node, NodeProject
+        from mop.server.sessions.models import Assignment, ExecutionIncarnation
+        from mop.server.access.delegation import RoleBinding
+        node = Node.objects.create(name='binding-node', driver='host', ssh_host='node.invalid',
+            control_origin='https://node.invalid', lan_address='10.0.0.8', bootstrap_address='boot.invalid')
+        NodeProject.objects.create(node=node, project=self.project)
+        grant_id = uuid.uuid4()
+        assignment = Assignment.objects.create(project=self.project, node=node, owner=self.user,
+            role='worker', bundle_digest='a' * 64, grant_id=grant_id,
+            expires_at=timezone.now() + timedelta(hours=1))
+        incarnation = ExecutionIncarnation.objects.create(assignment=assignment, node=node, executor_epoch=uuid.uuid4())
+        assignment.current_incarnation = incarnation
+        assignment.save(update_fields=['current_incarnation'])
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            app = self.service.application()
+        with transaction.atomic():
+            actual = app.grants.bindings.current(self.project.id, assignment.id)
+            self.assertEqual(actual, RoleBinding(self.project.id, assignment.id, incarnation.id,
+                'worker', 'a' * 64, grant_id, self.user.pk))
+            self.assertIsNone(app.grants.bindings.current(uuid.uuid4(), assignment.id))
+            # A read projection не является подтверждением activation/retirement.
+            with self.assertRaises(PermissionError):
+                app.grants.bindings.activation(grant_id)
+            with self.assertRaises(PermissionError):
+                app.grants.bindings.retirement(grant_id, 1)
+
+    def reserved_grant(self):
+        from datetime import timedelta
+        import uuid
+        from django.utils import timezone
+        from django.contrib.contenttypes.models import ContentType
+        content_type, _ = ContentType.objects.get_or_create(app_label='sessions', model='credential_fixture')
+        Permission.objects.get_or_create(content_type=content_type, codename='create_puppet')
+        for action in ('access.approve_role', 'access.view_role', 'access.issue_grant',
+                       'sessions.create_puppet', 'preparation.approve_bootstrap'):
+            app_label, code = action.split('.')
+            self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app_label, codename=code))
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            app = self.service.application()
+        actor = self.access.token_context(self.token)
+        revision = app.preparation.publish(actor, project_id=self.project.id, tasks=b'tasks', variables=b'',
+            provenance='fixture', commit='a' * 40)
+        app.preparation.approve(actor, revision.id)
+        manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
+        bundle = app.grants.publish_bundle(actor, project_id=self.project.id, manifest=manifest,
+            prompt=b'private', provenance='fixture')
+        app.grants.approve_bundle(actor, bundle.id)
+        return app.grants.reserve(actor, project_id=self.project.id, bundle_id=bundle.id,
+            target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
+            expires_at=timezone.now() + timedelta(hours=1))
+
+    def grant_assignment(self, reserved):
+        from datetime import timedelta
+        from uuid import uuid4
+        from django.utils import timezone
+        from mop.server.catalog.models import Node, NodeProject
+        from mop.server.sessions.models import Assignment, ExecutionIncarnation
+        node = Node.objects.create(name='provision-node', driver='host', ssh_host='node.invalid',
+            control_origin='https://node.invalid', lan_address='10.0.0.8', bootstrap_address='boot.invalid')
+        NodeProject.objects.create(node=node, project=self.project)
+        assignment = Assignment.objects.create(id=reserved.target_id, project=self.project, node=node,
+            owner=self.user, role=reserved.role, bundle_digest=reserved.digest, grant_id=reserved.id,
+            expires_at=timezone.now() + timedelta(hours=1))
+        incarnation = ExecutionIncarnation.objects.create(id=reserved.incarnation, assignment=assignment,
+            node=node, executor_epoch=uuid4())
+        assignment.current_incarnation = incarnation
+        assignment.save(update_fields=['current_incarnation'])
+        return assignment
+
+    def test_real_assignment_query_allows_rootless_provision_without_token_export(self):
+        from mop.server.access.models import Grant
+        from mop.server.secrets.models import SecretVersion
+        from rest_framework.authtoken.models import Token
+        reserved = self.reserved_grant()
+        self.grant_assignment(reserved)
+        async def body(client, server):
+            result = await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
+                expected_revision=reserved.revision)
+            self.assertEqual(result.revision, reserved.revision + 1)
+            self.assertIsNotNone(result.credential_version_id)
+            self.result = result
+        self.run_socket(body)
+        grant = Grant.objects.get(pk=reserved.id)
+        token = Token.objects.get(user_id=grant.principal.user_id)
+        version = SecretVersion.objects.get(pk=self.result.credential_version_id)
+        self.assertNotIn(token.key, repr(self.result))
+        self.assertNotIn(token.key.encode(), bytes(version.envelope))
+
+    def test_existing_mismatched_assignment_refuses_provision_before_crypto(self):
+        from uuid import uuid4
+        from mop.server.access.models import Grant
+        from rest_framework.authtoken.models import Token
+        reserved = self.reserved_grant()
+        assignment = self.grant_assignment(reserved)
+        assignment.grant_id = uuid4()
+        assignment.save(update_fields=['grant_id'])
+        class NoCrypto:
+            def encrypt(inner, value, context):
+                self.fail('mismatched assignment must be refused before provider work')
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'provisioning binding changed'):
+                await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
+                    expected_revision=reserved.revision)
+        self.run_socket(body, provider=NoCrypto())
+        row = Grant.objects.get(pk=reserved.id)
+        self.assertEqual(row.revision, reserved.revision)
+        self.assertIsNone(row.credential_version_id)
+        self.assertFalse(Token.objects.filter(user_id=row.principal.user_id).exists())
+
+    def test_assignment_rebinding_during_crypto_prevents_retained_commit_and_token(self):
+        from uuid import uuid4
+        from mop.server.access.models import Grant
+        from mop.server.sessions.models import Assignment
+        from mop.server.secrets.models import SecretVersion
+        from mop.server.secrets.crypto import XChaCha20Provider, Keyring
+        from rest_framework.authtoken.models import Token
+        reserved = self.reserved_grant()
+        assignment = self.grant_assignment(reserved)
+        before = SecretVersion.objects.count()
+        real = XChaCha20Provider(Keyring('fixture', {'fixture': b'k' * 32}))
+        class Rebinding:
+            def encrypt(inner, value, context):
+                self.assertFalse(connection.in_atomic_block)
+                envelope = real.encrypt(value, context)
+                Assignment.objects.filter(pk=assignment.id).update(grant_id=uuid4())
+                return envelope
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'provisioning binding changed'):
+                await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
+                    expected_revision=reserved.revision)
+        self.run_socket(body, provider=Rebinding())
+        row = Grant.objects.get(pk=reserved.id)
+        self.assertEqual(row.revision, reserved.revision)
+        self.assertIsNone(row.credential_version_id)
+        self.assertEqual(SecretVersion.objects.count(), before)
+        self.assertFalse(Token.objects.filter(user_id=row.principal.user_id).exists())
+
     def test_rootless_preparation_bytes_and_real_policy_backed_grant_reservation(self):
         from datetime import timedelta
         import uuid
@@ -438,11 +587,12 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             with self.assertRaisesRegex(self.Error, 'grant revision changed'):
                 await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
                     expected_revision=reserved.revision + 1)
-            # Это не production provision acceptance: пока concrete #639 query не
-            # связана, реальный owner обязан отказать, а не принять fake None.
-            with self.assertRaisesRegex(self.Error, 'binding.*not bound'):
-                await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
-                    expected_revision=reserved.revision)
+            # Pre-registration provisioning разрешён owner-контрактом, когда
+            # реальный public Assignment query ещё не находит новый target.
+            provisioned = await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
+                expected_revision=reserved.revision)
+            self.assertEqual(provisioned.revision, reserved.revision + 1)
+            self.assertEqual(provisioned.state, 'reserved')
             row = await server.runtime.database(lambda: BootstrapRevision.objects.values(
                 'content_version_id', 'digest').get(pk=revision.id))
             from mop.server.access.models import Grant
@@ -451,7 +601,8 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             self.assertEqual(proof['intent__policy_approval_id'], approval.id)
             self.assertEqual(proof['intent__policy_version_id'], row['content_version_id'])
             self.assertEqual(proof['intent__policy_digest'], row['digest'])
-            self.assertIsNone(proof['credential_version_id'])
+            self.assertIsNotNone(proof['credential_version_id'])
+            self.assertEqual(proof['credential_version_id'], provisioned.credential_version_id)
         self.run_socket(body)
 
     def test_retained_bundle_read_is_an_actual_access_use_case_not_raw_decrypt(self):
