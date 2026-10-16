@@ -76,8 +76,8 @@ test("a late answer of the former target does not replace the card", async () =>
     .mockImplementationOnce(async () => slow)
     .mockImplementationOnce(async () => cardOk({ ...CARD, name: "pu-mop-2", owner: "alice" }));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ target } = { target: "pu-mop-1" as string | null }) =>
-    usePuppetCard(ADMIN, target), { initialProps: { target: "pu-mop-1" as string | null } });
+  const view = renderHook(({ target }: { target: string | null }) =>
+    usePuppetCard(ADMIN, target), { initialProps: { target: "pu-mop-1" } });
   // цель сменилась до ответа первой: вторая отвечает, первая ещё висит
   await act(async () => { view.rerender({ target: "pu-mop-2" }); });
   await waitFor(() => expect(view.result.current.card?.name).toBe("pu-mop-2"));
@@ -92,7 +92,7 @@ test("logout while pending: the late answer does not resurrect the card", async 
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = vi.fn(async () => slow);
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ session } = { session: ADMIN }) =>
+  const view = renderHook(({ session }: { session: Session }) =>
     usePuppetCard(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
   await act(async () => { view.rerender({ session: GUEST_SESS }); });
   expect(view.result.current.card).toBeNull();
@@ -107,7 +107,7 @@ test("logout while pending: the late answer does not resurrect the card", async 
 test("role degradation clears the shown card in the same render", async () => {
   const fetchMock = vi.fn(async () => cardOk());
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ session } = { session: ADMIN }) =>
+  const view = renderHook(({ session }: { session: Session }) =>
     usePuppetCard(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
   await waitFor(() => expect(view.result.current.card).toEqual(CARD));
   await act(async () => { view.rerender({ session: GUEST_SESS }); });

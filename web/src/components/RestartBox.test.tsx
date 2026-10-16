@@ -30,7 +30,7 @@ const opJson = (status: string) =>
   ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "restart",
      target: "pu-mop-1", status }) }) as Response;
 const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
-  vi.fn(async (url: string | URL, init?: { method?: string }) =>
+  vi.fn(async (_url: string | URL, init?: { method?: string }) =>
     (init?.method ?? "GET") === "POST" ? post() : get());
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });

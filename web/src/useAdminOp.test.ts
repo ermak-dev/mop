@@ -28,7 +28,7 @@ const pause = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
 /** POST -- первый вызов, GET результата -- остальные. */
 const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
-  vi.fn(async (url: string | URL, init?: { method?: string }) =>
+  vi.fn(async (_url: string | URL, init?: { method?: string }) =>
     (init?.method ?? "GET") === "POST" ? post() : get());
 
 afterEach(() => { vi.unstubAllGlobals(); operations.resetForTest(); });
@@ -96,8 +96,8 @@ test("a late 202 of a former target does not start its poll", async () => {
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ target } = { target: "pu-mop-1" as string | null }) =>
-    useAdminOp(ADMIN, target), { initialProps: { target: "pu-mop-1" as string | null } });
+  const view = renderHook(({ target }: { target: string | null }) =>
+    useAdminOp(ADMIN, target), { initialProps: { target: "pu-mop-1" } });
   await act(async () => { view.result.current.submit(); });
   await act(async () => { view.rerender({ target: "pu-mop-2" }); });
   await act(async () => { release?.(ok202("op-old")); });
@@ -112,7 +112,7 @@ test("role loss clears the operation; a late 202 does not resurrect it", async (
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ session } = { session: ADMIN }) =>
+  const view = renderHook(({ session }: { session: Session }) =>
     useAdminOp(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
   await act(async () => { view.result.current.submit(); });
   await act(async () => { view.rerender({ session: GUEST_SESS }); });
@@ -137,7 +137,7 @@ test("unknown from the server is terminal and kept as unknown", async () => {
 test("a purged result (not found) reads as unknown", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
     () => Promise.resolve({ ok: true, status: 200,
-      json: async () => ({ status: "not found" }) }) as Response);
+      json: async () => ({ status: "not found" }) } as Response));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
   await act(async () => { await view.result.current.submit(); });
@@ -181,7 +181,7 @@ test("a lost POST answer is unknown, and nothing retries it", async () => {
 
 test("a 202 without an id is a lost answer too", async () => {
   const fetchMock = postGet(() => Promise.resolve({ ok: true, status: 202,
-    json: async () => ({}) }) as Response, () => Promise.resolve(opJson("running")));
+    json: async () => ({}) } as Response), () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
   await act(async () => { await view.result.current.submit(); });
@@ -191,7 +191,7 @@ test("a 202 without an id is a lost answer too", async () => {
 
 test("a POST refusal names the phrase and a manual retry posts again", async () => {
   const fetchMock = postGet(() => Promise.resolve({ ok: false, status: 409,
-    json: async () => ({ error: "another operation is queued for this target" }) }) as Response,
+    json: async () => ({ error: "another operation is queued for this target" }) } as Response),
     () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
@@ -206,7 +206,7 @@ test("a POST refusal names the phrase and a manual retry posts again", async () 
 
 test("an unregistered operation (404) reads as refused with the phrase", async () => {
   const fetchMock = postGet(() => Promise.resolve({ ok: false, status: 404,
-    json: async () => ({ error: "unsupported operation" }) }) as Response,
+    json: async () => ({ error: "unsupported operation" }) } as Response),
     () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
