@@ -218,10 +218,11 @@ Actor nor the shared DRF Token. Enrollment, OS peer identity, assignment/lease
 ownership and physical quiescence are explicitly named domain facts verified by
 the same pipeline — not a second RBAC, GodManager or permission map.
 
-This is the target contract. At the frozen slice the implemented code still
-uses stock `auth.User` plus a mandatory `Principal` (human/service/grant) and a
-Grant-linked restricted service User; see AUTH.md. Those paths are replaced,
-not extended, by #683–#689.
+This is the target contract. Since #683 the implemented identity is the single
+`actor.Actor` (`AUTH_USER_MODEL`, a standard `AbstractUser` subclass whose
+`kind` column only classifies); the remaining `Principal` table is deprecated
+metadata awaiting its #684 retarget, and the Grant-linked service-user paths
+are reworked by #684–#689; see AUTH.md.
 
 Use standard Django User mechanics through Actor: password hashers and
 database-backed sessions, `is_staff` grants Admin login eligibility only,

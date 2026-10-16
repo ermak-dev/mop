@@ -33,11 +33,16 @@ SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset(('secrets.deliver_secret',))
 ACTIONS = ACTIONS | SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work', 'read_history', 'view_usage'))
 
-# Логический CONTROL namespace sessions отличается от Django app label execution.
+# Логический CONTROL namespace auth (человеческое имя User/Group) и sessions
+# отличаются от Django app label actor и execution: action регистрируется под
+# логическим именем, строки permission живут под app label владельца модели.
 def permission_names(action):
     from ..catalog.permissions import ACTION_PERMISSIONS
     if action.startswith('sessions.'):
         return ('execution.' + action.split('.', 1)[1],)
+    if action.startswith('auth.'):
+        verb, model = action.split('.', 1)[1].split('_', 1)
+        return ('actor.' + verb + '_actor',) if model == 'user' else ('auth.' + verb + '_' + model,)
     return ACTION_PERMISSIONS.get(action, (action,))
 
 

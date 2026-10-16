@@ -59,6 +59,9 @@ class OperationBackedAdmin(TransactionTestCase):
             app, code = name.split('.')
             if app == 'controller':
                 permission = Permission.objects.get_by_natural_key(code, app, 'domainpermission')
+            elif app == 'auth':  # logical namespace; rows live under actor label
+                code = code.replace('_user', '_actor', 1)
+                permission = Permission.objects.get(content_type__app_label='actor', codename=code)
             else:
                 permission = Permission.objects.get(content_type__app_label=app, codename=code)
             self.user.user_permissions.add(permission)
@@ -465,12 +468,12 @@ class OperationBackedAdmin(TransactionTestCase):
         node = self.node()
         access.enroll_service('machine', node.pk, project_ids=(), permissions=('catalog.observe_node',))
         target = get_user_model().objects.get(username='machine')
-        url = f'/admin/auth/user/{target.pk}/change/'
+        url = f'/admin/actor/actor/{target.pk}/change/'
         response = self.post(url, {'username': 'machine', 'is_staff': 'on', 'is_superuser': 'on', '_save': 'Save'})
         self.assertIn(response.status_code, (302, 403, 404))
         target.refresh_from_db()
         self.assertFalse(target.is_staff or target.is_superuser or target.has_usable_password())
-        self.assertEqual(self.post(f'/admin/auth/user/{target.pk}/password/',
+        self.assertEqual(self.post(f'/admin/actor/actor/{target.pk}/password/',
             {'password1': 'new-test-password', 'password2': 'new-test-password'}).status_code, 403)
 
     def test_retired_project_and_node_do_not_rescope_admin_queries(self):

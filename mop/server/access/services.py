@@ -379,6 +379,9 @@ def enroll_service(username, node_id, *, project_ids, permissions):
         if get_user_model().objects.filter(username=username).exists():
             raise ValueError('service username already exists')
         user = get_user_model().objects.create_user(username, password=None, is_staff=False, is_superuser=False)
+        # Классификация живёт на самом Actor; Principal до #684 — deprecated metadata.
+        user.kind = 'service'
+        user.save(update_fields=['kind'])
         principal = m.Principal.objects.create(user=user, kind='service', bound_node_id=node_id)
         for action in permissions:
             app, code = action.split('.')

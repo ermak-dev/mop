@@ -18,6 +18,7 @@ INSTALLED_APPS = [
     'mop.server.controller.adminapps.ControllerAdminConfig',
     'rest_framework', 'rest_framework.authtoken', 'channels',
     'mop.server.controller.apps.ControllerConfig',
+    'mop.server.actor',
     'mop.server.catalog',
     'mop.server.access',
     'mop.server.secrets',
@@ -27,6 +28,9 @@ INSTALLED_APPS = [
     'mop.server.builds.apps.BuildsConfig',
     'mop.server.gateway',
 ]
+# Один субъект #683: единый Actor вместо stock auth.User; все identity FK —
+# swappable ссылки на него, второй user-модели нет.
+AUTH_USER_MODEL = 'actor.Actor'
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',

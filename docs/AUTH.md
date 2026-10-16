@@ -39,14 +39,17 @@ singleton `current_actor` and never a transferable capability; every consumer
 reauthorizes before execution/retry/delivery and after a wait.
 
 This is the target contract of #624, not a claim that the frozen slice
-implements it. The current slice (50d1822d) implements stock `auth.User` with a
-mandatory `Principal` (human/service/grant), a Grant-linked restricted service
-User and a separate grant-kind resolver; those paragraphs below describe that
-current state and are replaced — not extended — by #683 (Actor/schema),
-#684 (credentials/context), #685 (RBAC/scope/LDAP), #686 (agent profile),
-#687 (service enrollment), #688 (delegation) and #689 (consumer cutover and
-parity). The proven scope/fencing/after-wait/crypto guarantees in those
-paragraphs carry over by invariant, not by table shape.
+implements it. The current slice implements the Actor identity (#683):
+`mop.server.actor.Actor` (a standard `AbstractUser` subclass) is the
+`AUTH_USER_MODEL`, `kind` is a plain discriminator column with no permission
+semantics, and every identity FK is a swappable reference to the one model.
+The remaining Principal table is deprecated metadata whose retarget belongs
+to #684; it is not a second identity. The paragraphs below describe the
+credential/scope mechanics that #684 (credentials/context), #685
+(RBAC/scope/LDAP), #686 (agent profile), #687 (service enrollment), #688
+(delegation) and #689 (consumer cutover and parity) rework on top of that
+single identity. The proven scope/fencing/after-wait/crypto guarantees in
+those paragraphs carry over by invariant, not by table shape.
 
 ### Current slice composition (#633/#635)
 
@@ -137,6 +140,10 @@ can admit them.
 
 The logical `sessions.*` CONTROL namespace maps to Django `execution.*` permissions
 through `access.permissions.permission_names`; it is not the built-in Django sessions app.
+Since #683 the same holds for `auth.*`: the logical `auth.<verb>_user` action maps
+to the `actor.<verb>_actor` permission rows, because the single Actor model
+carries its app label `actor`, while the CONTROL vocabulary keeps the human
+name `auth.*` for User/Group administration.
 Inventing a `sessions.create_puppet` Permission row cannot authorize the action.
 Django identifies an effective permission by `app_label.codename`, while rows are
 unique by ContentType and codename. Multiple registered models can therefore
