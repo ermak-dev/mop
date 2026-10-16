@@ -57,6 +57,25 @@ class Schema(unittest.TestCase):
         with patch('mop.server.secrets.checks.connections', {'default': fake}):
             self.assertEqual([e.id for e in secret_guarantees(databases=['default'])], ['secrets.E001'])
 
+    # HYPOTHESIS: параллельные leaves конфликтуют, offline schema теряет Builds/Gateway.
+    # SOLUTION: явные merge migrations, единый namespace receipt и полная регистрация apps.
+    # RESULT: сначала два red: конфликт leaves и потеря двух apps; после сборки оба green.
+    # STATUS: FIXED — see #623.
+    # Никаких ослаблений constraints или исключений models ради зелёной сборки.
+    def test_offline_schema_registers_every_production_domain(self):
+        schema = ast.parse((ROOT / 'mop/server/controller/schema.py').read_bytes())
+        production = ast.parse((ROOT / 'mop/server/controller/settings.py').read_bytes())
+        call = next(node for node in ast.walk(schema) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute) and node.func.attr == 'configure')
+        offline = ast.literal_eval(next(item.value for item in call.keywords if item.arg == 'INSTALLED_APPS'))
+        registered = ast.literal_eval(next(node.value for node in production.body
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'INSTALLED_APPS'
+                                                   for target in node.targets)))
+        def domains(names):
+            return {name.split('.apps.')[0] for name in names
+                    if name.startswith('mop.server.') and '.adminapps.' not in name}
+        self.assertEqual(domains(offline), domains(registered))
+
     def test_normal_migrations_match_models(self):
         if importlib.util.find_spec('django') is None:
             hermetic.skip('secret schema', 'declared server extra is required')

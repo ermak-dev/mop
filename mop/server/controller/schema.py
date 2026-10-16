@@ -5,7 +5,7 @@ import io
 def migrations(*, apps=(), write=False):
     if write and not apps:
         raise ValueError('migration generation requires explicit app names')
-    if any(app not in ('controller', 'catalog', 'secrets', 'access', 'preparation', 'operations', 'execution') for app in apps):
+    if any(app not in ('controller', 'catalog', 'secrets', 'access', 'preparation', 'operations', 'execution', 'builds', 'gateway') for app in apps):
         raise ValueError('unknown controller schema app')
     from django.conf import settings
     from django.core.management import call_command
@@ -14,7 +14,8 @@ def migrations(*, apps=(), write=False):
         INSTALLED_APPS=['django.contrib.auth', 'django.contrib.contenttypes',
             'django.contrib.sessions', 'rest_framework.authtoken',
             'mop.server.controller', 'mop.server.catalog', 'mop.server.secrets', 'mop.server.access',
-            'mop.server.preparation', 'mop.server.operations', 'mop.server.sessions.apps.ExecutionConfig'],
+            'mop.server.preparation', 'mop.server.operations', 'mop.server.sessions.apps.ExecutionConfig',
+            'mop.server.builds.apps.BuildsConfig', 'mop.server.gateway'],
         DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
         DEFAULT_AUTO_FIELD='django.db.models.BigAutoField')
     django.setup()

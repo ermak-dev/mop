@@ -43,7 +43,7 @@ def main(argv):
     parser.add_argument('--hostname', action='append', default=[])
     parser.add_argument('--tls-cert')
     parser.add_argument('--tls-key')
-    parser.add_argument('--app', action='append', default=[], choices=('controller', 'catalog', 'secrets', 'access', 'preparation', 'operations'))
+    parser.add_argument('--app', action='append', default=[], choices=('controller', 'catalog', 'secrets', 'access', 'preparation', 'operations', 'execution', 'builds', 'gateway'))
     parser.add_argument('--write', action='store_true')
     args = parser.parse_args(argv)
     if args.action == 'schema':

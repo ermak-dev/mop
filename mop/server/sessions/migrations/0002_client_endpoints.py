@@ -24,11 +24,8 @@ def options(name, *constraints, permissions=None):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('execution', '0001_initial')]
+    dependencies = [('execution', '0002_receipt_constraint_namespace')]
     operations = [
-        migrations.RemoveConstraint(model_name='resultreceipt', name='receipt_known_outcome'),
-        migrations.AddConstraint(model_name='resultreceipt', constraint=models.CheckConstraint(
-            condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='execution_receipt_known_outcome')),
         migrations.CreateModel(name='ClientSession', fields=identity()+[
             ('owner', fk(settings.AUTH_USER_MODEL)), ('client', fk('catalog.clientregistration')),
             ('external_session_id', models.CharField(max_length=256)), ('display_name', models.CharField(max_length=128)),

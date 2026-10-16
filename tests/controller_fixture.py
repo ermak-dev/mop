@@ -105,12 +105,12 @@ controller:pg17:
             result, _, commands = self.invoke(root, arguments=['--postgres', '16',
                 '--check', 'credential_service', '--cross-uid'])
             self.assertEqual(result, 0)
-            worker = next(command for command in commands if 'bash' in command)
+            worker = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
             self.assertIn('prepare-declared-fixture', worker[-1])
             self.assertIn('exec bash -c "$TESTS"', worker[-1])
             self.assertNotIn('exec su ci', worker[-1])
             _, _, commands = self.invoke(root)
-            worker = next(command for command in commands if 'bash' in command)
+            worker = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
             self.assertIn('exec su ci', worker[-1])
 
     def test_cross_uid_cannot_run_arbitrary_suite_as_root(self):
@@ -132,7 +132,7 @@ controller:pg17:
         with tempfile.TemporaryDirectory() as directory:
             result, _, commands = self.invoke(self.source(directory), check='controller_runtime')
         self.assertEqual(result, 0)
-        runner = next(command for command in commands if 'bash' in command)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
         self.assertIn('TESTS=python3 tests/controller_runtime.py', runner)
 
     def test_drop_diagnostic_reads_only_owned_database_and_known_pid_metadata(self):
