@@ -6,10 +6,56 @@ This section concerns the isolated Django controller, not the deployed file-back
 pool described below. It has no old-user/hash/cookie import or fallback. The issue
 branch is not a rollout or an accepted epic integration. API.md remains normative.
 
+### Target: one Actor identity (#624; implemented by #683–#689)
+
+The controller's single identity model is one Actor configured as
+`AUTH_USER_MODEL`, a standard Django `AbstractUser` subclass. Humans, agents and
+technical services are kinds of that one Actor: `kind` is a minimal discriminator
+that classifies the subject and never grants a permission, scope or staff/
+superuser status. Operational rights for every kind come only from standard
+Django Group/Permission (including direct `user_permissions`) checked by one
+application authorizer together with server-resolved scope and explicitly named
+domain facts — ownership/assignment, technical node enrollment, OS peer identity
+and physical quiescence are distinct facts verified by the same pipeline, not a
+second RBAC, capability dictionary or GodManager. Actor uses the standard user
+manager, `createsuperuser` and Django's `UserAdmin`; there is no alternative
+User, ProfileID or administrative auth framework. All identity references
+(actor/owner/initiator/executor/delegator/issuer/subject) are foreign keys to
+the same model. An agent or service Actor is stable across runtime incarnations:
+a restart is an execution record, not a new subject. AgentProfile and immutable
+AgentDefinitionVersion hold program and runtime technical constraints (spawn,
+secrets) linked to an Actor — they are domain data, not a second permission
+catalog. Delegation is a narrowing relation between existing issuer and subject
+Actors with lifecycle/expiry/revision/revoke; issuing or revoking it creates or
+deletes no Actor and no token, and revocation preserves the subject Actor and
+its shared DRF Token. LDAP users map to shared Django Groups; source-owned
+revocation removes only that source's managed membership/Group rows and never
+performs a destructive `user_permissions.set` over manual or other-source grants.
+
+ActorContext is constructed only at the trusted boundary from the verified
+credential: Actor ID, a reference to the current credential/generation and the
+minimal action context. It is never taken from JSON, never stored as a global
+singleton `current_actor` and never a transferable capability; every consumer
+reauthorizes before execution/retry/delivery and after a wait.
+
+This is the target contract of #624, not a claim that the frozen slice
+implements it. The current slice (50d1822d) implements stock `auth.User` with a
+mandatory `Principal` (human/service/grant), a Grant-linked restricted service
+User and a separate grant-kind resolver; those paragraphs below describe that
+current state and are replaced — not extended — by #683 (Actor/schema),
+#684 (credentials/context), #685 (RBAC/scope/LDAP), #686 (agent profile),
+#687 (service enrollment), #688 (delegation) and #689 (consumer cutover and
+parity). The proven scope/fencing/after-wait/crypto guarantees in those
+paragraphs carry over by invariant, not by table shape.
+
+### Current slice composition (#633/#635)
+
 `mop/server/access` composes standard Django User, Group, Permission and database
 sessions with Principal, LoginIdentity/IdentitySource, source-owned project and
 all-project memberships, and ClientOwnership pointing at Catalog's client. There
-is no second Project, custom User, custom bearer table or object-permission backend.
+is no second Project, custom bearer table or object-permission backend. This is
+the implemented state the Actor tasks replace; it is kept as evidence of the
+guarantees that must survive the rework.
 
 The HTTP composition root binds these routes:
 
@@ -38,7 +84,10 @@ it is not AEAD/hashed token storage. Token/session records and their private bin
 references require protected DB/backup access and are not registered in Admin.
 CredentialBinding stores a token HMAC generation check or a reference to the actual
 Django Session, never an additional plaintext token store. ActorContext contains
-only immutable IDs/kind/owner/node/grant references, never token/session keys or ORM grant objects.
+only immutable ID, kind, owner/node/delegation references, never token/session
+keys or ORM grant objects. #684 keeps only the proven metadata of CredentialBinding
+that standard Django credentials do not already provide, and removes Principal as
+an alternative identity without losing the HMAC/generation/identity-change fences.
 
 `token_context`, `session_context`, `current_actor` and `Access.authorize` reload
 current User, identity source/subject fingerprint, credential generation, session
@@ -56,7 +105,11 @@ maintenance hook used by initial administrator creation; it never resets a passw
 with unusable password, no staff/superuser flags and only the finite machine-work,
 observation, application-receipt and addressed project-secret permission allowlist.
 Its caller must enforce maintenance identity and deliver the returned token through
-authorized enrollment, not a log. Enrollment alone supplies no readiness, grant
+authorized enrollment, not a log. Under the target contract (#687) enrollment binds
+a service Actor through minimal profiles/relations checked as explicit technical
+preconditions by the same authorizer; the allowlist becomes ordinary Django
+permissions, and node binding is a use-case fact, not a kind route.
+Enrollment alone supplies no readiness, grant
 activation, transport retirement or installation-secret authority; addressed secret
 issuance independently validates the current execution and approved role proofs.
 
@@ -65,7 +118,10 @@ ordinary Django action permission, actual Catalog FK scope, client ownership and
 principal-kind fences. `is_staff` only permits Admin login. A human superuser has
 explicit global scope, not a service/grant/ownership bypass. Service users cannot
 be elevated by editing User flags. Grant-kind principals fail closed until #635
-binds its resolver. Catalog's immutable `permissions.ACTION_PERMISSIONS` is the
+binds its resolver. Under the target contract both fences disappear into the one
+authorizer: kind stops routing authorization, and delegation is a narrowing
+context on existing Actors rather than a third principal branch. Catalog's
+immutable `permissions.ACTION_PERMISSIONS` is the
 canonical conjunction of ordinary model and domain permissions; Access consumes
 that map rather than treating its entries as alternatives. `set_project_limit`
 is a separate action. Catalog's extra permissions are declared on Project, Node,
@@ -73,8 +129,11 @@ InstallationConfiguration and ProjectPolicySnapshot; `record_settings_applicatio
 belongs only to InstallationConfiguration, including node-setting receipts.
 Standard `view_project`/`view_node` are not declared twice. The fresh-install
 catalog migration graph has one permissions leaf, `0002_action_permissions`.
-Access's role/grant actions live on Principal. Later owning apps register their
-CONTROL actions before the evaluator can admit them.
+Access's role/grant actions live on Principal in the current slice; #685 fixes one
+permission-codename dictionary with a named registration owner per action and
+removes the sessions→execution alias and capability matrices of operational
+rights. Later owning apps register their CONTROL actions before the evaluator
+can admit them.
 
 The logical `sessions.*` CONTROL namespace maps to Django `execution.*` permissions
 through `access.permissions.permission_names`; it is not the built-in Django sessions app.
@@ -86,7 +145,15 @@ their intended registered ContentType by natural key. Removing one row does not
 prove revocation while another direct or group grant still supplies that action;
 source-owned directory revocation removes only that source's grants.
 
-### Transaction-local delegated authority (#635 / #639)
+### Transaction-local delegated authority (#635 / #639; target rework #688)
+
+This subsection describes the implemented delegation path of the current slice.
+Under the target contract (#688) the same invariants — live credential checks,
+active ancestry, pinned approvals, immutable sealed bundles, narrowing-only
+child grants, after-wait revalidation and SQL-only transaction-local resolvers —
+bind existing issuer and subject Actors instead of a Grant-linked service User
+and Principal; no User, token or per-grant identity is created, and revocation
+deletes neither the Actor nor its shared token.
 
 `Grants.local_authority()` exposes the standard delegated resolver methods
 `token_context`, `resolve_actor` and `authorize` without decrypting a prompt or
@@ -131,9 +198,13 @@ credential after the actual creator logged out or was revoked.
 The authoritative Router respects an existing LoginIdentity before source order.
 Otherwise the first knowing source decides, including wrong password, ambiguous
 login, absent groups and outage; no backend fall-through adopts another identity.
-LDAP users retain unusable local passwords. Direct/nested AD groups map to ordinary
-Django permissions and explicit project/all-project rows. Refresh removes only the
-source-owned scope and managed Group; unrelated local grants remain. LDAP I/O is
+LDAP users retain unusable local passwords. Direct/nested AD groups map to
+ordinary Django permissions and explicit project/all-project rows — under the
+target contract (#685) they map to shared Django Groups, never a per-user Group
+container, and there is no second permission catalog. Refresh removes only the
+source-owned scope and managed Group; unrelated local grants remain, and
+source-owned revocation never performs a destructive `user_permissions.set` that
+would erase manual or other-source rights. LDAP I/O is
 outside SQL, followed by source-revision and complete configuration CAS. Expired
 validation or a changed configuration fails closed until authoritative refresh.
 The configured immutable subject is `entryUUID` (default) or AD `objectGUID`, not

@@ -61,10 +61,11 @@ bypasses membership, incarnation, ownership, grant or safety checks.
   anonymous overview is a separately defined public projection, not this scope.
 * **Act(project)**: authenticated human authorized for that project, with fresh
   target, clone and ownership checks. Human admin is not a role puppet.
-* **Grant(capability)**: authenticated delegated principal, resolved against its
-  current grant, human owner, project, job, incarnation and pinned role digest.
-  Only the allowed operation is delegated; authority fields supplied by the
-  principal do not override the resolver.
+* **Grant(capability)**: an authenticated agent Actor acting under a live
+  delegation, resolved against its current delegation, human owner, project,
+  job, incarnation and pinned role digest. Only the allowed operation is
+  delegated; authority fields supplied by the caller do not override the
+  resolver, and the delegation narrows — never widens — the Actor's rights.
 * **Admin**: currently authorized human installation administrator. A puppet
   called `master` or `builder` does not qualify. Node-wide facts and cross-project
   effects need this authority.
@@ -249,7 +250,7 @@ function from the replacement.
 | MCP `send`, `mop send`; agent `send` | `messages.create`, `deliveries.retrieve`, scoped receipt subscription | Human Act(project) can claim the lease under existing safety rules; Grant(send) sends a plain message without taking lease/git identity. Preserve priority, delivery refusal, message id, bounded wait and idle-notification options. Reports to a master use a discovered live address, not its display name. Local UDS delivery remains local, not a server endpoint accepting arbitrary socket paths. |
 | MCP `dispatch`, agent dispatch transaction | `dispatches.create`, dispatch receipt | Grant(dispatch), same project and target `receives_dispatch`; explicit target or safe free/no-lease autopick. Atomically gate clone/lease, install the human owner's git identity and deliver. `spawn` does not define dispatch targets. A role's send must not become dispatch by changing a flag in the message body. |
 | `mop landing show/take/give [--force]` | `projects.landing.retrieve/take/release` | Act(project) or explicitly delegated capability; atomic holder checks, current resolved human owner, distinct force authority. Preserve the feature even where the project's workflow does not use a token. |
-| `mop profile`; role catalogue and grant resolution/revoke | `identity.retrieve`, `roles.list/retrieve`, `grants.retrieve/revoke` | Own authorized profile/catalogue; only approved human authority creates/revokes grants. Do not reveal credentials. Revocation names the exact principal/incarnation, never a reusable puppet name; body may keep running but new effects fail closed. |
+| `mop profile`; role catalogue and grant resolution/revoke | `identity.retrieve`, `roles.list/retrieve`, `grants.retrieve/revoke` | Own authorized profile/catalogue; only approved human authority creates/revokes delegations. Do not reveal credentials. Revocation names the exact Actor/delegation/incarnation, never a reusable puppet name, and deletes neither the Actor nor its shared token; body may keep running but new effects fail closed. |
 | Role bootstrap, `identity`, `resolve`, `bootstrap_result`, `startup` | Internal authenticated registration/bootstrap/identity operations; `puppets.bootstrap-result` for authorized observation | Assigned node and exact live binding; human owner supplies git identity, not the role request. Return pinned role/bundle identity and approved policy provenance. Grant child creation inherits the parent's approved snapshot and cannot escalate `spawn`, project, owner or secrets. |
 | `mop <role> [origin]`, `mop master` | Local role launcher calling `puppets.create`, readiness and terminal attach | Authorized human launch; always create a new role body, wait for matching ready binding, then attach. Do not choose an existing puppet merely by role name. Failure after creation names the existing body for recovery instead of creating another. |
 | `mop attach <name>` | Local terminal client over the canonical private attach interface (or explicitly approved SSH transport) | Explicit target access and trusted terminal authority; creates no body. Detach/disconnect does not stop the job. A legacy SSH helper is not a reason to expose node shell argv over DRF. |

@@ -6,8 +6,9 @@ Django or these endpoints. The implementation starts with #632. Existing subsyst
 documents describe the deployed version unless explicitly marked otherwise.
 
 The new controller is a modular Django monolith. Django ORM owns persistent mop
-state, PostgreSQL is the production database, Django Auth owns human authentication,
-DRF serves commands and queries, and Channels/ASGI serves realtime. NATS is an
+state, PostgreSQL is the production database, Django Auth owns the single Actor
+identity and authentication for humans, agents and services, DRF serves commands
+and queries, and Channels/ASGI serves realtime. NATS is an
 internal realtime transport, not an alternative management API or durable queue.
 
 See [STORAGE](STORAGE.md) for the reader/writer and deletion inventory,
@@ -87,7 +88,7 @@ private tables.
 | Module | Owns | Public use cases/queries | May depend on |
 |---|---|---|---|
 | Catalog | Project, Node, settings, image desired/observed metadata, client binding | configure project/node, resolve scope, list configured targets | Common values/policies |
-| Access | Principal, membership, RoleBundle, Grant, creation intent; Django Auth adapters | authorize action, resolve actor, approve bundle, issue/revoke grant | Catalog; secret references through secrets public interface |
+| Access | one Actor identity wiring (`AUTH_USER_MODEL`), membership, RoleBundle/agent definition versions, Delegation, creation intent; Django Auth adapters | authorize action, resolve actor, approve bundle/definition, issue/revoke delegation | Catalog; secret references through secrets public interface |
 | Secrets | encrypted SecretVersion, CredentialRotation, delivery receipts | stage/activate/revoke rotation, authorize addressed delivery, read metadata | Catalog; trusted actor value and an injected access decision, not access ORM imports |
 | Preparation | bootstrap revision/approval/result, build input snapshot | pin/approve preparation, inspect build inputs and receipts | Catalog, Access, Secrets |
 | Operations | Operation, Step, claim, resource coordination, audit and outbox | admit command, claim step, record result, reconcile, query status | Catalog, Access, Secrets, Preparation; narrow external ports |
@@ -156,7 +157,8 @@ physical effects, their recovery, or Operations publication.
 SQL queries over catalogue-owned models, not permission checks or public HTTP
 endpoints. Access/SessionGate and the current-catalog composition root must use
 those queries instead of backedge imports or treating any retained FK as active.
-In particular a SERVICE principal bound to a retired/missing node must be denied
+In particular a service Actor whose enrollment binds it to a retired/missing
+node must be denied
 at authentication/authorization, after waits and before addressed telemetry,
 bootstrap, secret delivery or session stages. Retiring a node is not proof that
 its old credential/process disappeared. This Access integration remains a
@@ -174,7 +176,9 @@ protect a concurrent update.
 |---|---|---|---|---|
 | Project identity derives from origin via `driver.project_of` | Catalog policy | configure project | unique identity + expected revision | collision, renamed origin, forged project FK |
 | RoleBundle bytes/digest are immutable | RoleBundle policy | approve/pin bundle | create unique digest/revision; immutable after approval | changed bytes, partial role triple, concurrent approval |
-| Grant cannot amplify owner permissions or approved spawn policy | Access delegation policy and Grant lifecycle | issue/delegate/revoke grant | current owner rights, bundle/incarnation, parent chain and CAS checked together | revoked ancestor/owner, changed target, stale incarnation, disallowed spawn |
+| Actor identity/auth: one `AUTH_USER_MODEL` Actor, kind classifies without granting, swappable FKs to the same model, PK survives incarnation change | Access identity policy (#683) | Actor migration/creation in the first fresh-install migration of its app | first-migration dependency ordering + swappable-user checks | duplicate User/Principal identity, kind-derived rights, PK churn on restart |
+| AgentDefinitionVersion bytes/digest are immutable; program/runtime constraints are technical preconditions, not permissions | Access agent-profile policy (#686) | publish/approve definition version | create unique digest/revision; immutable after approval | changed bytes, partial approval, capability-dictionary rebirth |
+| Delegation narrows only: issuer and subject are existing Actors, child never wider than parent, revoke preserves Actor and shared token | Access delegation policy (#688) | issue/delegate/revoke delegation | current issuer rights, bundle/incarnation, parent chain and CAS checked together | revoked ancestor/issuer, changed target, stale incarnation, disallowed spawn, widened child |
 | Human ownership protects a clean freshly dispatched clone and unfinished work | Assignment policy | dispatch/reassign/release | assignment revision + fresh clone observation + target incarnation | concurrent dispatch, dirty/unknown clone, force audit |
 | One executor owns a resource while an effect might still be running | ExecutionClaim policy | claim/renew/reconcile step | ordered resource rows + claim generation + CAS | timeout with late effect, duplicate/expired claim |
 | Operation transitions and request identity do not diverge | Operations lifecycle | admit/record/reconcile | request uniqueness + aggregate CAS + result/audit/outbox | duplicate key, conflicting payload, lost COMMIT reply |
@@ -190,10 +194,39 @@ a particular live PTY. Expiry of one never grants another.
 
 ## Authentication, scope and revocation
 
-Use standard Django User, Group, Permission, password hashers and database-backed
-sessions. Principal/membership/grant are related domain records, not subclasses
-of User. `is_staff` grants Admin login eligibility only. `is_superuser` is explicit
-global access, but still cannot bypass target identity, fencing or effect safety.
+### Unified Actor identity (target, #624; implemented by #683–#689)
+
+The single identity model is one Actor configured as `AUTH_USER_MODEL`, a
+standard Django `AbstractUser` subclass. Humans, agents and technical services
+are kinds of that one Actor, not separate User/Principal branches. Operational
+rights for every kind come only from standard Django Group/Permission
+(including direct `user_permissions`) through one application authorizer;
+a `kind` discriminator classifies the subject and never grants a permission,
+global scope or staff/superuser status. All identity references — actor, owner,
+initiator, executor, delegator/issuer, subject — are foreign keys to this one
+model with distinct technical roles in each action, never a second user table
+or per-subject profile identity. Actor uses the standard user manager,
+`createsuperuser` and Django's `UserAdmin`; there is no custom administrative
+auth framework and no alternative User/ProfileID. An agent Actor is stable
+across runtime incarnations: a restart or a new incarnation is an execution
+record, not a new subject. AgentProfile/AgentDefinitionVersion and the current
+RootProfile-style data are additional domain records linked to an Actor, not
+other identities. Delegation (#688) is a narrowing relation between existing
+issuer and subject Actors with lifecycle/expiry/revision/revoke; it never
+creates a User or token per delegation, and revoking it deletes neither the
+Actor nor the shared DRF Token. Enrollment, OS peer identity, assignment/lease
+ownership and physical quiescence are explicitly named domain facts verified by
+the same pipeline — not a second RBAC, GodManager or permission map.
+
+This is the target contract. At the frozen slice the implemented code still
+uses stock `auth.User` plus a mandatory `Principal` (human/service/grant) and a
+Grant-linked restricted service User; see AUTH.md. Those paths are replaced,
+not extended, by #683–#689.
+
+Use standard Django User mechanics through Actor: password hashers and
+database-backed sessions, `is_staff` grants Admin login eligibility only,
+`is_superuser` is explicit global access but still cannot bypass target
+identity, fencing or effect safety.
 
 Authorization is current action permission plus server-resolved project
 membership plus operation-specific ownership/delegation constraints. An explicit
@@ -221,9 +254,9 @@ or AEAD token storage. Restrict database/backup access and never expose token ro
 in Admin/audit/general APIs. Changing that representation requires a separately
 reviewed authentication decision, not an undocumented custom token framework.
 Rotation deletes/replaces the token atomically; one rotation invalidates all
-clients using it. Separate service users isolate machines/devices where required;
+clients using it. Separate service Actors isolate machines/devices where required;
 they are non-staff/non-superuser with unusable passwords and minimal permissions.
-A service principal cannot select a human owner in JSON.
+A service Actor cannot select a human owner in JSON.
 
 First-client credential issuance is `POST /api/v1/auth/token`: authenticate the
 username/password using the authoritative Django backend over HTTPS, rate-limit
@@ -248,10 +281,11 @@ that denial. Direct/nested AD group mapping, all-project scope and LDAP-owned
 membership revocation have explicit checks; a backend cannot overwrite local
 identity or store LDAP passwords.
 
-ActorContext contains credential-bound actor/principal kind, human owner where
-applicable, scope and grant identity. It is constructed at a trusted boundary,
-not from the payload or a module-global current user. It is a reference for live
-authorization, not a permanent capability snapshot.
+ActorContext contains the credential-bound Actor, its classification, human
+owner where applicable, scope and delegation identity. It is constructed at a
+trusted boundary, not from the payload or a module-global current user. It is
+a reference for live authorization, not a permanent capability snapshot, and it
+never carries token/session keys.
 
 | Change | New requests, pending/retry steps and secret issuance | Existing WS/terminal/delivery | Already running process |
 |---|---|---|---|
@@ -259,7 +293,7 @@ authorization, not a permanent capability snapshot.
 | Token revoke/rotate | old token rejected; browser independent | close token-bound endpoints; browser session unaffected | do not kill puppet |
 | User deactivation | all actor paths rejected | close all bound streams/control/endpoints | do not kill puppet |
 | Permission or membership removal | re-resolve current scope before start/retry/issuance | recheck before each protected delivery and after waits; close/filter lost scope | no automatic destructive rollback |
-| Grant/ancestor revoke or owner rights loss | descendants cease to authorize start/retry/delivery | close grant-bound subscriptions/control | reconcile any in-flight effect; no new stage |
+| Grant/ancestor revoke or owner rights loss | descendants cease to authorize start/retry/delivery | close delegation-bound subscriptions/control | reconcile any in-flight effect; no new stage; the Actor and its shared token survive |
 
 A durable revocation event wakes consumers, but correctness does not rely on its
 arrival: check before each protected frame/byte delivery, renewal, credential
@@ -422,7 +456,7 @@ applied or overwrite that revision's observation; the result explicitly reports
 | Project build | #648 has finite DRF admission/status and the durable build process manager below; real scheduler/body/image consumers and privileged deployment remain root bindings, not automatic-success defaults |
 | Worker process | Bounded Runtime-owned `Worker.run_one`/`run_pending` exist; root must wire the real executor, wake/poll and shutdown ownership rather than reuse the old web worker |
 | Realtime publication | Durable outbox publishing seam exists, including duplicate event IDs after lost ACK; #626 connects authorized event fan-out and resync |
-| Grants | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it |
+| Grants/Delegation | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it. The Actor-contract rework #683–#689 replaces the Principal/grant-identity wiring without weakening these fences |
 | Admin and CLI | #638/#642 call the same local service/DRF boundary; remove old admission/workflow owners only when these consumers are connected in the epic |
 | Retention | Completed results become undisclosable after the 90-day prune boundary; request identity cannot be reused. Physical audit/receipt erasure still requires the operator's explicit privacy/retention policy |
 
@@ -542,7 +576,7 @@ The privileged Unix executor checks both OS peer identity and the root-provided
 Step/claim gate. `privileged_build_executor` binds independent SQL callbacks and
 narrow safe refusal classes; already-safe library reasons survive unchanged,
 while raw provider/OS exceptions expose only their type. It runs under a distinct non-root UID, never a node-bound
-`Access.kind=service` identity. Its finite protocol carries durable IDs and tokens,
+service Actor identity. Its finite protocol carries durable IDs and tokens,
 not keys, inventory, shell or arbitrary arguments. Dispatch consumption commits
 before privileged execution; replay is denied. Disconnect does not undo a result
 or authorize resource release. The isolated Docker SETUP fixture proves separate
@@ -607,18 +641,22 @@ fabricated successful retry.
 Grant preparation reserves request identity and a pinned bundle without granting
 runtime authority: `reserved -> active` requires the matching creation/binding
 receipt, or `reserved -> revoked/expired` terminates an unactivated reservation.
-An active grant transitions only to `revoked/expired`; issuing a delegated child
-checks the active ancestor chain, owner rights and pinned approved policy.
+An active delegation transitions only to `revoked/expired`; issuing a delegated
+child checks the active ancestor chain, issuer rights and pinned approved policy.
 Logical revocation denies new acts immediately; transport-credential retirement
-is a separately recorded fallible stage, never a reason to keep logical access.
-Revocation never reactivates an old grant. Role edits create a new immutable
-bundle and require a new approval; they do not change existing digest bytes.
+is a separately recorded fallible stage, never a reason to keep logical access,
+and it never deletes the subject Actor or the shared DRF Token. Revocation never
+reactivates an old delegation. Role edits create a new immutable bundle and
+require a new approval; they do not change existing digest bytes. Activation is
+not implied by a SQL assignment, a lease or claims in a payload: the unbound
+activation and transport-retirement executor denies, and an assignment
+projection alone is not an activation or retirement receipt.
 
 The Access ORM boundary exposes `Grants.publish_bundle`, `approve_bundle`,
 `read_bundle`, `reserve`, `reservation`, `provision`, `activate`, `revoke`,
 `expire`, `record_retirement`, `resolve_actor` and the explicit message/dispatch
-admission methods. `reserve` accepts either a credential-bound human or an active
-delegated actor, never an owner/holder/force or workspace payload. CreationIntent
+admission methods. `reserve` accepts either a credential-bound human Actor or an
+actively delegated agent Actor, never an owner/holder/force or workspace payload. CreationIntent
 retains the first approved policy SecretVersion reference; retry queries that
 intent instead of fetching the parent's latest policy or creating a second child.
 The injected approval query must validate the exact stored intent binding, not a
@@ -640,18 +678,20 @@ project, human owner, aggregate UUID and purpose. This authority is explicitly
 bound by Access from the stored intent; it does not grant human secret-management
 permissions merely to provision a role's own credential. The standard DRF Token
 row is the framework's credential-bearing plaintext exception described in
-STORAGE.md; RoleBundle, CreationIntent, Grant, events and public metadata contain
-no raw token. Grant metadata refers to the encrypted SecretVersion instead.
+STORAGE.md; RoleBundle, CreationIntent, Delegation, events and public metadata
+contain no raw token. Delegation metadata refers to the encrypted SecretVersion
+instead.
 
 Approval, runtime-binding/activation/retirement queries and message/dispatch
 executors default to denial. Binding queries are trusted local authoritative
 reads, not network calls inside transactions. Later Preparation and Sessions
 composition supplies these queries and the physical delivery executor; an
 unbound executor refuses before an allowed effect. `token_context`,
-`current_actor` and `Access` take an explicit grant resolver; browser sessions
-and node service identities cannot become grant contexts. Grant plain-send
-admission carries no assignment claim or git identity; dispatch admission carries
-the current human owner for the separate fenced identity-before-send operation.
+`current_actor` and `Access` take an explicit delegation resolver; browser
+sessions and node service Actors cannot become delegated contexts. Delegation
+plain-send admission carries no assignment claim or git identity; dispatch
+admission carries the current human owner for the separate fenced
+identity-before-send operation.
 No legacy registry reader, credential import or dual write is used by this path.
 
 Rotation transitions are `staged -> delivering -> active -> retiring -> retired`,
@@ -857,14 +897,14 @@ message identity is distinct from its delivery ID and operation request ID.
 A stale installation epoch is rejected before cipher/admission, including when
 restore lost the old message row. Disabled installation effects deny new reports
 and are checked again before dispatch, not only when a connection is acquired.
-An identical sender-principal/message key in the current epoch returns stored
+An identical sender-Actor/message key in the current epoch returns stored
 metadata even after presence expiry or cipher unavailability; a changed intent
 returns 409.
 Admission returns 202 and a delivery Location, never proof of receipt. Private
 content is retained only as purpose/recipient/delivery-bound AEAD bytes, purged
 on terminal delivery state. Results expose only IDs, state and idle evidence.
 
-`GET /api/v1/deliveries/<id>` is private to the original sending principal or
+`GET /api/v1/deliveries/<id>` is private to the original sending Actor or
 recipient human, under current project/client authority. A current connection
 can `POST /api/v1/deliveries/<id>/ack` with exactly `schema_version`, `outcome`
 (`accepted|unknown|unavailable`). `X-Mop-Endpoint` and `X-Mop-Connection` headers
@@ -910,8 +950,8 @@ binding remain #628; native CLI launch/conversation lifecycle and MCP wiring rem
 leaves the cipher and grant resolver unbound until that composition supplies
 them, refusing private content admission instead of giving web/gateway a root
 key. The isolated fixture explicitly binds the real AEAD provider and current
-Access/Grant authority. No old pool or native vendor CLI acceptance is implied by
-that fixture.
+Access/delegation authority. No old pool or native vendor CLI acceptance is
+implied by that fixture.
 
 ## Sync/async and resource lifecycle
 
@@ -974,13 +1014,13 @@ identities subscribe only to configured installation/project subjects. A node
 identity may receive only its own
 `mop.rt.v1.<installation>.node.<node>.wake` hints and approved live progress
 subjects, never arbitrary publish/subscribe or management verbs. Node durable
-facts/results still go through authenticated DRF. Human and grant principals get
-no direct NATS credentials: their realtime audience is resolved at the Django
-gateway, and a session cookie/DRF token is not a NATS credential. Private addressed
-streams use server-derived recipient identities and never the broad project
-subject. #628 tests concrete broker ACLs, including denied cross-node/project
-subscriptions and credential revocation. No extra Redis broker is required merely
-to use Channels.
+facts/results still go through authenticated DRF. Human and delegated agent
+Actors get no direct NATS credentials: their realtime audience is resolved at the
+Django gateway, and a session cookie/DRF token is not a NATS credential. Private
+addressed streams use server-derived recipient identities and never the broad
+project subject. #628 tests concrete broker ACLs, including denied
+cross-node/project subscriptions and credential revocation. No extra Redis
+broker is required merely to use Channels.
 
 Events contain safe invalidation/projection metadata only, not secrets, messages,
 transcripts or terminal bytes. Authorized clients fetch private details separately.
@@ -1018,7 +1058,7 @@ fresh node facts.
 Terminal protocol is separate from events. REST authorizes an attachment/control
 request before `/ws/v1/terminal/<session-id>` binds the Django browser session,
 target/session incarnation and TerminalControl generation. Non-browser CLI attach
-uses its credential-bound principal through the same scope policy; credentials
+uses its credential-bound Actor through the same scope policy; credentials
 never appear in URLs. Browser sockets use the Django session, not a token copied
 into browser storage. Only that control owner can send `input`/`resize`; input
 frames carry a monotonically increasing connection sequence and are never replayed
@@ -1036,7 +1076,7 @@ that its socket or PTY is alive. A bound writer in `unknown` retains the exclusi
 SQL fence: lease expiry, REST detach, cancellation and detach timeout do not prove
 physical retirement. An unbound reservation can close without a physical proof.
 Before physical start, pin the instance ID and conversation/terminal epochs to the
-credential/principal, target/incarnation/executor, gateway/connection and generation.
+credential/Actor, target/incarnation/executor, gateway/connection and generation.
 Every write attempt and resize checks current authority after waits and a synchronous
 physical identity guard immediately before the syscall. A retired instance cannot
 reopen; closing a borrowed attachment never changes the body owner's FD flags or
@@ -1203,6 +1243,37 @@ Acceptance owners and scenarios:
   list/detail/create/FK/M2M/Admin scope, LDAP source precedence/revocation,
   revoked grant ancestor/owner, wrong role/incarnation and addressed secret
   delivery before/after long waits; no plaintext in API/audit/Admin LogEntry.
+* #683: empty PostgreSQL 17 migrations to the first administrator, human/agent/
+  service Actor creation, one `AUTH_USER_MODEL`, standard Group/Permission,
+  session/DRF Token and swappable FKs, stable Actor PK across incarnation
+  change, no kind-derived rights, repeat migrations, system checks, migration
+  drift and native backup/restore of the new schema.
+* #684: one authentication contract for human/agent/service Actors — revoked
+  credential, forged ActorContext, deactivation, rotation before first use and
+  during I/O, LDAP immutable-subject change, single-session logout, CSRF, no
+  plaintext in context/logs.
+* #685: parameterized human/agent/service authorization matrix — equal rights,
+  scope and required facts give equal decisions; group/direct permission
+  grant/revoke, inactive Actor, foreign project/client/node, staff without
+  permission, duplicate logical permission, unknown action, spoofed scope;
+  LDAP nested groups, ambiguous identity and source-owned revoke.
+* #686: agent Actor stable across reassignment, restart, incarnation change and
+  separate delegation revocation; history/audit stay bound to the correct
+  Actor; immutable definition bytes/digest/approval; no foreign work.
+* #687: service Actor technical enrollment matrix — forged bound node/kind/
+  owner, other node, stale epoch, enrollment revoked during await, foreign
+  incarnation, incomplete physical proof all refuse; real distinct-UID socket
+  and independent PostgreSQL connections.
+* #688: Actor with two independent delegations — revoking one disables neither
+  the other nor the identity or shared token; expiry, permission downgrade,
+  issuer deactivation, parent revoke; wider child refused; stale context after
+  token rotation cannot adopt a new identity; foreign target/project/
+  incarnation/forged holder refused.
+* #689: one parameterized contract matrix across DRF/Admin/WS/worker/private
+  boundary for human/agent/service: same effective rights, scope and factual
+  preconditions give the same decision and audit; only the credential transport
+  differs. Legacy resolver paths, sessions→execution aliases and duplicate
+  policy maps removed, verified by imports/discovery and regression tests.
 * #625: simultaneous identical and conflicting request IDs, lost accepted/result
   response, worker restart, crashes before/after external start/effect/COMMIT/
   outbox publish, uncertain COMMIT lookup, late running effect after wait timeout,
@@ -1218,6 +1289,12 @@ Acceptance owners and scenarios:
 * #644/#645: new empty install through admin/project/node/puppet/send/observe/stop,
   service restart and restore; no removed mop state files, readers, obsolete
   imports/settings/dependencies/templates/endpoints or accidental legacy discovery.
+
+The #683–#689 deliveries do not wait for one another's full old-consumer
+acceptance: #689 owns the adapter cutover and parity matrix, while each
+functional task keeps its own public contract; #645 closes the architecture
+matrix after #644 and the #689 cutover. Creating a task does not start its
+implementation, a master merge or a deploy.
 
 Every pure/testable implementation uses red-before-green TDD. Documentation itself
 needs no artificial failing test. The combined strict-suite and frontend-gates job gates exact
