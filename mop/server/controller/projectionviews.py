@@ -45,7 +45,9 @@ def response(function):
             code, status = 'not_found', 404
         elif isinstance(error, Denied):
             code, status = 'permission_denied', 403
-        result = {'schema_version':1, 'epoch':epoch, 'error':{'code':code, 'message':str(error), 'retryable':status == 503}}
+        result = {'schema_version':1, 'error':{'code':code, 'message':str(error), 'retryable':status == 503}}
+        if epoch is not None:
+            result['epoch'] = epoch
         if isinstance(error, SnapshotReset):
             result['reset'] = {'required':True}
     value = Response(result, status=status)

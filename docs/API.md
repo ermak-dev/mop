@@ -931,10 +931,12 @@ Remaining integration is deliberately visible in `coverage` and
   are not fabricated as an empty list. The current #642 Snapshot convenience field
   defaults omitted pending operations to an empty tuple: consumers must inspect
   coverage and cannot treat that default as a completed recovery handshake.
-  Standard foundation auth/database errors also need a shared versioned error
-  adapter: some currently omit `epoch` or use codes outside #642's finite set.
-  The foundation's separate `/api/v1/projects` responses also omit `epoch`; they
-  are not silently accepted as this snapshot envelope. The current pool query
+  Rechecked #642 at `20c2a4c5`: it now accepts omitted error epochs and the
+  foundation's finite error codes. When the restore authority is unavailable,
+  this reader omits the unknown epoch rather than sending null or inventing an
+  identity; successful pool snapshots always carry their verified epoch. The
+  foundation's separate `/api/v1/projects` responses use a dedicated catalogue
+  codec, not this pool snapshot envelope. The current pool query
   scope is human credentials; grant disclosure needs its current Access scope
   adapter bound at the root, not a synthetic human membership or token fallback.
 * #639 FactPage v1 `states` has running/dirty/session-count fields, not the complete
@@ -953,9 +955,14 @@ Remaining integration is deliberately visible in `coverage` and
   query is owner-private and requires delivery permission; pool-view permission
   cannot silently broaden that audience. Human endpoints remain a distinct kind,
   never puppet capacity or a Nomad action target.
-* #656 is the sole future usage source. Until its safe aggregate query is bound,
-  usage is explicitly unavailable; no transcript usage collector is imported.
-  Scheduler/image observations without producer generations remain unverified.
+* #656 is the sole usage source. Rechecked its published `8843d7e8`
+  `UsageQueries.read`: it exposes global key/model/date aggregates under
+  `execution.view_usage`, explicitly declares user/project/puppet attribution
+  unavailable, and has a separate non-snapshot page/wire contract. Those totals
+  cannot be attached to an individual puppet or disclosed using pool-view
+  permission. Per-puppet usage therefore stays explicitly unavailable; no
+  transcript usage collector is imported. Scheduler/image observations without
+  producer generations remain unverified.
 
 These seams do not claim CLI/WS integration, a gap-free subscribe handshake,
 external effect parity, deletion of every old reader elsewhere in the repository,
