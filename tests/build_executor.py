@@ -55,8 +55,9 @@ class ExecutorContract(unittest.TestCase):
         runner = SimpleNamespace(run=lambda *a, **k: SimpleNamespace(outcome='succeeded', quiescent=True, reason='exit zero'))
         adapter = AnsibleImageBuilder(invocations=factory, runner=runner,
             availability=lambda b, n: ImageAvailability(n, 'b'*64, True, datetime.now(timezone.utc), 'template'),
-            inspector=lambda ticket: StageResult('unknown', False, 'readback unavailable'))
+            inspector=lambda ticket: StageResult('succeeded', True, 'remote process stopped'))
         self.assertEqual(adapter.apply(ticket).outcome, 'unknown')
+        self.assertEqual(adapter.inspect(ticket).outcome, 'unknown')
 
     def test_pve_factory_pins_commit_and_rebuild_in_private_files_not_request_argv(self):
         from mop.server.builds.adapters import PveAnsibleInvocations
@@ -89,6 +90,28 @@ class ExecutorContract(unittest.TestCase):
             self.assertEqual(runner.run(invocation, timeout=7200).outcome, 'succeeded')
             with self.assertRaises(ValueError):
                 runner.run(invocation, timeout=7201)
+
+    def test_local_exit_never_proves_remote_ansible_effect_quiescence(self):
+        from mop.server.builds.adapters import AnsibleImageBuilder
+        from mop.server.builds.contracts import StageResult, ImageAvailability
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from uuid import uuid4
+        node = uuid4()
+        ticket = SimpleNamespace(stage='build', build=SimpleNamespace(target_nodes=(node,), source_digest='a'*64))
+        @contextmanager
+        def factory(build):
+            yield object()
+        for outcome in ('succeeded','failed'):
+            with self.subTest(local_outcome=outcome):
+                runner = SimpleNamespace(run=lambda *a, **k: SimpleNamespace(outcome=outcome, quiescent=True, reason='local process exited'))
+                adapter = AnsibleImageBuilder(invocations=factory, runner=runner,
+                    availability=lambda b, n: ImageAvailability(n, 'a'*64, True, datetime.now(timezone.utc), 'template'),
+                    inspector=lambda ticket: StageResult('unknown', False, 'remote task may still be running'))
+                result = adapter.apply(ticket)
+                self.assertEqual(result.outcome, 'unknown')
+                self.assertFalse(result.quiescent)
 
     def test_timeout_kills_owned_group_and_retains_failure_not_fake_success(self):
         from mop.server.builds.subprocess import SafeAnsibleSubprocess, TrustedInvocation

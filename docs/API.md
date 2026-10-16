@@ -437,7 +437,11 @@ materialization is bound; ciphertext is never treated as an executable manifest.
 The handler uses the same `Operation`, `Step`, admission counts, request identity,
 audit/outbox and resource claims. `BuildRun`, `BuildNodePlan`,
 `AffectedTargetPlan`, stage intents and receipts are metadata with protected
-foreign keys, not another queue or a generic saga description. Claims for the
+foreign keys, not another queue or a generic saga description. The frozen narrow
+#625 schema still requires a node field: the first requested node is only its
+storage anchor; the real build target is the project plus every saved node plan.
+The generalized #625/root integration must replace this structural anchor before
+cutover rather than infer build scope from that one field. Claims for the
 shared `build:mirror`, projects, nodes and affected targets remain held across
 unknown outcomes and expired leases. The common worker discovers stale build
 steps for inspection using the original token, never a new destructive attempt.
@@ -445,8 +449,9 @@ steps for inspection using the original token, never a new destructive attempt.
 The complete affected-target plan commits before the first clear. Each target
 records assignment identity, incarnation, revision, generation, role/grant and
 exact source-spec bytes/digest. Clear, wipe, bake, restore and announce have
-separate durable intents. A previously committed intent allows inspection, not
-blind replay. Restoration attempts every affected target whose clear was
+separate durable intents. Root returns the build thread's database connection
+after each short transaction, before blocking external I/O. A previously
+committed intent allows inspection, not blind replay. Restoration attempts every affected target whose clear was
 attempted; newer identities/revisions are not overwritten. Original failures and
 individual compensation failures remain separate. Process quiescence and a
 known effect outcome are distinct persisted facts. An unknown-but-stopped process
@@ -472,6 +477,10 @@ Root composition supplies named Scheduler, ImageBuilder and NodeExecutor ports
 and their capability preflight. `SafeAnsibleSubprocess` owns process groups through
 timeout/cancel quiescence and bounds output/private log retention; actual known
 secrets are redacted across pipe chunks and excluded from argv/environment.
+Local process-group termination or a zero exit code does not establish remote
+Ansible/PVE task quiescence: both normal completion and restart inspection require
+external quiescence plus matching physical image evidence. Unresolved local
+failure evidence remains visible alongside later receipts.
 Inventory, playbook, private workspace, secret inventory and physical inspection
 are trusted deployment bindings. The Unix client advertises image-builder
 capability only when a fresh physical availability reader is also supplied.

@@ -47,18 +47,30 @@ class AnsibleImageBuilder:
                 return StageResult('failed', True, 'build execution deadline expired before subprocess start')
             with self.invocations(build) as invocation:
                 result = self.runner.run(invocation, timeout=timeout)
+            if not result.quiescent:
+                return StageResult('unknown', False, result.reason)
             if result.outcome != 'succeeded':
-                return StageResult(result.outcome, result.quiescent, result.reason)
-        # rc=0 не доказывает image revision на каждом назначенном гипервизоре.
-        if not all(confirmed(self.reader(ticket.build, node), ticket.build, node) for node in ticket.build.target_nodes):
-            return StageResult('unknown', False, 'image process exited; physical availability requires readback')
-        return StageResult('succeeded', True, 'physical image revision confirmed')
+                return self._confirmation(ticket, local_failure=result.reason)
+        return self._confirmation(ticket)
+
+    def _confirmation(self, ticket, *, local_failure=''):
+        # Завершённый локальный ssh/Ansible процесс не доказывает остановку
+        # удалённого pct/Ansible task. Даже rc=0 + image exists этого не заменяют.
+        physical = self.inspect(ticket)
+        prefix = local_failure+'; ' if local_failure else ''
+        if physical.outcome == 'unknown' or not physical.quiescent:
+            return StageResult('unknown', physical.quiescent, (prefix+physical.reason)[:512])
+        if physical.outcome == 'failed':
+            return StageResult('failed', True, (prefix+physical.reason)[:512])
+        return StageResult('succeeded', True, (prefix+'physical image revision and external quiescence confirmed')[:512])
 
     def inspect(self, ticket):
         # Нужен не только image exists, но и stop/quiescence прежнего build process.
         result = self.inspector(ticket)
         if type(result) is not StageResult:
             raise ValueError('typed physical image inspection required')
+        if result.outcome == 'succeeded' and not all(confirmed(self.reader(ticket.build, node), ticket.build, node) for node in ticket.build.target_nodes):
+            return StageResult('unknown', result.quiescent, 'physical availability requires readback')
         return result
 
 

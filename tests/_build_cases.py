@@ -18,7 +18,9 @@ from _operation_cases import DurableOperations
 # RED: PG16 — build REST 404; PG17 — replay dispatch, busy skip, force и driver;
 #      PG16/17 — shared target fence, unknown/quiescent, restart queue, immutable
 #      inputs, mixed host/PVE и long-build deadline показали отдельные отказы.
-# RESULT: реальные PG16/17 crash/claim/recovery и regressions зелёные;
+# RED: idle DB connection при I/O и callback до independent COMMIT — реальные PG;
+#      local Ansible exit != remote quiescence — отдельные adapter counterexamples.
+# RESULT: узкие реальные PG16/17 crash/claim/recovery и regressions зелёные;
 #         отдельная UID/Unix fixture проверяет настоящий owned subprocess.
 # STATUS: FIXED — see #648; реальная новая PVE установка не проверена.
 @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -372,6 +374,28 @@ class ImageBuilds(TransactionTestCase):
         operation = self.builds.submit(self.actor, command)
         self.assertEqual(operation['state'], 'accepted')
         self.assertEqual(self.m.Operation.objects.get(pk=operation['id']).not_after, command.not_after)
+
+    def test_blocking_build_io_returns_database_connection_before_waiting(self):
+        self.setup_build()
+        def outside_database_pool():
+            self.assertIsNone(connections['default'].connection,
+                'long image I/O must not retain an idle controller pool connection')
+        self.fake.before_clear = outside_database_pool
+        self.assertEqual(self.builds.run(UUID(self.operation['id']))['state'], 'succeeded')
+
+    def test_privileged_dispatch_cannot_return_before_its_independent_commit(self):
+        from django.db import transaction
+        self.setup_build(targets=0)
+        claim = self.builds.claim(UUID(self.operation['id']))
+        self.builds._plan(claim)
+        ticket, fresh, result = self.builds._intent(claim, 'build')
+        with transaction.atomic():
+            with self.assertRaisesRegex(self.s.Refused, 'transaction_boundary'):
+                self.builds.resolve_ticket(intent_id=ticket.id, step_id=claim.step_id, token=claim.token,
+                    epoch=claim.epoch, verb='apply')
+            from mop.server.builds.contracts import StageResult
+            with self.assertRaisesRegex(self.s.Refused, 'transaction_boundary'):
+                self.builds._record(claim, ticket, StageResult('succeeded', True, 'fixture confirmation'))
 
     def test_denied_permission_has_no_operation_or_effect(self):
         from django.test import Client

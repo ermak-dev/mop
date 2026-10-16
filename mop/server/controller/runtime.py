@@ -313,21 +313,39 @@ def operation_installation_state():
     return InstallationState(row.epoch, row.effects_enabled, generation)
 
 
-def operations_service(*, grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
-    """Typed composition durable Operations с настоящим restore fence и DB budget."""
+def _composed_operations(*, transaction_scope, grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
     from ..operations.service import Operations
     from ..builds.service import Builds
-    service = Operations(installation_state=operation_installation_state, transaction_scope=short_transaction,
+    service = Operations(installation_state=operation_installation_state, transaction_scope=transaction_scope,
         grants=grants, executor=executor, queue_limit=queue_limit,
         project_limit=project_limit, execution_limit=execution_limit)
     service.builds = Builds(service)
     return service
 
 
+def operations_service(*, grants=None, executor=None, queue_limit=256, project_limit=64, execution_limit=8):
+    """Typed composition durable Operations с настоящим restore fence и DB budget."""
+    return _composed_operations(transaction_scope=short_transaction, grants=grants, executor=executor,
+        queue_limit=queue_limit, project_limit=project_limit, execution_limit=execution_limit)
+
+
+@contextmanager
+def build_transaction():
+    """Долгий blocking build не удерживает idle connection общего controller pool."""
+    connection = connections['default']
+    outer = not connection.in_atomic_block
+    try:
+        with short_transaction():
+            yield
+    finally:
+        if outer:
+            connection.close()
+
+
 def builds_service(*, scheduler=None, image_builder=None, node_executor=None, grants=None):
     """Trusted named ports: HTTP получает только admission/status, не adapters."""
     from ..builds.service import Builds
-    operations = operations_service(grants=grants)
+    operations = _composed_operations(transaction_scope=build_transaction, grants=grants)
     builds = Builds(operations, scheduler=scheduler, image_builder=image_builder, node_executor=node_executor)
     operations.builds = builds
     return builds

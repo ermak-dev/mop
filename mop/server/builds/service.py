@@ -44,7 +44,7 @@ class Builds:
     def _snapshot(self, row):
         run = m.BuildRun.objects.get(operation=row)
         plans = m.AffectedTargetPlan.objects.filter(build=run).order_by('assignment_id')
-        receipts = m.StageReceipt.objects.filter(intent__build=run, resolved=True).select_related('intent')
+        receipts = m.StageReceipt.objects.filter(intent__build=run).select_related('intent')
         return dict(id=str(row.pk), request_id=str(row.request_id), epoch=str(row.epoch), state=row.state,
             revision=row.revision, code=row.code, reason=row.reason,
             target={'kind':'project', 'id':str(run.project_id), 'source_revision':str(row.expected_revision)},
@@ -55,7 +55,8 @@ class Builds:
                 planned=run.planned_at is not None, skipped=run.skipped, affected_targets=[str(p.assignment_id) for p in plans],
                 unresolved_stages=[{'id':str(i.pk),'stage':i.stage,'key':i.key,'status':'needs_readback'}
                     for i in m.StageIntent.objects.filter(build=run).exclude(stagereceipt__resolved=True).order_by('created_at','id')],
-                stages=[{'stage':r.intent.stage, 'key':r.intent.key, 'outcome':r.outcome, 'reason':r.reason} for r in receipts.order_by('received_at', 'id')],
+                stages=[{'stage':r.intent.stage, 'key':r.intent.key, 'outcome':r.outcome, 'quiescent':r.quiescent,
+                    'resolved':r.resolved, 'reason':r.reason} for r in receipts.order_by('received_at', 'id')],
                 original_failure=run.original_failure,
                 compensation_failures=[r.reason for r in receipts if r.intent.stage=='restore' and r.outcome=='failed']))
 
@@ -313,6 +314,7 @@ class Builds:
 
     def resolve_ticket(self, *, intent_id, step_id, token, epoch, verb):
         """Trusted executor root gate. HTTP никогда не получает произвольный adapter."""
+        _independent()
         with self.operations._transaction():
             intent = m.StageIntent.objects.get(pk=intent_id, step_id=step_id, token=token)
             claim = BuildClaim(intent.build_id, step_id, token, epoch)
@@ -334,6 +336,7 @@ class Builds:
             return self._ticket(intent, claim, run)
 
     def _record(self, claim, ticket, result):
+        _independent()
         if type(result) is not StageResult:
             raise ValueError('typed build stage result required')
         with self.operations._transaction():
