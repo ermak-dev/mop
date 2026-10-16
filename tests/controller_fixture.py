@@ -51,7 +51,7 @@ controller:pg17:
                         'public.py', '.mop/sandbox.yaml'], check=True)
         return root
 
-    def invoke(self, root, *, cleanup_failure=False):
+    def invoke(self, root, *, cleanup_failure=False, labels=()):
         original_run, original_which = subprocess.run, shutil.which
         snapshots, commands = [], []
 
@@ -73,7 +73,7 @@ controller:pg17:
                 patch.object(controller.shutil, 'which', side_effect=lambda name:
                              '/fixture/docker' if name == 'docker' else original_which(name)), \
                 patch.object(controller.subprocess, 'run', side_effect=run):
-            result = controller.main(['--postgres', '16'])
+            result = controller.main(['--postgres', '16', *[word for label in labels for word in ('--label', label)]])
         return result, snapshots, commands
 
     def test_snapshot_contains_tracked_and_new_source_but_no_ignored_inputs(self):
@@ -90,6 +90,17 @@ controller:pg17:
             self.assertNotIn(private, files)
         self.assertFalse(any(path.startswith('.git/') for path in files))
         self.assertTrue(any(command[1:3] == ['rm', '-f'] for command in commands))
+
+    def test_narrow_labels_are_passed_as_arguments_not_shell_source(self):
+        import shlex
+        labels = ('_access_cases.AccessContracts.test_currentness', 'not-a-label; exit 0')
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            result, _, commands = self.invoke(root, labels=labels)
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if 'bash' in command)
+        script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
+        self.assertEqual(shlex.split(script), ['python3', 'tests/controller.py', *labels])
 
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:

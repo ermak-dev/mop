@@ -9,16 +9,15 @@ from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from . import models as m
-from .definitions import DEFINITIONS, validate_batch
+from .definitions import DEFINITIONS, resolve, validate_batch
 from .policy import project_origin, project_limit
+from .retirement import (RemovalGuard, UnsafeRemoval, ProjectRemovalProof, NodeRemovalProof,
+    PreparedProjectRetirement, PreparedNodeRetirement, validate_proof,
+    validate_project_receipt, validate_node_receipt)
 
 
 class Conflict(ValueError):
     """Identity или ожидаемая revision уже изменились."""
-
-
-class UnsafeRemoval(ValueError):
-    """Нет свежих внешних guards для физического удаления."""
 
 
 class ProtectionUnavailable(ValueError):
@@ -59,6 +58,17 @@ class SettingsSnapshot:
     receipt: str = ''
 
 
+@dataclass(frozen=True)
+class EffectiveSettingsSnapshot:
+    installation_revision: int
+    node_revision: int | None
+    values: tuple
+    sources: tuple
+    missing: tuple
+    installation_applied_revision: int | None
+    node_applied_revision: int | None
+
+
 def snapshot(row):
     return Snapshot(tuple((f.attname, bytes(value) if isinstance(value, memoryview) else value)
         for f in row._meta.concrete_fields for value in (getattr(row, f.attname),)))
@@ -92,37 +102,93 @@ def observation(source, observed_at, receipt=None):
 
 
 class Catalog:
-    def __init__(self, *, authorizer: Authorizer | None = None, protection: PolicyProtection | None = None):
+    def __init__(self, *, authorizer: Authorizer | None = None, protection: PolicyProtection | None = None,
+                 removal_guard: RemovalGuard | None = None):
         self._authorizer = authorizer if authorizer is not None else Deny()
         self._protection = protection
+        self._removal_guard = removal_guard
 
     def _authorize(self, actor, action, *, projects=(), nodes=(), clients=()):
         self._authorizer.authorize(actor, action, project_ids=tuple(sorted(set(projects), key=str)),
             node_ids=tuple(sorted(set(nodes), key=str)), client_ids=tuple(sorted(set(clients), key=str)))
 
     def _node_scope(self, node_id):
-        return tuple(m.NodeProject.objects.filter(node_id=node_id).values_list('project_id', flat=True))
+        return tuple(m.NodeProject.objects.filter(node_id=node_id, project__retired_at__isnull=True)
+                     .values_list('project_id', flat=True))
+
+    @staticmethod
+    def project_is_current(project_id):
+        """Внутренний SQL fact для Access/SessionGate, не authorization."""
+        return m.Project.objects.filter(pk=project_id, retired_at__isnull=True).exists()
+
+    @staticmethod
+    def node_is_current(node_id):
+        """Retained FK не делает SERVICE principal текущим узлом."""
+        return m.Node.objects.filter(pk=node_id, retired_at__isnull=True).exists()
+
+    @staticmethod
+    def current_project_ids(project_ids=None):
+        """SQL scope query для Access; None — все current, пустой набор — никто."""
+        rows = m.Project.objects.filter(retired_at__isnull=True)
+        if project_ids is not None:
+            rows = rows.filter(pk__in=project_ids)
+        return tuple(rows.order_by('pk').values_list('pk', flat=True))
+
+    @staticmethod
+    def current_node_ids(node_ids):
+        """Batch currentness без утечки retirement predicate в Access."""
+        return tuple(m.Node.objects.filter(pk__in=node_ids, retired_at__isnull=True)
+                     .order_by('pk').values_list('pk', flat=True))
+
+    @staticmethod
+    def _live(row):
+        if row.retired_at is not None:
+            raise Conflict('catalogue target is retired')
+        return row
+
+    def _locked_project(self, project_id):
+        return self._live(m.Project.objects.select_for_update().get(pk=project_id))
+
+    def _locked_node(self, node_id):
+        return self._live(m.Node.objects.select_for_update().get(pk=node_id))
+
+    def _removal_inspection_boundary(self):
+        if connection.in_atomic_block:
+            raise RuntimeError('removal inspection requires execution outside SQL transactions')
+
+    def _guard(self):
+        if self._removal_guard is None:
+            raise UnsafeRemoval('fresh jobs, occupants and external guards are not bound')
+        return self._removal_guard
+
+    @staticmethod
+    def _retire(row):
+        row.retired_at, row.identity_slot = timezone.now(), row.id
+        row.revision += 1
+        row.save(update_fields=['retired_at', 'identity_slot', 'revision'])
+        return snapshot(row)
 
     def register_project(self, actor, origin):
         value = project_origin(origin)
         self._authorize(actor, 'catalog.add_project')
         try:
             with transaction.atomic():
-                row, _ = m.Project.objects.get_or_create(origin=value.origin, defaults={'name': value.name})
+                row, _ = m.Project.objects.select_for_update().get_or_create(
+                    origin=value.origin, retired_at__isnull=True, defaults={'name': value.name})
                 self._authorize(actor, 'catalog.add_project', projects=(row.id,))
                 return snapshot(row)
         except IntegrityError as error:
             raise Conflict('project name belongs to another origin') from error
 
     def get_project(self, actor, project_id):
-        row = m.Project.objects.get(pk=project_id)
+        row = m.Project.objects.get(pk=project_id, retired_at__isnull=True)
         self._authorize(actor, 'catalog.view_project', projects=(row.id,))
         return snapshot(row)
 
     def list_projects(self, actor):
         self._authorize(actor, 'catalog.view_project')
         result = []
-        for row in m.Project.objects.order_by('id'):
+        for row in m.Project.objects.filter(retired_at__isnull=True).order_by('id'):
             try:
                 self._authorize(actor, 'catalog.view_project', projects=(row.id,))
             except PermissionError:
@@ -136,7 +202,7 @@ class Catalog:
         value = project_origin(origin)
         try:
             with transaction.atomic():
-                row = m.Project.objects.select_for_update().get(pk=project_id)
+                row = self._locked_project(project_id)
                 self._authorize(actor, 'catalog.change_project', projects=(row.id,))
                 expected(row, expected_revision)
                 row.origin, row.name = value.origin, value.name
@@ -149,7 +215,7 @@ class Catalog:
     def set_project_limit(self, actor, project_id, limit, *, expected_revision):
         value = project_limit(limit)
         with transaction.atomic():
-            row = m.Project.objects.select_for_update().get(pk=project_id)
+            row = self._locked_project(project_id)
             self._authorize(actor, 'catalog.set_project_limit', projects=(row.id,))
             expected(row, expected_revision)
             row.puppet_limit = value
@@ -157,11 +223,32 @@ class Catalog:
             row.save(update_fields=['puppet_limit', 'revision'])
             return snapshot(row)
 
-    def delete_project(self, actor, project_id, *, expected_revision):
+    def prepare_delete_project(self, actor, project_id, *, expected_revision):
+        self._removal_inspection_boundary()
         row = m.Project.objects.get(pk=project_id)
         self._authorize(actor, 'catalog.delete_project', projects=(row.id,))
+        self._live(row)
         expected(row, expected_revision)
-        raise UnsafeRemoval('fresh jobs, occupants and external guards are not bound')
+        proof = self._guard().inspect_project(snapshot(row))
+        validate_proof(proof, ProjectRemovalProof, row.id, expected_revision)
+        return PreparedProjectRetirement(row.id, expected_revision, proof)
+
+    def commit_delete_project(self, actor, prepared):
+        if type(prepared) is not PreparedProjectRetirement:
+            raise UnsafeRemoval('prepared project retirement is required')
+        with transaction.atomic():
+            row = m.Project.objects.select_for_update().get(pk=prepared.target_id)
+            self._authorize(actor, 'catalog.delete_project', projects=(row.id,))
+            self._live(row)
+            expected(row, prepared.expected_revision)
+            validate_proof(prepared.proof, ProjectRemovalProof, row.id, row.revision)
+            receipt = self._guard().validate_project(prepared.proof, snapshot(row))
+            validate_project_receipt(receipt, prepared.proof, timezone.now())
+            return self._retire(row)
+
+    def delete_project(self, actor, project_id, *, expected_revision):
+        prepared = self.prepare_delete_project(actor, project_id, expected_revision=expected_revision)
+        return self.commit_delete_project(actor, prepared)
 
     def configure_node(self, actor, *, name, driver, ssh_host, ssh_port, control_origin,
                        lan_address, bootstrap_address, node_id=None, expected_revision=None):
@@ -190,7 +277,7 @@ class Catalog:
                 if node_id is None:
                     self._authorize(actor, 'catalog.add_node')
                     return snapshot(m.Node.objects.create(**values))
-                row = m.Node.objects.select_for_update().get(pk=node_id)
+                row = self._locked_node(node_id)
                 self._authorize(actor, 'catalog.change_node', nodes=(row.id,), projects=self._node_scope(row.id))
                 expected(row, expected_revision)
                 for key, value in values.items():
@@ -202,14 +289,25 @@ class Catalog:
             raise Conflict('node name is already registered') from error
 
     def get_node(self, actor, node_id):
-        row = m.Node.objects.get(pk=node_id)
+        row = m.Node.objects.get(pk=node_id, retired_at__isnull=True)
         self._authorize(actor, 'catalog.view_node', nodes=(row.id,), projects=self._node_scope(row.id))
         return snapshot(row)
+
+    def list_nodes(self, actor):
+        self._authorize(actor, 'catalog.view_node')
+        result = []
+        for row in m.Node.objects.filter(retired_at__isnull=True).order_by('id'):
+            try:
+                self._authorize(actor, 'catalog.view_node', nodes=(row.id,), projects=self._node_scope(row.id))
+            except PermissionError:
+                continue
+            result.append(snapshot(row))
+        return tuple(result)
 
     def _change_node_flag(self, actor, node_id, field, value, revision):
         flag(value)
         with transaction.atomic():
-            row = m.Node.objects.select_for_update().get(pk=node_id)
+            row = self._locked_node(node_id)
             self._authorize(actor, 'catalog.change_node', nodes=(row.id,), projects=self._node_scope(row.id))
             expected(row, revision)
             setattr(row, field, value)
@@ -226,10 +324,11 @@ class Catalog:
     def set_node_projects(self, actor, node_id, project_ids, *, expected_revision):
         ids = set(project_ids)
         with transaction.atomic():
-            projects = tuple(m.Project.objects.select_for_update().filter(pk__in=ids).order_by('id').values_list('id', flat=True))
+            projects = tuple(m.Project.objects.select_for_update().filter(pk__in=ids, retired_at__isnull=True)
+                             .order_by('id').values_list('id', flat=True))
             if len(projects) != len(ids):
                 raise ValueError('unknown project reference')
-            row = m.Node.objects.select_for_update().get(pk=node_id)
+            row = self._locked_node(node_id)
             old = self._node_scope(row.id)
             self._authorize(actor, 'catalog.change_node', nodes=(row.id,), projects=(*old, *projects))
             expected(row, expected_revision)
@@ -243,7 +342,7 @@ class Catalog:
     def record_node_application(self, actor, node_id, *, target_revision, receipt):
         text(receipt, 'application receipt', 512)
         with transaction.atomic():
-            row = m.Node.objects.select_for_update().get(pk=node_id)
+            row = self._locked_node(node_id)
             self._authorize(actor, 'catalog.record_node_application', nodes=(row.id,), projects=self._node_scope(row.id))
             if type(target_revision) is not int or row.revision != target_revision:
                 return False
@@ -255,7 +354,7 @@ class Catalog:
         flag(eligible)
         observation(source, observed_at)
         with transaction.atomic():
-            row = m.Node.objects.select_for_update().get(pk=node_id)
+            row = self._locked_node(node_id)
             self._authorize(actor, 'catalog.observe_node', nodes=(row.id,), projects=self._node_scope(row.id))
             if row.observed_at is not None and observed_at <= row.observed_at:
                 raise Conflict('stale node observation')
@@ -264,13 +363,36 @@ class Catalog:
             row.save(update_fields=['observed_eligible', 'observed_source', 'observed_at', 'received_at'])
             return snapshot(row)
 
-    def forget_node(self, actor, node_id, *, expected_revision):
+    def prepare_forget_node(self, actor, node_id, *, expected_revision):
+        self._removal_inspection_boundary()
         row = m.Node.objects.get(pk=node_id)
         self._authorize(actor, 'catalog.delete_node', nodes=(row.id,), projects=self._node_scope(row.id))
+        self._live(row)
         expected(row, expected_revision)
         if row.deployment_member:
             raise UnsafeRemoval('deployment membership would recreate this node')
-        raise UnsafeRemoval('fresh jobs, occupants and external guards are not bound')
+        proof = self._guard().inspect_node(snapshot(row))
+        validate_proof(proof, NodeRemovalProof, row.id, expected_revision)
+        return PreparedNodeRetirement(row.id, expected_revision, proof)
+
+    def commit_forget_node(self, actor, prepared):
+        if type(prepared) is not PreparedNodeRetirement:
+            raise UnsafeRemoval('prepared node retirement is required')
+        with transaction.atomic():
+            row = m.Node.objects.select_for_update().get(pk=prepared.target_id)
+            self._authorize(actor, 'catalog.delete_node', nodes=(row.id,), projects=self._node_scope(row.id))
+            self._live(row)
+            expected(row, prepared.expected_revision)
+            if row.deployment_member:
+                raise UnsafeRemoval('deployment membership would recreate this node')
+            validate_proof(prepared.proof, NodeRemovalProof, row.id, row.revision)
+            receipt = self._guard().validate_node(prepared.proof, snapshot(row))
+            validate_node_receipt(receipt, prepared.proof, timezone.now())
+            return self._retire(row)
+
+    def forget_node(self, actor, node_id, *, expected_revision):
+        prepared = self.prepare_forget_node(actor, node_id, expected_revision=expected_revision)
+        return self.commit_forget_node(actor, prepared)
 
     def _installation(self, *, lock=False):
         model = m.InstallationConfiguration._meta.get_field('installation').remote_field.model
@@ -295,22 +417,52 @@ class Catalog:
 
     def get_node_settings(self, actor, node_id):
         with transaction.atomic():
-            owner = m.Node.objects.select_for_update().get(pk=node_id)
+            owner = m.Node.objects.select_for_update().get(pk=node_id, retired_at__isnull=True)
             self._authorize(actor, 'catalog.view_nodesetting', nodes=(node_id,), projects=self._node_scope(node_id))
             return self._settings_snapshot(owner, node=True)
+
+    def get_effective_settings(self, actor, *, node_id=None, require=()):
+        # Тот же installation lock, что у обоих writers: revision pair и rows
+        # не смешиваются с параллельным edit. Никаких внешних I/O/fallback.
+        with transaction.atomic():
+            installation = self._installation(lock=True)
+            self._authorize(actor, 'catalog.view_installationsetting')
+            installed = self._settings_snapshot(installation, node=False)
+            local = None
+            if node_id is not None:
+                node = m.Node.objects.select_for_update().get(pk=node_id, retired_at__isnull=True)
+                self._authorize(actor, 'catalog.view_nodesetting', nodes=(node_id,), projects=self._node_scope(node_id))
+                local = self._settings_snapshot(node, node=True)
+            result = resolve(dict(installed.values), dict(local.values) if local else None, require=require)
+            return EffectiveSettingsSnapshot(installed.revision, local.revision if local else None,
+                result.values, result.sources, result.missing, installed.applied_revision,
+                local.applied_revision if local else None)
 
     def _set_settings(self, actor, batch, revision, node_id):
         values = validate_batch(batch, node=node_id is not None)
         with transaction.atomic():
+            # Один порядок lock: installation, затем node. Так глобальный edit
+            # проверяет все существующие overrides без гонки с узловым edit.
+            installation = self._installation(lock=True)
+            installed = dict(self._settings_snapshot(installation, node=False).values)
             if node_id is None:
-                owner = self._installation(lock=True)
+                owner = installation
                 self._authorize(actor, 'catalog.change_installationsetting')
                 state, _ = m.InstallationConfiguration.objects.get_or_create(installation=owner)
                 field, model, reference = 'revision', m.InstallationSetting, {'installation': owner}
+                proposed = {**installed, **values}
+                resolve(proposed)
+                by_node = {}
+                for row in m.NodeSetting.objects.filter(node__retired_at__isnull=True).order_by('node_id', 'key'):
+                    by_node.setdefault(row.node_id, {})[row.key] = getattr(row, row.value_kind + '_value')
+                for overrides in by_node.values():
+                    resolve(proposed, overrides)
             else:
-                owner = m.Node.objects.select_for_update().get(pk=node_id)
+                owner = self._locked_node(node_id)
                 self._authorize(actor, 'catalog.change_nodesetting', nodes=(node_id,), projects=self._node_scope(node_id))
                 state, field, model, reference = owner, 'settings_revision', m.NodeSetting, {'node': owner}
+                local = dict(self._settings_snapshot(owner, node=True).values)
+                resolve(installed, {**local, **values})
             expected(state, revision, field)
             for key, value in values.items():
                 definition = DEFINITIONS[key]
@@ -336,7 +488,7 @@ class Catalog:
                 row, _ = m.InstallationConfiguration.objects.get_or_create(installation=owner)
                 current, prefix = row.revision, ''
             else:
-                row = m.Node.objects.select_for_update().get(pk=node_id)
+                row = self._locked_node(node_id)
                 self._authorize(actor, 'catalog.record_settings_application', nodes=(row.id,), projects=self._node_scope(row.id))
                 current, prefix = row.settings_revision, 'settings_'
             if type(target_revision) is not int or target_revision != current:
@@ -373,7 +525,7 @@ class Catalog:
             if type(content) is not bytes or not content or not reference:
                 raise ProtectionUnavailable('policy protector returned no protected bytes/reference')
         with transaction.atomic():
-            project = m.Project.objects.select_for_update().get(pk=project_id)
+            project = self._locked_project(project_id)
             self._authorize(actor, 'catalog.pin_project_policy', projects=(project.id,))
             expected(project, expected_revision)
             last = m.ProjectPolicySnapshot.objects.filter(project=project).order_by('-sequence').first()
@@ -408,6 +560,7 @@ class Catalog:
     def create_image_revision(self, actor, project_id, policy_id, *, source):
         text(source, 'image source')
         with transaction.atomic():
+            self._locked_project(project_id)
             policy = m.ProjectPolicySnapshot.objects.get(pk=policy_id)
             self._authorize(actor, 'catalog.add_imagerevision', projects=(project_id, policy.project_id))
             if policy.project_id != project_id:
@@ -423,8 +576,8 @@ class Catalog:
 
     def set_image_intent(self, actor, node_id, project_id, image_id, *, expected_revision):
         with transaction.atomic():
-            m.Project.objects.select_for_update().get(pk=project_id)
-            m.Node.objects.select_for_update().get(pk=node_id)
+            self._locked_project(project_id)
+            self._locked_node(node_id)
             image = self._image(actor, node_id, project_id, image_id)
             row = m.NodeImage.objects.select_for_update().filter(node_id=node_id, project_id=project_id).first()
             if row is None:
@@ -442,8 +595,8 @@ class Catalog:
         flag(available)
         observation(source, observed_at, receipt)
         with transaction.atomic():
-            m.Project.objects.select_for_update().get(pk=project_id)
-            m.Node.objects.select_for_update().get(pk=node_id)
+            self._locked_project(project_id)
+            self._locked_node(node_id)
             image = self._image(actor, node_id, project_id, image_id)
             row = m.NodeImage.objects.select_for_update().get(node_id=node_id, project_id=project_id)
             expected(row, expected_revision)
@@ -469,7 +622,7 @@ class Catalog:
                 or any(c.isspace() or c in '~^:?*[\\' for c in integration_branch)):
             raise ValueError('invalid integration branch')
         with transaction.atomic():
-            m.Project.objects.select_for_update().get(pk=project_id)
+            self._locked_project(project_id)
             client = m.ClientRegistration.objects.select_for_update().get(pk=client_id)
             row = m.WorkspaceBinding.objects.filter(client=client, workspace_key=workspace_key).first()
             self._authorize(actor, 'catalog.change_workspacebinding', clients=(client.id,),
@@ -487,6 +640,7 @@ class Catalog:
             return snapshot(row)
 
     def resolve_workspace(self, actor, client_id, workspace_key):
-        row = m.WorkspaceBinding.objects.get(client_id=client_id, workspace_key=workspace_key)
+        row = m.WorkspaceBinding.objects.get(client_id=client_id, workspace_key=workspace_key,
+                                             project__retired_at__isnull=True)
         self._authorize(actor, 'catalog.view_workspacebinding', clients=(row.client_id,), projects=(row.project_id,))
         return snapshot(row)

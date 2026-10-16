@@ -61,6 +61,117 @@ class AccessContracts(TransactionTestCase):
         self.token = s.issue_token(self.user.pk)
         self.actor = s.token_context(self.token)
 
+    # BUG: retained catalogue FK оставляет live credentials полномочия после retirement.
+    # HYPOTHESIS: Access проверяет наличие FK, а не public currentness catalogue.
+    # RED: PG16/17 — Denied/NotVisible not raised, retired UUID в token/session scope.
+    # SOLUTION: catalogue владеет currentness queries; Access пересчитывает scope.
+    # RESULT: пять integration currentness checks — PG16/17 5/5 green.
+    # STATUS: FIXED — see #635 / #633 / #634
+    def test_retired_node_revokes_existing_service_token_and_saved_context(self):
+        from _catalog_retirement_cases import retirement_catalog
+        from mop.server.catalog.models import Node, NodeProject
+        self.user.is_superuser = True
+        self.user.save()
+        api = retirement_catalog(self, self.s.Access())
+        values = dict(name='agent', driver='host', ssh_host='agent.example', ssh_port=22,
+            control_origin='https://agent.example', lan_address='agent.example', bootstrap_address='agent.example')
+        node = api.configure_node(self.actor, **values)
+        api.set_node_projects(self.actor, node.id, [self.project.pk], expected_revision=1)
+        token = self.s.enroll_service('agent-service', node.id, project_ids=(self.project.pk,),
+                                    permissions=('catalog.observe_node',))
+        actor = self.s.token_context(token)
+        def authorize():
+            self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(node.id,), project_ids=(self.project.pk,))
+        authorize()
+        api.forget_node(self.actor, node.id, expected_revision=2)
+        self.assertTrue(Node.objects.filter(pk=node.id).exists())
+        replacement = api.configure_node(self.actor, **values)
+        self.assertNotEqual(node.id, replacement.id)
+        self.assertTrue(NodeProject.objects.filter(node_id=node.id).exists())
+        with self.assertRaises(self.s.Denied):
+            self.s.token_context(token)
+        with self.assertRaises(self.s.Denied):
+            self.s.current_actor(actor)
+        with self.assertRaises(self.s.Denied):
+            authorize()
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(replacement.id,))
+
+    def test_retired_project_is_not_an_enrolled_service_scope(self):
+        from _catalog_retirement_cases import retirement_catalog
+        self.user.is_superuser = True
+        self.user.save()
+        api = retirement_catalog(self, self.s.Access())
+        node = api.configure_node(self.actor, name='observer', driver='host', ssh_host='agent.example',
+            ssh_port=22, control_origin='https://agent.example', lan_address='agent.example', bootstrap_address='agent.example')
+        api.set_node_projects(self.actor, node.id, [self.project.pk], expected_revision=1)
+        token = self.s.enroll_service('observer-service', node.id, project_ids=(self.project.pk,),
+                                    permissions=('catalog.observe_node',))
+        actor = self.s.token_context(token)
+        self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(node.id,), project_ids=(self.project.pk,))
+        api.delete_project(self.actor, self.project.pk, expected_revision=1)
+        # Сам узел ещё живой; отозвана только project scope старого UUID.
+        self.assertEqual(self.s.token_context(token), actor)
+        with self.assertRaises(self.s.Denied):
+            self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(node.id,), project_ids=(self.project.pk,))
+        with self.assertRaises((ValueError, self.s.Denied)):
+            self.s.enroll_service('late-observer', node.id, project_ids=(self.project.pk,),
+                                 permissions=('catalog.observe_node',))
+
+    def test_retired_project_filters_live_token_and_browser_scopes_even_for_global_owner(self):
+        from _catalog_retirement_cases import retirement_catalog
+        from mop.server.catalog.models import Project
+        from unittest.mock import patch
+        from django.db import DatabaseError
+        self.user.is_superuser = True
+        self.user.save()
+        client = Client()
+        self.login_browser(client)
+        session = self.s.session_context(client.session.session_key)
+        api = retirement_catalog(self, self.s.Access())
+        for actor in (self.actor, session):
+            self.assertIn(self.project.pk, self.s.visible_project_ids(actor))
+            self.s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
+            self.s.Access().authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
+        api.delete_project(self.actor, self.project.pk, expected_revision=1)
+        replacement = api.register_project(self.actor, self.project.origin)
+        self.assertNotEqual(replacement.id, self.project.pk)
+        self.assertTrue(Project.objects.filter(pk=self.project.pk).exists())
+        for mode in ('superuser', 'all', 'member'):
+            self.user.is_superuser = mode == 'superuser'
+            self.user.save()
+            self.m.AllProjectMembership.objects.filter(user=self.user).delete()
+            if mode == 'all':
+                self.m.AllProjectMembership.objects.create(user=self.user, source=self.source)
+            for actor in (self.s.token_context(self.token), self.s.session_context(client.session.session_key)):
+                with self.subTest(mode=mode, credential=actor.credential_id):
+                    self.assertNotIn(self.project.pk, self.s.visible_project_ids(actor))
+                    for action in ('catalog.view_project', 'catalog.change_project'):
+                        with self.assertRaises(self.s.NotVisible):
+                            self.s.Access().authorize(actor, action, project_ids=(self.project.pk,))
+                    if mode == 'member':
+                        with self.assertRaises(self.s.NotVisible):
+                            self.s.Access().authorize(actor, 'catalog.view_project', project_ids=(replacement.id,))
+        # DB failure не превращается в пустой scope / silent False.
+        with patch('mop.server.catalog.services.m.Project.objects.filter', side_effect=DatabaseError('fixture')):
+            with self.assertRaises(DatabaseError):
+                self.s.Catalog.project_is_current(self.project.pk)
+            with self.assertRaises(DatabaseError):
+                self.s.visible_project_ids(self.actor)
+
+    def test_retired_node_requested_scope_is_not_visible_to_human(self):
+        from _catalog_retirement_cases import retirement_catalog
+        self.user.is_superuser = True
+        self.user.save()
+        api = retirement_catalog(self, self.s.Access())
+        node = api.configure_node(self.actor, name='retired', driver='host', ssh_host='agent.example',
+            ssh_port=22, control_origin='https://agent.example', lan_address='agent.example', bootstrap_address='agent.example')
+        self.s.Access().authorize(self.actor, 'catalog.view_node', node_ids=(node.id,))
+        api.forget_node(self.actor, node.id, expected_revision=1)
+        for action in ('catalog.view_node', 'catalog.change_node'):
+            with self.assertRaises(self.s.NotVisible):
+                self.s.Access().authorize(self.actor, action, node_ids=(node.id,))
+
     def login_browser(self, client):
         # Trusted login endpoint создаёт binding; Client.login обходит этот use case.
         response = client.post('/api/v1/auth/login',

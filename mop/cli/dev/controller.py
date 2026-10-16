@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 16|17] [--check controller|hermetic]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 16|17] [--check controller|hermetic] [--label dotted.test]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -11,6 +11,7 @@ import argparse
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import uuid
@@ -46,7 +47,11 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
     parser.add_argument('--check', choices=('controller', 'hermetic'), default='controller')
+    parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     args = parser.parse_args(argv)
+    if args.label and args.check != 'controller':
+        parser.error('--label requires --check controller')
+    test_script = shlex.join(['python3', f'tests/{args.check}.py', *args.label])
     docker = shutil.which('docker')
     if not docker:
         raise RuntimeError('isolated controller checks require an existing Docker installation')
@@ -105,7 +110,7 @@ def main(argv):
                            '-v', 'mop-controller-fixture-pip:/root/.cache/pip',
                            '-e', 'MOP_TESTS_STRICT=1', '-e', 'MOP_TEST_POSTGRES_HOST=postgres',
                            '-e', f'POSTGRES_MAJOR={args.postgres}',
-                           '-e', f'TESTS=python3 tests/{args.check}.py',
+                           '-e', f'TESTS={test_script}',
                            job['PYTHON_IMAGE'], 'bash', '-euc', setup], check=False).returncode
         except OSError as error:
             failure = f'isolated controller fixture unavailable: {type(error).__name__}'
