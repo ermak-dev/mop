@@ -19,6 +19,8 @@ from django.utils import timezone
 # RESULT: schema, live credential, scope и source projection проверяются реальной БД.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class AuthenticationBoundary(TransactionTestCase):
+    serialized_rollback = True
+
     def test_login_requires_csrf_even_for_anonymous_browser(self):
         response = Client(enforce_csrf_checks=True).post('/api/v1/auth/login',
             {'username': 'human', 'password': 'not-a-real-secret'}, secure=True)
@@ -38,6 +40,8 @@ class AuthenticationBoundary(TransactionTestCase):
 
 
 class AccessContracts(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         # Отсутствующий app — собственный проверяемый red, а не ошибка импорта.
         self.assertTrue(apps.is_installed('mop.server.access'), 'Access schema must be installed')
@@ -187,6 +191,32 @@ class AccessContracts(TransactionTestCase):
         with self.assertRaises(self.s.Denied):
             self.s.session_context(client.session.session_key)
         self.assertFalse(self.m.CredentialBinding.objects.filter(session_id=client.session.session_key).exists())
+
+    # BUG: Access проверял только имя action, игнорируя canonical catalog tuple.
+    # HYPOTHESIS: configure/change/set-limit были альтернативами вместо conjunction.
+    # SOLUTION: evaluator читает единственный ACTION_PERMISSIONS у владельца каталога.
+    def test_catalog_actions_require_every_canonical_permission_and_live_revocation(self):
+        from mop.server.catalog.permissions import ACTION_PERMISSIONS
+        self.m.AllProjectMembership.objects.create(user=self.user, source=self.source)
+        access = self.s.Access()
+        for action, required in ACTION_PERMISSIONS.items():
+            with self.subTest(action=action):
+                self.user.user_permissions.clear()
+                permissions = [Permission.objects.get(content_type__app_label=name.split('.')[0],
+                    codename=name.split('.')[1]) for name in required]
+                self.user.user_permissions.add(*permissions)
+                access.authorize(self.actor, action)
+                for permission in permissions:
+                    self.user.user_permissions.remove(permission)
+                    with self.subTest(missing=permission.codename), self.assertRaises(self.s.Denied):
+                        access.authorize(self.actor, action)
+                    self.user.user_permissions.add(permission)
+                access.authorize(self.actor, action)
+
+    def test_settings_application_permission_has_one_canonical_parent(self):
+        permission = Permission.objects.get(content_type__app_label='catalog',
+            codename='record_settings_application')
+        self.assertEqual(permission.content_type.model, 'installationconfiguration')
 
     def test_action_and_scope_are_independent_and_fresh(self):
         access = self.s.Access()
@@ -550,6 +580,9 @@ class AccessContracts(TransactionTestCase):
         with self.assertRaises(self.s.Denied):
             api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1)
         self.permission('catalog.set_project_limit')
+        with self.assertRaises(self.s.Denied):
+            api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1)
+        self.permission('catalog.configure_project')
         self.assertEqual(api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1).puppet_limit, 2)
 
     def test_catalog_query_cannot_return_private_rows_after_actor_revoked_mid_query(self):

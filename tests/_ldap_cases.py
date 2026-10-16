@@ -157,6 +157,8 @@ class AdapterContracts(SimpleTestCase):
 
 
 class DirectoryIdentityContracts(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         from mop.server.access import models as m
         from mop.server.catalog.models import Project
