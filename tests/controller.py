@@ -6,7 +6,7 @@ from _controller_fixture import main
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv[1:] or ['_operation_cases', '_ldap_cases', '_controller_cases',
+    sys.exit(main(sys.argv[1:] or ['_admin_cases', '_operation_cases', '_ldap_cases', '_controller_cases',
                    '_controller_restore_cases', '_catalog_cases', '_catalog_retirement_cases',
                    '_access_cases', '_secret_cases', '_secret_recovery_cases.SecretRecovery', '_grant_cases',
                    '_execution_cases', '_credential_cases', '_preparation_cases']))
