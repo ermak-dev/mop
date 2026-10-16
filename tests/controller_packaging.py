@@ -67,14 +67,18 @@ class Packaging(unittest.TestCase):
             def check(self, message, condition):
                 self.messages.append(message)
         failure = 'AssertionError: exact failing invariant\n' + '\n'.join('trailer' for _ in range(12))
-        child = Mock(returncode=1)
-        child.communicate.return_value = (failure, None)
+        # Каждый Popen — отдельный ребёнок, в том числе при concurrent drain (#673).
+        def child(*args, **kwargs):
+            process = Mock(returncode=1)
+            process.communicate.return_value = (failure, None)
+            return process
         collector = Collector()
         with patch.object(hermetic, 'hostile_home', return_value=('/fixture', {})), \
                 patch.object(hermetic, 'hostile_repo', return_value='/fixture'), \
                 patch.object(hermetic, 'files', return_value=['/fixture/tests/controller.py']), \
-                patch.object(hermetic.subprocess, 'Popen', return_value=child):
+                patch.object(hermetic.subprocess, 'Popen', side_effect=child):
             hermetic.check_runs(collector)
+        self.assertEqual(len(collector.messages), 2)
         self.assertTrue(all('exact failing invariant' in message for message in collector.messages))
 
     # HYPOTHESIS: setuptools берёт только .py; рабочий source Admin скрывает
