@@ -9,4 +9,4 @@ if __name__ == '__main__':
     sys.exit(main(sys.argv[1:] or ['_build_cases.ImageBuilds', '_operation_cases', '_ldap_cases', '_controller_cases',
                    '_controller_restore_cases', '_catalog_cases', '_catalog_retirement_cases',
                    '_access_cases', '_secret_cases', '_secret_recovery_cases.SecretRecovery', '_grant_cases',
-                   '_execution_cases', '_proxy_usage_cases', '_control_client_cases']))
+                   '_execution_cases', '_proxy_usage_cases', '_control_client_cases', '_projection_cases']))

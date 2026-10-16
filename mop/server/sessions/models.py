@@ -107,8 +107,10 @@ class ReadinessReceipt(ImmutableRecord):
     receipt = models.OneToOneField(ResultReceipt, on_delete=models.PROTECT)
 
 
-# Отдельный leaf позволяет #641/#649 добавлять свою схему без общей миграции.
+# Django регистрирует независимые leaves usage и read projections.
 from .usage_models import UsageSource, UsageReadIntent, UsageEvent, UsageAggregate  # noqa: E402,F401
+from .projection_models import (ProjectionRuntime, ProjectionClock, SourceProducer, ProducerEpoch, SourceObservation,
+                                ProjectSequence, ProjectionEvent, ReadSnapshot)  # noqa: F401,E402
 
 
 class LandingToken(Record):
