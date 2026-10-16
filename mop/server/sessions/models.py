@@ -116,6 +116,11 @@ class ReadinessReceipt(ImmutableRecord):
     receipt = models.OneToOneField(ResultReceipt, on_delete=models.PROTECT)
 
 
+# Django регистрирует отдельный leaf моделей параллельно telemetry/endpoints.
+from .projection_models import (ProjectionRuntime, ProjectionClock, SourceProducer, ProducerEpoch, SourceObservation,
+                                ProjectSequence, ProjectionEvent, ReadSnapshot)  # noqa: F401,E402
+
+
 class LandingToken(Record):
     project = models.OneToOneField('catalog.Project', on_delete=models.PROTECT)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT)

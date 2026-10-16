@@ -495,6 +495,9 @@ def validate_asgi_startup():
     if settings.BOOTSTRAP['role'] not in {'web', 'gateway'}:
         raise RuntimeError('ASGI requires a web/gateway bootstrap, not maintenance credentials')
     maintenance('check')
+    # Смена controller run — startup mutation, не скрытый repair из HTTP GET.
+    from mop.server.sessions.projection_writes import ProjectionWriter
+    ProjectionWriter.begin_run(UUID(installation_snapshot()['epoch']))
 
 
 def serve(host, port, *, hostnames=(), tls_cert=None, tls_key=None):
