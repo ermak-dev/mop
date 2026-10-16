@@ -9,7 +9,10 @@ import copy
 import http.client
 import json
 import re
+import socket
 import ssl
+import threading
+import time
 from typing import Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -112,29 +115,89 @@ class NomadStopScheduler:
     def capabilities(self):
         return (frozenset({'conditional_stop_job','inspect_stop_job'}) if self.body_inspector is not None else frozenset())
 
-    def _request(self, method, path, namespace, body=None, *, all_allocations=False):
+    def _request(self, method, path, namespace, body=None, *, all_allocations=False, deadline=None):
         # Без redirects/proxy/env credentials; один bounded socket на вызов.
+        # Budget ПУБЛИЧНОГО вызова (#680): deadline — monotonic предел всего
+        # observe/stop_job/inspect_stop, а не каждого _request. Каждый новый
+        # вложенный запрос получает только остаток, drip-ответ (каждое socket
+        # ожидание под timeout) прерывается Timer+shutdown, финальная
+        # monotonic проверка закрывает гонку shutdown-против-возврата.
         query = urlencode({'namespace':namespace,'consistent':'true', **({'all':'true'} if all_allocations else {})})
         cls = http.client.HTTPSConnection if self.origin.scheme=='https' else http.client.HTTPConnection
         options = {'context':self._ssl} if cls is http.client.HTTPSConnection else {}
-        connection = cls(self.origin.hostname,self.origin.port,timeout=self.timeout,**options)
+        remaining = self.timeout if deadline is None else deadline-time.monotonic()
+        if remaining <= 0:
+            raise SchedulerUnavailable()
+        connection = cls(self.origin.hostname,self.origin.port,timeout=min(self.timeout,remaining),**options)
+        timer = None
         try:
+            # DNS bounded: резолв hostname вне C-резолвера вызывающего потока.
+            # IP-literal пропускает резолв (getaddrinfo всё равно лезет в файлы),
+            # loopback/localhost валидированы конструктором. connection.host
+            # остаётся hostname: SNI, Host header и проверка сертификата HTTPS
+            # идут по нему; резолв подменяется только в адресе соединения.
+            if re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', self.origin.hostname):
+                resolved = None
+            else:
+                resolved = self._resolve(self.origin.hostname, remaining)
+            if resolved is not None:
+                def dial(address, timeout, source_address=None, _resolved=resolved):
+                    # connect стартует ПОСЛЕ резолва: остаток бюджета, а не
+                    # срезанный на входе timeout, иначе connect жил бы за
+                    # пределами бюджета, пока Timer ещё не заведён.
+                    if deadline is not None:
+                        timeout = min(timeout, deadline - time.monotonic())
+                        if timeout <= 0:
+                            raise SchedulerUnavailable()
+                    return socket.create_connection((_resolved, address[1]), timeout, source_address)
+                connection._create_connection = dial
             raw = None if body is None else json.dumps(body,separators=(',',':')).encode()
-            connection.request(method,path+'?'+query,body=raw,headers={'X-Nomad-Token':self._token,'Content-Type':'application/json'})
+            connection.request(method,path+'?'+query,body=raw,
+                headers={'X-Nomad-Token':self._token,'Content-Type':'application/json'})
+            def abort():
+                # shutdown будит getresponse/read даже при медленном drip body.
+                sock = connection.sock
+                if sock is not None:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+            timer = threading.Timer(max(.001, deadline-time.monotonic() if deadline is not None
+                                         else self.timeout), abort)
+            timer.daemon = True
+            timer.start()
             response = connection.getresponse()
             raw = response.read(1048577)
-            if len(raw)>1048576:
+            if len(raw)>1048576 or (deadline is not None and time.monotonic() >= deadline):
                 raise SchedulerUnavailable()
             if response.status!=200:
                 return response.status, None
             return response.status, json.loads(raw)
         finally:
+            if timer is not None:
+                timer.cancel()
+                timer.join()
             connection.close()
 
-    def _job(self, job):
+    def _resolve(self, hostname, remaining):
+        """getaddrinfo в bounded потоке: медленный резолвер не держит вызов."""
+        outcome = []
+        def run():
+            try:
+                outcome.append(socket.getaddrinfo(hostname,None)[0][4][0])
+            except Exception:
+                outcome.append(None)
+        worker = threading.Thread(target=run,daemon=True)
+        worker.start()
+        worker.join(max(.001,remaining))
+        if worker.is_alive() or not outcome or outcome[0] is None:
+            raise SchedulerUnavailable()
+        return outcome[0]
+
+    def _job(self, job, *, deadline=None):
         if type(job) is not JobPin or job.scheduler_id!=self.scheduler_id:
             raise SchedulerUnavailable()
-        status, value = self._request('GET','/v1/job/'+quote(job.job_id,safe=''),job.namespace)
+        status, value = self._request('GET','/v1/job/'+quote(job.job_id,safe=''),job.namespace,deadline=deadline)
         if (status!=200 or type(value) is not dict or value.get('ID')!=job.job_id
                 or value.get('Namespace')!=job.namespace or type(value.get('JobModifyIndex')) is not int
                 or type(value.get('Meta')) is not dict or type(value.get('Stop')) is not bool
@@ -143,8 +206,10 @@ class NomadStopScheduler:
         return value
 
     def observe(self, job):
+        # Один monotonic budget на весь публичный вызов (#680).
+        budget = time.monotonic() + self.timeout
         try:
-            value = self._job(job)
+            value = self._job(job, deadline=budget)
             if value['Stop'] or 'mop.stop_token' in value['Meta']:
                 raise SchedulerUnavailable()
             return value['JobModifyIndex']
@@ -156,7 +221,8 @@ class NomadStopScheduler:
                 or ticket.not_after <= datetime.now(timezone.utc)):
             return StopProof('failed','conditional-refusal')
         try:
-            value = self._job(ticket.job)
+            budget = time.monotonic() + self.timeout
+            value = self._job(ticket.job, deadline=budget)
             if value['JobModifyIndex']!=ticket.job.modify_index or value['Stop']:
                 return StopProof('failed','conditional-refusal')
             job = copy.deepcopy(value)
@@ -168,25 +234,27 @@ class NomadStopScheduler:
             if ticket.not_after <= datetime.now(timezone.utc):
                 return StopProof('failed','conditional-refusal')
             status, _ = self._request('POST','/v1/jobs',ticket.job.namespace,
-                {'Job':job,'EnforceIndex':True,'JobModifyIndex':ticket.job.modify_index})
+                {'Job':job,'EnforceIndex':True,'JobModifyIndex':ticket.job.modify_index},deadline=budget)
             # Nomad index conflict: атомарно отвергнут именно conditional write.
             if status==409:
                 return StopProof('failed','conditional-refusal')
             if status!=200:
                 return StopProof('unknown','scheduler-uncertain')
-            return self.inspect_stop(ticket)
+            return self.inspect_stop(ticket, deadline=budget)
         except Exception:
             # Ответ мог потеряться после внешнего COMMIT; нельзя повторять POST.
             return StopProof('unknown','scheduler-uncertain')
 
-    def inspect_stop(self, ticket):
+    def inspect_stop(self, ticket, *, deadline=None):
+        # deadline не задан (reconcile) -- свой бюджет этого вызова (#680).
         try:
-            value = self._job(ticket.job)
+            budget = deadline or time.monotonic() + self.timeout
+            value = self._job(ticket.job, deadline=budget)
             if (value['Stop'] is not True or value['JobModifyIndex']<=ticket.job.modify_index
                     or value['Meta'].get('mop.stop_operation')!=str(ticket.operation_id)
                     or value['Meta'].get('mop.stop_token')!=str(ticket.token)):
                 raise SchedulerUnavailable()
-            status, rows = self._request('GET','/v1/job/'+quote(ticket.job.job_id,safe='')+'/allocations',ticket.job.namespace,all_allocations=True)
+            status, rows = self._request('GET','/v1/job/'+quote(ticket.job.job_id,safe='')+'/allocations',ticket.job.namespace,all_allocations=True,deadline=budget)
             # Нет allocations не является physical proof: GC/неполный ответ
             # не доказывает завершение процесса. all=true добавляется ниже.
             if status!=200 or type(rows) is not list or not rows:
@@ -212,7 +280,7 @@ class NomadStopScheduler:
                     or proof.observed_at.utcoffset() is None or not 0 <= (now-proof.observed_at).total_seconds() <= 10):
                 raise SchedulerUnavailable()
             # Повторный consistent job read не позволяет принять смешанную spec.
-            if self._job(ticket.job)!=value:
+            if self._job(ticket.job,deadline=budget)!=value:
                 raise SchedulerUnavailable()
             return StopProof('succeeded','job-quiescent')
         except Exception:
