@@ -93,7 +93,7 @@ def load(path):
     identity = data['installation_id']
     if not isinstance(identity, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', identity):
         raise RuntimeError('bootstrap installation identity is invalid')
-    if not isinstance(data['role'], str) or data['role'] not in {'maintenance', 'web', 'worker', 'gateway'}:
+    if not isinstance(data['role'], str) or data['role'] not in {'maintenance', 'credential', 'web', 'worker', 'gateway'}:
         raise RuntimeError('bootstrap process role is invalid')
     db = data['database']
     required_db = {'ENGINE', 'NAME', 'HOST', 'PORT', 'USER', 'PASSWORD', 'OPTIONS'}
@@ -120,9 +120,11 @@ def load(path):
         if name in opts:
             with _protected_open(opts[name], key=name == 'sslkey'):
                 pass
-    if data['role'] != 'maintenance' and 'root_key' in data:
+    if data['role'] not in {'maintenance', 'credential'} and 'root_key' in data:
         raise RuntimeError('root key must not be supplied to web, worker or gateway')
-    if data['role'] == 'maintenance':
+    if data['role'] == 'credential' and 'django_key' not in data:
+        raise RuntimeError('credential bootstrap Django signing key is required')
+    if data['role'] in {'maintenance', 'credential'}:
         root = private_bytes(data.get('root_key', ''))
         if len(root) < 32:
             raise RuntimeError('bootstrap root key must contain at least 32 bytes')
@@ -139,10 +141,10 @@ def root_digest(bootstrap):
 
 
 def secret_provider(bootstrap, *, installation_id, expected_root_digest, key_id):
-    """Maintenance-композиция; identity/fingerprint берутся из проверенной Installation."""
+    """Credential-композиция; identity/fingerprint берутся из проверенной Installation."""
     from mop.server.secrets.crypto import Keyring, XChaCha20Provider
-    if bootstrap.get('role') != 'maintenance':
-        raise RuntimeError('secret root access requires the maintenance process role')
+    if bootstrap.get('role') != 'credential':
+        raise RuntimeError('secret root access requires the credential process role')
     if type(installation_id) is not str or not re.fullmatch(
             r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', installation_id) or \
             bootstrap.get('installation_id') != installation_id:

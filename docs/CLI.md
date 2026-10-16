@@ -625,7 +625,7 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 16|17] [--check controller|hermetic]: isolated PostgreSQL checks
+mop dev controller [--postgres 16|17] [--check controller|credential_service|hermetic]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -1246,9 +1246,34 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
 Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and
 workers use distinct runtime principals without DDL/role/database creation rights;
-only maintenance can read the encryption root. Django signing material is a
+only maintenance and the isolated credential service receive the root. Secret
+use cases run in `mop server credentials`, never web/worker. Django signing material is a
 separate protected file. Supply secrets in these files, never in CLI arguments.
 Restore requires stopped services and an empty target; no legacy import exists.
+```
+
+#### mop server credentials
+
+```text
+mop server credentials --bootstrap PATH --socket PATH --key-id ID [--peer-uid UID ...]: isolated credential service
+
+Runs only the fresh-install credential process, never deploys or provisions it.
+Bootstrap is an explicit protected file with role credential, its restricted DB
+principal, Django signing trust and encryption-root reference. No secret values
+are accepted in argv. The socket parent must already be service-owned and have
+no other writers. Existing endpoints are refused, never replaced automatically.
+
+  --bootstrap PATH   absolute private controller bootstrap file
+  --socket PATH      absolute Unix socket in a protected service-owned directory
+  --key-id ID        retained root key identifier (must remain stable across restarts)
+  --peer-uid UID     allowed local frontend UID, repeatable; omitted means deny all
+  --socket-group GID optional service group for socket 0660; otherwise mode 0600
+
+SO_PEERCRED and current standard Access token/session credentials are both
+required. Web, worker and gateway do not receive the root. There is no decrypt
+RPC, generic model editing, network listener, schema maintenance or automatic replay.
+Missing real assignment/approval composition refuses issuance, not permission-only
+success. Service identities, DB grants and units are provisioned separately.
 ```
 
 #### mop server deploy

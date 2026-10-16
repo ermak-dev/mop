@@ -697,6 +697,9 @@ class GrantCases(TransactionTestCase):
         from django.test import Client
         browser = Client()
         self.assertTrue(browser.login(username='owner', password='test-only-password'))
+        # Client.login обходит trusted HTTP login hook; fixture обязана явно
+        # создать тот же binding, а не ослаблять production session_context.
+        auth.bind_session(self.user.pk, browser.session.session_key)
         browser_actor = auth.session_context(browser.session.session_key)
         # Старая реализация выбирает первый token binding вместо capability
         # браузера; после logout этот token не должен продолжить его намерение.

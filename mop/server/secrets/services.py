@@ -558,6 +558,9 @@ class SecretStore:
         if len(identities) != 1:
             raise Refused('addressed secret recipient binding mismatch')
         for binding in bindings:
+            # Назначение не заменяет action/scope permission. _selection вызывается
+            # до crypto и повторно под CAS locks после любого provider wait.
+            authorize(self.authorizer, actor, 'deliver_secret', binding.secret, (binding,))
             available(binding.secret)
             if not binding.secret.active_version_id:
                 raise Refused('addressed secret has no active version')

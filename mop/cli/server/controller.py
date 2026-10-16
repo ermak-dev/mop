@@ -19,7 +19,8 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
 Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and
 workers use distinct runtime principals without DDL/role/database creation rights;
-only maintenance can read the encryption root. Django signing material is a
+only maintenance and the isolated credential service receive the root. Secret
+use cases run in `mop server credentials`, never web/worker. Django signing material is a
 separate protected file. Supply secrets in these files, never in CLI arguments.
 Restore requires stopped services and an empty target; no legacy import exists.
 """

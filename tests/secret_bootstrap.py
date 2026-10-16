@@ -2,11 +2,11 @@
 
 HYPOTHESIS: fingerprint корня не является ключом; усечение корня теряет
 энтропию и связывает разные bootstrap с одинаковым префиксом.
-SOLUTION: явная maintenance-композиция с проверкой identity/fingerprint
+SOLUTION: явная credential-композиция с проверкой identity/fingerprint
 и HKDF-SHA256 от всех байтов защищённого корня.
 RESULT: четыре behavioral red на отсутствующую композицию, затем green
 для derivation, повторного чтения, отказов и защищённых файлов.
-STATUS: FIXED — see #637 (maintenance root composition, не runtime delivery)
+STATUS: FIXED — see #637 (credential-only root composition; runtime проверяет отдельный gate)
 """
 import hashlib
 import hmac
@@ -29,7 +29,7 @@ class BootstrapCrypto(unittest.TestCase):
         self.path = Path(self.directory.name) / 'root.key'
         self.root = b'synthetic-root-material-' * 5
         self.write(self.root)
-        self.bootstrap = {'role': 'maintenance', 'installation_id': 'fixture-install',
+        self.bootstrap = {'role': 'credential', 'installation_id': 'fixture-install',
                           'root_key': str(self.path)}
 
     def write(self, root):
@@ -72,11 +72,11 @@ class BootstrapCrypto(unittest.TestCase):
                        {'expected_root_digest': 'invalid'}, {'key_id': '../key'}):
             with self.subTest(params=params), self.assertRaises((RuntimeError, ValueError)):
                 self.provider(**params)
-        for role in ('web', 'worker', 'gateway', 'builder'):
+        for role in ('web', 'worker', 'gateway', 'builder', 'maintenance'):
             self.bootstrap['role'] = role
-            with self.subTest(role=role), self.assertRaisesRegex(RuntimeError, 'maintenance'):
+            with self.subTest(role=role), self.assertRaisesRegex(RuntimeError, 'credential'):
                 self.provider()
-        self.bootstrap['role'] = 'maintenance'
+        self.bootstrap['role'] = 'credential'
         self.write(b'short')
         with self.assertRaisesRegex(RuntimeError, 'root key'):
             self.provider(expected_root_digest=hashlib.sha256(b'short').hexdigest())
