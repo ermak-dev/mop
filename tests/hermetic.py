@@ -65,7 +65,7 @@ HOME = tempfile.mkdtemp(prefix="mop-test-home-")
 # стоят все необязательные библиотеки и пропуску неоткуда взяться.
 STRICT = (os.environ.get("MOP_TESTS_STRICT") or "").lower() in ("1", "yes", "true", "on")
 # Только координата изолированной CI fixture, не bootstrap/credentials установки.
-FIXTURE_NAMES = ('MOP_TEST_POSTGRES_HOST',)
+FIXTURE_NAMES = ('MOP_TEST_POSTGRES_HOST', 'MOP_TEST_NATS_BINARY')
 FIXTURE_ENV = {key: os.environ[key] for key in FIXTURE_NAMES if key in os.environ}
 
 

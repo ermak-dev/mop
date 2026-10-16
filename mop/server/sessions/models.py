@@ -4,6 +4,7 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 from mop.server.catalog.models import Record, ImmutableRecord
+from .terminal_models import TerminalControl, TerminalAttachment  # noqa: F401
 
 
 class Assignment(Record):

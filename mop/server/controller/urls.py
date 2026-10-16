@@ -11,6 +11,7 @@ from .views import Health
 from django.views.decorators.cache import never_cache
 from . import authviews as auth
 from . import machineviews as machine
+from . import terminalviews as terminal
 
 urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
@@ -24,6 +25,8 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/machine/work/result', machine.Result.as_view()),
     path('api/v1/machine/executor/restarted', machine.Restarted.as_view()),
     path('api/v1/machine/facts', machine.Facts.as_view()),
+    path('api/v1/terminal/attachments', terminal.Open.as_view()),
+    path('api/v1/terminal/attachments/<uuid:attachment_id>', terminal.Close.as_view()),
     path('api/v1/identity', auth.Identity.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),

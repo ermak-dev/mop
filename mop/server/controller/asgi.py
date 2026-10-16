@@ -9,20 +9,17 @@ from .runtime import Runtime, configure, validate_asgi_startup
 configure()
 
 
-async def unbound_websocket(scope, receive, send):
-    """До #628 нет WS-авторизации/consumer; не создавать обход Auth."""
-    await send({'type': 'websocket.close', 'code': 4404})
-
-
 class ControllerApplication:
     """HTTP/gateway и adapters имеют одного владельца запуска и остановки."""
-    def __init__(self, *, runtime=None, startup=validate_asgi_startup, http=None, http_limit=16):
+    def __init__(self, *, runtime=None, startup=validate_asgi_startup, http=None, http_limit=16, gateway=None):
         if not 1 <= http_limit <= 16:
             raise ValueError('HTTP concurrency must be within 16 requests')
         self.runtime = runtime or Runtime()
         self.startup = startup
+        from mop.server.realtime.gateway import Gateway
+        self.gateway = gateway or Gateway(runtime=self.runtime)
         self.router = ProtocolTypeRouter({'http': http or get_asgi_application(),
-                                          'websocket': unbound_websocket})
+                                          'websocket': self.gateway})
         self.http_limit = http_limit
         self.active = 0
         self.started = False
@@ -32,6 +29,9 @@ class ControllerApplication:
             await self.lifespan(receive, send)
             return
         if scope['type'] == 'websocket':
+            if not self.started:
+                await send({'type':'websocket.close','code':1013})
+                return
             await self.router(scope, receive, send)
             return
         if not self.started or self.active >= self.http_limit:
@@ -52,6 +52,7 @@ class ControllerApplication:
                 try:
                     await self.runtime.database(self.startup)
                     await self.runtime.start()
+                    await self.gateway.start()
                     self.started = True
                 except Exception as exc:
                     await self.runtime.aclose()
@@ -64,6 +65,7 @@ class ControllerApplication:
                     async with asyncio.timeout(10):
                         while self.active:
                             await asyncio.sleep(.01)
+                        await self.gateway.aclose()
                         await self.runtime.aclose()
                 except Exception as exc:
                     await send({'type': 'lifespan.shutdown.failed', 'message': str(exc)})
