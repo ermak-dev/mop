@@ -25,7 +25,7 @@ from mop.server.secrets.rotation import Effect, Outcome, Observation, FailureRea
 # STATUS: FIXED — see #637; это проверка core, не полная приёмка задачи.
 class Allow:
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
-        if actor != 'trusted':
+        if actor != 'trusted' and not (actor == 'machine' and action == 'secrets.deliver_secret'):
             raise PermissionError('denied')
 
 

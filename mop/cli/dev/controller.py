@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation] [--label dotted.test]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 16|17] [--check controller|credential_service|hermetic|preparation] [--label dotted.test] [--cross-uid]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -6,6 +6,8 @@ an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The snapshot contains tracked and nonignored source,
 not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
+--cross-uid runs only credential_service as root inside the owned container to
+exercise distinct OS peers; the default suite still runs as unprivileged ci.
 """
 import argparse
 import os
@@ -46,11 +48,14 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
-    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation', 'credential_service'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
+    parser.add_argument('--cross-uid', action='store_true')
     args = parser.parse_args(argv)
     if args.label and args.check != 'controller':
         parser.error('--label requires --check controller')
+    if args.cross_uid and args.check != 'credential_service':
+        parser.error('--cross-uid requires --check credential_service')
     test_script = shlex.join(['python3', f'tests/{args.check}.py', *args.label])
     docker = shutil.which('docker')
     if not docker:
@@ -62,6 +67,11 @@ def main(argv):
         ci = yaml.safe_load(stream)
     job = ci['test:py3.12' if args.postgres == '16' else 'controller:pg17']['variables']
     setup = ci['.tests']['variables']['SETUP']['value']
+    if args.cross_uid:
+        command = 'exec su ci -s /bin/bash -c "$TESTS"'
+        if setup.count(command) != 1 or not setup.rstrip().endswith(command):
+            raise RuntimeError('cross-UID fixture requires the declared final ci test command')
+        setup = setup.replace(command, 'exec bash -c "$TESTS"')
     prefix = 'mop-controller-test-' + uuid.uuid4().hex[:16]
     database, worker = prefix + '-db', prefix + '-runner'
     cleanup_errors = []

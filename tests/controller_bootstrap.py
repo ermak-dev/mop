@@ -87,6 +87,20 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'root'):
             load(self.path)
 
+    # HYPOTHESIS: credential runtime нельзя запустить отдельным restricted uid.
+    # STATUS: FIXED — see #637; red — bootstrap process role is invalid.
+    def test_credential_role_requires_protected_root_and_django_trust(self):
+        self.data['role'] = 'credential'
+        self.data['django_key'] = str(self.root)
+        self.write()
+        self.assertEqual(load(self.path)['role'], 'credential')
+        for missing in ('root_key', 'django_key'):
+            old = self.data.pop(missing)
+            self.write()
+            with self.assertRaises(RuntimeError):
+                load(self.path)
+            self.data[missing] = old
+
     def test_port_and_tls_values_are_validated_before_connect(self):
         self.data['database']['PORT'] = 'not-a-port'
         self.write()

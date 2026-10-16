@@ -440,22 +440,22 @@ def client_command(modname):
     """Операторские команды, включая дочерний MCP, без .env установки."""
     return modname.startswith(("mop.cli.core.", "mop.cli.pool.", "mop.cli.node.",
                                "mop.cli.project.", "mop.cli.secret.", "mop.cli.session.")) or \
-        modname in ("mop.cli.service.mcp", "mop.cli.session", "mop.cli.server.controller")
+        modname in ("mop.cli.service.mcp", "mop.cli.session", "mop.cli.server.controller", "mop.cli.server.credentials")
 
 
 def main(argv):
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
-    if argv[:2] == ["server", "controller"]:
-        return run(command("mop.cli.server.controller"), argv[2:])
+    if argv[:2] in (["server", "controller"], ["server", "credentials"]):
+        return run(command("mop.cli.server." + argv[1]), argv[2:])
     # Глобальная опция (#131): сервер для любой команды, с любого места argv.
     from mop.common import context
     try:
         server, argv = context.strip_server(argv)
     except ValueError as e:
         sys.exit(f"mop: {e}")
-    if argv[:2] == ["server", "controller"]:
+    if argv[:2] in (["server", "controller"], ["server", "credentials"]):
         # Старый глобальный selector не должен включать profile/.env пути.
-        print("controller uses its protected bootstrap; --server is not supported", file=sys.stderr)
+        print("controller services use protected bootstrap; --server is not supported", file=sys.stderr)
         return 1
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())
