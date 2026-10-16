@@ -194,7 +194,10 @@ class AccessContracts(TransactionTestCase):
 
     # BUG: Access проверял только имя action, игнорируя canonical catalog tuple.
     # HYPOTHESIS: configure/change/set-limit были альтернативами вместо conjunction.
+    # RED: owned PG16 — девять missing-permission subtests дали Denied not raised.
     # SOLUTION: evaluator читает единственный ACTION_PERMISSIONS у владельца каталога.
+    # RESULT: повторный resolve читает актуальные права для всего canonical tuple.
+    # STATUS: FIXED — see #633
     def test_catalog_actions_require_every_canonical_permission_and_live_revocation(self):
         from mop.server.catalog.permissions import ACTION_PERMISSIONS
         self.m.AllProjectMembership.objects.create(user=self.user, source=self.source)

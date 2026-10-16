@@ -14,7 +14,7 @@ class Migration(migrations.Migration):
             ('enable_node', 'Can enable node'), ('forget_node', 'Can forget node'),
             ('record_node_application', 'Can record node application'), ('observe_node', 'Can observe node')]}),
         migrations.AlterModelOptions(name='installationconfiguration', options={
-            'permissions': [('record_settings_application', 'Can record settings application')]}),
+            'permissions': (('record_settings_application', 'Can record settings application'),)}),
         migrations.AlterModelOptions(name='projectpolicysnapshot', options={
             'permissions': [('pin_project_policy', 'Can pin project policy')]}),
     ]
