@@ -95,7 +95,11 @@ def main(argv):
         if verbose:
             p.log([f"{'ok' if r.returncode == 0 else 'FAILED'}  {TESTS}/{f}  "
                    f"{time.time() - t0:.1f}s"])
+        if r.returncode:
+            p.clear()
+            details, _ = summary([results[-1]])
+            print("\n".join(details[:-1]), flush=True)
     p.clear()
     lines, ok = summary(results)
-    print("\n".join(lines))
+    print(lines[-1], flush=True)
     return 0 if ok else 1
