@@ -3,6 +3,7 @@
 Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
 
   setup --venv PATH             install the declared server extra in a new venv
+  schema [--app NAME] [--write]  offline migration check; --write generates migrations
   check                         Django system checks and schema readiness
   migrate                       apply standard Django migrations
   migrations-check              refuse uncommitted model changes
@@ -15,7 +16,7 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
 
-Every action except setup requires an explicit absolute MOP_CONTROLLER_BOOTSTRAP
+Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and
 workers use distinct runtime principals without DDL/role/database creation rights;
 only maintenance can read the encryption root. Django signing material is a
@@ -31,7 +32,7 @@ import sys
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('setup', 'check', 'migrate', 'migrations-check',
+    parser.add_argument('action', choices=('setup', 'schema', 'check', 'migrate', 'migrations-check',
                         'initialize', 'admin', 'serve', 'worker', 'backup', 'restore'))
     parser.add_argument('--venv')
     parser.add_argument('--username')
@@ -41,7 +42,15 @@ def main(argv):
     parser.add_argument('--hostname', action='append', default=[])
     parser.add_argument('--tls-cert')
     parser.add_argument('--tls-key')
+    parser.add_argument('--app', action='append', default=[], choices=('controller', 'catalog', 'secrets'))
+    parser.add_argument('--write', action='store_true')
     args = parser.parse_args(argv)
+    if args.action == 'schema':
+        from mop.server.controller.schema import migrations
+        output = migrations(apps=args.app, write=args.write)
+        if output:
+            print(output, end='')
+        return 0
     if args.action == 'setup':
         if not args.venv:
             parser.error('setup requires --venv')

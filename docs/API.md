@@ -413,7 +413,14 @@ bundle and require a new approval; they do not change existing digest bytes.
 
 Rotation transitions are `staged -> delivering -> active -> retiring -> retired`,
 with `reconciling` on uncertain delivery/revoke and `failed` only on a known safe
-failure. Activation requires the configured addressed receipts; old credentials
+failure. Confirmed partial application plus proven executor quiescence moves to
+`recovery_required`, preserving the known receipt subset and safe reason. It may
+start explicit `restoring_old -> old_restored -> revoking_new -> compensated`
+steps, never replay the original effect. A partially applied compensation ends
+in `partial` with both original and compensation reasons retained; it does not
+pretend rollback completed. Current authorization, version/incarnation and
+external ownership are rechecked before each recovery effect.
+Activation requires the configured addressed receipts; old credentials
 are not retired merely because a send timed out. Build records pinned inputs,
 affected bodies/resources, per-stage receipts and known prior state before any
 removal. Recovery checks current revision/incarnation before restoring anything.
