@@ -197,6 +197,27 @@ test:py3.12:
         runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
         script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
         self.assertEqual(shlex.split(script), ['python3', 'tests/controller.py', *labels])
+
+    # BUG (#677): launch-файлы проверок -- обычные unittest-модули без Django
+    # labels: DiscoverRunner на 'body_launch' отдаёт _FailedTest, а без своего
+    # --check запускать их в объявленном образе можно только руками, мимо
+    # fixture с её сетью и cleanup.
+    # HYPOTHESIS: конечного --check launch (body_launch + api_body_spec одним
+    # списком, тем же shlex-контрактом, что остальные checks) достаточно.
+    # SOLUTION: отдельный режим в controller; результат -- два имени файла в
+    # TESTS, оба обязательны, без shell-source и без wildcard.
+    # RESULT: режим отказал до реализации (argparse exit 2), затем fixture
+    # несёт оба скрипта; actual run в python:3.12-slim см. отчёт #677.
+    def test_launch_gate_selects_both_finite_check_files_in_owned_fixture(self):
+        import shlex
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, commands = self.invoke(self.source(directory), check='launch')
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
+        self.assertEqual(shlex.split(script), ['python3', 'tests/body_launch.py',
+                                               '&&', 'python3', 'tests/api_body_spec.py'])
+
     def test_runtime_gate_can_be_selected_in_owned_postgres_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
             result, _, commands = self.invoke(self.source(directory), check='controller_runtime')
