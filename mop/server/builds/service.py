@@ -358,6 +358,8 @@ class Builds:
         port = self.image_builder if stage == 'build' else self.node_executor if stage == 'wipe' else self.scheduler
         try:
             result = port.apply(ticket) if fresh else port.inspect(ticket)
+        except (Denied, Refused) as error:
+            result = StageResult('unknown', False, str(error)[:512])
         except Exception as error:
             # Чужой raw exception может содержать ключ/argv; только тип публичен.
             result = StageResult('unknown', False, 'external stage unavailable: '+type(error).__name__)
