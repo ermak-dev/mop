@@ -21,6 +21,14 @@ def _unavailable():
 
 
 class AccessAdminSite(AdminSite):
+    index_template = 'admin/mop/index.html'
+
+    def each_context(self, request):
+        from .admincommon import allowed
+        return {**super().each_context(request),
+                'proxy_panel_url': '/llm/management.html' if request.user.is_authenticated
+                and allowed(request, 'controller.manage_proxy') else None}
+
     def has_permission(self, request):
         if not super().has_permission(request):
             return False

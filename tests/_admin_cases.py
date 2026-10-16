@@ -23,6 +23,16 @@ from mop.server.secrets import models as s
 # Admin hooks допускают обход domain scope и раскрывают защищённые поля.
 # SPEC: реальные POST с устаревшим revision, downgrade, FK и bulk обходами;
 # штатный PostgreSQL, без browser/pool/root inputs.
+# SOLUTION: form revision передаётся Catalog; physical admission отдельно от
+# changeform transaction; защищённая замена идёт через настоящий #669 socket.
+# RED: PG16 — stale POST вернул 302 вместо 409, новые маршруты отсутствовали;
+# PG17 — отдельный regression red для ссылки на независимый gateway.
+# RED: replay после downgrade, recent LogEntry/flash, forged save-as-new,
+# duplicate add и stale CAS при совпавших значениях воспроизведены POST-ами.
+# RESULT: PG16/17 — 34/34 (31 Admin + 3 Auth), включая настоящий worker с
+# контролируемым adapter и защищённый socket без web root provider.
+# Полный strict/native-TLS gate остаётся CI на точном branch SHA.
+# STATUS: FIXED — see #638
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class OperationBackedAdmin(TransactionTestCase):
     serialized_rollback = True
@@ -93,6 +103,44 @@ class OperationBackedAdmin(TransactionTestCase):
         row.refresh_from_db()
         self.assertEqual((row.puppet_limit, row.revision), (3, 3))
 
+    def test_project_limit_form_can_restore_the_supported_unlimited_value(self):
+        self.global_scope()
+        self.allow('catalog.change_project', 'catalog.configure_project', 'catalog.set_project_limit')
+        c.Project.objects.filter(pk=self.project.pk).update(puppet_limit=4)
+        response = self.post(f'/admin/catalog/project/{self.project.pk}/change/',
+                             self.project_form(puppet_limit=''))
+        self.assertEqual(response.status_code, 302)
+        self.project.refresh_from_db()
+        self.assertEqual((self.project.puppet_limit, self.project.revision), (None, 2))
+
+    def test_forged_save_as_new_cannot_turn_stale_change_into_fresh_add(self):
+        self.global_scope()
+        self.allow('catalog.add_project', 'catalog.change_project', 'catalog.configure_project', 'catalog.set_project_limit')
+        c.Project.objects.filter(pk=self.project.pk).update(revision=2, puppet_limit=7)
+        response = self.post(f'/admin/catalog/project/{self.project.pk}/change/',
+            {**self.project_form(), '_saveasnew': 'Save as new'})
+        self.assertEqual(response.status_code, 403)
+        self.project.refresh_from_db()
+        self.assertEqual((self.project.revision, self.project.puppet_limit), (2, 7))
+
+    def test_duplicate_add_is_not_a_revision_free_update_of_an_existing_project(self):
+        self.global_scope()
+        self.allow('catalog.add_project', 'catalog.change_project', 'catalog.configure_project', 'catalog.set_project_limit')
+        c.Project.objects.filter(pk=self.project.pk).update(revision=2, puppet_limit=7)
+        response = self.post('/admin/catalog/project/add/', {'origin': self.project.origin,
+            'puppet_limit': '4', '_save': 'Save'})
+        self.assertEqual(response.status_code, 409)
+        self.project.refresh_from_db()
+        self.assertEqual((self.project.revision, self.project.puppet_limit), (2, 7))
+
+    def test_matching_fresh_values_do_not_erase_the_submitted_stale_revision(self):
+        self.global_scope()
+        self.allow('catalog.change_project', 'catalog.configure_project', 'catalog.set_project_limit')
+        c.Project.objects.filter(pk=self.project.pk).update(revision=2, puppet_limit=4)
+        response = self.post(f'/admin/catalog/project/{self.project.pk}/change/', self.project_form())
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(LogEntry.objects.filter(object_id=str(self.project.pk)).exists())
+
     def test_staff_without_domain_permission_and_post_downgrade_are_denied(self):
         self.global_scope()
         self.allow('catalog.change_project', 'catalog.configure_project', 'catalog.set_project_limit')
@@ -157,6 +205,34 @@ class OperationBackedAdmin(TransactionTestCase):
         self.assertEqual(tuple(row.nodeproject_set.values_list('project_id', flat=True)), (self.project.pk,))
         self.assertEqual(o.Operation.objects.count(), 0)
 
+    def test_node_edit_uses_the_submitted_catalogue_revision(self):
+        self.global_scope()
+        self.allow('catalog.view_node', 'catalog.change_node', 'catalog.configure_node')
+        node = self.node()
+        url = f'/admin/catalog/node/{node.pk}/change/'
+        self.assertEqual(self.get(url).status_code, 200)
+        c.Node.objects.filter(pk=node.pk).update(revision=2)
+        response = self.post(url, {'name': node.name, 'driver': 'host', 'ssh_host': 'changed.invalid',
+            'ssh_port': '22', 'control_origin': node.control_origin, 'lan_address': node.lan_address,
+            'bootstrap_address': node.bootstrap_address, 'expected_revision': '1', '_save': 'Save'})
+        self.assertEqual(response.status_code, 409)
+        node.refresh_from_db()
+        self.assertEqual((node.ssh_host, node.revision), ('node.invalid', 2))
+
+    def test_node_settings_use_settings_revision_and_do_not_apply_node_state(self):
+        self.global_scope()
+        self.allow('catalog.view_node', 'catalog.view_nodesetting', 'catalog.change_nodesetting', 'catalog.configure_node')
+        node = self.node()
+        c.Node.objects.filter(pk=node.pk).update(revision=8)
+        url = '/admin/catalog/nodesetting/configure/?node=' + str(node.pk)
+        response = self.post(url, {'node': str(node.pk), 'expected_revision': '1', 'log_level': 'warning'})
+        self.assertEqual(response.status_code, 302)
+        node.refresh_from_db()
+        self.assertEqual((node.revision, node.settings_revision, node.settings_applied_revision), (8, 2, None))
+        self.assertEqual(c.NodeSetting.objects.get(node=node, key='log_level').text_value, 'warning')
+        self.assertEqual(self.post(url, {'node': str(node.pk), 'expected_revision': '1', 'log_level': 'error'}).status_code, 409)
+        self.assertFalse(o.Operation.objects.exists())
+
     def test_typed_settings_save_is_desired_revision_only_and_stale_is_conflict(self):
         self.global_scope()
         self.allow('catalog.view_installationsetting', 'catalog.change_installationsetting')
@@ -220,7 +296,7 @@ class OperationBackedAdmin(TransactionTestCase):
 
     def test_registered_node_action_uses_actual_operation_admission_and_replay(self):
         self.global_scope()
-        self.allow('catalog.view_node', 'catalog.drain_node', 'operations.view_operation')
+        self.allow('catalog.view_node', 'catalog.drain_node', 'catalog.enable_node', 'operations.view_operation')
         node = self.node()
         Installation.objects.update(effects_enabled=True)
         url = f'/admin/catalog/node/{node.pk}/actions/drain/'
@@ -241,6 +317,70 @@ class OperationBackedAdmin(TransactionTestCase):
         self.assertEqual(operation.state, 'accepted')
         self.assertEqual(o.AuditEvent.objects.count(), 1)
         self.assertEqual(o.OutboxEvent.objects.count(), 1)
+        # Binding fixture подкреплён настоящим #625 Worker, не fake submit.
+        # Контролируемый внешний adapter запускается только после HTTP ответа.
+        from asgiref.sync import async_to_sync
+        from mop.server.controller.runtime import Runtime, operations_service
+        from mop.server.operations.worker import Worker
+        token = access.enroll_service('admin-node-executor', node.pk, project_ids=(),
+            permissions=('catalog.record_node_application', 'catalog.observe_node'))
+        executor = access.token_context(token)
+        calls = []
+        class NodeExecutor:
+            async def set_eligibility(inner, claim):
+                calls.append(claim)
+                return True
+        async def consume():
+            runtime = Runtime(database_limit=2, queue_limit=0)
+            worker = Worker(runtime, operations_service(executor=executor), NodeExecutor())
+            try:
+                await worker.run_one(operation.pk)
+            finally:
+                await runtime.aclose()
+        async_to_sync(consume)()
+        operation.refresh_from_db()
+        node.refresh_from_db()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(operation.state, 'succeeded')
+        self.assertEqual((node.revision, node.desired_eligible, node.observed_eligible), (2, False, False))
+        self.assertEqual(o.EffectReceipt.objects.count(), 1)
+        with patch('mop.server.controller.adminservices.node_actions', return_value=('drain', 'enable')):
+            response = self.post(f'/admin/catalog/node/{node.pk}/actions/enable/',
+                {**data, 'expected_revision': '2', 'request_id': str(uuid4())})
+            self.assertEqual(response.status_code, 302)
+        operation = o.Operation.objects.exclude(pk=operation.pk).get()
+        self.assertEqual((operation.action, operation.eligible, operation.state), ('enable', True, 'accepted'))
+        node.refresh_from_db()
+        self.assertFalse(node.observed_eligible)
+        async_to_sync(consume)()
+        operation.refresh_from_db()
+        node.refresh_from_db()
+        self.assertEqual((operation.state, node.revision, node.observed_eligible), ('succeeded', 3, True))
+        self.assertEqual(o.EffectReceipt.objects.count(), 2)
+
+    def test_replay_after_action_downgrade_uses_common_query_authority_not_a_new_admin_gate(self):
+        self.global_scope()
+        self.allow('catalog.view_node', 'catalog.drain_node', 'operations.view_operation')
+        node = self.node()
+        Installation.objects.update(effects_enabled=True)
+        url = f'/admin/catalog/node/{node.pk}/actions/drain/'
+        data = {'expected_revision': '1', 'request_id': str(uuid4()), 'epoch': str(self.installation.epoch),
+                'not_after': (timezone.now()+timedelta(minutes=2)).isoformat()}
+        with patch('mop.server.controller.adminservices.node_actions', return_value=('drain', 'enable')):
+            first = self.post(url, data)
+            self.assertEqual(first.status_code, 302)
+            self.user.user_permissions.remove(*Permission.objects.filter(content_type__app_label='catalog',
+                codename__in=('drain_node', 'view_node')))
+            response = self.post(url, data)
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response['Location'], first['Location'])
+            rest = self.client.post(f'/api/v1/nodes/{node.pk}/commands/drain',
+                {'schema_version': 1, **data, 'params': {}}, content_type='application/json', secure=True)
+            self.assertEqual(rest.status_code, 202)
+            self.assertEqual(rest.json()['operation']['id'], str(o.Operation.objects.get().pk))
+            self.assertEqual(self.post(url, {**data, 'request_id': str(uuid4())}).status_code, 403)
+        self.assertEqual(o.Operation.objects.count(), 1)
+        self.assertEqual(o.AuditEvent.objects.count(), 1)
 
     def test_secret_metadata_and_replacement_never_echo_or_log_bytes(self):
         self.allow('secrets.view_secret_metadata', 'secrets.manage_project_secret')
@@ -284,7 +424,9 @@ class OperationBackedAdmin(TransactionTestCase):
                 item = await asyncio.to_thread(client.create, auth, project_id=self.project.pk,
                     name='REPLACE_TOKEN', kind='variable', purpose='project', value=b'synthetic-old-secret')
                 url = f'/admin/secrets/secret/{item.id}/replace/'
-                with patch('mop.server.controller.adminservices.credential_client', return_value=client):
+                with patch('mop.server.controller.adminservices.credential_client', return_value=client), \
+                     patch('mop.server.controller.bootstrap.secret_provider',
+                           side_effect=AssertionError('web must not construct a root provider')):
                     response = await asyncio.to_thread(self.post, url, {'value': marker, 'expected_revision': '1'})
                 self.assertEqual(response.status_code, 302)
                 self.secret_id = item.id
@@ -317,7 +459,7 @@ class OperationBackedAdmin(TransactionTestCase):
         self.global_scope()
         self.allow('auth.view_user', 'auth.change_user')
         node = self.node()
-        access.enroll_service('machine', node.pk, project_ids=(), permissions=())
+        access.enroll_service('machine', node.pk, project_ids=(), permissions=('catalog.observe_node',))
         target = get_user_model().objects.get(username='machine')
         url = f'/admin/auth/user/{target.pk}/change/'
         response = self.post(url, {'username': 'machine', 'is_staff': 'on', 'is_superuser': 'on', '_save': 'Save'})
@@ -336,8 +478,83 @@ class OperationBackedAdmin(TransactionTestCase):
         self.assertNotContains(self.get('/admin/catalog/project/'), self.project.origin)
         self.assertEqual(self.get('/admin/catalog/node/').context['cl'].result_count, 0)
 
+    def test_secret_foreign_scope_is_filtered_for_list_count_detail_and_replacement(self):
+        self.allow('secrets.view_secret_metadata', 'secrets.manage_project_secret')
+        own = s.Secret.objects.create(installation=self.installation, project=self.project,
+            kind='variable', name='OWN_TOKEN', purpose='project')
+        foreign = s.Secret.objects.create(installation=self.installation, project=self.foreign,
+            kind='variable', name='FOREIGN_TOKEN', purpose='project')
+        response = self.get('/admin/secrets/secret/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['cl'].result_count, 1)
+        self.assertNotContains(response, foreign.name)
+        for verb in ('change', 'replace'):
+            response = self.get(f'/admin/secrets/secret/{foreign.pk}/{verb}/')
+            self.assertIn(response.status_code, (302, 404))
+        a.ProjectMembership.objects.filter(user=self.user).delete()
+        self.assertEqual(self.get('/admin/secrets/secret/').context['cl'].result_count, 0)
+        response = self.post(f'/admin/secrets/secret/{own.pk}/replace/',
+            {'value': 'private-rejected-value', 'expected_revision': '1'})
+        self.assertEqual(response.status_code, 404)
+        own.refresh_from_db()
+        self.assertEqual(own.last_number, 0)
+
+    def test_node_settings_target_is_rechecked_after_permission_downgrade(self):
+        self.global_scope()
+        self.allow('catalog.view_node', 'catalog.view_nodesetting', 'catalog.change_nodesetting', 'catalog.configure_node')
+        node = self.node()
+        url = '/admin/catalog/nodesetting/configure/?node=' + str(node.pk)
+        self.assertEqual(self.get(url).status_code, 200)
+        self.user.user_permissions.clear()
+        self.assertEqual(self.post(url, {'expected_revision': '1', 'node': str(node.pk), 'log_level': 'warning'}).status_code, 403)
+        self.assertFalse(c.NodeSetting.objects.exists())
+
+    def test_catalogue_validation_reason_is_not_sanitized_a_second_time(self):
+        self.global_scope()
+        self.allow('catalog.add_node', 'catalog.view_node', 'catalog.change_node', 'catalog.configure_node')
+        # ABANDONED: invalid driver останавливает ModelForm constraint, не Catalog.
+        # Host path проходит CharField и проверяется именно публичным Catalog.
+        response = self.post('/admin/catalog/node/add/', {'name': 'invalid', 'driver': 'host',
+            'ssh_host': 'node.invalid/path', 'ssh_port': '22', 'control_origin': 'https://node.invalid',
+            'lan_address': 'node.invalid', 'bootstrap_address': 'node.invalid', '_save': 'Save'})
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, 'invalid node address', status_code=400)
+        self.assertFalse(c.Node.objects.exists())
+
+    def test_safe_secret_storage_failure_keeps_its_reason_in_html(self):
+        from mop.server.secrets.services import StorageUnavailable
+        self.allow('secrets.view_secret_metadata', 'secrets.manage_project_secret')
+        secret = s.Secret.objects.create(installation=self.installation, project=self.project,
+            kind='variable', name='UNAVAILABLE_TOKEN', purpose='project')
+        with patch('mop.server.secrets.services.SecretStore.metadata',
+                   side_effect=StorageUnavailable('secret storage is unavailable; maintenance required')):
+            response = self.post(f'/admin/secrets/secret/{secret.pk}/replace/',
+                                 {'value': 'do-not-echo-638', 'expected_revision': '1'})
+        self.assertEqual(response.status_code, 503)
+        self.assertContains(response, 'secret storage is unavailable; maintenance required', status_code=503)
+        self.assertNotContains(response, 'do-not-echo-638', status_code=503)
+
     def test_gateway_permissions_are_real_model_metadata_and_token_admin_stays_absent(self):
         from rest_framework.authtoken.models import Token, TokenProxy
         self.assertTrue(Permission.objects.filter(content_type__app_label='controller', codename='manage_proxy').exists())
         self.assertFalse(admin.site.is_registered(Token))
         self.assertFalse(admin.site.is_registered(TokenProxy))
+
+    def test_admin_recent_log_sidebar_cannot_bypass_current_project_scope(self):
+        self.global_scope()
+        self.allow('catalog.change_project', 'catalog.configure_project', 'catalog.set_project_limit')
+        response = self.post(f'/admin/catalog/project/{self.project.pk}/change/', self.project_form())
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(LogEntry.objects.filter(object_id=str(self.project.pk)).exists())
+        a.AllProjectMembership.objects.filter(user=self.user).delete()
+        a.ProjectMembership.objects.filter(user=self.user).delete()
+        self.assertNotContains(self.get('/admin/'), str(self.project.pk))
+
+    def test_authorized_admin_index_links_separate_management_gateway(self):
+        self.global_scope()
+        self.allow('controller.manage_proxy')
+        response = self.get('/admin/')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '/llm/management.html')
+        self.user.user_permissions.clear()
+        self.assertNotContains(self.get('/admin/'), '/llm/management.html')
