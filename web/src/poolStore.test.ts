@@ -8,7 +8,7 @@ import {
   type Context, type Entity, type PoolState, type ReadQuery,
 } from './poolStore';
 
-const context: Context = { server: 'https://controller', user: 'u1', scope: 'p1', authorization: 'a1', target: 'p' };
+const context: Context = { server: 'https://controller', user: 'u1', scope: 'p1', authorization: 'a1', credentialGeneration: 'session-1', target: 'p' };
 const puppet = (revision = '1', incarnation = 'i1', id = 'p'): Entity =>
   ({ kind: 'puppet', id, incarnation, revision, data: { name: id, facts: { fresh: true } } });
 const operation = (revision = '1', status = 'accepted'): Entity => ({
@@ -30,6 +30,51 @@ function snapshot(state: PoolState) {
 }
 
 describe('versioned pool core #627', () => {
+  // HYPOTHESIS: одинаковые user/permissions не означают ту же credential;
+  // серверный next cursor может зациклить конечный fetch-loop без page budget.
+  // SOLUTION: credential generation — часть auth scope; visited cursors/page cap.
+  // RESULT: четыре behavioral red до исправления, затем green.
+  // STATUS: FIXED — see #627; это core boundary, не приёмка browser migration.
+  it('credential generation change clears private entities and pending commands before late logout-era HTTP', () => {
+    const request = beginRead(read(initial(), [puppet(), operation()]), { type: 'detail' });
+    let state = reducePool(request.state, { type: 'track', requestId: 'lost-before-login' });
+    const changedCredential = { ...context, credentialGeneration: 'new-django-session' };
+    state = reducePool(state, { type: 'context', context: changedCredential, epoch: 'e1' });
+    expect(state.entities).toEqual({});
+    expect(recoveryRequests(state)).toEqual([]);
+    const cleared = state;
+    state = reducePool(state, { type: 'rest', token: request.token, epoch: 'e1', rows: [puppet('9')] });
+    expect(state).toBe(cleared);
+  });
+
+  it.each([['a', 'a'], ['a', 'b', 'a']])('rejects cyclic snapshot continuation %s instead of an unbounded HTTP loop', (...cursors) => {
+    let state = initial();
+    let req = snapshot(state);
+    state = reducePool(req.state, { type: 'rest', token: req.token, epoch: 'e1', rows: [],
+      page: { snapshotId: 's', cursor: 'watermark', next: cursors[0] } });
+    for (let i = 1; i < cursors.length; i++) {
+      req = beginRead(state, { type: 'snapshot', kind: 'puppet', snapshotId: 's', cursor: cursors[i - 1] });
+      state = reducePool(req.state, { type: 'rest', token: req.token, epoch: 'e1', rows: [],
+        page: { snapshotId: 's', cursor: 'watermark', next: cursors[i] } });
+    }
+    expect(state.resync).toBe('snapshot_mismatch');
+    expect(state.entities).toEqual({});
+  });
+
+  it('bounds snapshot pages even when server invents a fresh opaque continuation on every empty page', () => {
+    // Структурный тип допускает будущий budget без import/setup failure.
+    const limits = { maxPages: 2 };
+    let state = createPoolState(context, 'e1', limits);
+    const first = snapshot(state);
+    state = reducePool(first.state, { type: 'rest', token: first.token, epoch: 'e1', rows: [],
+      page: { snapshotId: 's', cursor: 'watermark', next: 'a' } });
+    const second = beginRead(state, { type: 'snapshot', kind: 'puppet', snapshotId: 's', cursor: 'a' });
+    state = reducePool(second.state, { type: 'rest', token: second.token, epoch: 'e1', rows: [],
+      page: { snapshotId: 's', cursor: 'watermark', next: 'b' } });
+    expect(state.resync).toBe('overflow');
+    expect(state.connection.stale).toBe(true);
+  });
+
   it('fences stale connection errors, reset instructions and abandoned reads', () => {
     const request = beginRead(initial(), { type: 'detail' });
     let state = reducePool(request.state, { type: 'context', context: { ...context, user: 'other' }, epoch: 'e1' });

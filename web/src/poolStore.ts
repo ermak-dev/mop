@@ -15,6 +15,8 @@ export interface Context {
   readonly user: string;
   readonly scope: string;
   readonly authorization: string;
+  // Публичный opaque generation, не cookie/token и не credential bytes.
+  readonly credentialGeneration: string;
   readonly target: string;
 }
 export interface Identity {
@@ -46,6 +48,7 @@ export interface Limits {
   readonly maxEvents: number;
   readonly maxInvalidations: number;
   readonly maxReads: number;
+  readonly maxPages: number;
 }
 export type ResetReason = 'cursor_unknown' | 'cursor_expired' | 'gap' | 'overflow' |
   'epoch_mismatch' | 'version_conflict' | 'invalid_revision' | 'snapshot_mismatch' | 'context_changed';
@@ -65,6 +68,8 @@ export interface Collection {
   readonly complete: boolean;
   readonly ids: readonly string[];
   readonly accumulated: readonly string[];
+  readonly pages: number;
+  readonly continuations: readonly string[];
 }
 export interface PoolState {
   readonly context: Context;
@@ -112,14 +117,15 @@ function without<T>(values: Readonly<Record<string, T>>, key: string): Record<st
   return copy;
 }
 export function createPoolState(context: Context, epoch: string, limits: Partial<Limits> = {}): PoolState {
-  const bounds = { maxEvents: 512, maxInvalidations: 512, maxReads: 64, ...limits };
+  const bounds = { maxEvents: 512, maxInvalidations: 512, maxReads: 64, maxPages: 100, ...limits };
   if (Object.values(bounds).some(n => !Number.isSafeInteger(n) || n < 1)) throw new Error('Invalid store limits');
   return freeze({ context: { ...context }, epoch, generation: 1, clock: 0,
     entities: {}, collections: {}, requests: {}, pending: {}, eventIds: [], limits: bounds,
     resync: null, connection: { status: 'disconnected', stale: true } });
 }
 function sameAuth(a: Context, b: Context): boolean {
-  return a.server === b.server && a.user === b.user && a.scope === b.scope && a.authorization === b.authorization;
+  return a.server === b.server && a.user === b.user && a.scope === b.scope &&
+    a.authorization === b.authorization && a.credentialGeneration === b.credentialGeneration;
 }
 function reset(state: PoolState, reason: ResetReason, context = state.context, epoch = state.epoch): PoolState {
   // Только request_id переживает пересинхронизацию в том же auth scope.
@@ -143,7 +149,7 @@ export function beginRead(state: PoolState, query: ReadQuery): { state: PoolStat
       snapshotGeneration = id;
       collections = { ...collections, [query.kind]: {
         generation: id, started: state.clock, complete: false,
-        ids: previous?.ids ?? [], accumulated: [],
+        ids: previous?.ids ?? [], accumulated: [], pages: 0, continuations: [],
       } };
     } else snapshotGeneration = previous?.generation;
   }
@@ -223,6 +229,10 @@ function applyRest(state: PoolState, action: Extract<Action, { type: 'rest' }>):
     if (!action.page || (collection.snapshotId !== undefined && action.page.snapshotId !== collection.snapshotId) ||
         (collection.cursor !== undefined && action.page.cursor !== collection.cursor) ||
         action.rows.some(row => row.kind !== query.kind)) return reset(next, 'snapshot_mismatch');
+    if (action.page.next !== null && (action.page.next === query.cursor || collection.continuations.includes(action.page.next))) {
+      return reset(next, 'snapshot_mismatch');
+    }
+    if (collection.pages + 1 >= state.limits.maxPages && action.page.next !== null) return reset(next, 'overflow');
   }
   for (const row of action.rows) {
     next = reconcile(next, row, row, token.id);
@@ -238,7 +248,8 @@ function applyRest(state: PoolState, action: Extract<Action, { type: 'rest' }>):
       .filter(key => !next.entities[key]?.head.deleted);
     next = { ...next, collections: { ...next.collections, [query.kind]: {
       ...collection, snapshotId: action.page.snapshotId, cursor: action.page.cursor,
-      next: action.page.next, complete, ids, accumulated,
+      next: action.page.next, complete, ids, accumulated, pages: collection.pages + 1,
+      continuations: action.page.next === null ? collection.continuations : [...collection.continuations, action.page.next],
     } } };
   }
   return freeze(next);
