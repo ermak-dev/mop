@@ -215,13 +215,11 @@ def check_group(c):
 
 
 def check_pipeline_yaml(c):
-    """#525: одна джоба тестов (3.12), деплой без py3.13 в needs.
-
-    До #525 тесты ходили на 3.12 (машина оператора) и 3.13 (сервер и узлы,
-    Debian 13). 3.13 избыточна: оба образа гоняют один и тот же tests/
-    поверх одного deps.PIP, и код уже годы пишется под нижнюю границу --
-    вторая джоба удваивает время пайплайна, не ловя ничего своего. Остаток
-    в коммите.
+    """#525 убрал дубликат Python-only прогона. #632 добавляет отдельную
+    семантику PostgreSQL 17; deploy ждёт оба backend gate, а не только 3.12.
+    HYPOTHESIS: зелёные 3.12/web разрешают rollout до завершения PG17.
+    SOLUTION: PG17 — обязательный needs и полный строгий прогон.
+    STATUS: FIXED — see #632
     """
     import yaml
 
@@ -237,7 +235,8 @@ def check_pipeline_yaml(c):
     c.check("#525 the py3.12 test job stays",
             "test:py3.12" in ci and "extends" in (ci.get("test:py3.12") or {}), ci.get("test:py3.12"))
     needs = (ci.get("deploy:mop") or {}).get("needs")
-    c.expect("#525 deploy needs the survivors only", needs, ["test:py3.12", "web:dist"])
+    c.expect("#632 deploy needs both PostgreSQL gates and the dashboard", needs,
+             ["test:py3.12", "controller:pg17", "web:dist"])
 
 
 def main():

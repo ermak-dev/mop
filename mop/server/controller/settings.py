@@ -37,8 +37,11 @@ from psycopg import IsolationLevel
 
 # Ресурсные пределы foundation: предметные настройки позднее владеет Catalog.
 # Пул общий для процесса, а не отдельный пул на каждый ASGI request/thread.
+CONTROLLER_DB_TIMEOUT = 5
+CONTROLLER_TRANSACTION_TIMEOUT = 10
 DATABASES = {'default': {
-    **BOOTSTRAP['database'], 'CONN_MAX_AGE': 0, 'ATOMIC_REQUESTS': False,
+    **BOOTSTRAP['database'], 'ENGINE': 'mop.server.controller.postgresql',
+    'CONN_MAX_AGE': 0, 'ATOMIC_REQUESTS': False,
     'CONN_HEALTH_CHECKS': True,
     'OPTIONS': {**BOOTSTRAP['database']['OPTIONS'],
                 'connect_timeout': 5,

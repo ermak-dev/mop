@@ -8,8 +8,7 @@ import subprocess
 import tempfile
 import uuid
 
-from django.conf import settings
-from django.db import connections, transaction
+from django.db import connections
 
 
 def _private_path(path, *, exists):
@@ -51,8 +50,8 @@ def _tool_environment(config):
         yield env
 
 
-def _tool(tool, config, *, major, input=None, output=None, extra=()):
-    if config['ENGINE'] != 'django.db.backends.postgresql':
+def _tool(tool, config, *, major, input=None, output=None, extra=(), database=True):
+    if config['ENGINE'] not in {'django.db.backends.postgresql', 'mop.server.controller.postgresql'}:
         raise RuntimeError('backup/restore is supported only for PostgreSQL')
     try:
         version = subprocess.run([tool, '--version'], capture_output=True, timeout=5, check=True)
@@ -61,8 +60,10 @@ def _tool(tool, config, *, major, input=None, output=None, extra=()):
     match = re.search(rb'\b(\d+)\.', version.stdout)
     if not match or int(match[1]) != major:
         raise RuntimeError(f'PostgreSQL {major} {tool} is required; configure matching client tools')
-    argv = [tool, '--host', config['HOST'], '--port', config['PORT'],
-            '--username', config['USER'], '--dbname', config['NAME'], *extra]
+    argv = [tool, '--host', config['HOST'], '--port', config['PORT'], '--username', config['USER']]
+    if database:
+        argv += ['--dbname', config['NAME']]
+    argv += extra
     try:
         with _tool_environment(config) as env:
             result = subprocess.run(argv, stdin=input, stdout=output or subprocess.PIPE,
@@ -77,14 +78,23 @@ def _tool(tool, config, *, major, input=None, output=None, extra=()):
             reason = reason.replace(secret, '[redacted]')
         reason = ' '.join(reason.split())[:600]
         raise RuntimeError(f'PostgreSQL {tool} failed: {reason or result.returncode}')
+    return result.stdout
+
+
+def _require_autocommit(connection, operation):
+    if connection.in_atomic_block or not connection.get_autocommit():
+        raise RuntimeError(f'{operation} requires autocommit outside application transactions')
 
 
 def backup(path, using='default'):
     from .runtime import _maintenance_role, verify_installation
+    from .models import RestoreGuard
     _maintenance_role()
+    connection = connections[using]
+    _require_autocommit(connection, 'backup')
     verify_installation(using)
     path = _private_path(path, exists=False)
-    config = connections[using].settings_dict
+    config = connection.settings_dict
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
@@ -92,7 +102,8 @@ def backup(path, using='default'):
     try:
         with os.fdopen(fd, 'wb') as output:
             _tool('pg_dump', config, major=connections[using].pg_version // 10000,
-                  output=output, extra=('--format=custom', '--no-owner', '--no-acl'))
+                  output=output, extra=('--format=custom', '--no-owner', '--no-acl',
+                                        '--exclude-table=public.' + RestoreGuard._meta.db_table))
             output.flush()
             os.fsync(output.fileno())
     except BaseException:
@@ -102,27 +113,129 @@ def backup(path, using='default'):
     return {'file': str(path), 'root_key_included': False}
 
 
+def _arm_restore(using):
+    """Пустой target получает штатную схему; arm коммитится до archive I/O."""
+    import io
+    from django.apps import apps
+    from django.core.management import call_command
+    from django.db.migrations.recorder import MigrationRecorder
+    from .models import RestoreGuard
+    from .runtime import _guard_row, _schema_ready, short_transaction
+    connection = connections[using]
+    if not connection.introspection.table_names():
+        output = io.StringIO()
+        call_command('migrate', database=using, interactive=False, verbosity=0,
+                     stdout=output, stderr=output)
+    _schema_ready(using)
+    known = set(connection.introspection.django_table_names()) | {MigrationRecorder.Migration._meta.db_table}
+    if set(connection.introspection.table_names()) - known:
+        raise RuntimeError('restore requires an empty controller target without unrelated tables')
+    with short_transaction(using):
+        guard = _guard_row(using, lock=True)
+        if guard.state != 'uninitialized':
+            raise RuntimeError('restore requires an empty target with an uninitialized restore guard')
+        # Только штатные metadata seeds допустимы в заранее migrated target.
+        for model in apps.get_models(include_auto_created=True):
+            if model in (RestoreGuard,) or model._meta.label_lower in {'auth.permission', 'contenttypes.contenttype'}:
+                continue
+            if model._default_manager.using(using).exists():
+                raise RuntimeError('restore requires an empty target database and stopped services')
+        guard.generation = uuid.uuid4()
+        guard.state = 'restoring'
+        guard.save(using=using, update_fields=['generation', 'state'])
+    return guard.generation
+
+
+def _migration_history(script):
+    """Читаем только COPY штатного ledger из pg_restore, не исполняем SQL."""
+    match = re.search(rb'^COPY public\.django_migrations \(id, app, name, applied\) FROM stdin;\n(.*?)^\\\.\s*$',
+                      script, re.MULTILINE | re.DOTALL)
+    if not match:
+        raise RuntimeError('backup schema migration history is missing or unsupported')
+    rows = set()
+    for line in match[1].splitlines():
+        columns = line.split(b'\t')
+        if len(columns) != 4 or not columns[0].isdigit() or any(
+                not re.fullmatch(rb'[A-Za-z0-9_]+', value) for value in columns[1:3]):
+            raise RuntimeError('backup schema migration history is malformed')
+        row = tuple(value.decode('ascii') for value in columns[1:3])
+        if row in rows:
+            raise RuntimeError('backup schema migration history contains duplicates')
+        rows.add(row)
+    return rows
+
+
+def _archive_plan(source, connection):
+    """Guard и public schema не попадают под archive DROP/CREATE или data load."""
+    from django.db.migrations.recorder import MigrationRecorder
+    from .models import RestoreGuard
+    config, major = connection.settings_dict, connection.pg_version // 10000
+    def inspect(extra):
+        source.seek(0)
+        return _tool('pg_restore', config, major=major, input=source, extra=extra, database=False)
+    toc = inspect(('--list',))
+    guard = RestoreGuard._meta.db_table.encode('ascii').lower()
+    table_entry = re.compile(
+        rb'^\d+;\s+\d+\s+\d+\s+(?:TABLE DATA|FK CONSTRAINT|CONSTRAINT|DEFAULT|TRIGGER|RULE|POLICY|TABLE)'
+        rb'\s+\S+\s+("[^"]*"|\S+)(?:\s|$)')
+    for line in toc.splitlines():
+        entry = table_entry.match(line)
+        if entry and entry[1].strip(b'"').lower() == guard:
+            raise RuntimeError('backup contains forbidden restore guard entries')
+    schema = inspect(('--schema-only', '--file=-', '--no-owner', '--no-acl'))
+    if guard in schema.lower():
+        raise RuntimeError('backup schema references the forbidden restore guard')
+    history = _migration_history(inspect(('--data-only', '--table=django_migrations', '--file=-')))
+    expected = set(MigrationRecorder(connection).migration_qs.values_list('app', 'name'))
+    if history != expected:
+        raise RuntimeError('backup schema migration history does not match the controller')
+    plan = []
+    for line in toc.splitlines(keepends=True):
+        if re.match(rb'^\d+;\s+\d+\s+\d+\s+DATABASE\b', line):
+            raise RuntimeError('backup must not contain database creation entries')
+        if re.match(rb'^\d+;\s+\d+\s+\d+\s+SCHEMA\b', line):
+            if not re.match(rb'^\d+;\s+\d+\s+\d+\s+SCHEMA\s+-\s+public\s', line):
+                raise RuntimeError('backup contains an unsupported schema')
+            continue
+        plan.append(line)
+    return b''.join(plan)
+
+
 def restore(path, using='default'):
-    from .runtime import _maintenance_role, verify_installation
+    from .runtime import _maintenance_role, _guard_row, _verify_installation_state, short_transaction
     from .models import Installation
     _maintenance_role()
     connection = connections[using]
-    if connection.introspection.table_names():
-        raise RuntimeError('restore requires an empty target database and stopped services')
+    _require_autocommit(connection, 'restore')
     path = _private_path(path, exists=True)
+    generation = _arm_restore(using)
+    # После arm никакой finally не объявляет target готовым: даже SystemExit,
+    # потеря COMMIT reply и авария процесса должны оставлять durable fence.
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, 'rb') as source:
+    with os.fdopen(fd, 'rb') as source, tempfile.TemporaryDirectory(prefix='mop-restore-plan-') as directory:
+        plan = Path(directory) / 'archive.list'
+        plan.write_bytes(_archive_plan(source, connection))
+        source.seek(0)
         _tool('pg_restore', connection.settings_dict, major=connection.pg_version // 10000, input=source,
-              extra=('--single-transaction', '--exit-on-error', '--no-owner', '--no-acl'))
-    try:
-        verify_installation(using)
-    except Exception:
-        # Не включаем dispatcher при несовпадении schema/identity/root.
-        # Частичную/непроверенную БД оператор не принимает за чистую установку.
-        raise
-    with transaction.atomic(using=using):
+              extra=('--single-transaction', '--exit-on-error', '--no-owner', '--no-acl',
+                     '--clean', '--if-exists', '--use-list=' + str(plan)))
+    with short_transaction(using):
+        guard = _guard_row(using, lock=True)
+        if guard.state != 'restoring' or guard.generation != generation:
+            raise RuntimeError('restore guard generation changed during restore')
         row = Installation.objects.using(using).select_for_update().get(pk=1)
         row.epoch = uuid.uuid4()
         row.effects_enabled = False
         row.save(using=using, update_fields=['epoch', 'effects_enabled'])
+    # Root-файл и schema loader читаются без SQL locks; guard ещё dirty.
+    _verify_installation_state(using)
+    with short_transaction(using):
+        guard = _guard_row(using, lock=True)
+        current = Installation.objects.using(using).select_for_update().get(pk=1)
+        if guard.state != 'restoring' or guard.generation != generation:
+            raise RuntimeError('restore guard generation changed before completion')
+        if current.epoch != row.epoch or current.effects_enabled:
+            raise RuntimeError('restored installation fence changed before completion')
+        guard.state = 'ready'
+        guard.save(using=using, update_fields=['state'])
     return {'epoch': str(row.epoch), 'effects_enabled': False}
