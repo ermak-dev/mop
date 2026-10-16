@@ -536,7 +536,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     return target, ActionInput('Fixture','fixture@example.test','hello ; $(no-shell)')
             async def authorize(): pass
             gate = EffectGuard(authorize, lambda: None)
-            adapter = LocalExecutor(runner, Resolver())
+            class Replacement:
+                async def confirmed(self, work, target): return False
+            adapter = LocalExecutor(runner, Resolver(), replacement=Replacement())
             try:
                 self.assertEqual(await adapter.execute(work, gate), ('succeeded','identity-applied'))
                 self.assertEqual((await runner.run(('git','-C',str(root/'repo'),'config','user.email'))).strip(),
@@ -589,8 +591,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         class Resolver:
             async def resolve(self, value): return target, ActionInput('Owner','owner@example.test','message')
         class Runner:
-            async def run(self, argv, *, before_spawn):
+            async def run(self, argv, *, before_spawn, final_check):
                 await before_spawn()
+                final_check()
                 effects.append(argv)
                 return ''
             async def aclose(self): pass
@@ -598,7 +601,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             nonlocal checks
             checks += 1
             if checks == 2: raise Refused('generation changed')
-        adapter = LocalExecutor(Runner(), Resolver())
+        class Sender:
+            async def send(self, *args): raise AssertionError('revoked work sent a message')
+            async def aclose(self): pass
+        adapter = LocalExecutor(Runner(), Resolver(), sender=Sender())
         with self.assertRaisesRegex(Refused, 'generation changed'):
             await adapter.execute(work, EffectGuard(authorize, lambda: None))
         self.assertEqual(len(effects), 1)
@@ -619,7 +625,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             class Runner:
                 async def run(self, argv, **kwargs):
                     await kwargs['before_spawn']()
+                    kwargs['final_check']()
                     calls.append(tuple(argv))
+                    if argv[-2] == 'var':
+                        return 'Owner <owner@example.test> 1 +0000\n'
                     return ''
                 async def aclose(self): pass
             async def authorize(): calls.append('gate')

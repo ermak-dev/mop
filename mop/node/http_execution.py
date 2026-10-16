@@ -25,15 +25,29 @@ class Unavailable(RuntimeError):
 ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready'))
 EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered',
     'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
-FACT_FIELDS = {
-    'states': {'running', 'dirty', 'session_count'},
-    'clone': {'clean', 'branch', 'untracked', 'modified'},
-    'sizes': {'bytes'},
-    'usage': {'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'},
-    'disk': {'free_bytes', 'total_bytes'},
-    'junk': {'candidate_count', 'bytes', 'inventory_complete'},
-    'health': {'healthy', 'latency_ms'},
+FACT_TYPES = {
+    'states': dict(running=bool, dirty=bool, session_count=int),
+    'clone': dict(clean=bool, branch=str, untracked=int, modified=int),
+    'sizes': dict(bytes=int),
+    'usage': dict(input_tokens=int, output_tokens=int, cache_read_tokens=int, cache_write_tokens=int),
+    'disk': dict(free_bytes=int, total_bytes=int),
+    'junk': dict(candidate_count=int, bytes=int, inventory_complete=bool),
+    'health': dict(healthy=bool, latency_ms=int),
 }
+FACT_FIELDS = {kind: set(fields) for kind, fields in FACT_TYPES.items()}
+
+
+def validate_fact_values(kind, values, *, partial=False):
+    # bool — подкласс int, поэтому только точный type; 0 и False не взаимозаменяемы.
+    if (type(values) is not dict or set(values) - FACT_FIELDS[kind]
+            or not partial and set(values) != FACT_FIELDS[kind]):
+        raise Refused('incomplete finite fact schema')
+    for field, value in values.items():
+        expected = FACT_TYPES[kind][field]
+        if (type(value) is not expected
+                or expected is int and not 0 <= value < 2**63
+                or expected is str and (len(value) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in value))):
+            raise Refused('invalid typed fact value')
 
 
 def uuid(value):
@@ -265,14 +279,10 @@ class MachineClient:
             counter(item['sequence'])
             if not stamp(item['observed_at']) <= stamp(item['received_at']) <= datetime.now(timezone.utc):
                 raise Refused('invalid fact timestamp')
-            if (item['state'] not in ('fresh', 'stale', 'unavailable') or type(item['values']) is not dict
-                    or set(item['values']) - FACT_FIELDS[kind]):
-                raise Refused('invalid named facts')
-            for field in item['values'].values():
-                if (type(field) not in (int, str, bool, type(None))
-                        or type(field) is int and not 0 <= field < 2**63
-                        or type(field) is str and (len(field) > 256 or any(ord(c) < 32 for c in field))):
-                    raise Refused('invalid fact value')
+            if (item['state'] not in ('fresh', 'stale', 'unavailable')
+                    or value['complete'] and item['state'] != 'fresh'):
+                raise Refused('invalid named facts or incomplete observation')
+            validate_fact_values(kind, item['values'], partial=item['state'] != 'fresh')
         return value
 
     async def aclose(self):

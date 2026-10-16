@@ -96,7 +96,7 @@ class ProcessRunner:
     def active(self):
         return len(self._processes)
 
-    async def run(self, argv, *, before_spawn=None):
+    async def run(self, argv, *, before_spawn=None, final_check=None):
         if self._closed:
             raise Unavailable('subprocess executor closed')
         async with self._slots:
@@ -108,7 +108,7 @@ class ProcessRunner:
                 raise Unavailable('subprocess executor closed')
             # create_subprocess_exec может уже породить child до своего return.
             # Отмена caller не должна потерять единственного владельца process handle.
-            spawn = asyncio.create_task(self._spawn(argv))
+            spawn = asyncio.create_task(self._spawn(argv, final_check))
             self._spawns.add(spawn)
             try:
                 process = await asyncio.shield(spawn)
@@ -138,7 +138,13 @@ class ProcessRunner:
                 await self._reap(process)
                 self._processes.discard(process)
 
-    async def _spawn(self, argv):
+    async def _spawn(self, argv, final_check):
+        # Admission/rebind уже завершились, но create_task уступил event loop.
+        # Последний синхронный gate исполняется владельцем child, без нового yield.
+        if self._closed:
+            raise Unavailable('subprocess executor closed before spawn')
+        if final_check is not None:
+            final_check()
         process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         self._processes.add(process)
@@ -183,12 +189,22 @@ class UnixSessionSender:
         self._writers = set()
         self._closed = False
 
-    async def send(self, target, inputs, before_send):
-        from mop import session
-        if (target.session_socket is None or not target.session_socket.is_absolute()
+    def preflight(self, target, inputs):
+        if (self._closed or not isinstance(target.session_socket, Path)
+                or not target.session_socket.is_absolute()
                 or type(inputs.peer_token) is not str or not 1 <= len(inputs.peer_token) <= 4096):
             raise Unavailable('addressed session channel and peer credential unavailable')
         inputs.check('send_message')
+        try:
+            available = target.session_socket.is_socket()
+        except OSError as error:
+            raise Unavailable('addressed session channel unavailable') from error
+        if not available:
+            raise Unavailable('addressed session channel unavailable')
+
+    async def send(self, target, inputs, before_send):
+        from mop import session
+        self.preflight(target, inputs)
         writer = None
         try:
             async with asyncio.timeout(self.timeout):
@@ -270,9 +286,18 @@ class LocalExecutor:
         if type(guard) is not EffectGuard:
             raise Refused('effect guard required')
 
+        # Заведомо неподдерживаемое действие не получает частичный внешний эффект.
+        # Наличие port не обещает успех: его неподтверждённый ответ остаётся unknown.
+        if work.action == 'restart_session' and self.replacement is None:
+            raise Unavailable('session replacement confirmation source unavailable')
+        if work.action == 'send_message':
+            preflight = getattr(self.sender, 'preflight', None)
+            if preflight is not None:
+                preflight(target, inputs)
+
         async def before_spawn():
-            # Semaphore уже взят. После HTTP перечитываем physical mapping, затем
-            # проверяем local deadline/epoch без await до create_subprocess_exec.
+            # Semaphore уже взят. После HTTP перечитываем physical mapping.
+            # Отдельный final_check внутри spawn закрывает scheduling gap.
             await guard()
             current, current_input = await self._bound(work)
             if current != target or current_input != inputs:
@@ -280,15 +305,24 @@ class LocalExecutor:
             guard.check()
 
         async def effect(argv):
-            return await self.runner.run(argv, before_spawn=before_spawn)
+            return await self.runner.run(argv, before_spawn=before_spawn, final_check=guard.check)
 
-        git = ('git', '-C', str(target.clone), 'config', '--local')
+        git = ('git', '-C', str(target.clone))
         tmux = ('tmux', '-S', str(target.tmux_socket))
         if work.action in ('apply_identity', 'send_message'):
             # Никакого rollback: поздний отказ не пишет identity новой generation.
-            await effect((*git, 'user.name', inputs.git_name))
-            await effect((*git, 'user.email', inputs.git_email))
-            await effect((*git, 'user.useConfigOnly', 'true'))
+            # --worktree совпадает с --local без extensions.worktreeConfig;
+            # с extension меняет только адресованное дерево, не соседние worktrees.
+            config = (*git, 'config', '--worktree')
+            await effect((*config, 'user.name', inputs.git_name))
+            await effect((*config, 'user.email', inputs.git_email))
+            await effect((*config, 'user.useConfigOnly', 'true'))
+            # Успех записи не доказывает effective identity (include/env/normalization).
+            expected = f'{inputs.git_name} <{inputs.git_email}> '
+            for variable in ('GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT'):
+                identity = await effect((*git, 'var', variable))
+                if not identity.startswith(expected):
+                    raise Refused('effective Git identity does not match confirmed profile')
             if work.action == 'apply_identity':
                 return 'succeeded', 'identity-applied'
             return await self.sender.send(target, inputs, before_spawn)

@@ -11,7 +11,7 @@ from typing import Protocol
 import time
 
 from mop.node.execution_adapters import BoundTarget, ProcessRunner
-from mop.node.http_execution import FACT_FIELDS, Refused, Unavailable, uuid
+from mop.node.http_execution import FACT_FIELDS, Refused, Unavailable, uuid, validate_fact_values
 
 
 @dataclass(frozen=True)
@@ -91,13 +91,10 @@ class LocalFacts:
 
     @staticmethod
     def _validate(kind, values):
-        if type(values) is not dict or set(values) != FACT_FIELDS[kind]:
-            raise Unavailable('incomplete finite fact source')
-        for value in values.values():
-            if (type(value) not in (int, str, bool)
-                    or type(value) is int and not 0 <= value < 2**63
-                    or type(value) is str and (len(value) > 256 or any(ord(c) < 32 for c in value))):
-                raise Unavailable('invalid finite fact source')
+        try:
+            validate_fact_values(kind, values)
+        except Refused as error:
+            raise Unavailable(str(error)) from error
 
     async def _values(self, kind, target):
         git = ('git', '-C', str(target.clone))
