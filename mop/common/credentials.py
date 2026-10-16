@@ -1,6 +1,7 @@
 """Конечный credential use-case протокол. Только stdlib, без ключей/ORM/crypto RPC."""
 import base64
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 import json
 import os
@@ -26,6 +27,13 @@ class Command(str, Enum):
     ADDRESSED = 'issue_addressed'
     ROTATION = 'issue_rotation'
     BUNDLE = 'read_bundle'
+    PUBLISH_BUNDLE = 'publish_bundle'
+    APPROVE_BUNDLE = 'approve_bundle'
+    RESERVE_GRANT = 'reserve_grant'
+    PROVISION_GRANT = 'provision_grant'
+    PUBLISH_PREPARATION = 'publish_preparation'
+    READ_PREPARATION = 'read_preparation'
+    APPROVE_PREPARATION = 'approve_preparation'
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,13 +82,63 @@ class DeliveredSecret:
 
 
 @dataclass(frozen=True, slots=True)
+class BundleInfo:
+    id: UUID
+    role: str
+    digest: str
+    project_id: UUID
+    owner_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class BundleBytes:
     id: UUID
     role: str
     digest: str
     manifest: bytes = field(repr=False)
     prompt: bytes = field(repr=False)
-    provenance: str
+    provenance: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationInfo:
+    id: UUID
+    project_id: UUID
+    owner_id: int
+    number: int
+    content_version_id: UUID
+    digest: str
+    task_size: int
+    vars_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationBytes:
+    tasks: bytes = field(repr=False)
+    variables: bytes = field(repr=False)
+    provenance: str = field(repr=False)
+    commit: str
+    secret_refs: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalReceipt:
+    id: UUID
+    revision_id: UUID
+    human_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class GrantReceipt:
+    id: UUID
+    project_id: UUID
+    target_id: UUID
+    incarnation: UUID
+    role: str
+    digest: str
+    state: str
+    revision: int
+    credential_version_id: UUID | None
 
 
 def identifier(value):
@@ -130,6 +188,27 @@ def _text(value, limit):
     return value
 
 
+def identifiers(value):
+    if type(value) is not list or len(value) > 128:
+        raise CredentialError('bounded secret reference list required')
+    result = tuple(identifier(item) for item in value)
+    if len(set(result)) != len(result):
+        raise CredentialError('unique secret references required')
+    return result
+
+
+def instant(value):
+    if type(value) is not str or len(value) > 40:
+        raise CredentialError('canonical UTC grant expiry required')
+    try:
+        result = datetime.fromisoformat(value)
+    except ValueError:
+        raise CredentialError('canonical UTC grant expiry required') from None
+    if result.utcoffset() != timezone.utc.utcoffset(result) or result.isoformat() != value:
+        raise CredentialError('canonical UTC grant expiry required')
+    return result
+
+
 def parse_request(data):
     exact(data, ('version', 'auth', 'command', 'args'))
     if type(data['version']) is not int or data['version'] != 1:
@@ -145,20 +224,33 @@ def parse_request(data):
               Command.STAGE: ('secret_id', 'value', 'expected_revision'),
               Command.UPDATE: ('secret_id', 'value', 'expected_revision'),
               Command.ADDRESSED: (), Command.ROTATION: ('rotation_id', 'claim_id', 'generation'),
-              Command.BUNDLE: ('bundle_id',)}
+              Command.BUNDLE: ('bundle_id',),
+              Command.PUBLISH_BUNDLE: ('project_id', 'manifest', 'prompt', 'provenance'),
+              Command.APPROVE_BUNDLE: ('bundle_id',),
+              Command.RESERVE_GRANT: ('project_id', 'bundle_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),
+              Command.PROVISION_GRANT: ('grant_id', 'expected_revision'),
+              Command.PUBLISH_PREPARATION: ('project_id', 'tasks', 'variables', 'provenance', 'commit', 'secret_refs'),
+              Command.READ_PREPARATION: ('revision_id',), Command.APPROVE_PREPARATION: ('revision_id',)}
     exact(args, shapes[command])
     result = dict(args)
-    for name in ('project_id', 'secret_id', 'rotation_id', 'claim_id', 'bundle_id'):
+    for name in ('project_id', 'secret_id', 'rotation_id', 'claim_id', 'bundle_id',
+                 'grant_id', 'revision_id', 'target_id', 'incarnation', 'request_id'):
         if name in result:
-            result[name] = None if name == 'project_id' and result[name] is None else identifier(result[name])
+            optional = command is Command.CREATE and name == 'project_id' and result[name] is None
+            result[name] = None if optional else identifier(result[name])
     for name in ('expected_revision', 'generation'):
         if name in result:
             result[name] = counter(result[name])
-    for name, limit in (('name', 256), ('kind', 32), ('purpose', 32)):
+    for name, limit in (('name', 256), ('kind', 32), ('purpose', 32), ('provenance', 4096), ('commit', 64)):
         if name in result:
             result[name] = _text(result[name], limit)
-    if 'value' in result:
-        result['value'] = binary(result['value'])
+    for name in ('value', 'manifest', 'prompt', 'tasks', 'variables'):
+        if name in result:
+            result[name] = binary(result[name])
+    if 'secret_refs' in result:
+        result['secret_refs'] = identifiers(result['secret_refs'])
+    if 'expires_at' in result:
+        result['expires_at'] = instant(result['expires_at'])
     return auth, command, result
 
 

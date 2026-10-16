@@ -39,7 +39,7 @@ class CredentialSocketCases(TransactionTestCase):
         self.assertIsNotNone(importlib.util.find_spec('mop.server.controller.credentials'),
                              'isolated credential application service is missing')
         from mop.server.controller import credentials as service
-        from mop.client.credentials import CredentialClient
+        from mop.common.credential_client import CredentialClient
         from mop.common.credentials import Credential, CredentialError
         from mop.server.access import models as m, services as access
         from mop.server.catalog.models import Project
@@ -162,6 +162,54 @@ class CredentialSocketCases(TransactionTestCase):
                 await asyncio.to_thread(client.issue_addressed, self.auth)
         self.run_socket(body)
 
+    def test_distinct_frontend_uid_uses_only_group_protected_socket(self):
+        if os.geteuid() != 0:
+            self.skipTest('distinct UID fixture requires owned root container')
+        import sys
+        from mop.server.controller.runtime import Runtime
+        shared = tempfile.TemporaryDirectory(prefix='mop-credential-crossuid-', dir='/tmp')
+        self.addCleanup(shared.cleanup)
+        self.path = str(Path(shared.name) / 'credential.sock')
+        os.chmod(shared.name, 0o750)
+        code = '''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from mop.common.credential_client import CredentialClient
+from mop.common.credentials import Credential
+from uuid import UUID
+payload = json.loads(sys.stdin.read())
+assert os.geteuid() == 65534
+client = CredentialClient(payload['path'], server_uid=0)
+item = client.create(Credential('token', payload['token']), project_id=UUID(payload['project']),
+    name='DISTINCT_UID', kind='variable', purpose='project', value=b'uid-fixture')
+assert not any(name.startswith(('django', 'mop.server', 'nacl')) for name in sys.modules)
+print(item.revision)
+'''
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            app = self.service.application()
+        async def run():
+            runtime = Runtime(queue_limit=0)
+            server = self.service.CredentialService(self.path, application=app, runtime=runtime,
+                allowed_uids=(65534,), socket_group=os.getegid())
+            await server.start()
+            try:
+                process = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', code,
+                    str(Path(__file__).resolve().parents[1]), user=65534, group=os.getegid(), extra_groups=(),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    env={key: value for key, value in os.environ.items() if not key.startswith(('MOP_', 'DJANGO_'))})
+                payload = json.dumps({'path': self.path, 'token': self.token, 'project': str(self.project.id)}).encode()
+                async with asyncio.timeout(8):
+                    output, error = await process.communicate(payload)
+                self.assertEqual(process.returncode, 0, error.decode())
+                self.assertEqual(output.strip(), b'1')
+                client = self.Client(self.path, server_uid=0)
+                with self.assertRaises(self.Error):
+                    await asyncio.to_thread(self.create, client)
+            finally:
+                await server.aclose()
+                await runtime.aclose()
+        async_to_sync(run)()
+
     def test_peer_uid_is_default_deny_and_client_verifies_server_uid(self):
         async def body(client, server):
             with self.assertRaises(self.Error):
@@ -233,6 +281,20 @@ class CredentialSocketCases(TransactionTestCase):
                 await other.aclose()
         self.run_socket(body)
 
+    def test_grant_callback_in_sql_uses_public_local_authority_not_crypto_chain(self):
+        from dataclasses import replace
+        import uuid
+        from django.db import transaction
+        from mop.server.access.context import PrincipalKind
+        actor = replace(self.access.token_context(self.token), kind=PrincipalKind.GRANT,
+            grant_id=uuid.uuid4(), human_owner_id=self.user.pk)
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            app = self.service.application()
+        with transaction.atomic():
+            with self.assertRaises(self.access.NotVisible):
+                self.service.CurrentAccess(app).authorize(actor, 'secrets.manage_project_secret',
+                    project_ids=(self.project.id,))
+
     def test_exact_delivery_port_cannot_bypass_secret_authorizer(self):
         import uuid
         from mop.server.secrets import services as s
@@ -261,7 +323,7 @@ class CredentialSocketCases(TransactionTestCase):
         code = '''
 import json, sys
 sys.path.insert(0, sys.argv[1])
-from mop.client.credentials import CredentialClient
+from mop.common.credential_client import CredentialClient
 from mop.common.credentials import Credential
 payload = json.loads(sys.stdin.read())
 from uuid import UUID
@@ -286,6 +348,112 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             self.assertNotIn(b'child-private', output + error)
         self.run_socket(body)
 
+    # HYPOTHESIS: rootless web не может publish exact role bytes без своего provider.
+    # SOLUTION: отдельный typed publish_bundle handler вызывает owner Grants целиком.
+    # RESULT: socket дал missing publish_bundle; затем exact bytes roundtrip green.
+    # Дополнительный red: смена root оставляла bundle после отказа; local grant
+    # callback входил в crypto chain под atomic. Оба исправлены, PG16 socket green.
+    # STATUS: FIXED — see #669.
+    def test_rootless_publish_bundle_retains_exact_bytes_and_rechecks_authority(self):
+        from mop.server.access.models import RoleBundle
+        for code in ('approve_role', 'view_role'):
+            self.user.user_permissions.add(Permission.objects.get(content_type__app_label='access', codename=code))
+        manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
+        async def body(client, server):
+            result = await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+                manifest=manifest, prompt=b'rootless private prompt', provenance='rootless-fixture')
+            self.assertEqual(result.project_id, self.project.id)
+            self.assertEqual(result.owner_id, self.user.pk)
+            content = await asyncio.to_thread(client.read_bundle, self.auth, result.id)
+            self.assertEqual(content.manifest, manifest)
+            self.assertEqual(content.prompt, b'rootless private prompt')
+            self.assertEqual(content.digest, result.digest)
+            await server.runtime.database(self.user.user_permissions.clear)
+            with self.assertRaises(self.Error):
+                await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+                    manifest=manifest, prompt=b'new denied prompt', provenance='rootless-fixture')
+        self.run_socket(body)
+        self.assertEqual(RoleBundle.objects.count(), 1)
+
+    def test_bundle_publication_cannot_commit_after_root_changes_during_crypto(self):
+        from mop.server.controller.models import Installation
+        from mop.server.access.models import RoleBundle
+        from mop.server.secrets.crypto import XChaCha20Provider, Keyring
+        real = XChaCha20Provider(Keyring('old', {'old': b'q' * 32}))
+        for code in ('approve_role', 'view_role'):
+            self.user.user_permissions.add(Permission.objects.get(content_type__app_label='access', codename=code))
+        class Rekeying:
+            def encrypt(inner, value, context):
+                self.assertFalse(connection.in_atomic_block)
+                encrypted = real.encrypt(value, context)
+                Installation.objects.filter(pk=1).update(root_digest='0' * 64)
+                return encrypted
+        manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
+        async def body(client, server):
+            with self.assertRaises(self.Error):
+                await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+                    manifest=manifest, prompt=b'must not persist', provenance='fixture')
+        self.run_socket(body, provider=Rekeying())
+        self.assertFalse(RoleBundle.objects.exists(), 'root change was detected only after aggregate commit')
+
+    # HYPOTHESIS: web без root не может сохранить exact Preparation bytes или
+    # выдать intent с настоящим approval; чужой owner в JSON не является proof.
+    # SOLUTION: finite aggregate commands, Preparation.approval_query и live Access.
+    # RED: PG16 missing publish_preparation; PG17 safe grant conflict был заменён
+    # generic unknown. Fixture projection live ORM исправлена отдельно, не red.
+    # RESULT: PG17 — 29 socket checks green, включая actual distinct UID.
+    # STATUS: FIXED — see #669 (stage: bytes/approval/reservation; binding всё ещё deny).
+    def test_rootless_preparation_bytes_and_real_policy_backed_grant_reservation(self):
+        from datetime import timedelta
+        import uuid
+        from django.utils import timezone
+        from mop.server.preparation.models import BootstrapRevision
+        from django.contrib.contenttypes.models import ContentType
+        content_type, _ = ContentType.objects.get_or_create(app_label='sessions', model='credential_fixture')
+        Permission.objects.get_or_create(content_type=content_type, codename='create_puppet')
+        for action in ('access.approve_role', 'access.view_role', 'access.issue_grant',
+                       'sessions.create_puppet', 'preparation.approve_bootstrap'):
+            app_label, code = action.split('.')
+            self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app_label, codename=code))
+        manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
+        async def body(client, server):
+            revision = await asyncio.to_thread(client.publish_preparation, self.auth,
+                project_id=self.project.id, tasks=b'- debug: msg=hello\r\n', variables=b'private: value\n',
+                provenance='git:fixture', commit='a' * 40, secret_refs=())
+            content = await asyncio.to_thread(client.read_preparation, self.auth, revision.id)
+            self.assertEqual(content.tasks, b'- debug: msg=hello\r\n')
+            self.assertEqual(content.variables, b'private: value\n')
+            self.assertNotIn('private: value', repr(content))
+            approval = await asyncio.to_thread(client.approve_preparation, self.auth, revision.id)
+            bundle = await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+                manifest=manifest, prompt=b'private role prompt', provenance='fixture')
+            await asyncio.to_thread(client.approve_bundle, self.auth, bundle.id)
+            target_id, incarnation = uuid.uuid4(), uuid.uuid4()
+            reserved = await asyncio.to_thread(client.reserve_grant, self.auth, project_id=self.project.id,
+                bundle_id=bundle.id, target_id=target_id, incarnation=incarnation, request_id=uuid.uuid4(),
+                expires_at=timezone.now() + timedelta(hours=1))
+            self.assertEqual((reserved.project_id, reserved.target_id, reserved.incarnation),
+                (self.project.id, target_id, incarnation))
+            self.assertEqual(reserved.state, 'reserved')
+            with self.assertRaisesRegex(self.Error, 'grant revision changed'):
+                await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
+                    expected_revision=reserved.revision + 1)
+            # Это не production provision acceptance: пока concrete #639 query не
+            # связана, реальный owner обязан отказать, а не принять fake None.
+            with self.assertRaisesRegex(self.Error, 'binding.*not bound'):
+                await asyncio.to_thread(client.provision_grant, self.auth, reserved.id,
+                    expected_revision=reserved.revision)
+            row = await server.runtime.database(lambda: BootstrapRevision.objects.values(
+                'content_version_id', 'digest').get(pk=revision.id))
+            from mop.server.access.models import Grant
+            proof = await server.runtime.database(lambda: Grant.objects.values('intent__policy_approval_id',
+                'intent__policy_version_id', 'intent__policy_digest', 'credential_version_id').get(pk=reserved.id))
+            self.assertEqual(proof['intent__policy_approval_id'], approval.id)
+            self.assertEqual(proof['intent__policy_version_id'], row['content_version_id'])
+            self.assertEqual(proof['intent__policy_digest'], row['digest'])
+            self.assertIsNone(proof['credential_version_id'])
+        self.run_socket(body)
+
     def test_retained_bundle_read_is_an_actual_access_use_case_not_raw_decrypt(self):
         import uuid
         with override_settings(BOOTSTRAP=self.bootstrap):
@@ -306,9 +474,9 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
                 await asyncio.to_thread(client.read_bundle, self.auth, uuid.uuid4())
         self.run_socket(body)
 
-    def test_composition_checks_runtime_db_privileges_before_reading_root(self):
+    def test_composition_checks_runtime_db_privileges_before_provider_construction(self):
         with override_settings(BOOTSTRAP=self.bootstrap), \
-                patch.object(self.service.bootstrap, 'secret_provider', side_effect=AssertionError('root read before DB gate')):
+                patch.object(self.service.bootstrap, 'secret_provider', side_effect=AssertionError('provider constructed before DB gate')):
             with self.assertRaisesRegex(RuntimeError, 'Runtime DB principal'):
                 self.service.compose(key_id='root-v1')
 
@@ -436,6 +604,13 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             await asyncio.to_thread(self.create, client)
             Path(self.path).unlink()
         self.run_socket(body)
+
+    def test_privileged_derivation_does_not_admit_maintenance_to_listener_startup(self):
+        for role in ('maintenance', 'web', 'worker', 'gateway', 'node'):
+            with self.subTest(role=role), override_settings(BOOTSTRAP={**self.bootstrap, 'role': role}), \
+                    patch.object(self.service.bootstrap, 'secret_provider', side_effect=AssertionError('provider reached')):
+                with self.assertRaisesRegex(RuntimeError, 'separate credential'):
+                    self.service.compose(key_id='root-v1')
 
     def test_runtime_role_cannot_enter_maintenance_or_export_provider(self):
         from mop.server.controller.runtime import maintenance, validate_asgi_startup

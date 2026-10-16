@@ -6,7 +6,7 @@ SOLUTION: явная credential-композиция с проверкой ident
 и HKDF-SHA256 от всех байтов защищённого корня.
 RESULT: четыре behavioral red на отсутствующую композицию, затем green
 для derivation, повторного чтения, отказов и защищённых файлов.
-STATUS: FIXED — see #637 (credential-only root composition; runtime проверяет отдельный gate)
+STATUS: FIXED — see #637, #669 (privileged derivation; credential-only runtime admission)
 """
 import hashlib
 import hmac
@@ -67,12 +67,23 @@ class BootstrapCrypto(unittest.TestCase):
             XChaCha20Provider(Keyring('root-v1', {'root-v1': public})).decrypt(envelope, context)
         self.assertNotIn(self.root.decode(), repr(self.provider()))
 
+    # HYPOTHESIS: credential-only admission был ошибочно перенесён на offline derivation.
+    # SOLUTION: maintenance и credential делят derivation, но не listener admission.
+    # RESULT: maintenance roundtrip дал role refusal до исправления; затем green.
+    # STATUS: FIXED — see #669.
+    def test_offline_maintenance_authenticates_credential_envelope(self):
+        from mop.server.secrets.crypto import SecretContext
+        context = SecretContext(b'fixture-install', b'record', b'purpose', 1)
+        envelope = self.provider().encrypt(b'synthetic-recovery-secret', context)
+        self.bootstrap['role'] = 'maintenance'
+        self.assertEqual(self.provider().decrypt(envelope, context), b'synthetic-recovery-secret')
+
     def test_wrong_identity_fingerprint_role_and_weak_root_are_refused(self):
         for params in ({'installation_id': 'another'}, {'expected_root_digest': '0' * 64},
                        {'expected_root_digest': 'invalid'}, {'key_id': '../key'}):
             with self.subTest(params=params), self.assertRaises((RuntimeError, ValueError)):
                 self.provider(**params)
-        for role in ('web', 'worker', 'gateway', 'builder', 'maintenance'):
+        for role in ('web', 'worker', 'gateway', 'builder', 'node'):
             self.bootstrap['role'] = role
             with self.subTest(role=role), self.assertRaisesRegex(RuntimeError, 'credential'):
                 self.provider()

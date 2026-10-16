@@ -191,15 +191,16 @@ through an HTTP request or distribute DB/bootstrap files to nodes.
 #644 owns concrete grants, service units and instance-wide connection accounting.
 The separately privileged builder is not an ordinary worker role.
 
-### Isolated credential runtime (#637)
+### Isolated credential runtime (#669, Secret core #637)
 
 `mop server credentials --bootstrap /private/credential/bootstrap.json
 --socket /run/private-credential/service.sock --key-id root-v1 --peer-uid UID`
 uses only explicit protected bootstrap and a local Unix socket. This command does
 not start any deployed old service, provision accounts or install units. It checks
 foundation schema/restore/installation readiness and runtime DB privileges before
-reading the protected encryption root. Key identifiers must remain stable for
-retained envelopes; this entrypoint supports one retained root identifier, not
+constructing the AEAD provider. Protected bootstrap loading and installation
+verification can read the root earlier; this is not a pre-root-read DB gate.
+Key identifiers must remain stable for retained envelopes; this entrypoint supports one retained root identifier, not
 automatic root rotation. Missing historical keys fail closed.
 
 The socket parent must already exist, be owned by the credential service UID,
@@ -221,10 +222,12 @@ does not select a user or grant. The service constructs ActorContext through
 Access, never from caller owner/project/actor claims. No new bearer, JWT, shared
 service password, credential file or persisted socket session is introduced.
 
-Rootless `mop.client.credentials.CredentialClient(path, server_uid=UID)` is stdlib
+Rootless `mop.common.credential_client.CredentialClient(path, server_uid=UID)` is stdlib
 only. It verifies the service peer UID and protected endpoint and exposes typed
-`create`, `stage`, `update`, `issue_addressed`, `issue_rotation`, and `read_bundle`
-methods. Forward a `mop.common.credentials.Credential('token'|'session', value)`
+`create`, `stage`, `update`, `issue_addressed`, `issue_rotation`,
+`publish_bundle`, `read_bundle`, `approve_bundle`, `reserve_grant`,
+`provision_grant`, `publish_preparation`, `read_preparation` and
+`approve_preparation` methods. Forward a `mop.common.credentials.Credential('token'|'session', value)`
 privately per call; neither it nor returned secret bytes have a value-bearing
 repr. Calls must be outside SQL transactions; async frontends use their owned
 bounded blocking runtime. No retries are performed: lost responses or timeouts of
@@ -258,11 +261,33 @@ grant/ancestors, current owner rights and pinned required-name set. The producti
 composition deliberately binds `AwaitAssignment`, which denies even a permitted
 human. The public SecretStore also checks full Secrets delivery action/scope on
 both selections, before/after crypto; a bound assignment port alone is not
-permission. Grants' approval/runtime queries remain default-deny until their real
-composition is accepted. This service is not a claim that #636/#639/#643 wiring
-or rootless grant publish/provision transactions are complete. Those aggregate
-use cases need a reviewed application-level boundary; ordinary roles must not
-receive a CryptoProvider to work around it.
+permission. Grants' runtime binding/activation/retirement queries remain default-deny until
+concrete #639 queries are bound. `provision_grant` calls the real Grants owner,
+but successful provisioning is not claimed while that query is unbound.
+
+The implemented rootless aggregate boundary publishes/reads exact encrypted role
+and Preparation bytes, approves them, and reserves grants with the real
+`Preparation.approval_query()` proof pinned by Grants into its immutable intent.
+Provider work stays outside SQL; current actor authorization inside SQL uses
+`Grants.local_authority()`, not the decrypting `Grants.authorize` chain.
+The retained-secret authority keeps its domain-owner checks and adds the root /
+epoch / restore-generation fence at prepare, aggregate commit and read release.
+A changed root during crypto cannot merely fail after committing a stale bundle.
+Receipts contain metadata and immutable references, never the grant token.
+
+This initial #669 stage does not wire the production web/worker HTTP routes,
+node-addressed delivery, #643 admissions, or anonymous LDAP service bind / scoped
+Controller integration consumers. Those non-human consumers need explicit
+purpose plus OS-peer authority and a concrete current-resource query; forwarding
+an arbitrary human owner ID as actor authority is not permitted. They remain
+closed rather than weakening admission or giving ordinary roles a CryptoProvider.
+#644 separately owns service identities, units and DB provisioning.
+
+Owned source-only socket checks can exercise actual distinct OS UIDs with
+`mop dev controller --postgres 16 --check credential_service --cross-uid`
+(and 17). Only that explicit fixture runs its test process as root inside its
+new isolated container; the default CI suite remains unprivileged. This creates
+no live pool service or host account and passes no installation inputs.
 
 Cold-start order is dependency setup, provisioned PostgreSQL 16/17 and trust
 roots, `migrate`, `initialize`, `admin --username name`, `check`, then `serve` and

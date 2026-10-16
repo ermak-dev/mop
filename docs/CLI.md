@@ -625,7 +625,7 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 16|17] [--check controller|credential_service|hermetic|preparation]: isolated PostgreSQL checks
+mop dev controller [--postgres 16|17] [--check controller|credential_service|hermetic|preparation] [--cross-uid]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -633,6 +633,8 @@ an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The snapshot contains tracked and nonignored source,
 not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
+--cross-uid runs only credential_service as root inside the owned container to
+exercise distinct OS peers; the default suite still runs as unprivileged ci.
 ```
 
 #### mop dev docs

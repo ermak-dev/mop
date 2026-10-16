@@ -141,10 +141,10 @@ def root_digest(bootstrap):
 
 
 def secret_provider(bootstrap, *, installation_id, expected_root_digest, key_id):
-    """Credential-композиция; identity/fingerprint берутся из проверенной Installation."""
+    """Privileged derivation для offline recovery и credential; не admission listener."""
     from mop.server.secrets.crypto import Keyring, XChaCha20Provider
-    if bootstrap.get('role') != 'credential':
-        raise RuntimeError('secret root access requires the credential process role')
+    if bootstrap.get('role') not in {'maintenance', 'credential'}:
+        raise RuntimeError('secret root access requires the maintenance or credential process role')
     if type(installation_id) is not str or not re.fullmatch(
             r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', installation_id) or \
             bootstrap.get('installation_id') != installation_id:

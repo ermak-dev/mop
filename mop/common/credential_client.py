@@ -4,6 +4,7 @@
 Вызывать вне SQL; async потребитель использует свой bounded blocking runtime.
 """
 from dataclasses import fields
+from datetime import datetime, timezone
 import os
 import socket
 import stat
@@ -80,12 +81,15 @@ class CredentialClient:
     def _result(kind, value):
         p.exact(value, (f.name for f in fields(kind)))
         value = dict(value)
-        for name in ('id', 'project_id', 'active_version_id', 'secret_id', 'binding_id', 'version_id'):
+        for name in ('id', 'project_id', 'active_version_id', 'secret_id', 'binding_id', 'version_id',
+                     'target_id', 'incarnation', 'credential_version_id', 'revision_id', 'content_version_id'):
             if name in value and value[name] is not None:
                 value[name] = p.identifier(value[name])
-        for name in ('value', 'manifest', 'prompt'):
+        for name in ('value', 'manifest', 'prompt', 'tasks', 'variables'):
             if name in value:
                 value[name] = p.binary(value[name])
+        if 'secret_refs' in value:
+            value['secret_refs'] = p.identifiers(value['secret_refs'])
         return kind(**value)
 
     def create(self, auth: p.Credential, *, project_id: UUID | None, name: str,
@@ -116,6 +120,46 @@ class CredentialClient:
         if type(result) is not list or len(result) > 128:
             raise p.CredentialError('invalid credential delivery response')
         return tuple(self._result(p.DeliveredSecret, row) for row in result)
+
+    def publish_bundle(self, auth: p.Credential, *, project_id: UUID,
+                       manifest: bytes, prompt: bytes, provenance: str) -> p.BundleInfo:
+        result = self._invoke(auth, p.Command.PUBLISH_BUNDLE, {'project_id': str(project_id),
+            'manifest': p.encoded(manifest), 'prompt': p.encoded(prompt), 'provenance': provenance})
+        return self._result(p.BundleInfo, result)
+
+    def approve_bundle(self, auth: p.Credential, bundle_id: UUID) -> UUID:
+        return p.identifier(self._invoke(auth, p.Command.APPROVE_BUNDLE, {'bundle_id': str(bundle_id)}))
+
+    def reserve_grant(self, auth: p.Credential, *, project_id: UUID, bundle_id: UUID,
+                      target_id: UUID, incarnation: UUID, request_id: UUID,
+                      expires_at: datetime) -> p.GrantReceipt:
+        if type(expires_at) is not datetime or expires_at.utcoffset() is None:
+            raise p.CredentialError('aware grant expiry required')
+        result = self._invoke(auth, p.Command.RESERVE_GRANT, {'project_id': str(project_id),
+            'bundle_id': str(bundle_id), 'target_id': str(target_id), 'incarnation': str(incarnation),
+            'request_id': str(request_id), 'expires_at': expires_at.astimezone(timezone.utc).isoformat()})
+        return self._result(p.GrantReceipt, result)
+
+    def provision_grant(self, auth: p.Credential, grant_id: UUID, *, expected_revision: int) -> p.GrantReceipt:
+        result = self._invoke(auth, p.Command.PROVISION_GRANT,
+            {'grant_id': str(grant_id), 'expected_revision': expected_revision})
+        return self._result(p.GrantReceipt, result)
+
+    def publish_preparation(self, auth: p.Credential, *, project_id: UUID, tasks: bytes,
+                            variables: bytes, provenance: str, commit: str,
+                            secret_refs: tuple[UUID, ...] = ()) -> p.PreparationInfo:
+        result = self._invoke(auth, p.Command.PUBLISH_PREPARATION, {'project_id': str(project_id),
+            'tasks': p.encoded(tasks), 'variables': p.encoded(variables), 'provenance': provenance,
+            'commit': commit, 'secret_refs': [str(ref) for ref in secret_refs]})
+        return self._result(p.PreparationInfo, result)
+
+    def read_preparation(self, auth: p.Credential, revision_id: UUID) -> p.PreparationBytes:
+        result = self._invoke(auth, p.Command.READ_PREPARATION, {'revision_id': str(revision_id)})
+        return self._result(p.PreparationBytes, result)
+
+    def approve_preparation(self, auth: p.Credential, revision_id: UUID) -> p.ApprovalReceipt:
+        result = self._invoke(auth, p.Command.APPROVE_PREPARATION, {'revision_id': str(revision_id)})
+        return self._result(p.ApprovalReceipt, result)
 
     def read_bundle(self, auth: p.Credential, bundle_id: UUID) -> p.BundleBytes:
         result = self._invoke(auth, p.Command.BUNDLE, {'bundle_id': str(bundle_id)})

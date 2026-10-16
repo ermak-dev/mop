@@ -1,8 +1,8 @@
 """Отдельная credential OS-служба: root/provider остаются внутри процесса.
 
 Socket принимает конечные application commands, не ciphertext/AAD/actor claims.
-Ни HTTP, ни произвольного RPC, ни собственного credential store. Конкретные
-assignment/approval bindings ещё не собраны: отсутствие порта всегда отказ.
+Ни HTTP, ни произвольного RPC, ни собственного credential store. Реальный
+Preparation approval связан; отсутствие assignment/runtime порта всегда отказ.
 """
 import asyncio
 from dataclasses import fields
@@ -18,8 +18,9 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 
 from mop.common import credentials as p
 from mop.server.access import services as access
-from mop.server.access.grants import Grants
+from mop.server.access.grants import Grants, Conflict as GrantConflict, StorageUnavailable as GrantUnavailable
 from mop.server.secrets import services as secrets
+from mop.server.preparation import services as preparation
 from mop.server.secrets.crypto import SecretCryptoError
 from . import bootstrap
 from .models import Installation
@@ -42,15 +43,43 @@ class CurrentAccess:
             # manage_project_secret не доказывает authority над Nomad/signer
             # или другими installation credentials. Их use case ещё не связан.
             raise PermissionError('installation credential application authority is not bound')
-        return access.Access(grants=self.application.grants).authorize(actor, action, **refs)
+        return access.Access(grants=self.application.local_grants).authorize(actor, action, **refs)
+
+
+class CurrentPreparationAccess(CurrentAccess):
+    def authorize_owner(self, owner_id, action, *, project_ids=()):
+        # owner_id берётся только из persisted BootstrapRevision, не из wire.
+        # Это revalidation владельца policy, не восстановление ActorContext.
+        self.application.fence()
+        return access.Access().authorize_owner(owner_id, action, project_ids=project_ids)
+
+
+class CurrentRetention:
+    """Root fence дополняет, но не заменяет SQL-only authority предметного владельца."""
+    def __init__(self, application, authority):
+        self.application, self.authority = application, authority
+
+    def check(self, actor, scope):
+        self.application.fence()
+        self.authority.check(actor, scope)
+        self.application.fence()
 
 
 class CredentialApplication:
     """Доверенная композиция: аргументы конструктора не берутся из wire."""
     def __init__(self, provider, snapshot, generation, *, delivery_gate=None):
         self.snapshot, self.generation = snapshot, generation
-        # Unbound approval/runtime queries в Grants — явный deny, не fake proof.
+        # Metadata grant callbacks используют только публичный SQL-only port.
+        # Runtime binding остаётся deny-default до concrete Sessions query.
         self.grants = Grants(provider=provider)
+        self.local_grants = self.grants.local_authority()
+        self.preparation = preparation.Preparation(provider=provider,
+            authorizer=CurrentPreparationAccess(self))
+        self.preparation.secrets.authority = CurrentRetention(self, self.preparation.secrets.authority)
+        self.grants.approvals = self.preparation.approval_query()
+        # Domain owner создал exact authority. Оборачиваем её публичный
+        # RetentionAuthority port, не переносим Access/Grants ORM в Root.
+        self.grants.secrets.authority = CurrentRetention(self, self.grants.secrets.authority)
         self.store = secrets.SecretStore(provider=provider, authorizer=CurrentAccess(self),
             delivery_gate=delivery_gate if delivery_gate is not None else AwaitAssignment())
 
@@ -70,7 +99,7 @@ class CredentialApplication:
 
     def execute(self, credential, command, args):
         self.fence()
-        actor = (access.token_context(credential.value, grants=self.grants)
+        actor = (access.token_context(credential.value, grants=self.local_grants)
                  if credential.kind == 'token' else access.session_context(credential.value))
         if command is p.Command.CREATE:
             result = self.store.create(actor, **args)
@@ -82,13 +111,33 @@ class CredentialApplication:
             result = self.store.issue_addressed(actor)
         elif command is p.Command.ROTATION:
             result = self.store.issue_rotation(actor, **args)
+        elif command is p.Command.PUBLISH_BUNDLE:
+            row = self.grants.publish_bundle(actor, **args)
+            result = p.BundleInfo(row.id, row.role, row.digest, row.project_id, row.owner_id)
         elif command is p.Command.BUNDLE:
             row = self.grants.read_bundle(actor, **args)
             result = p.BundleBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
+        elif command is p.Command.APPROVE_BUNDLE:
+            result = self.grants.approve_bundle(actor, **args)
+        elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT):
+            row = (self.grants.reserve(actor, **args) if command is p.Command.RESERVE_GRANT
+                   else self.grants.provision(actor, **args))
+            result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
+                row.role, row.digest, row.state, row.revision, row.credential_version_id)
+        elif command is p.Command.PUBLISH_PREPARATION:
+            row = self.preparation.publish(actor, **args)
+            result = p.PreparationInfo(row.id, row.project_id, row.owner_id, row.number,
+                row.content_version_id, row.digest, row.task_size, row.vars_size)
+        elif command is p.Command.READ_PREPARATION:
+            row = self.preparation.read_revision(actor, **args)
+            result = p.PreparationBytes(row.tasks, row.variables, row.provenance, row.commit, row.secret_refs)
+        elif command is p.Command.APPROVE_PREPARATION:
+            row = self.preparation.approve(actor, **args)
+            result = p.ApprovalReceipt(row.id, row.revision_id, row.human_id)
         else:
             raise p.CredentialError('unsupported credential command')
         self.fence()
-        access.current_actor(actor, grants=self.grants)
+        access.current_actor(actor, grants=self.local_grants)
         return _wire(result)
 
 
@@ -101,7 +150,9 @@ def _wire(value):
         if len(value) > 128:
             raise p.CredentialError('credential result exceeds item limit')
         return [_wire(item) for item in value]
-    if type(value) in (secrets.SecretMetadata, secrets.VersionMetadata, secrets.AddressedSecret, p.BundleBytes):
+    if type(value) in (secrets.SecretMetadata, secrets.VersionMetadata, secrets.AddressedSecret,
+                       p.BundleBytes, p.BundleInfo, p.GrantReceipt, p.PreparationInfo,
+                       p.PreparationBytes, p.ApprovalReceipt):
         return {f.name: _wire(getattr(value, f.name)) for f in fields(value)}
     if value is None or type(value) in (str, int, bool):
         return value
@@ -139,7 +190,8 @@ def compose(*, key_id):
 def _failure(exc):
     # Library phrases этих категорий уже безопасны: не обрезаем их второй раз.
     if isinstance(exc, (p.CredentialError, access.Denied, secrets.Refused, secrets.Conflict,
-                        secrets.StorageUnavailable, secrets.TransactionBoundary, SecretCryptoError)):
+                        secrets.StorageUnavailable, secrets.TransactionBoundary, SecretCryptoError,
+                        preparation.Conflict, preparation.StorageUnavailable, GrantConflict, GrantUnavailable)):
         return {'ok': False, 'error': {'code': 'refused', 'message': str(exc)}}
     if type(exc) is PermissionError:
         return {'ok': False, 'error': {'code': 'refused', 'message': str(exc)}}

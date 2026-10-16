@@ -51,7 +51,7 @@ controller:pg17:
                         'public.py', '.mop/sandbox.yaml'], check=True)
         return root
 
-    def invoke(self, root, *, cleanup_failure=False):
+    def invoke(self, root, *, cleanup_failure=False, arguments=None):
         original_run, original_which = subprocess.run, shutil.which
         snapshots, commands = [], []
 
@@ -73,7 +73,7 @@ controller:pg17:
                 patch.object(controller.shutil, 'which', side_effect=lambda name:
                              '/fixture/docker' if name == 'docker' else original_which(name)), \
                 patch.object(controller.subprocess, 'run', side_effect=run):
-            result = controller.main(['--postgres', '16'])
+            result = controller.main(arguments or ['--postgres', '16'])
         return result, snapshots, commands
 
     def test_snapshot_contains_tracked_and_new_source_but_no_ignored_inputs(self):
@@ -90,6 +90,32 @@ controller:pg17:
             self.assertNotIn(private, files)
         self.assertFalse(any(path.startswith('.git/') for path in files))
         self.assertTrue(any(command[1:3] == ['rm', '-f'] for command in commands))
+
+    # HYPOTHESIS: обычный ci UID не способен проверить SO_PEERCRED двух UID.
+    # SOLUTION: только явный credential_service fixture допускает root в owned container.
+    # RESULT: отсутствующий --cross-uid дал red; policy checks и actual PG16 UID probe green.
+    # STATUS: FIXED — see #669.
+    def test_cross_uid_is_explicit_owned_container_mode_not_default_or_pool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            setup_path = root / '.gitlab-ci.yml'
+            setup_path.write_text(setup_path.read_text().replace('value: exit 0',
+                "value: |\n        prepare-declared-fixture\n        exec su ci -s /bin/bash -c \"$TESTS\""))
+            result, _, commands = self.invoke(root, arguments=['--postgres', '16',
+                '--check', 'credential_service', '--cross-uid'])
+            self.assertEqual(result, 0)
+            worker = next(command for command in commands if 'bash' in command)
+            self.assertIn('prepare-declared-fixture', worker[-1])
+            self.assertIn('exec bash -c "$TESTS"', worker[-1])
+            self.assertNotIn('exec su ci', worker[-1])
+            _, _, commands = self.invoke(root)
+            worker = next(command for command in commands if 'bash' in command)
+            self.assertIn('exec su ci', worker[-1])
+
+    def test_cross_uid_cannot_run_arbitrary_suite_as_root(self):
+        with self.assertRaises(SystemExit) as caught:
+            controller.main(['--check', 'hermetic', '--cross-uid'])
+        self.assertEqual(caught.exception.code, 2)
 
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
