@@ -50,6 +50,10 @@ import site
 import subprocess
 import sys
 import tempfile
+import signal
+import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import _lib  # noqa: F401,E402 -- первым: временный корень процесса раньше HOME (#338)
 
@@ -236,6 +240,67 @@ def check_strict_children(c):
             "MOP_TESTS_STRICT" not in child_env_({}, strict=False))
 
 
+# Предел прямых детей одного hermetic, не всего runner-а и не потомков.
+# Двухпроцессный Django внутри слота (#671), как и внешний parallel runner,
+# умножает нагрузку: совместное включение требует замеров всей job, а не
+# только каждого ускорения по отдельности. Эта правка не включает #671.
+RUN_WORKERS = 4
+
+
+def run_cases(cases):
+    """Конечный пул: каждый слот владеет ребёнком до полного чтения PIPE.
+
+    Новая session отделяет только наши группы процессов; отмена не ищет
+    процессы по имени и не трогает чужие проверки или сервисы.
+    """
+    lock = threading.Lock()
+    stopping = threading.Event()
+    active = set()
+
+    def kill(p):
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # Уже завершился, но communicate всё равно обязан его собрать.
+
+    def run(case):
+        label, f, root, env = case
+        with lock:
+            if stopping.is_set():
+                return None
+            try:
+                p = subprocess.Popen([sys.executable, f], env=env, cwd=root,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, start_new_session=True)
+            except OSError:
+                return label, f, -1, traceback.format_exc()
+            active.add(p)
+        try:
+            text = p.communicate()[0]
+            return label, f, p.returncode, text
+        except BaseException:
+            stopping.set()
+            kill(p)
+            p.communicate()
+            raise
+        finally:
+            with lock:
+                active.remove(p)
+
+    pool = ThreadPoolExecutor(max_workers=RUN_WORKERS)
+    try:
+        # Порядок отчёта прежний; PIPE читаются в workers, а не в этом цикле.
+        return list(pool.map(run, cases))
+    finally:
+        try:
+            with lock:
+                stopping.set()
+                for p in active:
+                    kill(p)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+
 def check_runs(c):
     """Все файлы зелёные с пустым HOME и с враждебным -- во втором случае из
     копии репозитория с враждебным .env (#217)."""
@@ -249,17 +314,14 @@ def check_runs(c):
     for label, (home, env, root) in homes.items():
         for f in files():
             f = os.path.join(root, "tests", os.path.basename(f))
-            runs.append((label, f, subprocess.Popen(
-                [sys.executable, f], env=child_env({**env, "HOME": home}),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=root)))
-    for label, f, p in runs:
-        text = p.communicate()[0]
+            runs.append((label, f, root, child_env({**env, "HOME": home})))
+    for label, f, code, text in run_cases(runs):
         # Причина Django failure находится перед итогом runner-а. Вырезать
         # её ради последних восьми строк — оставить CI без диагноза (#632).
-        detail = text.strip().splitlines() if p.returncode else text.strip().splitlines()[-8:]
+        detail = text.strip().splitlines() if code else text.strip().splitlines()[-8:]
         tail = "\n    ".join(detail)
-        c.check(f"check_runs: {os.path.basename(f)} with a {label} HOME: exit {p.returncode}"
-                f"\n    {tail}", p.returncode == 0)
+        c.check(f"check_runs: {os.path.basename(f)} with a {label} HOME: exit {code}"
+                f"\n    {tail}", code == 0)
 
 
 def main():
