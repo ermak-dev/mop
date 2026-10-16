@@ -3524,7 +3524,7 @@ def check_server_namespace_259(c):
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
             "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
             "diagnose",   # #536: офлайн-сводка локальной установки
-            "proxykey", "grant", "controller"}
+            "proxykey", "grant", "controller", "credentials"}
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))

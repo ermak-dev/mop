@@ -349,7 +349,7 @@ def _verify_installation_state(using='default'):
         raise RuntimeError('controller installation is not initialized')
     if row.identity != settings.BOOTSTRAP['installation_id']:
         raise RuntimeError('controller installation identity does not match bootstrap')
-    if settings.BOOTSTRAP['role'] == 'maintenance' and row.root_digest != root_digest(settings.BOOTSTRAP):
+    if settings.BOOTSTRAP['role'] in {'maintenance', 'credential'} and row.root_digest != root_digest(settings.BOOTSTRAP):
         raise RuntimeError('controller root key does not match initialized trust')
     return {'identity': row.identity, 'epoch': str(row.epoch), 'effects_enabled': row.effects_enabled}
 

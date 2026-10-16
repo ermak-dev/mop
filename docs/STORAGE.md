@@ -190,8 +190,11 @@ identifiers and decryptability until re-encryption and verification complete;
 unknown key identifiers or failed authentication are hard errors, not an
 empty secret or fallback to a file.
 
-Maintenance composition uses `controller.bootstrap.secret_provider` with the
-verified Installation identity/fingerprint and an explicit retained key identifier.
+The isolated credential process and offline maintenance recovery use
+`controller.bootstrap.secret_provider` with the verified Installation
+identity/fingerprint and an explicit retained key identifier. Privileged derivation
+admits only `credential` and `maintenance`; listener/startup admission remains
+separately credential-only.
 It reads the protected root once, checks the fingerprint, then derives a 32-byte
 AEAD key using HKDF-SHA256 (RFC 5869) from every root byte. The fixed extract salt
 is `mop.secret.root.hkdf-sha256.v1\0`; expand info is `mop.secret.aead\0`, the

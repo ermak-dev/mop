@@ -174,17 +174,140 @@ provisions verified TLS. Missing or malformed inputs fail, never select `.env`,
 old profiles, a local database file or adjacent credentials.
 
 Use separate bootstrap files **and OS service identities** for `maintenance`,
-`web`, `worker` and `gateway`. Only maintenance receives `root_key`. Ordinary
-web/worker/gateway processes receive their own least-privilege DB login and the
-Django signing reference, not encryption-root, migration, builder, Nomad or NATS
-credentials. The maintenance principal owns schema/migrations and has authorized
-backup/restore access. Runtime principals need application-table CRUD and sequence
-usage grants from provisioning, but no schema/table ownership, schema CREATE,
-role/database administration or membership permitting elevation to such a role.
-System checks reject elevated runtime principals. Foundation does not provision
-roles through an HTTP request or distribute DB/bootstrap files to nodes.
+`credential`, `web`, `worker` and `gateway`. Maintenance receives `root_key` for
+initialization and authorized backup/restore trust checks. Only `credential` can
+compose the AEAD provider and run secret application use cases at runtime.
+Ordinary web/worker/gateway processes receive their own least-privilege DB login
+and Django signing reference, not encryption-root, migration, builder, Nomad or
+NATS credentials. The maintenance principal owns schema/migrations and has
+authorized backup/restore access. The credential bootstrap requires protected
+root and Django signing references plus its own restricted DB login; it has no
+maintenance, schema, migration or backup privilege. Like other runtime principals,
+it needs application-table CRUD and sequence usage grants from provisioning, but
+no schema/table ownership, schema CREATE, role/database administration or
+membership permitting elevation to such a role. System checks reject elevated
+runtime principals, including `credential`. Foundation does not provision roles
+through an HTTP request or distribute DB/bootstrap files to nodes.
 #644 owns concrete grants, service units and instance-wide connection accounting.
 The separately privileged builder is not an ordinary worker role.
+
+### Isolated credential runtime (#669, Secret core #637)
+
+`mop server credentials --bootstrap /private/credential/bootstrap.json
+--socket /run/private-credential/service.sock --key-id root-v1 --peer-uid UID`
+uses only explicit protected bootstrap and a local Unix socket. This command does
+not start any deployed old service, provision accounts or install units. It checks
+foundation schema/restore/installation readiness and runtime DB privileges before
+constructing the AEAD provider. Protected bootstrap loading and installation
+verification can read the root earlier; this is not a pre-root-read DB gate.
+Key identifiers must remain stable for retained envelopes; this entrypoint supports one retained root identifier, not
+automatic root rotation. Missing historical keys fail closed.
+
+The socket parent must already exist, be owned by the credential service UID,
+have no group/other writers, and have a trusted non-symlink ancestor chain.
+Startup refuses existing endpoints, including stale sockets; an operator must
+verify stopped ownership before local repair. The endpoint is `0600` by default.
+For distinct frontend OS accounts, provisioning can give a dedicated group
+traversal on the service directory (for example `0750`), and select that service
+account's group with `--socket-group GID` for socket `0660`. Frontend accounts must
+not be directory writers or able to read the bootstrap/root. No `0777` directory,
+public socket, network listener or automatic stale-socket deletion is provided.
+
+Every connection must pass Linux `SO_PEERCRED` against explicit repeatable
+`--peer-uid` values (empty means deny all), then authenticate a privately
+forwarded **current standard Access token or Django session credential**. This
+is an internal trusted-frontend boundary, not a browser endpoint: existing HTTP
+login/CSRF/session checks remain the frontend's responsibility. OS peer identity
+does not select a user or grant. The service constructs ActorContext through
+Access, never from caller owner/project/actor claims. No new bearer, JWT, shared
+service password, credential file or persisted socket session is introduced.
+
+Rootless `mop.common.credential_client.CredentialClient(path, server_uid=UID)` is stdlib
+only. It verifies the service peer UID and protected endpoint and exposes typed
+`create`, `stage`, `update`, `issue_addressed`, `issue_rotation`,
+`publish_bundle`, `read_bundle`, `approve_bundle`, `reserve_grant`,
+`provision_grant`, `publish_preparation`, `read_preparation` and
+`approve_preparation` methods. Forward a `mop.common.credentials.Credential('token'|'session', value)`
+privately per call; neither it nor returned secret bytes have a value-bearing
+repr. Calls must be outside SQL transactions; async frontends use their owned
+bounded blocking runtime. No retries are performed: lost responses or timeouts of
+mutations mean unknown outcome and require reconciliation, not blind replay.
+The finite version-1 length-prefixed JSON protocol accepts at most 2 MiB per
+frame and 1 MiB per value, one command per connection, at most eight accepted
+connections and eight DB/effect tasks. Reads, writes and command waits have a
+five-second default deadline (hard maximum ten seconds); timed-out DB tasks stay
+owned by Runtime until they finish, and shutdown drains them. No access log or
+request-body logging exists.
+
+`create`/`stage`/`update` call the real SecretStore with current Access action and
+scope checks before/after AEAD, and actual relational AAD, version/CAS and nonce
+constraints. The runtime additionally pins installation identity, epoch, root
+fingerprint, effects setting and restore generation around use cases and crypto
+waits, using ORM-only checks inside SQL sections. It never reads a root file or
+calls the provider inside an authorization transaction. Installation-scoped
+credential mutation is explicitly unbound and denied: project-secret permission
+does not authorize changing Nomad, signer or installation integration credentials.
+Their finite application-level composition must be accepted separately.
+`read_bundle(bundle_id)` calls public `Grants.read_bundle`: retained
+bytes, exact owner/project, current permission, immutable bundle/digest and
+normalized capability checks, not a caller-selected ciphertext/context oracle.
+There is no raw `RetainedSecrets.prepare/commit` socket pair: passing an opaque
+prepared envelope back would widen the interface and putting socket I/O inside
+an aggregate SQL transaction is forbidden.
+
+Grants' current binding query uses the public SQL-only
+`Assignments.current(project_id, target_id)` projection: exact project, target,
+incarnation, owner, role, bundle digest and grant. `provision_grant` calls the real
+Grants owner and can retain a new credential without returning its token. A live
+mismatched assignment is refused before provider work and checked again before
+the retained commit. Bundles must be published through Grants, which seals their
+complete normalized sets; manually populated approval rows are not authority.
+
+Activation and transport retirement remain explicitly unbound: a current read
+projection is not a trusted activation or retirement receipt. Addressed and
+rotation issuance also remain denied by `AwaitAssignment`, even for a permitted
+human. They require an authenticated enrolled node, current assignment, exact
+role/digest/incarnation, active grant/ancestors, current owner rights and pinned
+required-name set, not merely the new current-binding adapter. The public
+SecretStore checks full Secrets delivery action/scope before/after crypto; a
+binding alone is not permission. No node-addressed proof or receipt is fabricated.
+
+The implemented rootless aggregate boundary publishes/reads exact encrypted role
+and Preparation bytes, approves them, and reserves grants with the real
+`Preparation.approval_query()` proof pinned by Grants into its immutable intent.
+Provider work stays outside SQL; current actor authorization inside SQL uses
+`Grants.local_authority()`, not the decrypting `Grants.authorize` chain.
+The retained-secret authority keeps its domain-owner checks and adds the root /
+epoch / restore-generation fence at prepare, aggregate commit and read release.
+A changed root during crypto cannot merely fail after committing a stale bundle.
+Receipts contain metadata and immutable references, never the grant token.
+
+This initial #669 stage does not wire the production web/worker HTTP routes,
+node-addressed delivery, #643 admissions, or anonymous LDAP service bind / scoped
+Controller integration consumers. Those non-human consumers need explicit
+purpose plus OS-peer authority and a concrete current-resource query; forwarding
+an arbitrary human owner ID as actor authority is not permitted. They remain
+closed rather than weakening admission or giving ordinary roles a CryptoProvider.
+#644 separately owns service identities, units and DB provisioning.
+
+This adapter does not provide a role-create admission workflow. Public
+`Assignments.create` currently takes a grant ID while generating the target ID;
+`Grants.reserve` takes the target/incarnation while generating the grant ID.
+Connecting those identities for a new target still needs an accepted owning
+admission use case. The current Operations vertical is node drain/enable, not a
+generic role-create/stage handler. Socket tests with persisted matching
+assignments prove the binding checks, not that missing end-to-end workflow.
+Grants also requires the registered `sessions.create_puppet` permission; the
+current execution app installs `execution.*`, not that role-create permission.
+The socket fixture explicitly supplies it. Production admission must own its
+registration rather than treating a superuser or caller-selected owner as a
+substitute for a missing capability.
+
+Owned source-only socket checks can exercise actual distinct OS UIDs with
+`mop dev controller --postgres 16 --check credential_service --cross-uid`
+(and 17). Only that explicit fixture runs its test process as root inside its
+new isolated container; the default CI suite remains unprivileged. This creates
+no live pool service or host account and passes no installation inputs.
 
 Cold-start order is dependency setup, provisioned PostgreSQL 16/17 and trust
 roots, `migrate`, `initialize`, `admin --username name`, `check`, then `serve` and
