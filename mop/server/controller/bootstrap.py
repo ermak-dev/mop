@@ -95,7 +95,24 @@ def load(path):
         raise RuntimeError('bootstrap installation identity is invalid')
     if not isinstance(data['role'], str) or data['role'] not in {'maintenance', 'credential', 'web', 'worker', 'gateway'}:
         raise RuntimeError('bootstrap process role is invalid')
-    db = data['database']
+    validate_database(data['database'])
+    if data['role'] not in {'maintenance', 'credential'} and 'root_key' in data:
+        raise RuntimeError('root key must not be supplied to web, worker or gateway')
+    if data['role'] == 'credential' and 'django_key' not in data:
+        raise RuntimeError('credential bootstrap Django signing key is required')
+    if data['role'] in {'maintenance', 'credential'}:
+        root = private_bytes(data.get('root_key', ''))
+        if len(root) < 32:
+            raise RuntimeError('bootstrap root key must contain at least 32 bytes')
+    if 'django_key' in data:
+        signing_key = private_bytes(data['django_key'])
+        if len(signing_key) < 50 or not signing_key.isascii():
+            raise RuntimeError('bootstrap Django signing key must contain at least 50 ASCII bytes')
+    return Bootstrap(data)
+
+
+def validate_database(db):
+    """Та же конечная DB-схема для runtime и отдельного provisioner input."""
     required_db = {'ENGINE', 'NAME', 'HOST', 'PORT', 'USER', 'PASSWORD', 'OPTIONS'}
     if not isinstance(db, dict) or set(db) != required_db:
         raise RuntimeError('bootstrap database keys are invalid')
@@ -120,19 +137,6 @@ def load(path):
         if name in opts:
             with _protected_open(opts[name], key=name == 'sslkey'):
                 pass
-    if data['role'] not in {'maintenance', 'credential'} and 'root_key' in data:
-        raise RuntimeError('root key must not be supplied to web, worker or gateway')
-    if data['role'] == 'credential' and 'django_key' not in data:
-        raise RuntimeError('credential bootstrap Django signing key is required')
-    if data['role'] in {'maintenance', 'credential'}:
-        root = private_bytes(data.get('root_key', ''))
-        if len(root) < 32:
-            raise RuntimeError('bootstrap root key must contain at least 32 bytes')
-    if 'django_key' in data:
-        signing_key = private_bytes(data['django_key'])
-        if len(signing_key) < 50 or not signing_key.isascii():
-            raise RuntimeError('bootstrap Django signing key must contain at least 50 ASCII bytes')
-    return Bootstrap(data)
 
 
 def root_digest(bootstrap):

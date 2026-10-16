@@ -471,7 +471,7 @@ def client_command(modname):
 
 def main(argv):
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
-    if argv[:2] in (["server", "controller"], ["server", "credentials"]):
+    if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"]):
         return run(command("mop.cli.server." + argv[1]), argv[2:])
     # Новый путь выбирается до legacy context/.env: даже отсутствующая capability
     # не должна открывать старый login store или импортировать NATS.
@@ -498,7 +498,7 @@ def main(argv):
         server, argv = context.strip_server(argv)
     except ValueError as e:
         sys.exit(f"mop: {e}")
-    if argv[:2] in (["server", "controller"], ["server", "credentials"]):
+    if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"]):
         # Старый глобальный selector не должен включать profile/.env пути.
         print("controller services use protected bootstrap; --server is not supported", file=sys.stderr)
         return 1

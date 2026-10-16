@@ -62,7 +62,7 @@ controller:pg17:
             if argv[1:3] in (['container', 'ls'], ['network', 'ls']):
                 name = argv[argv.index('--filter') + 1].split('=', 1)[1]
                 return subprocess.CompletedProcess(argv, 0, stdout=name + '\n', stderr='')
-            if 'bash' in argv:
+            if any(word.startswith('TESTS=') for word in argv):
                 mount = argv[argv.index('-v') + 1]
                 source = Path(mount.rsplit(':', 1)[0])
                 snapshots.append({str(path.relative_to(source)) for path in source.rglob('*') if path.is_file()})
@@ -125,7 +125,7 @@ controller:pg17:
             root = self.source(directory)
             result, _, commands = self.invoke(root, labels=labels)
         self.assertEqual(result, 0)
-        runner = next(command for command in commands if 'bash' in command)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
         script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
         self.assertEqual(shlex.split(script), ['python3', 'tests/controller.py', *labels])
 

@@ -13,8 +13,6 @@
 These need what lives only on the controller: the inventory, the
 playbooks, secrets/ and the Nomad token.
 """
-from mop.cli import lib
-
-
 def main(argv):
+    from mop.cli import lib
     lib.usage(__doc__)

@@ -13,3 +13,5 @@ web/src/node_modules/
 build/
 *.egg-info/
 .playwright-mcp/
+# Публичный CA только новой PostgreSQL fixture; private key остаётся в контейнере.
+.test-postgres-ca.pem

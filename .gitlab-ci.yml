@@ -89,6 +89,17 @@ stages: [test, deploy]
       --network "mop-ci-$CI_JOB_ID" --network-alias postgres
       -e POSTGRES_DB=mop_ci -e POSTGRES_USER=mop_ci
       -e POSTGRES_PASSWORD=isolated-test-only "$POSTGRES_IMAGE"
+      bash -euc 'openssl req -x509 -newkey rsa:2048 -nodes -days 2
+      -subj /CN=postgres -addext subjectAltName=DNS:postgres
+      -keyout /tmp/mop-test-server.key -out /tmp/mop-test-server.crt >/dev/null 2>&1;
+      chmod 600 /tmp/mop-test-server.key;
+      chown postgres:postgres /tmp/mop-test-server.key /tmp/mop-test-server.crt;
+      exec docker-entrypoint.sh postgres -c ssl=on
+      -c ssl_cert_file=/tmp/mop-test-server.crt -c ssl_key_file=/tmp/mop-test-server.key'
+    - >-
+      docker exec "mop-ci-db-$CI_JOB_ID" bash -ec
+      'for attempt in $(seq 1 60); do test -s /tmp/mop-test-server.crt && pg_isready -U mop_ci && exit 0; sleep 1; done; exit 1'
+    - docker cp "mop-ci-db-$CI_JOB_ID:/tmp/mop-test-server.crt" "$CI_PROJECT_DIR/.test-postgres-ca.pem"
     # Native TLS/ACL broker запускается только тестом в owned runner namespace.
     - mkdir "/tmp/mop-ci-nats-$CI_JOB_ID"
     - docker create --name "mop-ci-nats-image-$CI_JOB_ID" nats:2.10.26
