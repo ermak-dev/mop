@@ -913,13 +913,11 @@ def check_tail_parse_431(c):
             c.fail(f"#431 tail {bad}: a trace, not a usage refusal", str(e))
         except SystemExit:
             c.check(f"#431 tail {bad}: usage", True)
-    # Соседний контракт для сверки.
+    # #642: новый stat отказывает bad input в command boundary до HTTPS.
     for bad in (["--days", "x"], ["--days"]):
-        try:
-            stat.parse(bad)
-            c.fail(f"#431 stat {bad} must refuse")
-        except SystemExit:
-            c.check(f"#431 stat {bad}: usage, as before", True)
+        out, err, code = run_command(stat.main, bad)
+        c.expect(f"#642 stat {bad} refuses without a trace or query",
+                 (out, err, code), ('', 'invalid command arguments\n', 1))
 
 
 CONCISE_431 = {
@@ -1576,7 +1574,7 @@ def check_role_declarations_585(c):
         # add --role (#618): ping -- предзапрос протокола ролей до создания.
         "add": ([], ["add", "alloc", "bootstrap_result", "ping"]),
         "landing": ([], ["landing"]),
-        "stat": (["usage"], ["pool"]),
+        "stat": None,
         "profile": None,
         # admin verbs outside the role grammar: silent for grants on purpose
         # stop (#608) -- job_stop, операторский глагол вне грамматики ролей
@@ -2059,22 +2057,11 @@ def check_refusals_163(c):
                 c.fail(f"{fn.__name__} read a refusal as {got!r}")
             except bus.Refused as e:
                 c.expect(f"{fn.__name__} lost the reason: {e!r}", str(e), reason)
-        refusal("mop stat on a pool refusal", run(stat.main), reason)
         # Подвал `mop list`: причина видна, а не пустой пул.
         c.expect("pool_lines on a refusal", lib.pool_lines(), [f"  {reason}"])
 
-        # stat: ни один узел не ответил -- тот же текст, что раньше, но
-        # отказом: stderr, ненулевой выход, stdout пуст.
-        puppets.ready_nodes = lambda: {"n1", "n2"}
-        bus.request_many = lambda verb, nodes, **kw: {}
-        refusal("mop stat with no node answering", run(stat.main),
-                "no node answered:\n  n1: no response\n  n2: no response")
-
-        # Пустой пул без отказа сервиса -- не «никто не ответил» с пустым
-        # перечнем, а прямо: готовых узлов нет.
-        puppets.ready_nodes = lambda: set()
-        refusal("mop stat on an empty pool", run(stat.main),
-                "no ready nodes in the pool")
+        # #642/#656: stat больше не зависит от pool/node/transcripts. Его
+        # реальные HTTP refusals/nullable coverage проверены в control_consumers.
 
         # Обычный ответ -- вывод прежний, символ в символ.
         row = {"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
@@ -2101,24 +2088,17 @@ def check_refusals_163(c):
         c.expect("pool_lines", lib.pool_lines(), want)
         bus.ask_cluster = lambda verb, **kw: {"nodes": [pool[0]]}
 
-        # #245: stat --users -- по людям, от самого прожорливого; узел со
-        # старым агентом (без by_login) -- в «-». --puppets и --users разом --
-        # usage.
-        def u(i, o, w, r):
-            return {"input": i, "output": o, "cache_write": w, "cache_read": r}
-        puppets.ready_nodes = lambda: {"hyper", "gpu"}
-        bus.request_many = lambda verb, nodes, **kw: {
-            "hyper": {"ok": True, "usage": {"pu-mop-1": {"2026-09-22": u(2000, 500, 0, 10000)}},
-                      "by_login": {"pu-mop-1": {"anton": {"2026-09-22": u(2000, 500, 0, 10000)}}}},
-            "gpu": {"ok": True, "usage": {"pu-mop-2": {"2026-09-22": u(10, 0, 0, 0)}}}}
-        out, err, code = run(stat.main, ["--users"])
-        want = ("USER   INPUT  OUTPUT  CACHE-W  CACHE-R  TOTAL\n"
-                "anton  2.0k   500     0        10k      12k\n"
-                "-      10     0       0        0        10\n")
-        c.check(f"#245 mop stat --users: exit {code!r}, stderr {err!r}, stdout {out!r}",
-                not (code or err or want not in out))
-        out, err, code = run(stat.main, ["--puppets", "--users"])
-        c.check(f"#245 --puppets with --users must be a usage error: {out!r}", not (not code))
+        # #656: shared proxy keys не доказывают user/puppet attribution. Даже
+        # при доступных старых счётчиках новый stat не читает их как fallback.
+        def no_transcripts(*args, **kwargs):
+            raise AssertionError('stat attempted transcript/node usage fallback')
+        bus.request_many = no_transcripts
+        puppets.ready_nodes = no_transcripts
+        for args in (["--users"], ["--puppets"], ["--puppets", "--users"]):
+            out, err, code = run(stat.main, args)
+            c.check(f"#642 {args} is explicitly unavailable before IO",
+                    code == 2 and out == '' and 'unavailable for shared proxy keys' in err,
+                    (out, err, code))
         puppets.ready_nodes = real_ready_nodes
         # #277: ответ глагола pool -- форма pool, а не строка nodes: у той нет
         # статуса, и PoolNode её не примет.

@@ -31,7 +31,7 @@ SURFACES = dict.fromkeys((
     'session history', 'session terminal', 'server doctor', 'server gc', 'server sweep',
     'server disk', 'server proxykey', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
-                              'node up', 'operation', 'addresses'), 'bound'))
+                              'node up', 'operation', 'addresses', 'stat'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -45,7 +45,6 @@ GAPS = {
     'stop': 'stop-job admission', 'send': 'message admission/receipts',
     'dispatch': 'dispatch admission and scoped target selection',
     'model': 'session model action', 'models': 'inference model query',
-    'stat': 'proxy usage query (never transcript scraping)',
     'attach': 'private terminal physical resolver/capability discovery',
     'session terminal': 'private terminal physical resolver/capability discovery',
     'session history': 'private history query',
@@ -244,6 +243,26 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                 return 2
         elif words in ('health', 'profile', 'diagnose'):
             args = p.parse_args(argv)
+        elif words == 'stat':
+            p.add_argument('--days', type=int)
+            p.add_argument('--start')
+            p.add_argument('--end')
+            p.add_argument('--group-by', choices=('day', 'key', 'model', 'user', 'project', 'puppet'), default='day')
+            p.add_argument('--users', action='store_true')
+            p.add_argument('--puppets', action='store_true')
+            args = p.parse_args(argv)
+            if args.users or args.puppets or args.group_by in ('user', 'project', 'puppet'):
+                print('unsupported: user, project and puppet usage attribution is unavailable for shared proxy keys',
+                      file=sys.stderr)
+                return 2
+            if bool(args.start) != bool(args.end) or args.start and args.days is not None:
+                raise api.ClientError('provide start/end or days, not both')
+            if not args.start:
+                days = 14 if args.days is None else args.days
+                if not 1 <= days <= 366:
+                    raise api.ClientError('usage days must be within 1..366')
+                end = datetime.now(timezone.utc).date() + timedelta(days=1)
+                args.start, args.end = (end - timedelta(days=days)).isoformat(), end.isoformat()
         elif words == 'addresses':
             p.add_argument('project_id')
             p.add_argument('--limit', type=int, default=100)
@@ -284,6 +303,9 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
         elif words in ('profile', 'mcp'):
             emit({'schema_version': 1, **plain(client.identity())}, credential=selected.token)
+        elif words == 'stat':
+            emit(client.proxy_usage(start=args.start, end=args.end, group_by=args.group_by),
+                 credential=selected.token)
         elif words == 'addresses':
             emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
                  credential=selected.token)

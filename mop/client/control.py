@@ -384,6 +384,15 @@ def _freeze(value, depth=0):
     return value
 
 
+def _mutable(value):
+    """Материализация wire DTO для общего строгого codec владельца query."""
+    if isinstance(value, Mapping):
+        return {key: _mutable(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_mutable(item) for item in value]
+    return value
+
+
 def _pairs(pairs):
     data = {}
     for key, value in pairs:
@@ -449,7 +458,7 @@ _CODES = frozenset(("validation_error", "not_authenticated", "authentication_fai
                     "database_outcome_unknown", "installation_unavailable", "deadline_horizon",
                     "effects_disabled", "admission_limit", "claim_conflict", "operation_conflict",
                     "transaction_boundary", "controller_unavailable", "delivery_capacity",
-                    "delivery_unavailable", "delivery_conflict"))
+                    "delivery_unavailable", "delivery_conflict", "usage_unavailable"))
 
 
 def _api_error(data, status, retry_after):
@@ -826,6 +835,23 @@ class Client:
         if failed:
             raise ProtocolError('invalid address response')
         return result
+
+    def proxy_usage(self, *, start: str, end: str, group_by: str = 'day') -> Mapping:
+        from .usage import stat, UsageQueryError
+
+        def query(*, start, end, limit, after):
+            # Codec #656 валидирует период, grouping и cursor до следующего GET.
+            return _mutable(self._get('/api/v1/usage?' + urlencode({'schema_version': 1,
+                'start': start, 'end': end, 'limit': limit, 'after': after})))
+
+        error = None
+        try:
+            result = stat(query, start=start, end=end, group_by=group_by)
+        except UsageQueryError as failure:
+            error = str(failure)
+        if error is not None:
+            raise ClientError(error)
+        return _freeze(result)
 
     def projects_page(self, *, cursor: str | None = None, page_size: int = 100) -> ProjectPage:
         data = self._get("/api/v1/projects?" + self._page_query(page_size, cursor))

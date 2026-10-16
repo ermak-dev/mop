@@ -353,6 +353,36 @@ class Consumers(unittest.TestCase):
         self.assertNotIn(TOKEN, result)
         self.assertEqual(self.fixture.calls[-1][1], '/api/v1/projects?page_size=100&cursor=safe-cursor')
 
+    def test_proxy_stat_uses_published_usage_parser_without_transcript_attribution(self):
+        from mop.cli import _control
+        from usage_query import page
+        self.response(page())
+        out, err = io.StringIO(), io.StringIO()
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(['stat', '--start', '2026-10-16', '--end', '2026-10-17'])
+        self.assertEqual(code, 0, err.getvalue())
+        result = json.loads(out.getvalue())
+        self.assertEqual(result['source'], 'cliproxy')
+        self.assertFalse(result['source_complete'])
+        self.assertEqual(result['attribution'], {'user': 'unavailable', 'project': 'unavailable', 'puppet': 'unavailable'})
+        self.assertEqual(result['groups'][0]['counters']['total']['value'], '41')
+        self.assertIsNone(result['groups'][0]['counters']['cache_read']['value'])
+        self.assertEqual(self.fixture.calls[-1][:2], ('GET',
+            '/api/v1/usage?schema_version=1&start=2026-10-16&end=2026-10-17&limit=100&after='))
+        self.assertNotIn(TOKEN, out.getvalue()+err.getvalue())
+
+    def test_proxy_stat_unavailable_breakdown_refuses_before_any_query(self):
+        from mop.cli import _control
+        for args in (['--users'], ['--puppets'], ['--group-by', 'project']):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(['stat', *args]), 2)
+            self.assertIn('unavailable', err.getvalue())
+            self.assertIn('proxy', err.getvalue())
+            self.assertEqual(out.getvalue(), '')
+        self.assertEqual(self.fixture.calls, [])
+
     def test_absent_backend_refuses_before_any_io_and_never_ssh_or_nats(self):
         from mop.cli import _control
         for words in ('add', 'update', 'recycle', 'delete', 'wipe', 'stop', 'model',

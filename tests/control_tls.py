@@ -60,6 +60,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlsplit(self.path)
         if path.path == '/api/v1/health':
             self.reply(200, {'schema_version': 1, 'epoch': EPOCH, 'state': 'ready', 'effects_enabled': True})
+        elif path.path == '/api/v1/usage':
+            from usage_query import page
+            self.reply(200, page())
         elif path.path == '/api/v1/operations':
             query = parse_qs(path.query)
             if query != {'request_id': [KEY], 'epoch': [EPOCH]}:
@@ -193,6 +196,16 @@ assert not any(x == 'django' or x.startswith(('django.', 'mop.server.')) for x i
 entry, = distribution('mop').entry_points.select(name='mop', group='console_scripts')
 assert entry.value == 'mop.cli:console'
 assert cli.main(['health']) == 0
+import contextlib, io
+from mop.cli.core import stat
+private = io.StringIO()
+with contextlib.redirect_stdout(private):
+    assert stat.main(['--start', '2026-10-16', '--end', '2026-10-17']) == 0
+result = json.loads(private.getvalue())
+assert result['source'] == 'cliproxy' and result['source_complete'] is False
+assert result['attribution']['puppet'] == 'unavailable'
+assert result['groups'][0]['counters']['cache_read']['value'] is None
+assert not any(x == 'django' or x.startswith(('django.', 'mop.server.', 'nats.')) for x in sys.modules)
 '''
         env = {key: value for key, value in os.environ.items() if not key.startswith(('MOP_', 'PYTHON'))}
         env.update(MOP_API_ORIGIN=self.origin, MOP_API_TOKEN=TOKEN, MOP_API_CA=str(self.cert))

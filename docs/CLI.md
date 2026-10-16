@@ -8,9 +8,9 @@ Every command of `mop`, as its commandlet in `mop/cli` describes itself: the fir
 
 The #623/#642 migration is incomplete. The dispatcher uses only explicit transient HTTPS origin/token/CA context for remote control; it never falls back to the old bus, connection.json or git config stores. Local developer/setup commands stay local.
 
-Bound consumers: `mop addresses`, `mop diagnose`, `mop health`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop addresses`, `mop diagnose`, `mop health`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop stat`. `mop diagnose` is offline context validation only.
 
-Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop build`, `mop code`, `mop delete`, `mop detail`, `mop dispatch`, `mop driver build`, `mop landing`, `mop list`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop restart`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop session history`, `mop session terminal`, `mop stat`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
+Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop build`, `mop code`, `mop delete`, `mop detail`, `mop dispatch`, `mop driver build`, `mop landing`, `mop list`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop restart`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop session history`, `mop session terminal`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -275,16 +275,17 @@ Channel protocol — CHANNEL.md, bus subjects — BUS.md.
 #### mop stat
 
 ```text
-token usage across the pool, a bar per day: mop stat [--days N] [--puppets|--users]
+mop stat [--days N | --start <date> --end <date>] [--group-by day|model|key]
 
-Sums claude token counters (input, output, cache write, cache read) over
-every puppet on every ready node for the last N days (default 14), by the
-node's local date. --puppets breaks the same window down per puppet, the
-biggest spender first, instead of drawing the chart; --users does it per
-person -- the login of the master whose message started each turn, "-" for
-spend nobody's message started, or a node whose agent does not attribute yet. Read off the puppets'
-own transcripts, so a puppet whose clone was removed no longer counts. In a
-master shell the picture is the project's, not the pool's.
+Query controller-owned proxy usage only. The UTC end date is exclusive; default
+is 14 days including today, bounded to 366 days. Output preserves source coverage
+and nullable counters. total is a parent metric, not a sum of all categories.
+There is no transcript read, node scan, invented billing or missing-source zero.
+
+Shared proxy keys cannot attribute usage to users, projects or puppets. --users,
+--puppets and those groupings refuse explicitly before any query. Model/key/day
+breakdowns retain the server's source provenance and incomplete coverage.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop stop
