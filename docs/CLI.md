@@ -734,8 +734,10 @@ nonignored source, not installation inputs or .git. No host ports, installation 
 Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
 checks start their own native TLS broker with fixture-only principals and ACLs.
---cross-uid runs only credential_service as root inside the owned container to
-exercise distinct OS peers; the default suite still runs as unprivileged ci.
+--cross-uid runs only the narrow root UID gate (_credential_uid_gate.py,
+the two real cross-peer cases) as root inside the owned container,
+after the setup builds the uid pair; the default suite still runs as
+unprivileged ci.
 --web adds the frontend gates — the dashboard build check, full TypeScript
 checking and the complete Vitest interaction suite — with Node tools in the
 same Python 3.12 container; every check runs under its own exit status and any
