@@ -175,6 +175,98 @@ class GrantCases(TransactionTestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             return list(pool.map(run, (0, 1)))
 
+    # HYPOTHESIS: machine claim требует SQL-only проверки receiving grant,
+    # а _chain расшифровывает bundle вне transaction и проверяет acting authority.
+    # RESULT: четыре receiving-gate red и acting-factory red, затем проверен
+    # полный token-context порт; итоговые PG16/17 — по 216/216 green.
+    # STATUS: FIXED — see #635 / #639
+    def execution_query(self):
+        query = getattr(self.api, 'authorize_execution', None)
+        self.assertTrue(callable(query), 'public ORM-only execution binding check is missing')
+        return query
+
+    def test_execution_binding_is_current_inside_transaction_without_provider_io(self):
+        query = self.execution_query()
+        row, _ = self.active()
+        class ForbiddenProvider:
+            def encrypt(self, *args):
+                raise AssertionError('execution authority invoked crypto provider')
+            decrypt = encrypt
+        self.api.secrets.provider = ForbiddenProvider()
+        with self.assertRaisesRegex(ValueError, 'caller transaction'):
+            query(row.binding)
+        with transaction.atomic():
+            self.assertIsNone(query(row.binding))
+        self.bindings.bindings[(row.project_id, row.target_id)] = replace(row.binding, incarnation=uuid.uuid4())
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(row.binding)
+
+    def test_execution_binding_cannot_substitute_any_part_of_its_recipient_identity(self):
+        query = self.execution_query()
+        row, _ = self.active()
+        for field, value in (('project_id', self.foreign.pk), ('target_id', uuid.uuid4()),
+                ('incarnation', uuid.uuid4()), ('role', 'another'), ('digest', 'b' * 64),
+                ('grant_id', uuid.uuid4()), ('human_owner_id', self.user.pk + 1)):
+            with self.subTest(field=field), transaction.atomic(), self.assertRaises(PermissionError):
+                query(replace(row.binding, **{field: value}))
+        self.approvals.enabled = False
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(row.binding)
+
+    def test_execution_binding_rechecks_ancestor_credentials_and_current_owner(self):
+        query = self.execution_query()
+        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        child, _ = self.active(actor=parent_actor)
+        with transaction.atomic():
+            self.assertIsNone(query(child.binding))
+        permission = Permission.objects.get(content_type__app_label='access', codename='view_role')
+        self.user.user_permissions.remove(permission)
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(child.binding)
+        self.user.user_permissions.add(permission)
+        with transaction.atomic():
+            self.assertIsNone(query(child.binding))
+        Token.objects.filter(user__principal__pk=parent.principal_id).delete()
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(child.binding)
+
+    def test_execution_binding_refuses_reserved_or_unbound_recipient(self):
+        query = self.execution_query()
+        reserved = self.reserve()
+        self.api.provision(self.actor, reserved.id, expected_revision=reserved.revision)
+        self.bindings.bindings[(reserved.project_id, reserved.target_id)] = reserved.binding
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            query(reserved.binding)
+        row, _ = self.active()
+        unavailable = self.g.Grants(provider=self.provider, approvals=self.approvals)
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            unavailable.authorize_execution(row.binding)
+
+    def test_local_acting_authority_uses_approved_normalized_caps_without_decryption(self):
+        factory = getattr(self.api, 'local_authority', None)
+        self.assertTrue(callable(factory), 'transaction-local acting grant authority is missing')
+        row, actor = self.active()
+        class ForbiddenProvider:
+            def encrypt(self, *args):
+                raise AssertionError('local authorization invoked crypto provider')
+            decrypt = encrypt
+        self.api.secrets.provider = ForbiddenProvider()
+        local = factory()
+        token = Token.objects.get(user__principal__pk=row.principal_id).key
+        self.assertEqual(auth.token_context(token, grants=local), actor)
+        authority = auth.Access(grants=local)
+        with transaction.atomic():
+            self.assertEqual(local.resolve_actor(actor), actor)
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        self.permit('catalog.change_project')
+        with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'capabilities'):
+            authority.authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.foreign.pk,))
+        Token.objects.filter(user__principal__pk=row.principal_id).delete()
+        with transaction.atomic(), self.assertRaises(PermissionError):
+            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+
     def test_exact_bytes_canonical_digest_normalized_caps_and_immutable_write_paths(self):
         value = self.api.read_bundle(self.actor, self.bundle.id)
         self.assertEqual(value.prompt, b'private role prompt\r\n')
@@ -696,7 +788,10 @@ class GrantCases(TransactionTestCase):
     def test_activation_does_not_substitute_another_valid_creator_credential(self):
         from django.test import Client
         browser = Client()
-        self.assertTrue(browser.login(username='owner', password='test-only-password'))
+        response = browser.post('/api/v1/auth/login',
+            {'username': 'owner', 'password': 'test-only-password'},
+            content_type='application/json', secure=True)
+        self.assertEqual(response.status_code, 200)
         browser_actor = auth.session_context(browser.session.session_key)
         # Старая реализация выбирает первый token binding вместо capability
         # браузера; после logout этот token не должен продолжить его намерение.
