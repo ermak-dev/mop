@@ -207,6 +207,29 @@ class Access:
     def __init__(self, *, grants=None):
         self.grants = grants
 
+    def authorize_owner(self, owner_id, action, *, project_ids=()):
+        """Локальная проверка текущего human owner для закреплённого server proof.
+
+        Не создаёт ActorContext и не допускает команду от имени владельца.
+        Вызывается только trusted прикладным слоем, не HTTP по owner JSON.
+        """
+        user = get_user_model().objects.filter(pk=owner_id).first()
+        if user is None:
+            raise Denied('human owner is unavailable')
+        principal, _ = _principal(user)
+        if principal.kind != 'human':
+            raise Denied('human owner required')
+        projects = set(project_ids)
+        if not _global(user):
+            allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
+            if not projects <= allowed:
+                raise Denied('human owner no longer belongs to project')
+        if action not in ACTIONS:
+            raise Denied('action is not registered')
+        app, code = action.split('.', 1)
+        if not Permission.objects.filter(content_type__app_label=app, codename=code).exists() or not user.has_perm(action):
+            raise Denied('current human owner permission required')
+
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
         if type(actor) is ActorContext and actor.kind is PrincipalKind.GRANT:
             if self.grants is None:
