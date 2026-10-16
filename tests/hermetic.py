@@ -254,7 +254,10 @@ def check_runs(c):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=root)))
     for label, f, p in runs:
         text = p.communicate()[0]
-        tail = "\n    ".join(text.strip().splitlines()[-8:])
+        # Причина Django failure находится перед итогом runner-а. Вырезать
+        # её ради последних восьми строк — оставить CI без диагноза (#632).
+        detail = text.strip().splitlines() if p.returncode else text.strip().splitlines()[-8:]
+        tail = "\n    ".join(detail)
         c.check(f"check_runs: {os.path.basename(f)} with a {label} HOME: exit {p.returncode}"
                 f"\n    {tail}", p.returncode == 0)
 
