@@ -301,7 +301,9 @@ class GrantCases(TransactionTestCase):
         with transaction.atomic():
             self.assertEqual(local.resolve_actor(actor), actor)
             authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
-        self.permit('catalog.change_project')
+        # Полная human authority нужна, чтобы проверять именно pinned caps,
+        # а не ранний отказ owner permission (combined PG17 red, #625).
+        self.permit('catalog.change_project', 'catalog.configure_project')
         with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'capabilities'):
             authority.authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
         with transaction.atomic(), self.assertRaises(PermissionError):
