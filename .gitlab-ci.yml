@@ -54,7 +54,7 @@ stages: [test, deploy]
     SETUP:
       value: |
         apt-get update -qq
-        apt-get install -y -qq --no-install-recommends git openssl jq curl ca-certificates >/dev/null
+        apt-get install -y -qq --no-install-recommends git openssl jq curl ca-certificates tmux >/dev/null
         # Клиент 17 не восстанавливает свой dump на 16 (transaction_timeout).
         # Используем подписанный upstream apt repo и matching major tools.
         install -d /usr/share/postgresql-common/pgdg
