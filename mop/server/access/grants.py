@@ -586,6 +586,9 @@ class Grants:
                 policy_approval_id=proof.approval_id, policy_version_id=proof.version_id, policy_digest=proof.digest)
             grant_id = uuid.uuid4()
             user = get_user_model().objects.create_user('grant-' + grant_id.hex, password=None, is_staff=False, is_superuser=False)
+            # Классификация на Actor; Principal до #684/#688 — deprecated metadata.
+            user.kind = 'service'
+            user.save(update_fields=['kind'])
             principal = m.Principal.objects.create(user=user, kind='grant')
             row = m.Grant.objects.create(id=grant_id, intent=intent, principal=principal)
             self._event(row, actor, 'reserve')

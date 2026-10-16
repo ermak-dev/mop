@@ -20,7 +20,10 @@ class GlobalAuthAdmin(IdentifierFreeSuccess):
     save_as = False
 
     def _permission(self, request, verb):
-        return allowed(request, 'auth.' + verb + '_' + self.model._meta.model_name)
+        # Логический auth namespace: Actor зареган под своим app label,
+        # action остаётся auth.<verb>_user, имя модели не участвует.
+        return allowed(request, 'auth.' + verb + '_user' if self.model._meta.model_name == 'actor'
+                       else 'auth.' + verb + '_' + self.model._meta.model_name)
 
     def has_module_permission(self, request):
         return self.has_view_permission(request) or self.has_add_permission(request)

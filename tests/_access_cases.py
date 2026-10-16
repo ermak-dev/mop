@@ -200,6 +200,9 @@ class AccessContracts(TransactionTestCase):
 
     def permission(self, name):
         app, codename = name.split('.')
+        # auth.* — логический namespace: строки permission лежат в actor.
+        if app == 'auth':
+            app, codename = 'actor', codename.replace('_user', '_actor', 1)
         permission = Permission.objects.get(content_type__app_label=app, codename=codename)
         self.user.user_permissions.add(permission)
 
@@ -810,7 +813,7 @@ class AccessContracts(TransactionTestCase):
         self.user.save()
         client = Client()
         self.login_browser(client)
-        response = client.post('/admin/auth/user/add/', {'username': 'created-human',
+        response = client.post('/admin/actor/actor/add/', {'username': 'created-human',
             'usable_password': 'true', 'password1': 'a-long-distinct-passphrase-633',
             'password2': 'a-long-distinct-passphrase-633', '_save': 'Save'}, secure=True)
         self.assertEqual(response.status_code, 302)
@@ -874,7 +877,7 @@ class AccessContracts(TransactionTestCase):
         self.user.save()
         client = Client()
         self.login_browser(client)
-        response = client.post('/admin/auth/user/' + str(user_id) + '/password/', {
+        response = client.post('/admin/actor/actor/' + str(user_id) + '/password/', {
             'password1': 'a-long-distinct-passphrase-633', 'password2': 'a-long-distinct-passphrase-633'}, secure=True)
         self.assertEqual(response.status_code, 403)
         self.assertFalse(get_user_model().objects.get(pk=user_id).has_usable_password())
