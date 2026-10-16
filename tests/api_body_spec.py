@@ -81,7 +81,14 @@ class ApiBodySpecTests(unittest.TestCase):
             args = self.arguments(directory)
             layout = args['layout']
             layout.runtime.mkdir(parents=True, mode=0o700)
-            layout.launcher.write_text('#!/usr/bin/python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+            # HYPOTHESIS (#676): shebang /usr/bin/python3 -- это путь хоста
+            # установки, не образа: в python:3.12-slim интерпретатор живёт в
+            # /usr/local/bin/python3, и bash отдаёт 127 до контракта wrapper.
+            # SOLUTION (#676): fixture launcher называет текущий интерпретатор
+            # (sys.executable) -- образ, в котором идут проверки, сам по себе
+            # источник пути, без пакета хоста или конкретного префикса.
+            layout.launcher.write_text(f'#!{sys.executable}\n'
+                'import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
             layout.launcher.chmod(0o700)
             job = render(**args)['Job']
             task = job['TaskGroups'][0]['Tasks'][0]
