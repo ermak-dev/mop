@@ -99,7 +99,8 @@ def provision(spec, admin, *, passwords):
     finally:
         admin.execute('SELECT pg_advisory_unlock(%s)', (lock,))
     return {'database_created': True, 'services_started': False, 'runtime_connections': 24,
-            'maintenance_connections': 8, 'schema_owner': identities['maintenance']}
+            'maintenance_connections': 8, 'connection_scope': 'managed-target-logins',
+            'schema_owner': identities['maintenance']}
 
 
 def verify(spec, connection):
@@ -128,7 +129,11 @@ def verify(spec, connection):
             if row is None or row[1:] != (False, False, False, False, False, 8, True):
                 raise RuntimeError('database role privileges or connection budget differ from installation')
             oid = row[0]
-            if connection.execute('SELECT 1 FROM pg_auth_members WHERE member=%s', (oid,)).fetchone():
+            # Запрет обоих концов покрывает и транзитивные пути: любой путь к
+            # configured role обязан иметь последнее входящее ребро. Не пытаемся
+            # считать membership как LOGIN limit; INHERIT FALSE не запрещает SET.
+            if connection.execute('SELECT 1 FROM pg_auth_members WHERE member=%s OR roleid=%s',
+                                  (oid, oid)).fetchone():
                 raise RuntimeError('database role has unsupported inherited or SET ROLE membership')
             if role == 'maintenance':
                 continue
@@ -142,29 +147,120 @@ def verify(spec, connection):
             if connection.execute('SELECT 1 FROM pg_class WHERE relowner=%s UNION ALL '
                     'SELECT 1 FROM pg_namespace WHERE nspowner=%s', (oid, oid)).fetchone():
                 raise RuntimeError('runtime identity must not own database objects')
-            table_checks = []
-            for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
-                table_checks.append((privilege, False))
-            for privilege in ('TRUNCATE', 'REFERENCES', 'TRIGGER'):
-                table_checks.append((privilege, True))
-            for privilege, forbidden in table_checks:
-                wrong = connection.execute('SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace '
-                    'WHERE n.nspname=\'public\' AND c.relkind IN (\'r\', \'p\') '
-                    'AND has_table_privilege(%s, c.oid, %s)=%s LIMIT 1', (name, privilege, forbidden)).fetchone()
-                if wrong:
-                    raise RuntimeError('runtime existing table grants are not least privilege')
-            for kind, expected in (('r', {'SELECT', 'INSERT', 'UPDATE', 'DELETE'}), ('S', {'USAGE', 'SELECT'})):
-                rights = connection.execute('SELECT a.privilege_type FROM pg_default_acl d '
-                    'CROSS JOIN LATERAL aclexplode(d.defaclacl) a '
-                    'WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=%s) '
-                    'AND d.defaclnamespace=\'public\'::regnamespace AND d.defaclobjtype=%s AND a.grantee=%s',
-                    (identities['maintenance'], kind, oid)).fetchall()
-                if {value[0] for value in rights} != expected:
-                    raise RuntimeError('runtime default grants are not least privilege for future migrations')
+            _verify_relations(connection, name, identities['maintenance'])
+            _verify_defaults(connection, oid, identities['maintenance'],
+                             [identities[role] for role in RUNTIME_ROLES])
+        _verify_login_scope(connection, [identities[role] for role in (*RUNTIME_ROLES, 'maintenance')])
     except psycopg.Error as error:
         raise RuntimeError('database verification unavailable: ' + type(error).__name__) from None
     return {'verified': True, 'runtime_connections': 24, 'maintenance_connections': 8,
-            'services_started': False}
+            'connection_scope': 'managed-target-logins', 'services_started': False}
+
+
+TRUST_TABLES = frozenset({'controller_restoreguard', 'controller_installation'})
+TABLE_RIGHTS = frozenset({'SELECT', 'INSERT', 'UPDATE', 'DELETE'})
+SEQUENCE_RIGHTS = frozenset({'USAGE', 'SELECT'})
+
+
+def seal_trust_tables(connection):
+    """Явное schema/restore provisioning; verifier никогда не вызывает этот путь."""
+    from psycopg import sql
+    with connection.cursor() as cursor:
+        for table in sorted(TRUST_TABLES):
+            # Table и column ACL независимы: REVOKE ALL ON TABLE не снимает
+            # ранее выданный UPDATE(state). Owner сохраняет maintenance authority.
+            cursor.execute('WITH recipients AS ('
+                'SELECT c.relowner, a.grantee FROM pg_class c '
+                'CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE c.oid=%s::regclass UNION ALL '
+                'SELECT c.relowner, a.grantee FROM pg_class c JOIN pg_attribute col ON col.attrelid=c.oid '
+                'CROSS JOIN LATERAL aclexplode(col.attacl) a WHERE c.oid=%s::regclass) '
+                'SELECT DISTINCT a.grantee, r.rolname FROM recipients a '
+                'LEFT JOIN pg_roles r ON r.oid=a.grantee WHERE a.grantee<>a.relowner',
+                ('public.' + table,) * 2)
+            recipients = cursor.fetchall()
+            cursor.execute('SELECT attname FROM pg_attribute WHERE attrelid=%s::regclass '
+                           'AND attnum>0 AND NOT attisdropped', ('public.' + table,))
+            columns = sql.SQL(', ').join(sql.Identifier(row[0]) for row in cursor.fetchall())
+            for oid, name in recipients:
+                role = sql.Identifier(name) if oid else sql.SQL('PUBLIC')
+                target = sql.Identifier('public', table)
+                cursor.execute(sql.SQL('REVOKE ALL ON TABLE {} FROM {}').format(target, role))
+                for privilege in ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES'):
+                    cursor.execute(sql.SQL('REVOKE {} ({}) ON TABLE {} FROM {}').format(
+                        sql.SQL(privilege), columns, target, role))
+                cursor.execute(sql.SQL('GRANT SELECT, UPDATE (id) ON TABLE {} TO {}').format(target, role))
+
+
+def _verify_relations(connection, name, owner):
+    """Проверяем effective ACL, в том числе PUBLIC и column grants."""
+    tables = connection.execute("SELECT c.oid, c.relname, pg_get_userbyid(c.relowner), c.relkind "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname='public' AND c.relkind IN ('r', 'p', 'S')").fetchall()
+    for oid, table, table_owner, kind in tables:
+        sequence = kind == 'S'
+        trust = not sequence and table in TRUST_TABLES
+        label = 'sequence grants' if sequence else 'trust table grants' if trust else 'table grants'
+        expected = SEQUENCE_RIGHTS if sequence else {'SELECT'} if trust else TABLE_RIGHTS
+        privileges = ['USAGE', 'SELECT', 'UPDATE'] if sequence else [
+            'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']
+        if not sequence and connection.info.server_version >= 170000:
+            privileges.append('MAINTAIN')
+        check = 'has_sequence_privilege' if sequence else 'has_table_privilege'
+        rights = connection.execute('SELECT p, ' + check + '(%s, %s, p), ' + check +
+            "(%s, %s, p || ' WITH GRANT OPTION') FROM unnest(%s::text[]) p",
+            (name, oid, name, oid, privileges)).fetchall()
+        if table_owner != owner or {p for p, enabled, _ in rights if enabled} != expected or any(
+                grantable for _, _, grantable in rights):
+            raise RuntimeError('runtime existing ' + label + ' are not least privilege')
+        if sequence:
+            continue
+        columns = connection.execute('SELECT a.attname, p, has_column_privilege(%s, a.attrelid, a.attnum, p), '
+            "has_column_privilege(%s, a.attrelid, a.attnum, p || ' WITH GRANT OPTION') "
+            "FROM pg_attribute a CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']) p "
+            'WHERE a.attrelid=%s AND a.attnum>0 AND NOT a.attisdropped', (name, name, oid)).fetchall()
+        for column, privilege, enabled, grantable in columns:
+            allowed = privilege == 'SELECT' or (privilege == 'UPDATE' and column == 'id') if trust else privilege in TABLE_RIGHTS
+            if enabled != allowed or grantable:
+                raise RuntimeError('runtime existing ' + label + ' have unsafe column privileges')
+
+
+def _verify_defaults(connection, oid, owner, names):
+    """Global и schema-local ACL складываются; ни один из них не вычитает другой."""
+    for kind, expected in (('r', TABLE_RIGHTS), ('S', SEQUENCE_RIGHTS)):
+        rights = connection.execute('SELECT a.grantee, r.rolname, a.privilege_type, a.is_grantable '
+            'FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a '
+            'LEFT JOIN pg_roles r ON r.oid=a.grantee '
+            'WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=%s) '
+            "AND d.defaclnamespace IN (0, 'public'::regnamespace) AND d.defaclobjtype=%s",
+            (owner, kind)).fetchall()
+        effective = {privilege for grantee, _, privilege, _ in rights if grantee in (0, oid)}
+        if effective != expected or any(grantable or grantee == 0 for grantee, _, _, grantable in rights
+                                        if grantee in (0, oid)):
+            raise RuntimeError('runtime default grants are not least privilege for future migrations')
+        # Дополнительный NOLOGIN grantee тоже нельзя оставить будущим входом в ACL.
+        if any(grantee != owner and grantee not in names for _, grantee, _, _ in rights):
+            raise RuntimeError('runtime default grants include an unconfigured role')
+
+
+def _verify_login_scope(connection, names):
+    """Только обычные LOGIN target DB; внешние superusers и другие БД вне budget."""
+    if connection.execute('SELECT 1 FROM pg_roles WHERE rolcanlogin AND NOT rolsuper '
+            "AND rolname<>ALL(%s) AND has_database_privilege(oid, current_database(), 'CONNECT') LIMIT 1",
+            (names,)).fetchone():
+        raise RuntimeError('database has an unconfigured LOGIN outside the managed connection budget')
+    # Не только роли с CONNECT сегодня: NOLOGIN ACL может стать доступен через
+    # membership завтра. PUBLIC и неописанные grantees не допускаются.
+    grants = connection.execute("WITH scoped(acl) AS ("
+        'SELECT datacl FROM pg_database WHERE datname=current_database() UNION ALL '
+        "SELECT nspacl FROM pg_namespace WHERE nspname='public' UNION ALL "
+        "SELECT c.relacl FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' UNION ALL "
+        'SELECT a.attacl FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid '
+        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') "
+        'SELECT a.grantee, r.rolname, a.is_grantable FROM scoped '
+        'CROSS JOIN LATERAL aclexplode(acl) a LEFT JOIN pg_roles r ON r.oid=a.grantee').fetchall()
+    for oid, grantee, grantable in grants:
+        if not oid or grantee not in (*names, 'pg_database_owner') or (grantable and grantee != names[-1]):
+            raise RuntimeError('database grants include an unconfigured role or grant option')
 
 
 def connect_provisioner(spec, path):

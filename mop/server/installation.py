@@ -92,6 +92,7 @@ def plan(spec):
     return {'installation_id': spec.identity, 'order': list(ORDER),
             'database': dict(spec.database), 'production_ready': False,
             'connections': {'runtime': 24, 'maintenance': 8, 'scope': 'instance-role-limits',
+                            'accounted_principals': 'managed-target-logins',
                             'roles': {role: 8 for role in (*RUNTIME_ROLES, 'maintenance')}},
             'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS],
             'setup': 'mop server controller setup --venv ' + dict(spec.paths)['venv'],
