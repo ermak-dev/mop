@@ -9,7 +9,7 @@ from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from . import models as m
-from .definitions import DEFINITIONS, validate_batch
+from .definitions import DEFINITIONS, resolve, validate_batch
 from .policy import project_origin, project_limit
 
 
@@ -57,6 +57,17 @@ class SettingsSnapshot:
     values: tuple
     applied_revision: int | None = None
     receipt: str = ''
+
+
+@dataclass(frozen=True)
+class EffectiveSettingsSnapshot:
+    installation_revision: int
+    node_revision: int | None
+    values: tuple
+    sources: tuple
+    missing: tuple
+    installation_applied_revision: int | None
+    node_applied_revision: int | None
 
 
 def snapshot(row):
@@ -297,18 +308,48 @@ class Catalog:
             self._authorize(actor, 'catalog.view_nodesetting', nodes=(node_id,), projects=self._node_scope(node_id))
             return self._settings_snapshot(owner, node=True)
 
+    def get_effective_settings(self, actor, *, node_id=None, require=()):
+        # Тот же installation lock, что у обоих writers: revision pair и rows
+        # не смешиваются с параллельным edit. Никаких внешних I/O/fallback.
+        with transaction.atomic():
+            installation = self._installation(lock=True)
+            self._authorize(actor, 'catalog.view_installationsetting')
+            installed = self._settings_snapshot(installation, node=False)
+            local = None
+            if node_id is not None:
+                node = m.Node.objects.select_for_update().get(pk=node_id)
+                self._authorize(actor, 'catalog.view_nodesetting', nodes=(node_id,), projects=self._node_scope(node_id))
+                local = self._settings_snapshot(node, node=True)
+            result = resolve(dict(installed.values), dict(local.values) if local else None, require=require)
+            return EffectiveSettingsSnapshot(installed.revision, local.revision if local else None,
+                result.values, result.sources, result.missing, installed.applied_revision,
+                local.applied_revision if local else None)
+
     def _set_settings(self, actor, batch, revision, node_id):
         values = validate_batch(batch, node=node_id is not None)
         with transaction.atomic():
+            # Один порядок lock: installation, затем node. Так глобальный edit
+            # проверяет все существующие overrides без гонки с узловым edit.
+            installation = self._installation(lock=True)
+            installed = dict(self._settings_snapshot(installation, node=False).values)
             if node_id is None:
-                owner = self._installation(lock=True)
+                owner = installation
                 self._authorize(actor, 'catalog.change_installationsetting')
                 state, _ = m.InstallationConfiguration.objects.get_or_create(installation=owner)
                 field, model, reference = 'revision', m.InstallationSetting, {'installation': owner}
+                proposed = {**installed, **values}
+                resolve(proposed)
+                by_node = {}
+                for row in m.NodeSetting.objects.order_by('node_id', 'key'):
+                    by_node.setdefault(row.node_id, {})[row.key] = getattr(row, row.value_kind + '_value')
+                for overrides in by_node.values():
+                    resolve(proposed, overrides)
             else:
                 owner = m.Node.objects.select_for_update().get(pk=node_id)
                 self._authorize(actor, 'catalog.change_nodesetting', nodes=(node_id,), projects=self._node_scope(node_id))
                 state, field, model, reference = owner, 'settings_revision', m.NodeSetting, {'node': owner}
+                local = dict(self._settings_snapshot(owner, node=True).values)
+                resolve(installed, {**local, **values})
             expected(state, revision, field)
             for key, value in values.items():
                 definition = DEFINITIONS[key]
