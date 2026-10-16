@@ -7,6 +7,7 @@ from _controller_fixture import main
 
 if __name__ == '__main__':
     sys.exit(main([
+        '_worker_root_cases',
         '_controller_cases.TransportDeadline',
         '_controller_boundary_cases.Materialization',
         '_controller_boundary_cases.Boundary.test_uncertain_commit_is_not_advertised_as_a_retryable_rollback',

@@ -406,7 +406,10 @@ class Boundary(unittest.TestCase):
             worker_resource = HttpResource()
             stop = asyncio.Event()
             stop.set()
-            await run_worker(stop, Runtime(adapters=(worker_resource,)))
+            class StoppedConsumer:
+                async def run_pending(self, *, limit):
+                    raise AssertionError('stopped worker must not poll')
+            await run_worker(stop, Runtime(adapters=(worker_resource,)), worker=StoppedConsumer())
             self.assertTrue(worker_resource.session.closed)
         asyncio.run(run())
 

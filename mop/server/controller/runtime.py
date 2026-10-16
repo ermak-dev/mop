@@ -167,6 +167,10 @@ class Runtime:
     def pending(self):
         return sum(self._counts.values())
 
+    def stop_accepting(self):
+        """Остановить новые claims, сохранив owned result/cleanup lane."""
+        self._stopped = True
+
     async def start(self):
         if self._stopped:
             raise RuntimeError('runtime is stopped')
@@ -541,13 +545,112 @@ def serve(host, port, *, hostnames=(), tls_cert=None, tls_key=None):
                 proxy_headers=False, server_header=False, ssl_certfile=tls_cert, ssl_keyfile=tls_key)
 
 
-async def run_worker(stop, runtime):
+def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None,
+                   image_builder=None, build_node_executor=None):
+    """Только доверенные named ports; нет legacy config, fake или общего execute.
+
+    Node eligibility требует отдельно enrolled service для текущей authority.
+    Build ports сохраняют приватный executor #648; root не достаёт hypervisor
+    credentials в web/worker. Физические fenced clients и OS enrollment задаёт
+    installation root: без них standalone worker явно отказывает на startup.
+    Restart потребляется только machine HTTP, не этим controller poll.
+    """
+    from ..access.context import ActorContext, PrincipalKind
+    from ..access.grants import Grants
+    from ..operations.worker import Worker
+    from .machinebinding import AssignmentBindings
+
+    node_bound = node_executor is not None
+    if node_bound != (executor is not None):
+        raise RuntimeError('node executor and enrolled service authority are required together')
+    if node_bound and (type(executor) is not ActorContext or executor.kind is not PrincipalKind.SERVICE
+                       or executor.node_id is None):
+        raise RuntimeError('enrolled node executor authority required')
+    if node_bound and not asyncio.iscoroutinefunction(getattr(node_executor, 'set_eligibility', None)):
+        raise RuntimeError('node executor requires a bound managed async set_eligibility capability')
+    build_ports = (scheduler, image_builder, build_node_executor)
+    build_bound = any(port is not None for port in build_ports)
+    if build_bound and any(port is None for port in build_ports):
+        raise RuntimeError('privileged build ports are not fully configured')
+    if not node_bound and not build_bound:
+        raise RuntimeError('controller worker capabilities are not configured: fenced node eligibility or privileged build ports required')
+
+    # Только SQL authority: credential/owner/approval перечитываются каждым
+    # use case. Provider secret I/O не вызывается под application transaction.
+    authority = Grants(provider=None, bindings=AssignmentBindings()).local_authority()
+    operations = operations_service(grants=authority, executor=executor)
+    builds = None
+    if build_bound:
+        builds = builds_service(scheduler=scheduler, image_builder=image_builder,
+            node_executor=build_node_executor, grants=authority)
+        builds._preflight()
+    return Worker(runtime, operations, node_executor, image_builds=builds,
+        node_id=executor.node_id if node_bound else None)
+
+
+async def _drain_worker(runtime, batch, stopped, timeout):
+    # Batch остаётся owned до результата: его cancel скрыл бы ошибку эффекта,
+    # который Runtime shield продолжает исполнять. Новые claims уже остановлены.
+    deadline = asyncio.get_running_loop().time() + timeout
+    if stopped is not None:
+        stopped.cancel()
+        await asyncio.gather(stopped, return_exceptions=True)
     try:
-        await runtime.start()
-        # Foundation не выдумывает временную очередь/handler: их связывает #625.
-        await stop.wait()
+        if batch is not None:
+            _, pending = await asyncio.wait((batch,), timeout=max(0, deadline-asyncio.get_running_loop().time()))
+            if pending:
+                raise RuntimeError('controller shutdown incomplete: worker pass is still running')
+            batch.result()
     finally:
-        await runtime.aclose()
+        # Не закрывать adapters и не освобождать slots под живым эффектом.
+        await runtime.aclose(timeout=max(0, deadline-asyncio.get_running_loop().time()))
+
+
+async def run_worker(stop, runtime, *, worker=None, poll_interval=.5, batch_limit=8, shutdown_timeout=10):
+    """Один bounded durable проход за раз; wake loss покрывает следующий poll.
+
+    Cleanup принадлежит root даже при повторной отмене caller. Если внешний I/O
+    ещё жив после бюджета, Runtime оставляет tasks/slots/adapters owned и выдаёт
+    честный incomplete shutdown; stale lease не доказывает quiescence.
+    """
+    import math
+    batch = stopped = None
+    drain_timeout = 10
+    try:
+        if type(batch_limit) is not int or not 1 <= batch_limit <= 8:
+            raise ValueError('worker batch exceeds controller safety caps')
+        if type(poll_interval) not in (int, float) or not math.isfinite(poll_interval) or not 0 < poll_interval <= 30:
+            raise ValueError('worker poll interval must be within 30 seconds')
+        if type(shutdown_timeout) not in (int, float) or not math.isfinite(shutdown_timeout) or not 0 < shutdown_timeout <= 10:
+            raise ValueError('worker shutdown budget must be within 10 seconds')
+        drain_timeout = shutdown_timeout
+        await runtime.start()
+        worker = compose_worker(runtime) if worker is None else worker
+        stopped = asyncio.create_task(stop.wait())
+        while not stop.is_set():
+            batch = asyncio.create_task(worker.run_pending(limit=batch_limit))
+            batch.add_done_callback(_observe)  # Поздняя ошибка после incomplete drain уже наблюдена.
+            done, _ = await asyncio.wait((batch, stopped), return_when=asyncio.FIRST_COMPLETED)
+            if batch in done:
+                batch.result()  # Discovery/DB отказ не становится успешным idle loop.
+            if stop.is_set():
+                break
+            batch = None
+            # Даже пустая очередь не вызывает busy spin; Event не теряется
+            # между двумя проходами и не зависит от ephemeral notification.
+            await asyncio.wait((stopped,), timeout=poll_interval)
+    finally:
+        runtime.stop_accepting()
+        cleanup = asyncio.create_task(_drain_worker(runtime, batch, stopped, drain_timeout))
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 def worker():
