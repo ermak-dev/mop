@@ -416,7 +416,8 @@ import Django or server modules. These routes are not a generic RPC interface.
   unresolved attempts unknown; it does not authorize replay or claim that the
   old process is quiescent.
 - `GET /api/v1/machine/facts` accepts `schema_version`, `node_id`, `kind`, `limit`.
-  Allowed kinds are `states`, `clone`, `sizes`, `usage`, `disk`, `junk`, `health`;
+  Allowed kinds are `states`, `clone`, `sizes`, `disk`, `junk`, `health`;
+  token `usage` is not a node fact (#656), but a separate proxy consumer;
   a bounded fact port returns explicit freshness/unavailability, never a mutation
   Operation. Missing bindings refuse; unavailable is not an empty safe-to-delete
   inventory. Expensive I/O must have adapter-level deadlines outside transactions.
@@ -619,6 +620,71 @@ a second PTY behind the first. Disconnect/revoke cancels subscriptions and relea
 live handles with generation checks; a persisted control record is not evidence
 that its socket or PTY is alive. Private history has a separately authorized read
 endpoint and explicit retention, never a broad project event.
+
+## Proxy usage source (#656)
+
+CLIProxyAPI, not session transcripts, is the source of new token accounting.
+The source-tag profile `cliproxy-v8.0.16-accounting-2` describes public upstream
+**v8.0.16 source**, not the version installed on any existing pool. The trusted
+credential-runtime binding (#669) must validate the actual binary/schema and
+controlled request counters before issuing `ReadCapability`. An unsupported or
+unverified instance is denied, not guessed from its version string in settings.
+No production queue/configuration was read or changed to implement this profile.
+Profile evidence is the tagged [accounting codec](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.16/sdk/cliproxy/usage/accounting.go)
+and [queue implementation](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.16/internal/redisqueue/queue.go),
+not a promise that a deployment matches those sources.
+
+The public query is `GET /api/v1/usage?schema_version=1&start=YYYY-MM-DD&end=YYYY-MM-DD`.
+Dates are UTC, start inclusive/end exclusive, at most 366 days; `limit` is 1..100
+and `after` is the opaque returned `next` cursor. Results are materialized daily
+source/key/provider/model/alias aggregates. `execution.view_usage` requires both
+its action permission and installation-wide scope; project-only credentials may
+not read globally unattributed shared-key traffic. Each counter carries a decimal
+string or null, `known_events`, and `unknown_events`. Known subtotals do not claim
+full coverage. `total` is a separate parent metric: never sum it with its input,
+output, cache or reasoning components. Unclassified structural zeros are not
+measured category zeros. This is token accounting, not monetary billing.
+`user`, `project`, and `puppet` attribution is unavailable: the shared client key
+proves none of them. `mop.client.usage.stat` is the bounded DTO adapter for #642;
+#626 consumes the same REST query, not a parallel node collector.
+
+`UsageSource`, `UsageReadIntent`, `UsageEvent`, and `UsageAggregate` belong to the
+execution application. Before each destructive GET, a short sync ORM function
+commits a read intent; external I/O never runs under SQL locks. A single source
+row and unresolved-read constraint serialize independent connections/processes.
+Expiry is not quiescence: a delayed or crashed read holds that source until a
+trusted, addressed `Quiescence` confirms its old HTTP attempts cannot still pop.
+Recovery records a permanent `read_outcome_unknown` gap, never replays the read.
+Event identity is source plus hashed execution ID; a separate payload fingerprint
+detects collisions. Identical events do not increment aggregates; conflicting
+payloads retain the original and record an explicit gap rather than overwriting.
+
+The async collector owns one batch (at most 100 records/2 MiB), and sends whole
+materialized ORM transactions through its owning Runtime. The finite `UsageBoundary`
+port holds management credentials and key-label HMAC material in the server-only
+credential process; raw queue records never cross into public DTOs/logs/events.
+No domain module imports RootController or retrieves a credential itself. The
+production boundary is deliberately unbound/denied until #669 supplies it.
+
+A local DB lock is **not** cross-installation ownership. Upstream v8.0.16 supplies
+no remote lease/ack/replay API. Its queue is volatile RAM (retention at most one
+hour); restart/expiry can lose records, and stream subscribers divert publications
+away from the backlog. Empty queue therefore never proves complete coverage.
+`source_complete` is always false. Read-intent/gap status is queryable independently
+of an empty period; unknown lost-event counts are never invented as zero.
+
+Before enabling a fresh installation, #644/#669 and the operator must demonstrate
+an actual upstream access boundary: only the named consumer can reach the queue
+and usage stream, including management panels, direct management access, other
+processes and other mop installations. Gateway #647 must deny these destructive
+queue/stream routes to panel clients. Two separate database leases or a declared
+"exclusive" boolean are insufficient. If that access topology cannot be enforced,
+collection stays denied. Controlled live acceptance must verify the deployed
+version/profile, client-key identity, model/alias and provider-specific counters,
+prove exclusion and test restart/retention loss. Isolated fake HTTPS transport
+checks are not that live proof. No existing production queue may be sampled by a
+second test consumer. The transcript collector is removed only with the connected
+#626/#642 cutover; no fallback or blending of historic transcript totals is allowed.
 
 ## Offline and repair boundary
 

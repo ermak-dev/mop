@@ -28,7 +28,7 @@ ACTIONS = frozenset(
 SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'poll_work', 'claim_work', 'report_result', 'read_facts'))
 ACTIONS = ACTIONS | SERVICE_ACTIONS | frozenset('execution.' + code for code in (
-    'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work'))
+    'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work', 'view_usage'))
 
 GLOBAL_ACTIONS = frozenset(
     [x for x in ACTIONS if x.startswith('auth.')] +
@@ -39,4 +39,4 @@ GLOBAL_ACTIONS = frozenset(
     ['sessions.' + x for x in ('view_history', 'view_tail', 'read_terminal', 'control_terminal')] +
     ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation', 'view_audit',
       'diagnose_pool', 'treat_pool', 'collect_pool_garbage', 'sweep_pool', 'view_node_disk')] +
-    ['secrets.rotate_proxy_key', 'controller.manage_proxy'])
+    ['secrets.rotate_proxy_key', 'controller.manage_proxy', 'execution.view_usage'])

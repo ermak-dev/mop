@@ -88,9 +88,53 @@ def _counter(value):
 
 def _partition(values, parent, children):
     parts = tuple(values[name] for name in children)
-    if values[parent] is not None and all(part is not None for part in parts):
-        if sum(parts) != values[parent]:
-            raise ValueError('inconsistent token partition')
+    if values[parent] is None:
+        return
+    known = sum(part for part in parts if part is not None)
+    if known > values[parent] or all(part is not None for part in parts) and known != values[parent]:
+        raise ValueError('inconsistent token partition')
+
+
+def _fingerprint(source_id, event_id, at, key_id, provider, model, alias, failed, quality, counters):
+    canonical = json.dumps([str(source_id), event_id, at.isoformat(), key_id, provider, model,
+        alias, failed, quality, counters], ensure_ascii=True, separators=(',', ':')).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def validate_event(event, *, source_id):
+    """Повторная pure проверка private frame: dataclass не trusted type proof."""
+    try:
+        if (type(event) is not UsageEvent or type(source_id) is not UUID or event.source_id != source_id
+                or event.profile != 'cliproxy-v8.0.16-accounting-2' or type(event.failed) is not bool
+                or event.quality not in ('complete', 'partial', 'unclassified', 'inconsistent')
+                or any(type(value) is not str or not re.fullmatch('[0-9a-f]{64}', value)
+                       for value in (event.event_id, event.fingerprint))
+                or event.key_id is not None and (type(event.key_id) is not str
+                    or not re.fullmatch('key_[0-9a-f]{64}', event.key_id))
+                or type(event.occurred_at) is not datetime or event.occurred_at.tzinfo is None
+                or event.occurred_at.utcoffset() is None or event.occurred_at.utcoffset().total_seconds() != 0
+                or type(event.counters) is not tuple or len(event.counters) != len(_FIELDS)):
+            raise ValueError('invalid event frame')
+        for label, maximum in ((event.provider, 128), (event.model, 256), (event.alias, 256)):
+            _text(label, maximum)
+        for item, (name, _, _) in zip(event.counters, _FIELDS):
+            if type(item) is not tuple or len(item) != 2 or item[0] != name:
+                raise ValueError('invalid category frame')
+            if item[1] is not None:
+                _counter(item[1])
+        values = dict(event.counters)
+        _partition(values, 'input', ('input_uncached', 'cache_read', 'cache_write'))
+        _partition(values, 'output', ('output_non_reasoning', 'reasoning'))
+        _partition(values, 'total', ('input', 'output', 'unclassified'))
+        if event.quality == 'complete' and (None in values.values() or values['unclassified'] != 0):
+            raise ValueError('invalid complete frame')
+        calculated = _fingerprint(event.source_id, event.event_id, event.occurred_at, event.key_id,
+            event.provider, event.model, event.alias, event.failed, event.quality, event.counters)
+        if not hmac.compare_digest(event.fingerprint, calculated):
+            raise ValueError('event fingerprint mismatch')
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        raise CodecError('invalid addressed usage event frame') from None
+    return event
 
 
 def _record(record, source_id, key_salt):
@@ -129,6 +173,12 @@ def _record(record, source_id, key_salt):
     if breakdown['quality'] == 'complete' and values['unclassified'] not in (None, 0):
         raise ValueError('complete partition contains unclassified tokens')
     quality = 'partial' if any(value is None for value in values.values()) else breakdown['quality']
+    # Unclassified/inconsistent содержат структурные нули без presence evidence.
+    # Положительные partial subsets сохраняются; неизвестные нули не измерения.
+    if breakdown['quality'] != 'complete':
+        for name in values:
+            if name not in ('total', 'unclassified') and (values[name] == 0 or breakdown['quality'] == 'inconsistent'):
+                values[name] = None
     provider = _text(record.get('provider'), 128, private=raw_key)
     model = _text(record.get('model'), 256, private=raw_key)
     alias = _text(record.get('alias') or model, 256, private=raw_key)
@@ -137,9 +187,7 @@ def _record(record, source_id, key_salt):
         raise ValueError('invalid failure classification')
     event_id = hashlib.sha256(b'mop.usage.execution.v1\x00' + source_id.bytes + identifier.encode()).hexdigest()
     counters = tuple(values.items())
-    canonical = json.dumps([str(source_id), event_id, at.isoformat(), key_id, provider, model,
-        alias, failed, quality, counters], ensure_ascii=True, separators=(',', ':')).encode()
-    fingerprint = hashlib.sha256(canonical).hexdigest()
+    fingerprint = _fingerprint(source_id, event_id, at, key_id, provider, model, alias, failed, quality, counters)
     return UsageEvent(source_id, event_id, fingerprint, at, key_id, provider, model, alias,
                       failed, quality, counters)
 

@@ -3,7 +3,13 @@
 HYPOTHESIS: raw counters пересекаются, а queue records содержат credentials.
 SOLUTION: только проверенный normalized breakdown и whitelist безопасных полей.
 RESULT: отсутствие codec — 9 red; затем отдельный behavioral red для dedupe
-при смене key-label salt. Нормализованная сумма/приватность/10 checks green.
+при смене key-label salt. Дополнительный red: partial child > known parent
+при отсутствующей другой категории. SOLUTION: known subtotal — нижняя граница.
+Второй red: structural unclassified zeros выдавались за measured category zero.
+SOLUTION: невыделенные категории nullable; positive partial subsets сохраняются.
+Private frame red: frozen DTO не проверялся перед записью. SOLUTION: validate_event
+повторяет typed normalized invariants и пересчитывает fingerprint без raw fields.
+Нормализованная сумма/приватность/13 checks green.
 STATUS: FIXED — see #656 (codec, не consumer/источник live/CLI cutover)
 """
 import copy
@@ -31,7 +37,9 @@ def record():
         'fail': {'status_code': 200, 'body': 'private response body'},
         'response_headers': {'Authorization': ['private-header']},
         'client_ip': '192.0.2.1', 'session_id': 'private-session', 'failed': False,
-        'tokens': {'input_tokens': 15, 'output_tokens': 26, 'reasoning_tokens': 6,
+        # Синтетические independent Anthropic counters по проверенному source tag,
+        # не запись живой установки. Normalized parents включают cache/reasoning.
+        'tokens': {'input_tokens': 10, 'output_tokens': 20, 'reasoning_tokens': 6,
             'cached_tokens': 4, 'cache_read_tokens': 4, 'cache_creation_tokens': 1, 'total_tokens': 41},
         'token_breakdown': {'schema_version': 2, 'quality': 'complete', 'total_tokens': 41,
             'unclassified_tokens': 0,
@@ -47,6 +55,18 @@ class QueueCodec(unittest.TestCase):
 
     def decode(self, records, **kwargs):
         return self.c.decode_batch(json.dumps(records).encode(), source_id=SOURCE, key_salt=SALT, **kwargs)
+
+    def test_private_event_frame_revalidates_types_and_fingerprint_before_storage(self):
+        from dataclasses import replace
+        self.assertTrue(callable(getattr(self.c, 'validate_event', None)),
+                        'frozen dataclass is not validation of a credential-runtime frame')
+        event = self.decode([record()]).events[0]
+        self.assertEqual(self.c.validate_event(event, source_id=SOURCE), event)
+        for invalid in (replace(event, failed=1), replace(event, model='changed-without-fingerprint'),
+                        replace(event, key_id=KEY), replace(event, quality='guessed'),
+                        replace(event, counters=(('total', 41),)), replace(event, fingerprint='0'*64)):
+            with self.subTest(invalid=invalid), self.assertRaises(self.c.CodecError):
+                self.c.validate_event(invalid, source_id=SOURCE)
 
     def test_normalized_partition_is_not_double_counted_with_legacy_counters(self):
         batch = self.decode([record()])
@@ -107,6 +127,26 @@ class QueueCodec(unittest.TestCase):
         self.assertIsNone(dict(batch.events[0].counters)['cache_write'])
         self.assertEqual(batch.events[0].quality, 'partial')
         self.assertFalse(batch.source_complete)
+
+    def test_unclassified_structural_zeros_are_not_measured_categories(self):
+        value = record()
+        value['token_breakdown'] = {'schema_version': 2, 'quality': 'unclassified',
+            'total_tokens': 41, 'unclassified_tokens': 41,
+            'input': {'total_tokens': 0, 'uncached_tokens': 0, 'cache_read_tokens': 0, 'cache_write_tokens': 0},
+            'output': {'total_tokens': 0, 'non_reasoning_tokens': 0, 'reasoning_tokens': 0}}
+        event = self.decode([value]).events[0]
+        self.assertIsNone(dict(event.counters)['cache_read'],
+            'unclassified accounting uses structural zeros, not observed category zeros')
+        self.assertIsNone(dict(event.counters)['output'])
+        self.assertEqual(dict(event.counters)['unclassified'], 41)
+        self.assertEqual(event.quality, 'unclassified')
+
+    def test_partial_children_cannot_exceed_a_known_parent(self):
+        value = record()
+        del value['token_breakdown']['input']['cache_write_tokens']
+        value['token_breakdown']['input']['uncached_tokens'] = 100
+        self.assertEqual(self.decode([value]).rejected, 1,
+            'missing one category must not conceal contradictory known counters')
 
     def test_unknown_profile_or_raw_only_counters_are_not_assumed_additive(self):
         value = record()

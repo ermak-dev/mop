@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 16|17] [--check controller|hermetic]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 16|17] [--check controller|hermetic|usage]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -45,8 +45,9 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
-    parser.add_argument('--check', choices=('controller', 'hermetic'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'hermetic', 'usage'), default='controller')
     args = parser.parse_args(argv)
+    check_script = 'proxy_usage_store' if args.check == 'usage' else args.check
     docker = shutil.which('docker')
     if not docker:
         raise RuntimeError('isolated controller checks require an existing Docker installation')
@@ -105,7 +106,7 @@ def main(argv):
                            '-v', 'mop-controller-fixture-pip:/root/.cache/pip',
                            '-e', 'MOP_TESTS_STRICT=1', '-e', 'MOP_TEST_POSTGRES_HOST=postgres',
                            '-e', f'POSTGRES_MAJOR={args.postgres}',
-                           '-e', f'TESTS=python3 tests/{args.check}.py',
+                           '-e', f'TESTS=python3 tests/{check_script}.py',
                            job['PYTHON_IMAGE'], 'bash', '-euc', setup], check=False).returncode
         except OSError as error:
             failure = f'isolated controller fixture unavailable: {type(error).__name__}'

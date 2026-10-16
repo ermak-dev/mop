@@ -56,6 +56,14 @@ class ExecutionWire(unittest.TestCase):
             with self.assertRaises(ValueError):
                 p.ReceiptV1(uuid4(), uuid4(), 2, outcome, evidence)
 
+    # HYPOTHESIS: старый fact usage допускает второй transcript-based token ingress.
+    # SPEC: #656 — proxy единственный источник; session/turn/model facts остаются #641.
+    # RED: FACT_FIELDS содержал usage. SOLUTION: убрать старый token ingress.
+    # RESULT: 7 pure checks green. STATUS: FIXED — see #656.
+    def test_transcript_usage_is_not_an_enrolled_node_fact(self):
+        self.assertNotIn('usage', p.FACT_FIELDS,
+                         'proxy usage must not be accepted as a node transcript fact')
+
     def test_fact_page_cannot_claim_foreign_node_or_arbitrary_fields(self):
         now = datetime.now(timezone.utc)
         item = p.FactV1(self.work.target_id, self.work.incarnation_id, 1, now, now,

@@ -107,6 +107,10 @@ class ReadinessReceipt(ImmutableRecord):
     receipt = models.OneToOneField(ResultReceipt, on_delete=models.PROTECT)
 
 
+# Отдельный leaf позволяет #641/#649 добавлять свою схему без общей миграции.
+from .usage_models import UsageSource, UsageReadIntent, UsageEvent, UsageAggregate  # noqa: E402,F401
+
+
 class LandingToken(Record):
     project = models.OneToOneField('catalog.Project', on_delete=models.PROTECT)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT)
