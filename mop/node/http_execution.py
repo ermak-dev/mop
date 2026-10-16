@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import json
 import re
 import ssl
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -281,11 +281,30 @@ class MachineClient:
 
 @dataclass(frozen=True)
 class EffectGuard:
-    authorize: object
-    check: object
+    authorize: Callable[[], Awaitable[None]]
+    check: Callable[[], None]
 
     async def __call__(self):
         await self.authorize()
+
+
+async def run_http_agent(*, origin, token, node_id, epoch, executor_epoch,
+                         previous_epoch, resolver, tls=None, readiness=None, replacement=None):
+    """Новый composition entry: только HTTP, без старого agent/NATS/state fallback.
+
+    #643 передаёт enrolled identity, предыдущий server-owned epoch и доверенный
+    physical/input resolver; #639 — addressed action input. До этих bindings
+    старт отказывает, а не выводит target/credentials из имени или .git marker.
+    """
+    from mop.node.execution_adapters import LocalExecutor, ProcessRunner
+    client = MachineClient(HttpsTransport(origin, token, tls=tls))
+    executor = LocalExecutor(ProcessRunner(), resolver, readiness=readiness, replacement=replacement)
+    runtime = Runtime(client, executor, node_id=node_id, epoch=epoch, executor_epoch=executor_epoch)
+    try:
+        await runtime.start(previous_epoch)
+        await runtime.run()
+    finally:
+        await runtime.aclose()
 
 
 class ExecutorPort(Protocol):
@@ -319,6 +338,7 @@ class Runtime:
         self._stop = asyncio.Event()
         self.last_error = None
         self._close_task = None
+        self._cleanup_task = None
 
     async def start(self, previous_epoch):
         if self._closed or self._ready:
@@ -376,6 +396,9 @@ class Runtime:
                 # ввод/identity. Не объявляем failed и не запускаем компенсацию.
                 self.last_error = str(error)
                 outcome, evidence = 'unknown', 'connection-lost'
+            except Exception as error:
+                self.last_error = 'executor adapter failed: ' + type(error).__name__
+                outcome, evidence = 'unknown', 'connection-lost'
             await self.client.result(admission, outcome, evidence)
             if outcome != 'unknown':
                 self._targets.discard(work.target_id)
@@ -423,6 +446,7 @@ class Runtime:
         # Concrete executor reap'ит только своих subprocess, не живые сессии.
         close = getattr(self.executor, 'aclose', None)
         cleanup = asyncio.create_task(close()) if close else None
+        self._cleanup_task = cleanup
         owned = {*tasks, *([cleanup] if cleanup else [])}
         try:
             if owned:

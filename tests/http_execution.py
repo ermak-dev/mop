@@ -168,6 +168,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.drain()
         self.assertEqual([c[1] for c in self.transport.calls[count:]], ['work'])
 
+    async def test_unexpected_adapter_failure_reports_unknown_without_raw_secret(self):
+        async def broken(work, guard):
+            await guard()
+            raise RuntimeError('private credential in exception')
+        self.executor.execute = broken
+        await self.runtime.tick()
+        await self.runtime.drain()
+        self.assertEqual(self.transport.calls[-1][1], 'work/result')
+        self.assertEqual(self.transport.calls[-1][2]['outcome'], 'unknown')
+        self.assertNotIn('private credential', self.runtime.last_error)
+
     async def test_result_loss_does_not_replay_a_completed_effect(self):
         self.transport.lose = 'work/result'
         await self.runtime.tick()
@@ -254,6 +265,42 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FactTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parallel_fact_pages_keep_their_reserved_observation_sequence(self):
+        work = Work.parse(wire())
+        root = Path('/tmp/mop640-fake-facts')
+        target = BoundTarget(work.target_id, work.incarnation_id, work.node_id,
+            work.executor_epoch, work.generation, work.role, work.bundle_digest,
+            work.grant_id, root, root/'tmux', '%0', root/'launcher')
+        entered, release = asyncio.Event(), asyncio.Event()
+        class Authority:
+            async def authorize(self, node_id, kind, limit):
+                return FactScope(node_id, kind, (target,), True)
+        facts = LocalFacts(None, Authority())
+        async def values(kind, physical):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return {'healthy':True,'latency_ms':1}
+        facts._values = values
+        first = asyncio.create_task(facts.read(node_id=work.node_id, kind='health'))
+        await entered.wait()
+        second = await facts.read(node_id=work.node_id, kind='health')
+        release.set()
+        first_page = await first
+        self.assertEqual(first_page['items'][0]['sequence'], '1')
+        self.assertEqual(second['items'][0]['sequence'], '2')
+
+    async def test_fact_timeout_is_explicit_unavailable_not_empty_or_raw_timeout(self):
+        class Authority:
+            async def authorize(self, *args): await asyncio.Event().wait()
+        runner = ProcessRunner()
+        facts = LocalFacts(runner, Authority(), timeout=.1)
+        try:
+            with self.assertRaises(Unavailable):
+                await facts.read(node_id=str(uuid4()), kind='junk')
+        finally:
+            await runner.aclose()
+
     async def test_real_clone_facts_and_missing_sources_never_become_empty_inventory(self):
         work = Work.parse(wire())
         runner = ProcessRunner()
@@ -284,6 +331,7 @@ class FactTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(value['complete'])
                 self.assertEqual(value['items'][0]['state'], 'unavailable')
                 self.assertEqual(value['items'][0]['values'], {})
+                self.assertTrue(facts.last_error, 'unavailable source reason must remain observable')
             denied = LocalFacts(runner, None)
             with self.assertRaises(Unavailable):
                 await denied.read(node_id=work.node_id, kind='junk', limit=1)
@@ -292,6 +340,19 @@ class FactTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NetworkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_http_entry_owns_client_even_when_reconciliation_fails(self):
+        from mop.node import http_execution
+        value = wire()
+        transport = Transport(value)
+        class Resolver:
+            async def reconcile(self, *args): return False
+        with patch.object(http_execution, 'HttpsTransport', return_value=transport):
+            with self.assertRaises(Unavailable):
+                await http_execution.run_http_agent(origin='https://controller.test', token='credential',
+                    node_id=value['node_id'], epoch=value['epoch'], executor_epoch=value['executor_epoch'],
+                    previous_epoch=str(uuid4()), resolver=Resolver())
+        self.assertTrue(transport.closed)
+
     async def test_verified_tls_fixed_routes_token_auth_and_no_post_retry(self):
         import aiohttp
         for origin in ('http://host.test', 'https://u:p@host.test', 'https://host.test/path'):
@@ -383,6 +444,36 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 server.close()
                 await server.wait_closed()
 
+    async def test_runner_shutdown_owns_in_progress_spawn(self):
+        runner = ProcessRunner()
+        spawned, release = asyncio.Event(), asyncio.Event()
+        children = []
+        original = asyncio.create_subprocess_exec
+        async def slow_spawn(*args, **kwargs):
+            child = await original(*args, **kwargs)
+            children.append(child)
+            spawned.set()
+            await release.wait()
+            return child
+        try:
+            with patch('asyncio.create_subprocess_exec', slow_spawn):
+                task = asyncio.create_task(runner.run((sys.executable,'-c','import time;time.sleep(30)')))
+                await spawned.wait()
+                closing = asyncio.create_task(runner.aclose())
+                await asyncio.sleep(.01)
+                self.assertFalse(closing.done(), 'shutdown forgot a live spawn')
+                release.set()
+                await closing
+                with self.assertRaises(Unavailable): await task
+                self.assertIsNotNone(children[0].returncode)
+        finally:
+            release.set()
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                    await child.wait()
+            await runner.aclose()
+
     async def test_spawn_cancellation_reaps_already_created_child(self):
         runner = ProcessRunner()
         spawned = asyncio.Event()
@@ -455,8 +546,19 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 ready = Work.parse({**work.wire(), 'action':'confirm_ready'})
                 with self.assertRaises(Unavailable):
                     await adapter.execute(ready, gate)
+                await adapter.aclose()
+                cleanup = ProcessRunner()
+                try:
+                    # Потеря control runtime не убивает уже живую pane/session.
+                    alive = await cleanup.run(('tmux','-S',str(socket),'display-message','-p',
+                                               '-t',pane,'#{pane_dead}'))
+                    self.assertEqual(alive.strip(), '0')
+                finally:
+                    await cleanup.aclose()
             finally:
-                await runner.run(('tmux','-S',str(socket),'kill-server'))
+                cleanup = ProcessRunner()
+                await cleanup.run(('tmux','-S',str(socket),'kill-server'))
+                await cleanup.aclose()
                 await adapter.aclose()
 
     async def test_missing_physical_binding_fails_closed(self):
@@ -475,6 +577,33 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.active, 0)
         self.assertEqual((await runner.run((sys.executable, '-c', 'print("ok")'))).strip(), 'ok')
         await runner.aclose()
+
+    async def test_revocation_between_identity_writes_neither_sends_nor_rolls_back(self):
+        work = Work.parse(wire())
+        root = Path('/tmp/mop640-fake-binding')
+        target = BoundTarget(work.target_id, work.incarnation_id, work.node_id,
+            work.executor_epoch, work.generation, work.role, work.bundle_digest,
+            work.grant_id, root, root/'tmux', '%0', root/'launcher')
+        effects = []
+        checks = 0
+        class Resolver:
+            async def resolve(self, value): return target, ActionInput('Owner','owner@example.test','message')
+        class Runner:
+            async def run(self, argv, *, before_spawn):
+                await before_spawn()
+                effects.append(argv)
+                return ''
+            async def aclose(self): pass
+        async def authorize():
+            nonlocal checks
+            checks += 1
+            if checks == 2: raise Refused('generation changed')
+        adapter = LocalExecutor(Runner(), Resolver())
+        with self.assertRaisesRegex(Refused, 'generation changed'):
+            await adapter.execute(work, EffectGuard(authorize, lambda: None))
+        self.assertEqual(len(effects), 1)
+        self.assertEqual(effects[0][-2:], ('user.name','Owner'))
+        await adapter.aclose()
 
     async def test_identity_before_send_with_recheck_between_effects(self):
         work = Work.parse(wire())

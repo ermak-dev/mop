@@ -42,8 +42,15 @@ class LocalFacts:
         self._slots = asyncio.Semaphore(concurrency)
         self.timeout = timeout
         self._sequence = 0
+        self.last_error = None
 
     async def read(self, *, node_id, kind, limit=100):
+        try:
+            return await self._read(node_id=node_id, kind=kind, limit=limit)
+        except TimeoutError as error:
+            raise Unavailable('fact source timed out; inventory unavailable') from error
+
+    async def _read(self, *, node_id, kind, limit):
         uuid(node_id)
         if type(kind) is not str or kind not in FACT_FIELDS or type(limit) is not int or not 1 <= limit <= 100:
             raise Refused('bounded named facts required')
@@ -59,6 +66,7 @@ class LocalFacts:
                         or len(scope.targets) > limit):
                     raise Refused('fact scope does not match request')
                 self._sequence += 1
+                sequence = self._sequence
                 items = []
                 complete = scope.complete
                 for target in scope.targets:
@@ -69,10 +77,13 @@ class LocalFacts:
                         values = await self._values(kind, target)
                         self._validate(kind, values)
                         state = 'fresh'
-                    except Unavailable:
+                    except Unavailable as error:
+                        # В DTO v1 нет reason-поля; composition может вывести
+                        # безопасную библиотечную причину через diagnostic status.
+                        self.last_error = str(error)
                         values, state, complete = {}, 'unavailable', False
                     items.append(dict(target_id=uuid(target.target_id),
-                        incarnation_id=uuid(target.incarnation_id), sequence=str(self._sequence),
+                        incarnation_id=uuid(target.incarnation_id), sequence=str(sequence),
                         observed_at=observed, received_at=datetime.now(timezone.utc).isoformat(),
                         state=state, values=values))
                 return dict(schema_version=1, node_id=node_id, kind=kind,

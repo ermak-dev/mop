@@ -89,6 +89,7 @@ class ProcessRunner:
         self.timeout, self.output_limit = timeout, output_limit
         self._slots = asyncio.Semaphore(concurrency)
         self._processes = set()
+        self._spawns = set()
         self._closed = False
 
     @property
@@ -107,16 +108,17 @@ class ProcessRunner:
                 raise Unavailable('subprocess executor closed')
             # create_subprocess_exec может уже породить child до своего return.
             # Отмена caller не должна потерять единственного владельца process handle.
-            spawn = asyncio.create_task(asyncio.create_subprocess_exec(*argv,
-                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT, start_new_session=True))
+            spawn = asyncio.create_task(self._spawn(argv))
+            self._spawns.add(spawn)
             try:
                 process = await asyncio.shield(spawn)
             except asyncio.CancelledError:
                 process = await spawn
                 await self._reap(process)
+                self._processes.discard(process)
                 raise
-            self._processes.add(process)
+            finally:
+                self._spawns.discard(spawn)
             try:
                 async with asyncio.timeout(self.timeout):
                     output = bytearray()
@@ -136,6 +138,16 @@ class ProcessRunner:
                 await self._reap(process)
                 self._processes.discard(process)
 
+    async def _spawn(self, argv):
+        process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        self._processes.add(process)
+        if self._closed:
+            await self._reap(process)
+            self._processes.discard(process)
+            raise Unavailable('subprocess executor closed during spawn')
+        return process
+
     @staticmethod
     async def _reap(process):
         try:
@@ -146,6 +158,8 @@ class ProcessRunner:
 
     async def aclose(self):
         self._closed = True
+        if self._spawns:
+            await asyncio.gather(*tuple(self._spawns), return_exceptions=True)
         processes = tuple(self._processes)
         for process in processes:
             try:
