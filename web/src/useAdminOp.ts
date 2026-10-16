@@ -73,7 +73,12 @@ export function useAdminOp(session: Session, target: string | null) {
     if (op.id && !TERMINAL.has(op.status)) return op.id;
     const at = ++seq.current;
     setOp({ status: "submitted", id: null, error: null, lost: false });
-    const ride = (async (): Promise<string | null> => {
+    // Ссылка на собственный полёт нужна finally: IIFE анализируется в
+    // месте вызова, где присваивание ещё не случилось -- стартуем с null,
+    // а после присваивания тип сужается сам; присваивание -- до первого
+    // await, finally читает уже готовый промис.
+    let ride: Promise<string | null> | null = null;
+    ride = (async (): Promise<string | null> => {
       try {
         // Ключ target при null-цели не едет вовсе (#472): контракт
         // {action, target?, params}, и null в JSON не «отсутствие».
