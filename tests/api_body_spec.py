@@ -77,7 +77,11 @@ class ApiBodySpecTests(unittest.TestCase):
 
     def test_wrapper_executes_only_registered_launcher_with_public_pin_arguments(self):
         render = self.renderer()
-        with tempfile.TemporaryDirectory(prefix='m643-') as directory:
+        # Короткий собственный корень (#677): во вложенном прогоне наследуемый
+        # TMPDIR удлиняет runtime-путь за sockaddr_un, и RegisteredLayout
+        # отказывает заранее; здесь исполняется launcher, сокет не строится,
+        # но layout обязан быть осуществимым, как настоящий.
+        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
             args = self.arguments(directory)
             layout = args['layout']
             layout.runtime.mkdir(parents=True, mode=0o700)

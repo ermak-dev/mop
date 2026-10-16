@@ -1,10 +1,12 @@
-"""mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client|launch] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
 
 Runs the selected check on Python 3.12 and PostgreSQL 17 with the declared server
 extra and matching client tools in fresh Docker containers, using the same setup as CI. Requires
 an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The client check runs clean-wheel HTTPS checks and
-native Django/PostgreSQL client contracts. The snapshot contains tracked and
+native Django/PostgreSQL client contracts. The launch check runs the two finite
+plain-unittest body launch files (body_launch, api_body_spec) — they carry no
+Django labels, so --label cannot select them. The snapshot contains tracked and
 nonignored source, not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
@@ -56,7 +58,7 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('17',), default='17')
-    parser.add_argument('--check', choices=('controller', 'controller_runtime', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage', 'fresh_postgres', 'client'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'controller_runtime', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage', 'fresh_postgres', 'client', 'launch'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     parser.add_argument('--realtime', action='store_true', help='include the owned native TLS NATS fixture')
     parser.add_argument('--cross-uid', action='store_true')
@@ -72,6 +74,12 @@ def main(argv):
     test_script = shlex.join(['python3', f'tests/{check_script}.py', *args.label])
     if args.check == 'client':
         test_script += ' && ' + shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])
+    if args.check == 'launch':
+        # launch-файлы (#677) -- обычные unittest-модули, не Django labels:
+        # DiscoverRunner на 'body_launch' отдаёт _FailedTest. Конечный список
+        # из двух файлов, оба обязательны, тот же shlex-контракт.
+        test_script = shlex.join(['python3', 'tests/body_launch.py']) \
+            + ' && ' + shlex.join(['python3', 'tests/api_body_spec.py'])
     if args.web:
         test_script = ('python_status=0; bash -c ' + shlex.quote(test_script) + ' || python_status=$?; '
             'web_status=0; python3 tests/_web_dist_fixture.py || web_status=$?; '
