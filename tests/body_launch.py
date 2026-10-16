@@ -2,7 +2,8 @@
 """HYPOTHESIS: запуск читает файловые markers вместо addressed assignment.
 SOLUTION: immutable registration/layout, exact API response и physical/session ports.
 RESULT: воспроизведены отсутствие addressed boundary/readiness/producer/probe,
-Unix pathname overflow (121 > 100), затем 11 checks зелёные. Настоящий owned
+Unix pathname overflow (121 > 100), bool/schema и control characters, затем
+11 checks зелёные. Настоящий owned
 process/Unix socket и stdlib hook IPC проверены; server receipts/image/routes —
 контролируемые doubles, production SessionApi/PVE не подтверждены.
 STATUS: FIXED — see #643 (driver/node stage, Root binding отдельно)
@@ -61,7 +62,8 @@ class LaunchTests(unittest.TestCase):
         for fields in ({'control_origin':'http://control.test'}, {'routing_reference':''},
                        {'bootstrap_host':''}, {'ssh_port':True}, {'ssh_port':65536},
                        {'driver':'docker'}, {'bootstrap_host':'host;touch /tmp/x'},
-                       {'control_origin':'https://token@control.test'}):
+                       {'control_origin':'https://token@control.test'},
+                       {'control_origin':'https://control.test\n'}):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 replace(config, **fields)
 
@@ -73,7 +75,7 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(layout.clone, Path('/owned/puppets/pu-owned-1'))
         self.assertEqual(layout.launcher, Path('/owned/runtime')/w.incarnation_id/'launch')
         self.assertIn(w.incarnation_id, str(layout.tmux_socket))
-        for name in ('../../other', 'pu-other-1; rm', '', 'not-a-puppet'):
+        for name in ('../../other', 'pu-other-1; rm', '', 'not-a-puppet', 'pu-owned-1\n'):
             with self.assertRaises(ValueError):
                 replace(registration, display_name=name)
         with self.assertRaises(ValueError): m.RegisteredLayout(Path('relative'), registration)
@@ -99,7 +101,8 @@ class LaunchTests(unittest.TestCase):
         response = m.LaunchResponse.parse(raw, r, input_factory=ActionInput)
         self.assertEqual(response.bundle.prompt, b.prompt)
         self.assertEqual(response.inputs, ActionInput('Current Owner', 'owner@example.test'))
-        for change in ({'work':replace(w, generation=9).wire()},
+        for change in ({'work':{**w.wire(), 'schema_version':True}},
+                       {'work':replace(w, generation=9).wire()},
                        {'work':replace(w, executor_epoch=str(uuid4())).wire()},
                        {'work':replace(w, grant_id=str(uuid4())).wire()},
                        {'bootstrap_revision':str(uuid4())}, {'bootstrap_digest':'d'*64},
@@ -189,6 +192,7 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
                 config = m.MachineConfig('https://public.example.test', '10.20.0.4',
                     '192.0.2.8' if driver == 'host' else '10.77.1.8', 2207, driver)
                 class Ports:
+                    supports_bootstrap = True
                     async def image(self, node_id, digest):
                         calls.append(('image', node_id, digest))
                         return fails != 'image'
@@ -200,6 +204,11 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
                         calls.append(('bootstrap', registered.bootstrap_revision))
                         if fails == 'bootstrap': raise Unavailable('bootstrap failed')
                         return registered.bootstrap_revision
+                unsupported = Ports()
+                unsupported.supports_bootstrap = False
+                with self.assertRaisesRegex(Unavailable, 'capabilit'):
+                    await BootstrapDiscovery(config, registration, unsupported).run()
+                self.assertEqual(calls, [])
                 discovery = BootstrapDiscovery(config, registration, Ports())
                 if fails:
                     with self.assertRaises(Unavailable): await discovery.run()

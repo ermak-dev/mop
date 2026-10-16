@@ -298,6 +298,8 @@ class SessionRuntime:
 
 
 class BootstrapPorts(Protocol):
+    supports_bootstrap: bool
+
     async def image(self, node_id: str, digest: str) -> bool:
         """#648 проверяет фактический образ на выбранном узле, не строку ORM."""
         ...
@@ -316,6 +318,10 @@ class BootstrapDiscovery:
     def __init__(self, machine, registration, ports: BootstrapPorts):
         if type(machine) is not MachineConfig or type(registration) is not Registration:
             raise Refused('explicit machine and registered bootstrap pins required')
+        if (getattr(ports, 'supports_bootstrap', None) is not True
+                or any(not callable(getattr(ports, name, None)) for name in
+                       ('image', 'route', 'admit', 'bootstrap'))):
+            raise Unavailable('bootstrap capabilities are not bound')
         self.machine, self.registration, self.ports = machine, registration, ports
 
     async def run(self):

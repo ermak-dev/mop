@@ -67,7 +67,10 @@ Machine config задаёт отдельно `control_origin` (verified HTTPS),
 ключ и исполняется закреплённая bootstrap revision (#669/Preparation). Отзыв
 идёт в `finally`, включая lost admission reply и cancellation. Неуспех отзыва
 не превращается в успех запуска. У host и PVE собственные physical ports;
-одного HTTP heartbeat недостаточно ни для одного из них. Здесь нет новых
+одного HTTP heartbeat недостаточно ни для одного из них. Composite bootstrap
+adapter объявляет `supports_bootstrap` только после связывания всех четырёх
+методов; отсутствующая capability отказывает до первого внешнего вызова.
+Здесь нет новых
 root exec/write verbs или предположения, что строка image в ORM — сам образ.
 
 `SessionApiProbe` требует заранее объявленной capability `supports_launch_scope`.

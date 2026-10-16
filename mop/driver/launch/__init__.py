@@ -46,6 +46,9 @@ class MachineConfig:
     driver: str
 
     def __post_init__(self):
+        if (type(self.control_origin) is not str or len(self.control_origin) > 2048
+                or any(ord(c) < 33 or ord(c) == 127 for c in self.control_origin)):
+            raise ValueError('explicit control origin without whitespace required')
         parts = urlsplit(self.control_origin)
         if (parts.scheme != 'https' or not parts.hostname or parts.username or parts.password
                 or parts.path not in ('', '/') or parts.query or parts.fragment):
@@ -88,7 +91,8 @@ class Registration:
         _uuid(self.bootstrap_revision)
         _digest(self.bootstrap_digest)
         _digest(self.image_digest)
-        if type(self.display_name) is not str or not valid_name(self.display_name):
+        if (type(self.display_name) is not str or not valid_name(self.display_name)
+                or any(ord(c) < 33 or ord(c) == 127 for c in self.display_name)):
             raise ValueError('registered display name required')
 
     def matches(self, work):
@@ -150,7 +154,9 @@ class LaunchResponse:
         if (type(value) is not dict or set(value) != names
                 or type(value['schema_version']) is not int or value['schema_version'] != 1):
             raise ValueError('unknown launch response fields or schema')
-        if (value['work'] != registration.work.wire()
+        if (type(value['work']) is not dict
+                or type(value['work'].get('schema_version')) is not int
+                or value['work'] != registration.work.wire()
                 or any(value[key] != getattr(registration, key) for key in
                        ('bootstrap_revision', 'bootstrap_digest', 'image_digest'))):
             raise ValueError('addressed launch response changed registration pins')
