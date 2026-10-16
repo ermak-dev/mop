@@ -224,6 +224,189 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(calls[-1], ('admit', False))
 
 
+class BootstrapCancellationTests(unittest.IsolatedAsyncioTestCase):
+    # BUG: повторная отмена caller убивает обязательный отзыв admission.
+    # HYPOTHESIS: unshielded await после первой отмены передаёт вторую _revoke.
+    # HYPOTHESIS 2 (WRONG): Task.cancelling() различает текущую отмену;
+    # проверка показала ложный success после ранее обработанной отмены.
+    # SOLUTION: отмена только текущего run запускает независимо owned отзыв;
+    # aclose ограничивает ожидание, не отменяет cleanup и сохраняет причину отказа.
+    # RESULT: fixture-файл удалён после 1/2/5 отмен; owned cleanup завершается
+    # без orphan tasks; timeout/ошибка/отмена cleanup не подтверждают отзыв.
+    # STATUS: FIXED — see #643
+    async def test_repeated_caller_cancellation_does_not_abandon_admission(self):
+        from mop.node.body_launch import BootstrapDiscovery
+        m = api()
+        r = m.Registration(work(), str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        machine = m.MachineConfig('https://example.test', '127.0.0.1', '127.0.0.1', 2207, 'host')
+        for cancellations in (1, 2, 5):
+            with self.subTest(cancellations=cancellations), tempfile.TemporaryDirectory(prefix='m643-revoke-') as directory:
+                admission = Path(directory)/'temporary-admission'
+                started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                baseline = asyncio.all_tasks()
+                class Ports:
+                    supports_bootstrap = True
+                    async def image(self, node_id, digest): return True
+                    async def route(self, machine): return True
+                    async def bootstrap(self, registration, machine): return registration.bootstrap_revision
+                    async def admit(self, registration, allow):
+                        if allow:
+                            admission.write_text('owned nonsecret admission fixture')
+                        else:
+                            started.set()
+                            try:
+                                await release.wait()
+                                admission.unlink()
+                            finally:
+                                finished.set()
+                discovery = BootstrapDiscovery(machine, r, Ports())
+                caller = asyncio.create_task(discovery.run())
+                try:
+                    await asyncio.wait_for(started.wait(), 2)
+                    for _ in range(cancellations):
+                        caller.cancel()
+                        await asyncio.sleep(0)
+                    release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await caller
+                    await asyncio.wait_for(finished.wait(), 2)
+                    await asyncio.sleep(0)
+                    self.assertFalse(admission.exists(), 'repeated cancellation abandoned temporary admission')
+                    pending = asyncio.all_tasks() - baseline
+                    self.assertFalse(pending, f'orphaned cleanup tasks: {pending}')
+                finally:
+                    release.set()
+                    await asyncio.gather(caller, return_exceptions=True)
+
+    async def test_cancelled_caller_keeps_cleanup_owned_and_close_is_bounded_and_cancellable(self):
+        from mop.node.body_launch import BootstrapDiscovery
+        m = api()
+        r = m.Registration(work(), str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        machine = m.MachineConfig('https://example.test', '127.0.0.1', '127.0.0.1', 2207, 'host')
+        with tempfile.TemporaryDirectory(prefix='m643-revoke-') as directory:
+            admission = Path(directory)/'temporary-admission'
+            started, release = asyncio.Event(), asyncio.Event()
+            baseline = asyncio.all_tasks()
+            class Ports:
+                supports_bootstrap = True
+                async def image(self, node_id, digest): return True
+                async def route(self, machine): return True
+                async def bootstrap(self, registration, machine): return registration.bootstrap_revision
+                async def admit(self, registration, allow):
+                    if allow:
+                        admission.write_text('owned nonsecret admission fixture')
+                    else:
+                        started.set()
+                        await release.wait()
+                        admission.unlink()
+            discovery = BootstrapDiscovery(machine, r, Ports())
+            caller = asyncio.create_task(discovery.run())
+            closer = None
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                caller.cancel()
+                done, _ = await asyncio.wait({caller}, timeout=.1)
+                self.assertIn(caller, done, 'caller cancellation must not wait for physical revocation')
+                with self.assertRaises(asyncio.CancelledError): await caller
+                self.assertTrue(admission.exists())
+                cleanup = asyncio.all_tasks() - baseline
+                self.assertEqual(len(cleanup), 1, 'exactly one cleanup owner must survive caller cancellation')
+                with self.assertRaisesRegex(Unavailable, 'not confirmed'):
+                    await asyncio.wait_for(discovery.aclose(timeout=.01), .5)
+                self.assertTrue(admission.exists(), 'bounded wait is not physical revocation')
+                self.assertTrue(all(not task.done() for task in cleanup))
+                for _ in range(2):
+                    closer = asyncio.create_task(discovery.aclose(timeout=1))
+                    await asyncio.sleep(0)
+                    closer.cancel()
+                    with self.assertRaises(asyncio.CancelledError): await closer
+                self.assertTrue(all(not task.done() for task in cleanup), 'close cancellation killed owned cleanup')
+                release.set()
+                await discovery.aclose(timeout=1)
+                self.assertFalse(admission.exists())
+                self.assertTrue(all(task.done() for task in cleanup))
+                self.assertFalse(asyncio.all_tasks() - baseline, 'cleanup left orphan tasks')
+                with self.assertRaises(Unavailable): await discovery.run()
+            finally:
+                release.set()
+                await asyncio.gather(caller, *([] if closer is None else [closer]), return_exceptions=True)
+                await asyncio.gather(*(asyncio.all_tasks() - baseline), return_exceptions=True)
+
+    async def test_handled_earlier_cancellation_cannot_skip_revocation_confirmation(self):
+        from mop.node.body_launch import BootstrapDiscovery
+        m = api()
+        r = m.Registration(work(), str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        machine = m.MachineConfig('https://example.test', '127.0.0.1', '127.0.0.1', 2207, 'host')
+        started, release = asyncio.Event(), asyncio.Event()
+        class Ports:
+            supports_bootstrap = True
+            async def image(self, node_id, digest): return True
+            async def route(self, machine): return True
+            async def bootstrap(self, registration, machine): return registration.bootstrap_revision
+            async def admit(self, registration, allow):
+                if not allow:
+                    started.set()
+                    await release.wait()
+        discovery = BootstrapDiscovery(machine, r, Ports())
+        async def previously_cancelled():
+            asyncio.current_task().cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+            return await discovery.run()
+        caller = asyncio.create_task(previously_cancelled())
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            self.assertFalse(caller.done(), 'historical cancellation count is not revocation confirmation')
+        finally:
+            release.set()
+            await caller
+            await discovery.aclose(timeout=1)
+
+    async def test_close_during_bootstrap_revokes_and_failed_revocation_is_not_confirmation(self):
+        from mop.node.body_launch import BootstrapDiscovery
+        m = api()
+        r = m.Registration(work(), str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        machine = m.MachineConfig('https://example.test', '127.0.0.1', '127.0.0.1', 2207, 'host')
+        for failure in (None, Unavailable('fixture revocation refused'), TimeoutError(), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory(prefix='m643-revoke-') as directory:
+                admission = Path(directory)/'temporary-admission'
+                started = asyncio.Event()
+                class Ports:
+                    supports_bootstrap = True
+                    async def image(self, node_id, digest): return True
+                    async def route(self, machine): return True
+                    async def bootstrap(self, registration, machine):
+                        started.set()
+                        await asyncio.Event().wait()
+                    async def admit(self, registration, allow):
+                        if allow:
+                            admission.write_text('owned nonsecret admission fixture')
+                        elif failure is not None:
+                            raise failure
+                        else:
+                            admission.unlink()
+                discovery = BootstrapDiscovery(machine, r, Ports())
+                caller = asyncio.create_task(discovery.run())
+                try:
+                    await asyncio.wait_for(started.wait(), 2)
+                    if failure is None:
+                        await asyncio.wait_for(discovery.aclose(timeout=1), 2)
+                        self.assertFalse(admission.exists())
+                    else:
+                        with self.assertRaisesRegex(Unavailable, 'not confirmed') as caught:
+                            await asyncio.wait_for(discovery.aclose(timeout=1), 2)
+                        if isinstance(failure, Unavailable):
+                            self.assertIn(str(failure), str(caught.exception))
+                        self.assertTrue(admission.exists())
+                        with self.assertRaisesRegex(Unavailable, 'not confirmed'):
+                            await discovery.aclose(timeout=1)
+                finally:
+                    caller.cancel()
+                    await asyncio.gather(caller, return_exceptions=True)
+
+
 class PhysicalProcessTests(unittest.IsolatedAsyncioTestCase):
     async def verify_https_receipt(self, proof):
         # Контролируемый HTTPS receiver проверяет transport и адресный ACK,

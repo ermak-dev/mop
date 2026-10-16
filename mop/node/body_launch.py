@@ -323,8 +323,20 @@ class BootstrapDiscovery:
                        ('image', 'route', 'admit', 'bootstrap'))):
             raise Unavailable('bootstrap capabilities are not bound')
         self.machine, self.registration, self.ports = machine, registration, ports
+        self._started = self._closed = False
+        self._caller = self._revocation = None
 
     async def run(self):
+        if self._started or self._closed:
+            raise Unavailable('bootstrap discovery already started or closed')
+        self._started = True
+        self._caller = asyncio.current_task()
+        try:
+            return await self._run()
+        finally:
+            self._caller = None
+
+    async def _run(self):
         r, p = self.registration, self.ports
         async with asyncio.timeout(10):
             if await p.image(r.work.node_id, r.image_digest) is not True:
@@ -341,15 +353,54 @@ class BootstrapDiscovery:
             if revision != r.bootstrap_revision:
                 raise Refused('bootstrap receipt revision does not match registration')
             return revision
+        except asyncio.CancelledError:
+            self._start_revocation()
+            raise
         finally:
-            # Owned task завершает отзыв и при cancellation caller. Ошибка
-            # отзыва не скрывается: успешный bootstrap не означает закрытый SSH.
-            task = asyncio.create_task(self._revoke())
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+            # Только пойманная в этом запуске отмена возвращается немедленно.
+            # Исторический Task.cancelling() не доказывает отзыв admission.
+            if self._revocation is None:
+                self._start_revocation()
+                await asyncio.shield(self._revocation)
+
+    def _start_revocation(self):
+        # Ссылка и результат принадлежат discovery, не отменённому caller.
+        # После cancellation supervisor обязан вызвать aclose; исключение
+        # остаётся в задаче для aclose даже если caller уже ушёл.
+        self._revocation = asyncio.create_task(self._revoke())
+        self._revocation.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception())
+
+    async def aclose(self, *, timeout=10):
+        """Ограниченное ожидание отзыва; незавершённый effect остаётся owned.
+
+        Timeout/cancellation не подтверждают физический отзыв. Ошибка хранится
+        в задаче и повторный aclose возвращает тот же отказ, а не ложный успех.
+        """
+        if type(timeout) not in (int, float) or not 0 < timeout <= 10:
+            raise ValueError('bootstrap close timeout must be within (0, 10] seconds')
+        self._closed = True
+        deadline = asyncio.get_running_loop().time() + timeout
+        caller = self._caller
+        if caller is asyncio.current_task():
+            raise Unavailable('bootstrap revocation not confirmed; run is still active')
+        if caller is not None:
+            caller.cancel()
+            _, pending = await asyncio.wait({caller}, timeout=timeout)
+            if pending:
+                raise Unavailable('bootstrap revocation not confirmed; bootstrap is still active')
+        task = self._revocation
+        if task is None:
+            return  # Admission ещё не начинался; обязательного отзыва нет.
+        _, pending = await asyncio.wait({task}, timeout=max(0, deadline-asyncio.get_running_loop().time()))
+        if pending:
+            raise Unavailable('bootstrap revocation not confirmed; cleanup still running, reconciliation required')
+        if task.cancelled():
+            raise Unavailable('bootstrap revocation not confirmed; cleanup cancelled, reconciliation required')
+        error = task.exception()
+        if error is not None:
+            reason = str(error) if isinstance(error, (Refused, Unavailable)) else type(error).__name__
+            raise Unavailable('bootstrap revocation not confirmed; reconciliation required: '+reason) from error
 
     async def _revoke(self):
         async with asyncio.timeout(10):
