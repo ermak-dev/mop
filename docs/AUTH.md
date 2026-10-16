@@ -60,11 +60,16 @@ ordinary Django action permission, actual Catalog FK scope, client ownership and
 principal-kind fences. `is_staff` only permits Admin login. A human superuser has
 explicit global scope, not a service/grant/ownership bypass. Service users cannot
 be elevated by editing User flags. Grant-kind principals fail closed until #635
-binds its resolver. Catalog configuration retains ordinary model permissions;
-`set_project_limit` is a separate action. Catalog's extra permissions are declared
-on Project/Node/ProjectPolicySnapshot; standard `view_project`/`view_node` are not
-declared twice. Access's role/grant actions live on Principal. Later owning apps
-register their CONTROL actions before the evaluator can admit them.
+binds its resolver. Catalog's immutable `permissions.ACTION_PERMISSIONS` is the
+canonical conjunction of ordinary model and domain permissions; Access consumes
+that map rather than treating its entries as alternatives. `set_project_limit`
+is a separate action. Catalog's extra permissions are declared on Project, Node,
+InstallationConfiguration and ProjectPolicySnapshot; `record_settings_application`
+belongs only to InstallationConfiguration, including node-setting receipts.
+Standard `view_project`/`view_node` are not declared twice. The fresh-install
+catalog migration graph has one permissions leaf, `0002_action_permissions`.
+Access's role/grant actions live on Principal. Later owning apps register their
+CONTROL actions before the evaluator can admit them.
 
 The authoritative Router respects an existing LoginIdentity before source order.
 Otherwise the first knowing source decides, including wrong password, ambiguous
@@ -72,9 +77,14 @@ login, absent groups and outage; no backend fall-through adopts another identity
 LDAP users retain unusable local passwords. Direct/nested AD groups map to ordinary
 Django permissions and explicit project/all-project rows. Refresh removes only the
 source-owned scope and managed Group; unrelated local grants remain. LDAP I/O is
-outside SQL, followed by source-revision CAS. Expired validation or a changed
-configuration revision fails closed until authoritative refresh. This validation
-freshness limit is not DRF token expiry.
+outside SQL, followed by source-revision and complete configuration CAS. Expired
+validation or a changed configuration fails closed until authoritative refresh.
+The configured immutable subject is `entryUUID` (default) or AD `objectGUID`, not
+the DN. The DN is only the password-bind target: a rename keeps identity, while a
+recreated DN or a duplicate subject cannot inherit another User's local authority.
+Only LDAP invalidCredentials is a password refusal; availability and cleanup
+failures propagate as sanitized unavailable errors without backend fall-through.
+This validation freshness limit is not DRF token expiry.
 
 The real ldap3 adapter accepts explicit ORM configuration and a protected bind/CA
 secret-reader port. Its default reader refuses before network I/O: #637 must bind

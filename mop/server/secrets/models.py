@@ -143,7 +143,7 @@ class SecretVersion(Immutable):
         ]
 
 
-class SecretBinding(Immutable):
+class SecretBinding(Record):
     secret = models.ForeignKey(Secret, on_delete=models.PROTECT)
     node = models.ForeignKey('catalog.Node', null=True, on_delete=models.PROTECT)
     client = models.ForeignKey('catalog.ClientRegistration', null=True, on_delete=models.PROTECT)
@@ -154,6 +154,27 @@ class SecretBinding(Immutable):
     grant_id = models.UUIDField()
     assignment_id = models.UUIDField()
     created_at = models.DateTimeField(default=timezone.now)
+    retired_at = models.DateTimeField(null=True, editable=False)
+
+    def save(self, *args, **kwargs):
+        # Membership меняется только под тем же parent lock, что и frozen set.
+        # Identity/evidence не меняются; единственный переход — current -> retired.
+        from django.db import transaction
+        with transaction.atomic():
+            Secret.objects.select_for_update().get(pk=self.secret_id)
+            previous = type(self)._base_manager.filter(pk=self.pk).first()
+            if previous:
+                if any(getattr(previous, f.attname) != getattr(self, f.attname)
+                       for f in self._meta.concrete_fields if f.name != 'retired_at'):
+                    raise ValueError('secret binding identity is immutable')
+                if previous.retired_at is not None or self.retired_at is None:
+                    raise ValueError('secret binding retirement is immutable')
+            elif self.retired_at is not None:
+                raise ValueError('new secret binding must be current')
+            if CredentialRotation.objects.filter(secret_id=self.secret_id, resolved=False).exists():
+                raise ValueError('secret binding membership is frozen by an unresolved rotation')
+            self.clean()
+            return super().save(*args, **kwargs)
 
     def clean(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', self.role) or not re.fullmatch(r'[0-9a-f]{64}', self.digest):
@@ -169,7 +190,13 @@ class SecretBinding(Immutable):
         constraints = [models.CheckConstraint(condition=(
             Q(node__isnull=False, client__isnull=True, controller=False)
             | Q(node__isnull=True, client__isnull=False, controller=False)
-            | Q(node__isnull=True, client__isnull=True, controller=True)), name='secret_binding_one_recipient')]
+            | Q(node__isnull=True, client__isnull=True, controller=True)), name='secret_binding_one_recipient'),
+            models.UniqueConstraint(fields=('secret', 'node', 'role'),
+                condition=Q(retired_at__isnull=True, node__isnull=False), name='secret_current_node_role'),
+            models.UniqueConstraint(fields=('secret', 'client', 'role'),
+                condition=Q(retired_at__isnull=True, client__isnull=False), name='secret_current_client_role'),
+            models.UniqueConstraint(fields=('secret', 'role'),
+                condition=Q(retired_at__isnull=True, controller=True), name='secret_current_controller_role')]
 
 
 def enum_field(enum, *, null=False, maximum=32):
@@ -274,5 +301,5 @@ class SecretAudit(Immutable):
 
     class Meta(Record.Meta):
         constraints = [models.CheckConstraint(condition=Q(action__in=(
-            'create', 'stage', 'update', 'bind', 'revoke', 'rotation_stage', 'rotation_begin',
+            'create', 'stage', 'update', 'bind', 'retire_binding', 'revoke', 'rotation_stage', 'rotation_begin',
             'rotation_record', 'rotation_reconcile', 'rotation_activate', 'receipt')), name='secret_audit_action')]

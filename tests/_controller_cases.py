@@ -63,7 +63,11 @@ class TransportDeadline(TransactionTestCase):
                                 from rest_framework.test import APIRequestFactory, force_authenticate
                                 from rest_framework.views import APIView
                                 from rest_framework.response import Response
+                                from rest_framework.permissions import IsAuthenticated
                                 class Probe(APIView):
+                                    # Transport fixture сохраняет исходный Django-auth gate.
+                                    # Access-bound credentials проверяет отдельный Auth suite.
+                                    permission_classes = (IsAuthenticated,)
                                     def get(self, request):
                                         return Response({'count': get_user_model().objects.using(alias).count()})
                                 request = APIRequestFactory().get('/fixture')

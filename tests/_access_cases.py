@@ -19,6 +19,8 @@ from django.utils import timezone
 # RESULT: schema, live credential, scope и source projection проверяются реальной БД.
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class AuthenticationBoundary(TransactionTestCase):
+    serialized_rollback = True
+
     def test_login_requires_csrf_even_for_anonymous_browser(self):
         response = Client(enforce_csrf_checks=True).post('/api/v1/auth/login',
             {'username': 'human', 'password': 'not-a-real-secret'}, secure=True)
@@ -38,6 +40,8 @@ class AuthenticationBoundary(TransactionTestCase):
 
 
 class AccessContracts(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         # Отсутствующий app — собственный проверяемый red, а не ошибка импорта.
         self.assertTrue(apps.is_installed('mop.server.access'), 'Access schema must be installed')
@@ -57,10 +61,165 @@ class AccessContracts(TransactionTestCase):
         self.token = s.issue_token(self.user.pk)
         self.actor = s.token_context(self.token)
 
+    def login_browser(self, client):
+        # Trusted login endpoint создаёт binding; Client.login обходит этот use case.
+        response = client.post('/api/v1/auth/login',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True, HTTP_HOST='testserver')
+        self.assertEqual(response.status_code, 200)
+
     def permission(self, name):
         app, codename = name.split('.')
         permission = Permission.objects.get(content_type__app_label=app, codename=codename)
         self.user.user_permissions.add(permission)
+
+    # BUG: неиспользованный credential присваивал identity первого запроса.
+    # HYPOTHESIS: binding создаётся resolver-ом, а не trusted issuance boundary.
+    # RED: PG16/17 — Denied not raised для unused key/session после смены identity.
+    # SOLUTION: binding коммитится с issuance/login/enrollment; resolver только читает.
+    # RESULT: unused generations и missing binding отказаны; live checks сохранены.
+    # STATUS: FIXED — see #633
+    def test_unused_issued_token_cannot_adopt_changed_identity(self):
+        self.s.revoke_token(self.actor)
+        key = self.s.issue_token(self.user.pk)
+        self.m.LoginIdentity.objects.filter(user=self.user).update(external_subject='replacement')
+        with self.assertRaises(self.s.Denied):
+            self.s.token_context(key)
+
+    def test_unused_rotated_token_cannot_adopt_changed_principal_revision(self):
+        key = self.s.rotate_token(self.actor)
+        self.m.Principal.objects.filter(user=self.user).update(revision=2)
+        with self.assertRaises(self.s.Denied):
+            self.s.token_context(key)
+
+    def test_missing_binding_never_adopts_current_identity(self):
+        self.m.CredentialBinding.objects.filter(token_user=self.user).delete()
+        with self.assertRaises(self.s.Denied):
+            self.s.token_context(self.token)
+        with self.assertRaises(self.s.Denied):
+            self.s.issue_token(self.user.pk)
+        self.assertFalse(self.m.CredentialBinding.objects.filter(token_user=self.user).exists())
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_unused_browser_login_cannot_adopt_changed_identity(self):
+        client = Client()
+        response = client.post('/api/v1/auth/login',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True)
+        self.assertEqual(response.status_code, 200)
+        self.m.LoginIdentity.objects.filter(user=self.user).update(external_subject='replacement')
+        with self.assertRaises(self.s.Denied):
+            self.s.session_context(client.session.session_key)
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_unused_admin_login_cannot_adopt_changed_identity(self):
+        self.user.is_staff = True
+        self.user.save()
+        client = Client()
+        response = client.post('/admin/login/',
+            {'username': 'human', 'password': 'test-password-only', 'next': '/admin/'}, secure=True)
+        self.assertEqual(response.status_code, 302)
+        self.m.LoginIdentity.objects.filter(user=self.user).update(external_subject='replacement')
+        with self.assertRaises(self.s.Denied):
+            self.s.session_context(client.session.session_key)
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_unbound_standard_session_fails_closed(self):
+        client = Client()
+        self.assertTrue(client.login(username='human', password='test-password-only'))
+        with self.assertRaises(self.s.Denied):
+            self.s.session_context(client.session.session_key)
+        self.assertFalse(self.m.CredentialBinding.objects.filter(session_id=client.session.session_key).exists())
+
+    def test_unused_enrollment_token_cannot_adopt_changed_node(self):
+        from mop.server.catalog.models import Node, NodeProject
+        def node(name):
+            return Node.objects.create(name=name, driver='host', ssh_host='node.invalid', ssh_port=22,
+                control_origin='https://controller.invalid', lan_address='node.invalid', bootstrap_address='node.invalid')
+        first, second = node('first'), node('second')
+        for row in (first, second):
+            NodeProject.objects.create(node=row, project=self.project)
+        key = self.s.enroll_service('unused-service', first.pk, project_ids=(self.project.pk,),
+            permissions=('catalog.observe_node',))
+        self.m.Principal.objects.filter(user__username='unused-service').update(bound_node=second)
+        with self.assertRaises(self.s.Denied):
+            self.s.token_context(key)
+
+    # BUG: Catalog создавал client без Access ownership, bind всегда давал 404.
+    # HYPOTHESIS: trusted composition должна записывать обе строки атомарно.
+    # RED: настоящий Catalog(Access) — NotVisible на bind сразу после register.
+    # SOLUTION: Access-composed register связывает client с User живого credential.
+    # RESULT: non-superuser register/bind работает; foreign client и project отказаны.
+    # STATUS: FIXED — see #633
+    def test_registration_composes_trusted_ownership_for_real_catalog(self):
+        from mop.server.controller.authviews import catalog_api
+        self.permission('catalog.add_clientregistration')
+        self.permission('catalog.change_workspacebinding')
+        api = catalog_api()
+        client = api.register_client(self.actor, label='workstation')
+        result = api.bind_workspace(self.actor, client.id, 'work', self.project.pk,
+            integration_branch='main', expected_revision=0)
+        self.assertEqual(result.project_id, self.project.pk)
+        other = get_user_model().objects.create_user('other-owner', password='other-password-only')
+        self.s.bind_local_identity(other.pk)
+        other_actor = self.s.token_context(self.s.issue_token(other.pk))
+        other.user_permissions.add(Permission.objects.get(content_type__app_label='catalog',
+            codename='add_clientregistration'))
+        foreign = api.register_client(other_actor, label='foreign')
+        with self.assertRaises(self.s.NotVisible):
+            api.bind_workspace(self.actor, foreign.id, 'work', self.project.pk,
+                integration_branch='main', expected_revision=0)
+        with self.assertRaises(self.s.NotVisible):
+            api.bind_workspace(self.actor, client.id, 'elsewhere', self.foreign.pk,
+                integration_branch='main', expected_revision=0)
+
+    def test_client_registration_and_ownership_roll_back_together(self):
+        from unittest.mock import patch
+        from mop.server.controller.authviews import catalog_api
+        from mop.server.catalog.models import ClientRegistration
+        self.permission('catalog.add_clientregistration')
+        with patch.object(self.m.ClientOwnership.objects, 'create', side_effect=RuntimeError('test ownership failure')):
+            with self.assertRaisesRegex(RuntimeError, 'test ownership failure'):
+                catalog_api().register_client(self.actor, label='rollback-client')
+        self.assertFalse(ClientRegistration.objects.filter(label='rollback-client').exists())
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_missing_session_binding_is_not_repaired(self):
+        client = Client()
+        response = client.post('/api/v1/auth/login',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True)
+        self.assertEqual(response.status_code, 200)
+        self.m.CredentialBinding.objects.filter(session_id=client.session.session_key).delete()
+        with self.assertRaises(self.s.Denied):
+            self.s.session_context(client.session.session_key)
+        self.assertFalse(self.m.CredentialBinding.objects.filter(session_id=client.session.session_key).exists())
+
+    # BUG: Access проверял только имя action, игнорируя canonical catalog tuple.
+    # HYPOTHESIS: configure/change/set-limit были альтернативами вместо conjunction.
+    # RED: owned PG16 — девять missing-permission subtests дали Denied not raised.
+    # SOLUTION: evaluator читает единственный ACTION_PERMISSIONS у владельца каталога.
+    # RESULT: повторный resolve читает актуальные права для всего canonical tuple.
+    # STATUS: FIXED — see #633
+    def test_catalog_actions_require_every_canonical_permission_and_live_revocation(self):
+        from mop.server.catalog.permissions import ACTION_PERMISSIONS
+        self.m.AllProjectMembership.objects.create(user=self.user, source=self.source)
+        access = self.s.Access()
+        for action, required in ACTION_PERMISSIONS.items():
+            with self.subTest(action=action):
+                self.user.user_permissions.clear()
+                permissions = [Permission.objects.get(content_type__app_label=name.split('.')[0],
+                    codename=name.split('.')[1]) for name in required]
+                self.user.user_permissions.add(*permissions)
+                access.authorize(self.actor, action)
+                for permission in permissions:
+                    self.user.user_permissions.remove(permission)
+                    with self.subTest(missing=permission.codename), self.assertRaises(self.s.Denied):
+                        access.authorize(self.actor, action)
+                    self.user.user_permissions.add(permission)
+                access.authorize(self.actor, action)
+
+    def test_settings_application_permission_has_one_canonical_parent(self):
+        permission = Permission.objects.get(content_type__app_label='catalog',
+            codename='record_settings_application')
+        self.assertEqual(permission.content_type.model, 'installationconfiguration')
 
     def test_action_and_scope_are_independent_and_fresh(self):
         access = self.s.Access()
@@ -120,14 +279,14 @@ class AccessContracts(TransactionTestCase):
     @override_settings(ALLOWED_HOSTS=['testserver'])
     def test_session_logout_and_password_change_invalidate_existing_context(self):
         client = Client()
-        self.assertTrue(client.login(username='human', password='test-password-only'))
+        self.login_browser(client)
         actor = self.s.session_context(client.session.session_key)
         self.assertNotIn(client.session.session_key, repr(actor))
         self.s.Access().authorize(actor, 'catalog.view_project')
         client.logout()
         with self.assertRaises(self.s.Denied):
             self.s.Access().authorize(actor, 'catalog.view_project')
-        client.login(username='human', password='test-password-only')
+        self.login_browser(client)
         actor = self.s.session_context(client.session.session_key)
         self.user.set_password('replacement-password-only')
         self.user.save()
@@ -327,7 +486,7 @@ class AccessContracts(TransactionTestCase):
         self.user.is_staff = True
         self.user.save()
         browser = Client()
-        browser.login(username='human', password='test-password-only')
+        self.login_browser(browser)
         response = browser.get('/admin/catalog/project/', secure=True)
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, self.foreign.origin)
@@ -337,20 +496,18 @@ class AccessContracts(TransactionTestCase):
 
     def test_client_fk_cannot_move_binding_to_foreign_project_or_client(self):
         from mop.server.catalog.models import ClientRegistration
-        from mop.server.catalog.services import Catalog
-        from mop.server.controller.runtime import initialize
+        from mop.server.controller.authviews import catalog_api
         from mop.server.controller.models import Installation
-        initialize()
-        client = ClientRegistration.objects.create(installation=Installation.objects.get(pk=1), label='owned')
-        foreign_client = ClientRegistration.objects.create(installation=Installation.objects.get(pk=1), label='foreign')
-        self.m.ClientOwnership.objects.create(client=client, user=self.user)
+        self.permission('catalog.add_clientregistration')
         self.permission('catalog.change_workspacebinding')
-        catalog = Catalog(authorizer=self.s.Access())
-        result = catalog.bind_workspace(self.actor, client.pk, 'work', self.project.pk,
+        catalog = catalog_api()
+        client = catalog.register_client(self.actor, label='owned')
+        foreign_client = ClientRegistration.objects.create(installation=Installation.objects.get(pk=1), label='foreign')
+        result = catalog.bind_workspace(self.actor, client.id, 'work', self.project.pk,
             integration_branch='main', expected_revision=0)
         self.assertEqual(result.project_id, self.project.pk)
         with self.assertRaises(self.s.NotVisible):
-            catalog.bind_workspace(self.actor, client.pk, 'work', self.foreign.pk,
+            catalog.bind_workspace(self.actor, client.id, 'work', self.foreign.pk,
                 integration_branch='main', expected_revision=1)
         with self.assertRaises(self.s.NotVisible):
             catalog.bind_workspace(self.actor, foreign_client.pk, 'work', self.project.pk,
@@ -426,6 +583,9 @@ class AccessContracts(TransactionTestCase):
         with self.assertRaises(self.s.Denied):
             api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1)
         self.permission('catalog.set_project_limit')
+        with self.assertRaises(self.s.Denied):
+            api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1)
+        self.permission('catalog.configure_project')
         self.assertEqual(api.set_project_limit(self.actor, self.project.pk, 2, expected_revision=1).puppet_limit, 2)
 
     def test_catalog_query_cannot_return_private_rows_after_actor_revoked_mid_query(self):
@@ -518,7 +678,7 @@ class AccessContracts(TransactionTestCase):
         self.user.is_staff = self.user.is_superuser = True
         self.user.save()
         client = Client()
-        self.assertTrue(client.login(username='human', password='test-password-only'))
+        self.login_browser(client)
         response = client.post('/admin/auth/user/add/', {'username': 'created-human',
             'usable_password': 'true', 'password1': 'a-long-distinct-passphrase-633',
             'password2': 'a-long-distinct-passphrase-633', '_save': 'Save'}, secure=True)
@@ -530,7 +690,7 @@ class AccessContracts(TransactionTestCase):
     @override_settings(ALLOWED_HOSTS=['testserver'])
     def test_browser_logout_records_only_safe_credential_event(self):
         client = Client()
-        self.assertTrue(client.login(username='human', password='test-password-only'))
+        self.login_browser(client)
         actor = self.s.session_context(client.session.session_key)
         key = client.session.session_key
         self.assertEqual(client.post('/api/v1/auth/logout', {}, secure=True).status_code, 200)
@@ -582,7 +742,7 @@ class AccessContracts(TransactionTestCase):
         self.user.is_staff = self.user.is_superuser = True
         self.user.save()
         client = Client()
-        self.assertTrue(client.login(username='human', password='test-password-only'))
+        self.login_browser(client)
         response = client.post('/admin/auth/user/' + str(user_id) + '/password/', {
             'password1': 'a-long-distinct-passphrase-633', 'password2': 'a-long-distinct-passphrase-633'}, secure=True)
         self.assertEqual(response.status_code, 403)

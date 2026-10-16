@@ -27,7 +27,133 @@ class Allow:
             raise PermissionError('out of scope')
 
 
+# BUG: non-superuser не может получить незарегистрированные custom actions.
+# HYPOTHESIS: post_migrate создаёт только default permissions; limit выдаётся как change_project.
+# SOLUTION: обычная migration регистрирует custom права; authorizer получает явный tuple.
+# RESULT: реальные User/Group проверяют каждый дополнительный gate, не is_staff/superuser.
+# STATUS: FIXED — see #634
+class CatalogPermissionCases(TransactionTestCase):
+    # Migration seeds, включая restore guard, переживают flush как в foundation.
+    serialized_rollback = True
+
+    def user(self):
+        from django.contrib.auth import get_user_model
+        user = get_user_model().objects.create_user(username='catalog-service')
+        user.set_unusable_password()
+        user.save()
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        return user
+
+    def grant(self, user, *codenames):
+        from django.contrib.auth.models import Group, Permission
+        group, _ = Group.objects.get_or_create(name='catalog-test-operator')
+        for code in codenames:
+            rows = Permission.objects.filter(content_type__app_label='catalog', codename=code)
+            self.assertEqual(rows.count(), 1, f'post_migrate did not create exactly one assignable catalog.{code}')
+            group.permissions.add(rows.get())
+        user.groups.add(group)
+        return group
+
+    def authorizer(self):
+        # Только action check для теста каталога, не scope/grant evaluator #633.
+        from catalog_schema import permission_registration_contract
+        permission_registration_contract()
+        from mop.server.catalog.permissions import ACTION_PERMISSIONS
+        class DjangoPermissions:
+            def authorize(self, actor, action, **refs):
+                # Новый instance: Django ModelBackend кэширует права на User.
+                current = type(actor).objects.get(pk=actor.pk)
+                if not current.has_perms(ACTION_PERMISSIONS[action]):
+                    raise PermissionError('missing catalog action permissions')
+        return DjangoPermissions()
+
+    def test_default_post_migrate_creates_assignable_custom_and_model_permissions(self):
+        from django.apps import apps
+        from django.contrib.auth.models import Permission
+        from catalog_schema import CUSTOM_PERMISSIONS
+        for model in apps.get_app_config('catalog').get_models():
+            opts = model._meta
+            expected = {f'{verb}_{opts.model_name}' for verb in opts.default_permissions}
+            expected |= CUSTOM_PERMISSIONS.get(opts.model_name, set())
+            actual = list(Permission.objects.filter(content_type__app_label='catalog',
+                content_type__model=opts.model_name).values_list('codename', flat=True))
+            with self.subTest(model=opts.model_name):
+                self.assertCountEqual(actual, expected)
+
+    def test_limit_emits_distinct_action_with_real_project_scope(self):
+        row = models.Project.objects.create(origin='https://git.example/alpha.git', name='alpha')
+        auth = Allow()
+        services.Catalog(authorizer=auth).set_project_limit('test', row.pk, 2, expected_revision=1)
+        self.assertEqual(auth.calls[-1][1:4], ('catalog.set_project_limit', (row.pk,), ()))
+
+    def test_non_superuser_limit_requires_every_permission_not_origin_change_alone(self):
+        user = self.user()
+        row = models.Project.objects.create(origin='https://git.example/alpha.git', name='alpha')
+        api = services.Catalog(authorizer=self.authorizer())
+        required = ('change_project', 'configure_project', 'set_project_limit')
+        group = self.grant(user, *required)
+        from django.contrib.auth.models import Permission
+        for missing in required:
+            permission = Permission.objects.get(content_type__app_label='catalog', codename=missing)
+            group.permissions.remove(permission)
+            with self.subTest(missing=missing), self.assertRaises(PermissionError):
+                api.set_project_limit(user, row.pk, 5, expected_revision=1)
+            row.refresh_from_db()
+            self.assertEqual((row.puppet_limit, row.revision), (None, 1))
+            group.permissions.add(permission)
+        group.permissions.remove(Permission.objects.get(content_type__app_label='catalog', codename='set_project_limit'))
+        origin = api.replace_project_origin(user, row.pk, 'https://git.example/beta.git', expected_revision=1)
+        self.assertEqual(origin.name, 'beta')
+        with self.assertRaises(PermissionError):
+            api.set_project_limit(user, row.pk, 5, expected_revision=origin.revision)
+        self.grant(user, 'set_project_limit')
+        result = api.set_project_limit(user, row.pk, 5, expected_revision=origin.revision)
+        self.assertEqual((result.puppet_limit, result.revision), (5, origin.revision + 1))
+
+    def test_machine_observation_and_application_permissions_are_independently_assignable(self):
+        initialize()
+        user = self.user()
+        row = models.Node.objects.create(name='machine', driver='host', ssh_host='ssh.example',
+            control_origin='https://control.example', lan_address='10.0.0.2', bootstrap_address='boot.example')
+        api = services.Catalog(authorizer=self.authorizer())
+        actions = {
+            'observe_node': lambda: api.observe_node(user, row.pk, eligible=True,
+                source='scheduler:test', observed_at=timezone.now()),
+            'record_node_application': lambda: api.record_node_application(user, row.pk, target_revision=1, receipt='node:1'),
+            'record_settings_application': lambda: api.record_settings_application(user, target_revision=1, receipt='settings:1'),
+        }
+        for code, operation in actions.items():
+            with self.subTest(action=code):
+                with self.assertRaises(PermissionError):
+                    operation()
+                self.grant(user, code)
+                self.assertTrue(operation())
+        self.assertTrue(api.record_settings_application(user, node_id=row.pk, target_revision=1, receipt='node-settings:1'))
+        row.refresh_from_db()
+        self.assertEqual((row.applied_receipt, row.settings_receipt, row.observed_eligible), ('node:1', 'node-settings:1', True))
+        with self.assertRaises(PermissionError):
+            api.set_node_eligibility(user, row.pk, False, expected_revision=1)
+
+    def test_policy_pin_permission_is_assignable_without_model_change_or_build(self):
+        user = self.user()
+        row = models.Project.objects.create(origin='https://git.example/alpha.git', name='alpha')
+        api = services.Catalog(authorizer=self.authorizer())
+        def pin():
+            return api.pin_project_policy(user, row.pk, b'policy', source_commit='a'*40,
+                source_ref='main', provenance='test', cpu=100, memory_mb=256, disk_mb=1024, expected_revision=1)
+        with self.assertRaises(PermissionError):
+            pin()
+        self.grant(user, 'pin_project_policy')
+        self.assertEqual(pin().content, b'policy')
+        with self.assertRaises(PermissionError):
+            api.replace_project_origin(user, row.pk, 'https://git.example/beta.git', expected_revision=2)
+
+
 class CatalogCases(TransactionTestCase):
+    # Без внешней test-транзакции; Django восстанавливает только migration seeds.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(hasattr(services, 'Catalog'), 'missing catalogue domain API: Catalog')
         for name in ('Project', 'Node', 'NodeProject', 'InstallationSetting', 'NodeSetting',
@@ -152,6 +278,58 @@ class CatalogCases(TransactionTestCase):
             models.Project.objects.get(pk=p.id).delete()
         with self.assertRaises(services.UnsafeRemoval):
             self.api.delete_project(self.actor, q.id, expected_revision=q.revision)
+
+    # HYPOTHESIS: пять ключей и раздельные snapshots не дают accepted effective
+    # revision; cross-field batch может сохраниться частично или вопреки узлу.
+    # SOLUTION: конечные definitions, общий resolver и installation-first lock.
+    # RESULT: PG16 red (query отсутствовал), затем 65/65 green на PG16 и PG17.
+    # STATUS: FIXED — see #634
+    def test_effective_settings_are_revisioned_authorized_and_durable(self):
+        self.assertTrue(callable(getattr(self.api, 'get_effective_settings', None)),
+                        'catalogue has no effective-setting query')
+        node = self.node()
+        initial = self.api.get_installation_settings(self.actor)
+        installed = self.api.set_installation_settings(self.actor,
+            {'public_origin': 'https://pool.example.test', 'pool_home': '/srv/pool',
+             'pool_user': 'puppet', 'log_level': 'warning', 'sweep_timeout_s': 400},
+            expected_revision=initial.revision)
+        ns = self.api.get_node_settings(self.actor, node.id)
+        ns = self.api.set_node_settings(self.actor, node.id,
+            {'log_level': 'debug', 'sweep_timeout_s': 300}, expected_revision=ns.revision)
+        effective = self.api.get_effective_settings(self.actor, node_id=node.id,
+                                                    require=('public_origin', 'pool_home'))
+        self.assertEqual((effective.installation_revision, effective.node_revision),
+                         (installed.revision, ns.revision))
+        self.assertEqual(dict(effective.values)['log_level'], 'debug')
+        self.assertEqual(dict(effective.sources)['log_level'], 'node')
+        self.assertEqual(dict(effective.sources)['public_origin'], 'installation')
+        self.assertEqual(effective.installation_applied_revision, None)
+        self.assertEqual(effective.node_applied_revision, None)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'puppet_memory_mb': 16384},
+                                               expected_revision=installed.revision)
+        self.assertEqual(self.api.get_installation_settings(self.actor), installed)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'sweep_free_min_gb': 10},
+                                               expected_revision=installed.revision)
+        self.assertEqual(self.api.get_installation_settings(self.actor), installed)
+        # Installation edit тоже проверяет уже принятые узловые overrides.
+        ns = self.api.set_node_settings(self.actor, node.id, {'sweep_free_min_gb': 40},
+                                        expected_revision=ns.revision)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'gc_free_min_gb': 50},
+                                               expected_revision=installed.revision)
+        self.assertEqual(self.api.get_installation_settings(self.actor), installed)
+        self.assertTrue(services.Catalog().get_effective_settings)
+        with self.assertRaises(PermissionError):
+            services.Catalog().get_effective_settings(self.actor, node_id=node.id)
+        with patch.object(models.InstallationSetting.objects, 'filter', side_effect=DatabaseError('offline')):
+            with self.assertRaises(DatabaseError):
+                self.api.get_effective_settings(self.actor)
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                models.NodeSetting.objects.create(node_id=node.id, key='pool_home',
+                    value_kind='text', text_value='/forged')
 
     def test_typed_settings_invalid_batch_rolls_back_and_node_scope_is_finite(self):
         initial = self.api.get_installation_settings(self.actor)

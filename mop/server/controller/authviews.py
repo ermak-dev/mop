@@ -1,5 +1,6 @@
 """DRF/Django boundary: finite input, CSRF, стандартные credentials и no-store."""
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -14,11 +15,22 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from mop.server.access import services as access
-from mop.server.catalog.services import Catalog
 
 
 def catalog_api():
-    return Catalog(authorizer=access.Access())
+    return access.AuthorizedCatalog()
+
+
+def login_session(request, user):
+    """После password/LDAP I/O: стандартная session и binding коммитятся вместе."""
+    with transaction.atomic():
+        current = get_user_model().objects.select_for_update().get(pk=user.pk)
+        if current.get_session_auth_hash() != user.get_session_auth_hash():
+            raise access.Denied('session authentication changed')
+        login(request, user)
+        request.session['access_reauthenticated_at'] = timezone.now().timestamp()
+        request.session.save()
+        access.bind_session(user.pk, request.session.session_key)
 
 
 from .authentication import actor_for_request
@@ -99,8 +111,7 @@ class Login(PrivateView):
 
     def post(self, request):
         user = _password_user(request._request, _input(request), browser_login=True)
-        login(request._request, user)
-        request.session['access_reauthenticated_at'] = timezone.now().timestamp()
+        login_session(request._request, user)
         return Response({'schema_version': 1, 'user_id': user.pk})
 
 
@@ -163,10 +174,11 @@ class RevokeToken(PrivateView):
 
 class Identity(PrivateView):
     def get(self, request):
-        actor = access.current_actor(actor_for_request(request))
+        actor = access.current_actor(request.actor, grants=getattr(self, 'grant_resolver', None))
         return Response({'schema_version': 1, 'user_id': actor.user_id,
             'principal_id': str(actor.principal_id), 'kind': actor.kind.value,
-            'human_owner_id': actor.human_owner_id, 'node_id': str(actor.node_id) if actor.node_id else None})
+            'human_owner_id': actor.human_owner_id, 'node_id': str(actor.node_id) if actor.node_id else None,
+            'grant_id': str(actor.grant_id) if actor.grant_id else None})
 
 
 def _project(row):

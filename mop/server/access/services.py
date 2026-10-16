@@ -11,6 +11,8 @@ from django.utils.crypto import constant_time_compare, salted_hmac
 from django.views.decorators.debug import sensitive_variables
 from rest_framework.authtoken.models import Token
 from ..catalog import models as catalog
+from ..catalog.services import Catalog
+from ..catalog.permissions import ACTION_PERMISSIONS
 from . import models as m
 from .context import ActorContext, PrincipalKind
 from .permissions import ACTIONS, GLOBAL_ACTIONS, SERVICE_ACTIONS
@@ -109,8 +111,9 @@ def token_context(key, *, grants=None):
         if not Token.objects.filter(user=user, key=key).exists():
             raise Denied('token revoked or rotated')
         principal, identity = _principal(user)
-        binding, _ = m.CredentialBinding.objects.get_or_create(token_user=user,
-            defaults={**_binding_values(principal, identity), 'token_digest': _digest(key)})
+        binding = m.CredentialBinding.objects.filter(token_user=user).first()
+        if binding is None:
+            raise Denied('credential binding is unavailable')
         _check_binding(binding, principal, identity)
         if not constant_time_compare(binding.token_digest, _digest(key)):
             raise Denied('token generation changed')
@@ -134,10 +137,25 @@ def session_context(session_key):
         principal, identity = _principal(user)
         session = Session.objects.filter(pk=session_key).first()
         _session_user(session, user)
-        binding, _ = m.CredentialBinding.objects.get_or_create(session=session,
-            defaults=_binding_values(principal, identity))
+        binding = m.CredentialBinding.objects.filter(session=session).first()
+        if binding is None:
+            raise Denied('credential binding is unavailable')
         _check_binding(binding, principal, identity)
         return _context(binding, principal)
+
+
+@sensitive_variables('session_key')
+def bind_session(user_id, session_key):
+    """Trusted login hook: session и binding сохраняются в общей transaction boundary."""
+    with transaction.atomic():
+        user = get_user_model().objects.select_for_update().get(pk=user_id)
+        principal, identity = _principal(user)
+        if principal.kind != 'human':
+            raise Denied('browser login requires a human identity')
+        session = Session.objects.filter(pk=session_key).first()
+        _session_user(session, user)
+        # Login создаёт новую session generation; существующий credential не чинится.
+        m.CredentialBinding.objects.create(session=session, **_binding_values(principal, identity))
 
 
 def _resolve(actor):
@@ -240,9 +258,31 @@ class Access:
                 raise Denied('installation-wide scope required')
         if action not in ACTIONS:
             raise Denied('action is not registered')
-        app, code = action.split('.', 1)
-        if not Permission.objects.filter(content_type__app_label=app, codename=code).exists() or not user.has_perm(action):
-            raise Denied('action permission required')
+        for permission in ACTION_PERMISSIONS.get(action, (action,)):
+            app, code = permission.split('.', 1)
+            if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
+                    or not user.has_perm(permission)):
+                raise Denied('action permission required')
+
+
+class AuthorizedCatalog(Catalog):
+    """Access-composition: client и ownership принадлежат одной transaction."""
+    def __init__(self):
+        super().__init__(authorizer=Access())
+
+    def register_client(self, actor, *, label):
+        with transaction.atomic():
+            # Владелец берётся только из живого credential, не из caller payload.
+            if type(actor) is not ActorContext:
+                raise Denied('trusted actor context required')
+            if not get_user_model().objects.select_for_update().filter(pk=actor.user_id).exists():
+                raise Denied('credential revoked')
+            user, principal = _resolve(actor)
+            if principal.kind != 'human':
+                raise Denied('client registration requires a human identity')
+            client = super().register_client(actor, label=label)
+            m.ClientOwnership.objects.create(client_id=client.id, user=user)
+            return client
 
 
 def bind_local_identity(user_id):
@@ -264,20 +304,31 @@ def bind_local_identity(user_id):
 
 
 @sensitive_variables('token')
+def _bind_token(token, principal, identity):
+    m.CredentialBinding.objects.create(token_user_id=token.user_id,
+        token_digest=_digest(token.key), **_binding_values(principal, identity))
+
+
+@sensitive_variables('token')
 def issue_token(user_id):
     """Только после password authentication на trusted boundary, не userid из JSON."""
     with transaction.atomic():
         user = get_user_model().objects.select_for_update().get(pk=user_id)
-        principal, _ = _principal(user)
+        principal, identity = _principal(user)
         if principal.kind != 'human':
             raise Denied('password token issuance requires a human identity')
         token, created = Token.objects.get_or_create(user=user)
-        # Существующий binding не перепривязывается к другой identity молча.
-        binding = m.CredentialBinding.objects.filter(token_user=user).first()
-        if binding is not None:
-            _check_binding(binding, principal, _identity(user, principal))
         if created:
+            _bind_token(token, principal, identity)
             m.CredentialEvent.objects.create(user=user, action='token_issued')
+        else:
+            # Существующий credential не усыновляет текущую identity при repair.
+            binding = m.CredentialBinding.objects.filter(token_user=user).first()
+            if binding is None:
+                raise Denied('credential binding is unavailable')
+            _check_binding(binding, principal, identity)
+            if not constant_time_compare(binding.token_digest, _digest(token.key)):
+                raise Denied('token generation changed')
         return token.key
 
 
@@ -285,10 +336,12 @@ def issue_token(user_id):
 def rotate_token(actor):
     with transaction.atomic():
         get_user_model().objects.select_for_update().get(pk=actor.user_id)
-        user, _ = _resolve(actor)
+        user, principal = _resolve(actor)
+        identity = _identity(user, principal)
         Token.objects.filter(user=user).delete()
         m.CredentialBinding.objects.filter(token_user=user).delete()
         token = Token.objects.create(user=user)
+        _bind_token(token, principal, identity)
         m.CredentialEvent.objects.create(user=user, action='token_rotated')
         return token.key
 
@@ -318,13 +371,14 @@ def enroll_service(username, node_id, *, project_ids, permissions):
         if get_user_model().objects.filter(username=username).exists():
             raise ValueError('service username already exists')
         user = get_user_model().objects.create_user(username, password=None, is_staff=False, is_superuser=False)
-        m.Principal.objects.create(user=user, kind='service', bound_node_id=node_id)
+        principal = m.Principal.objects.create(user=user, kind='service', bound_node_id=node_id)
         for action in permissions:
             app, code = action.split('.')
             user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
         for project_id in projects:
             m.ProjectMembership.objects.create(user=user, project_id=project_id, source=source)
         token = Token.objects.create(user=user)
+        _bind_token(token, principal, _identity(user, principal))
         m.CredentialEvent.objects.create(user=user, action='service_enrolled')
         return token.key
 
