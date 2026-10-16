@@ -16,6 +16,9 @@ from mop.server.controller.bootstrap import load
 # настройки; bootstrap должен отвергать их до первого подключения к БД.
 # Инфраструктурный reader существует: red здесь — принятие опасного ввода,
 # а не отсутствие Django или импортируемого модуля.
+# SOLUTION: finite schema, private owned regular files и явные trust roots.
+# RESULT: небезопасный/неполный bootstrap отказывает до подключения к БД.
+# STATUS: FIXED — see #632
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -24,6 +27,9 @@ class BootstrapTests(unittest.TestCase):
         self.root = self.directory / 'root.key'
         self.root.write_bytes(b'k' * 64)
         self.root.chmod(0o600)
+        self.ca = self.directory / 'fixture-ca.pem'
+        self.ca.write_text('fixture-only-not-a-certificate')
+        self.ca.chmod(0o644)
         self.path = self.directory / 'bootstrap.json'
         self.data = {
             'installation_id': 'foundation-test', 'role': 'maintenance',
@@ -31,7 +37,7 @@ class BootstrapTests(unittest.TestCase):
             'database': {'ENGINE': 'django.db.backends.postgresql',
                          'NAME': 'controller_test', 'HOST': 'db.example.invalid',
                          'PORT': '5432', 'USER': 'migration', 'PASSWORD': 'private-value',
-                         'OPTIONS': {'sslmode': 'verify-full', 'sslrootcert': '/trust/ca.pem'}}}
+                         'OPTIONS': {'sslmode': 'verify-full', 'sslrootcert': str(self.ca)}}}
         self.write()
 
     def write(self):
@@ -117,6 +123,15 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(db['OPTIONS']['connect_timeout'], 5)
             self.assertLessEqual(db['OPTIONS']['pool']['max_size'], 8)
         sys.modules.pop('mop.server.controller.settings', None)
+
+    def test_binary_django_signing_key_is_a_safe_bootstrap_refusal(self):
+        key = self.directory / 'binary.key'
+        key.write_bytes(b'\xff' * 64)
+        key.chmod(0o600)
+        self.data['django_key'] = str(key)
+        self.write()
+        with self.assertRaisesRegex(RuntimeError, 'Django signing'):
+            load(self.path)
 
     def test_no_fallback_for_missing_file(self):
         with self.assertRaisesRegex(RuntimeError, 'bootstrap'):

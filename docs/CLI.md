@@ -344,6 +344,7 @@ the developer's own commands: the project's tracker, CI and checks, not the pool
   mop dev ci    pipelines, job logs, lint and runners: GitLab CI from the terminal
   mop dev docs  regenerate docs/CLI.md, the CLI reference, from the docstrings
   mop dev test  run the checks in tests/, all or the named ones
+  mop dev controller  isolated PostgreSQL foundation checks in Docker
   mop dev web   build the dashboard (web/dist) and check the committed build
 
 Run from a working copy of the project: the coordinates come from its git
@@ -619,6 +620,19 @@ Each job that failed the pipeline, with the last lines of its log. A failed
 job with allow_failure is named as one that did NOT fail the pipeline. When
 no job failed at all, the pipeline's own reason: a rejected .gitlab-ci.yml
 fails with no jobs.
+```
+
+#### mop dev controller
+
+```text
+mop dev controller [--postgres 16|17] [--check controller|hermetic]: isolated PostgreSQL checks
+
+Runs the selected check with the declared server extra and matching PostgreSQL
+client tools in fresh Docker containers, using the same setup as CI. Requires
+an existing Docker installation and a mop Git working copy; installs no host
+packages and uses no pool. The snapshot contains tracked and nonignored source,
+not installation inputs or .git. No host ports, installation credentials or
+Docker socket enter test containers. Cleanup failures are reported explicitly.
 ```
 
 #### mop dev docs

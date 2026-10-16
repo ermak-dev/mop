@@ -14,6 +14,9 @@ from mop.common import deps
 # HYPOTHESIS: установка клиента не умеет выбирать серверную группу;
 # bootstrap командлета проходит через чтение старой .env.
 # Проверки метаданных исполняются без Django и без сетевой установки.
+# SOLUTION: отдельный server extra и stdlib dispatch без старой .env.
+# RESULT: clean-install gate отдельно проверяет настоящий клиентский venv.
+# STATUS: FIXED — see #632
 class Packaging(unittest.TestCase):
     def test_server_extra_is_separate_from_client(self):
         server = getattr(deps, 'SERVER', ())
@@ -27,6 +30,17 @@ class Packaging(unittest.TestCase):
         self.assertEqual(module.requirements('server'), list(server))
         self.assertEqual(module.requirements(), list(deps.PIP))
 
+    def test_pool_worker_ownership_uses_the_explicitly_selected_pool_release(self):
+        # BUG: psycopg[pool]==3.3.6 не фиксирует отдельно выпускаемый psycopg_pool.
+        # HYPOTHESIS: shutdown читает private _workers/_sched_runner, поэтому
+        # новая установка должна получать именно проверенный pool, не latest.
+        # SOLUTION: отдельный точный server-only requirement для psycopg-pool.
+        # RESULT: наблюдался missing-pin red; packaging и реальный shutdown green.
+        # STATUS: FIXED — see #632
+        self.assertIn('psycopg-pool==3.3.3', deps.SERVER)
+        self.assertFalse(any(item.lower().startswith(('psycopg-pool', 'psycopg_pool'))
+                             for item in deps.PIP), 'client must not acquire the controller pool')
+
     def test_isolated_database_fixture_survives_hermetic_children(self):
         from unittest.mock import patch
         import os
@@ -35,6 +49,33 @@ class Packaging(unittest.TestCase):
             env = hermetic.child_env({}, strict=True)
         self.assertEqual(env.get('MOP_TEST_POSTGRES_HOST'), 'isolated-db')
         self.assertNotIn('MOP_SERVER_LAN', env)
+
+    def test_global_server_selector_is_refused_without_old_context(self):
+        from mop import cli
+        from unittest.mock import patch
+        with patch('mop.common.context.here', side_effect=AssertionError('old context read')), \
+                patch.object(cli, 'environment', side_effect=AssertionError('old environment read')), \
+                patch.object(cli, 'command') as command:
+            self.assertEqual(cli.main(['--server', 'old.invalid', 'server', 'controller', 'check']), 1)
+            command.assert_not_called()
+
+    def test_hermetic_failure_keeps_the_actual_child_failure(self):
+        from unittest.mock import Mock, patch
+        class Collector:
+            def __init__(self):
+                self.messages = []
+            def check(self, message, condition):
+                self.messages.append(message)
+        failure = 'AssertionError: exact failing invariant\n' + '\n'.join('trailer' for _ in range(12))
+        child = Mock(returncode=1)
+        child.communicate.return_value = (failure, None)
+        collector = Collector()
+        with patch.object(hermetic, 'hostile_home', return_value=('/fixture', {})), \
+                patch.object(hermetic, 'hostile_repo', return_value='/fixture'), \
+                patch.object(hermetic, 'files', return_value=['/fixture/tests/controller.py']), \
+                patch.object(hermetic.subprocess, 'Popen', return_value=child):
+            hermetic.check_runs(collector)
+        self.assertTrue(all('exact failing invariant' in message for message in collector.messages))
 
     def test_controller_dispatch_does_not_initialize_old_environment(self):
         from mop import cli
