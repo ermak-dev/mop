@@ -697,7 +697,7 @@ class GrantCases(TransactionTestCase):
         from django.test import Client
         browser = Client()
         response = browser.post('/api/v1/auth/login',
-            {'username': 'owner', 'password': 'test-only-password'}, content_type='application/json')
+            {'username': 'owner', 'password': 'test-only-password'}, content_type='application/json', secure=True)
         self.assertEqual(response.status_code, 200)
         browser_actor = auth.session_context(browser.session.session_key)
         # Старая реализация выбирает первый token binding вместо capability
