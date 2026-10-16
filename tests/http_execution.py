@@ -97,6 +97,33 @@ class Executor:
 
 
 class ProtocolTests(unittest.TestCase):
+    # FEATURE: addressed identity input и предыдущий epoch приходят с сервера.
+    # HYPOTHESIS: прежний client имеет лишь metadata и вынуждает guessing/bypass.
+    # RED: отсутствовал addressed input client; boot передавал None вместо query.
+    # SOLUTION: strict finite DTO и явный server epoch query перед restart CAS.
+    # RESULT: node/pure suite green, native HTTPS proof отдельно в controller gate.
+    # STATUS: FIXED — see #625
+    def test_addressed_input_and_executor_discovery_have_strict_finite_shapes(self):
+        work = Work.parse(wire(action='apply_identity'))
+        class InputTransport:
+            value = dict(schema_version=1,operation_id=work.operation_id,step_id=work.step_id,
+                git_name='Owner',git_email='owner@example.invalid')
+            async def request(inner,method,path,payload=None,params=None):
+                return inner.value
+        transport = InputTransport()
+        client = MachineClient(transport)
+        self.assertTrue(callable(getattr(client,'action_input',None)), 'addressed input client port missing')
+        self.assertEqual(asyncio.run(client.action_input(work))['git_name'],'Owner')
+        transport.value = {**transport.value,'shell':'id'}
+        with self.assertRaises(Refused):
+            asyncio.run(client.action_input(work))
+        self.assertTrue(callable(getattr(client,'executor_state',None)), 'server epoch discovery client port missing')
+        transport.value = dict(schema_version=1,node_id=work.node_id,executor_epoch=work.executor_epoch)
+        self.assertEqual(asyncio.run(client.executor_state(work.node_id)),work.executor_epoch)
+        transport.value = {**transport.value,'node_id':str(uuid4())}
+        with self.assertRaises(Refused):
+            asyncio.run(client.executor_state(work.node_id))
+
     def test_strict_finite_work(self):
         self.assertEqual(Work.parse(wire()).action, 'send_message')
         for change in ({'action':'shell'}, {'owner_id':1}, {'revision':'01'},
@@ -107,6 +134,25 @@ class ProtocolTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_boot_without_previous_epoch_queries_server_before_restart_cas(self):
+        work = wire()
+        previous = str(uuid4())
+        class Discovery(Transport):
+            async def request(inner,method,path,payload=None,params=None):
+                if path == 'executor':
+                    inner.calls.append((method,path,payload,params))
+                    return dict(schema_version=1,node_id=work['node_id'],executor_epoch=previous)
+                return await super().request(method,path,payload,params)
+        transport = Discovery(work)
+        runtime = Runtime(MachineClient(transport),Executor(),node_id=work['node_id'],epoch=work['epoch'],
+            executor_epoch=work['executor_epoch'])
+        try:
+            await runtime.start(None)
+            self.assertEqual([call[1] for call in transport.calls],['executor','executor/restarted'])
+            self.assertEqual(transport.calls[1][2]['previous_epoch'],previous)
+        finally:
+            await runtime.aclose()
+
     async def asyncSetUp(self):
         self.value = wire()
         self.transport = Transport(self.value)
