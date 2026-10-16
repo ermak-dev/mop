@@ -124,11 +124,13 @@ physical reconciliation port: исчезновение одного PID или t
   SessionApi scope, а не эмулировать его production подтверждение тестовым peer.
 
 Локальная проверка #643 использует новый управляемый процесс с настоящим Unix
-socket и отдельный stdlib hook → private IPC → контролируемый receipt fixture.
-API/approval/image/routing ответы в этих checks — doubles; это не acceptance
-новой установки. Реальный PVE bootstrap, VM/reboot, внешний образ, TLS/controller
-receipts и production SessionApi требуют отдельного разрешённого стенда; старый
-пул для этих опытов не используется.
+socket, отдельный stdlib hook → private IPC и настоящий verified HTTPS receiver
+с одноразовым fixture certificate. Проверены Token auth/401 чужого credential и
+exact machine result receipt с outcome `unknown`, без объявления готовности.
+API/approval/receipt policy/image/routing в этих checks — doubles; это не
+acceptance новой установки. Реальный PVE bootstrap, VM/reboot, внешний образ,
+production controller receipts и SessionApi требуют отдельного разрешённого
+стенда; старый пул для этих опытов не используется.
 
 ## Контракт
 

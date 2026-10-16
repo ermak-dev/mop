@@ -4,7 +4,8 @@ SOLUTION: immutable registration/layout, exact API response и physical/session 
 RESULT: воспроизведены отсутствие addressed boundary/readiness/producer/probe,
 Unix pathname overflow (121 > 100), bool/schema и control characters, затем
 11 checks зелёные. Настоящий owned
-process/Unix socket и stdlib hook IPC проверены; server receipts/image/routes —
+process/Unix socket, stdlib hook IPC и настоящий verified HTTPS receipt
+(включая 401 чужого credential) проверены. Server auth/receipt policy/image/routes —
 контролируемые doubles, production SessionApi/PVE не подтверждены.
 STATUS: FIXED — see #643 (driver/node stage, Root binding отдельно)
 """
@@ -224,6 +225,60 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PhysicalProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def verify_https_receipt(self, proof):
+        # Контролируемый HTTPS receiver проверяет transport и адресный ACK,
+        # не подменяет server auth/ORM или production SessionApi scope authority.
+        import ssl
+        import subprocess
+        from aiohttp import web
+        from mop.node.http_execution import Admission, MachineClient, HttpsTransport
+        w = proof.registration.work
+        attempt = str(uuid4())
+        credential = 'owned-fixture-machine-credential'
+        received = []
+        async def result(request):
+            if request.headers.get('Authorization') != 'Token '+credential:
+                return web.json_response({}, status=401)
+            value = await request.json()
+            if value.get('attempt_id') != attempt:
+                return web.json_response({}, status=409)
+            received.append((proof.scope, value))
+            return web.json_response(dict(schema_version=1, receipt_id=value['receipt_id'],
+                attempt_id=attempt, revision='2', outcome=value['outcome'], evidence=value['evidence']))
+        with tempfile.TemporaryDirectory(prefix='m643-tls-') as directory:
+            key, cert = Path(directory)/'key.pem', Path(directory)/'cert.pem'
+            completed = await asyncio.to_thread(subprocess.run, ['openssl', 'req', '-x509',
+                '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost',
+                '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', str(key), '-out', str(cert)],
+                capture_output=True, timeout=10)
+            self.assertEqual(completed.returncode, 0, 'owned TLS fixture certificate generation failed')
+            key.chmod(0o600)
+            server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_tls.load_cert_chain(cert, key)
+            client_tls = ssl.create_default_context(cafile=str(cert))
+            app = web.Application()
+            app.router.add_post('/api/v1/machine/work/result', result)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '127.0.0.1', 0, ssl_context=server_tls)
+            await site.start()
+            origin = 'https://127.0.0.1:'+str(site._server.sockets[0].getsockname()[1])
+            client = MachineClient(HttpsTransport(origin, credential, tls=client_tls))
+            denied = MachineClient(HttpsTransport(origin, 'wrong-fixture-credential', tls=client_tls))
+            admission = Admission(w, str(uuid4()), attempt, 1, w.not_after)
+            try:
+                with self.assertRaises(Refused):
+                    await denied.result(admission, 'unknown', 'effect-running')
+                await client.result(admission, 'unknown', 'effect-running')
+                self.assertEqual(len(received), 1)
+                self.assertEqual(received[0][0], proof.scope)
+                self.assertEqual(received[0][1]['outcome'], 'unknown')
+                self.assertEqual(received[0][1]['evidence'], 'effect-running')
+            finally:
+                await client.aclose()
+                await denied.aclose()
+                await runner.cleanup()
+
     async def test_live_owned_process_socket_and_scope_are_required_not_a_stale_session_file(self):
         m = api()
         from mop.node import body_launch
@@ -256,6 +311,7 @@ class PhysicalProcessTests(unittest.IsolatedAsyncioTestCase):
                     async def observe(self, registered): return proof
                 probe = SessionApiProbe(Api())
                 self.assertEqual(await probe.observe(layout), proof)
+                await self.verify_https_receipt(proof)
                 proof = replace(proof, process_start='old-file-start')
                 with self.assertRaises(Unavailable): await probe.observe(layout)
                 proof = replace(proof, process_start=process_identity(process.pid))
