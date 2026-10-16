@@ -61,6 +61,26 @@ class AccessContracts(TransactionTestCase):
         self.token = s.issue_token(self.user.pk)
         self.actor = s.token_context(self.token)
 
+    # BUG: owner proof проверяет только CRUD permission, тогда как Access требует CONTROL.
+    # HYPOTHESIS: отдельная permission loop в authorize_owner расходится с authorize.
+    # RED: PG16 — Denied not raised для owner с одним CRUD правом.
+    # SOLUTION: общая action permission matrix при прежних currentness/scope gates.
+    # RESULT: owner proof не обходит CONTROL permission и не расширяет scope.
+    # STATUS: FIXED — see #625
+    def test_owner_proof_requires_same_action_permissions_and_current_scope(self):
+        self.permission('catalog.change_project')
+        api = self.s.Access()
+        with self.assertRaisesRegex(self.s.Denied, 'current human owner permission required'):
+            api.authorize_owner(self.user.pk, 'catalog.change_project', project_ids=(self.project.pk,))
+        self.permission('catalog.configure_project')
+        api.authorize_owner(self.user.pk, 'catalog.change_project', project_ids=(self.project.pk,))
+        with self.assertRaises(self.s.Denied):
+            api.authorize_owner(self.user.pk, 'catalog.change_project', project_ids=(self.foreign.pk,))
+        self.source.enabled = False
+        self.source.save(update_fields=['enabled'])
+        with self.assertRaises(self.s.Denied):
+            api.authorize_owner(self.user.pk, 'catalog.change_project', project_ids=(self.project.pk,))
+
     # BUG: retained catalogue FK оставляет live credentials полномочия после retirement.
     # HYPOTHESIS: Access проверяет наличие FK, а не public currentness catalogue.
     # RED: PG16/17 — Denied/NotVisible not raised, retired UUID в token/session scope.

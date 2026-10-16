@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     'mop.server.access',
     'mop.server.secrets',
     'mop.server.preparation',
+    'mop.server.operations',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

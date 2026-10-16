@@ -194,6 +194,17 @@ def _global(user):
     return user.is_superuser or m.AllProjectMembership.objects.filter(user=user, source__enabled=True).exists()
 
 
+def _require_permissions(user, action, reason):
+    """Одна permission matrix для текущего actor и закреплённого human owner."""
+    if action not in ACTIONS:
+        raise Denied('action is not registered')
+    for permission in ACTION_PERMISSIONS.get(action, (action,)):
+        app, code = permission.split('.', 1)
+        if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
+                or not user.has_perm(permission)):
+            raise Denied(reason)
+
+
 def visible_project_ids(actor):
     user, principal = _resolve(actor)
     if principal.kind != 'human':
@@ -222,15 +233,13 @@ class Access:
         if principal.kind != 'human':
             raise Denied('human owner required')
         projects = set(project_ids)
+        if projects != set(Catalog.current_project_ids(projects)):
+            raise Denied('human owner project is unavailable')
         if not _global(user):
             allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
             if not projects <= allowed:
                 raise Denied('human owner no longer belongs to project')
-        if action not in ACTIONS:
-            raise Denied('action is not registered')
-        app, code = action.split('.', 1)
-        if not Permission.objects.filter(content_type__app_label=app, codename=code).exists() or not user.has_perm(action):
-            raise Denied('current human owner permission required')
+        _require_permissions(user, action, 'current human owner permission required')
 
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
         if type(actor) is ActorContext and actor.kind is PrincipalKind.GRANT:
@@ -259,13 +268,7 @@ class Access:
                 raise NotVisible('resource not found')
             if action in GLOBAL_ACTIONS and not _global(user):
                 raise Denied('installation-wide scope required')
-        if action not in ACTIONS:
-            raise Denied('action is not registered')
-        for permission in ACTION_PERMISSIONS.get(action, (action,)):
-            app, code = permission.split('.', 1)
-            if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
-                    or not user.has_perm(permission)):
-                raise Denied('action permission required')
+        _require_permissions(user, action, 'action permission required')
 
 
 class AuthorizedCatalog(Catalog):

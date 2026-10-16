@@ -19,7 +19,6 @@ from rest_framework.authtoken.models import Token
 
 from mop.common import soul
 from ..catalog.models import Project
-from ..catalog.services import Catalog
 from ..secrets.services import RetainedSecrets, RetentionScope, outside_transaction
 from ..secrets.crypto import SecretCryptoError
 from . import models as m, services as auth
