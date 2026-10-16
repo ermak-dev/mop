@@ -99,6 +99,8 @@ class DirectoryConfiguration(models.Model):
     user_base = models.CharField(max_length=1024)
     group_base = models.CharField(max_length=1024, blank=True)
     login_attribute = models.CharField(max_length=128, default='uid')
+    subject_attribute = models.CharField(max_length=16, default='entryUUID',
+        choices=[('entryUUID', 'entryUUID'), ('objectGUID', 'objectGUID')])
     nested_ad = models.BooleanField(default=False)
     starttls = models.BooleanField(default=False)
     ca_secret_ref = models.CharField(max_length=256, blank=True)

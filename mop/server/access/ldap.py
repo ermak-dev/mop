@@ -4,6 +4,7 @@ import re
 import ssl
 from typing import Protocol
 from urllib.parse import urlsplit
+from uuid import UUID
 from django.views.decorators.debug import sensitive_variables
 from .directory import DirectoryAccount, DirectoryUnavailable
 
@@ -30,7 +31,8 @@ class LdapDirectory:
         if (parsed.scheme not in ('ldap', 'ldaps') or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.query or parsed.fragment or parsed.path not in ('', '/')
                 or (parsed.scheme == 'ldap' and not cfg.starttls)
-                or not re.fullmatch('[A-Za-z][A-Za-z0-9-]*', cfg.login_attribute)):
+                or not re.fullmatch('[A-Za-z][A-Za-z0-9-]*', cfg.login_attribute)
+                or cfg.subject_attribute not in ('entryUUID', 'objectGUID')):
             raise DirectoryUnavailable('invalid secure directory configuration')
         import ldap3
         ca = self.secrets.ca_pem(cfg.source_id, cfg.ca_secret_ref).decode('ascii') if cfg.ca_secret_ref else None
@@ -51,6 +53,10 @@ class LdapDirectory:
             if cfg.starttls and not conn.start_tls():
                 raise DirectoryUnavailable('directory TLS negotiation failed')
             if not conn.bind():
+                # RFC 4511: только invalidCredentials (49) — отказ credentials.
+                # busy/unavailable/unwillingToPerform не означают неверный пароль.
+                if conn.result.get('result') != 49:
+                    raise DirectoryUnavailable('directory bind is unavailable')
                 yield None
             else:
                 yield conn
@@ -58,7 +64,35 @@ class LdapDirectory:
             raise DirectoryUnavailable('directory transport or trust is unavailable') from None
         finally:
             if conn is not None:
-                conn.unbind()
+                try:
+                    conn.unbind()
+                except (LDAPException, OSError, UnicodeError, ValueError):
+                    raise DirectoryUnavailable('directory transport cleanup failed') from None
+
+    @staticmethod
+    def _subject(cfg, entry):
+        attributes = entry.get('raw_attributes', entry.get('attributes', {}))
+        values = [value for name, value in attributes.items()
+                  if name.casefold() == cfg.subject_attribute.casefold()]
+        if len(values) != 1:
+            raise DirectoryUnavailable('directory immutable subject is missing or ambiguous')
+        values = values[0]
+        if isinstance(values, (str, bytes)):
+            values = (values,)
+        if not isinstance(values, (tuple, list)) or len(values) != 1:
+            raise DirectoryUnavailable('directory immutable subject is missing or ambiguous')
+        value = values[0]
+        try:
+            # AD хранит первые три компонента GUID в little-endian порядке.
+            if cfg.subject_attribute == 'objectGUID' and isinstance(value, bytes):
+                return str(UUID(bytes_le=value))
+            if isinstance(value, bytes):
+                value = value.decode('ascii')
+            if not isinstance(value, str):
+                raise ValueError
+            return str(UUID(value))
+        except (ValueError, UnicodeError, TypeError):
+            raise DirectoryUnavailable('directory immutable subject is invalid') from None
 
     @sensitive_variables('secret')
     def lookup(self, cfg, username):
@@ -71,21 +105,35 @@ class LdapDirectory:
             if conn is None:
                 raise DirectoryUnavailable('directory service bind failed')
             filt = '(' + cfg.login_attribute + '=' + escape_filter_chars(username) + ')'
-            conn.search(cfg.user_base, filt, attributes=[cfg.login_attribute], size_limit=2)
-            if conn.result.get('result') not in (0, 4):
-                raise DirectoryUnavailable('directory user search failed')
+            attributes = [cfg.login_attribute, cfg.subject_attribute]
+            conn.search(cfg.user_base, filt, attributes=attributes, size_limit=2)
+            if conn.result.get('result') != 0:
+                raise DirectoryUnavailable('directory user search failed or exceeded limit')
             entries = tuple(e for e in conn.response if e.get('type') == 'searchResEntry')
-            if len(entries) != 1 or conn.result.get('result') == 4:
-                return tuple(DirectoryAccount(e['dn'], username, ()) for e in entries) if len(entries) > 1 else (
-                    DirectoryAccount('ambiguous-a', username, ()), DirectoryAccount('ambiguous-b', username, ())) if conn.result.get('result') == 4 else ()
+            if not entries:
+                return ()
+            if len(entries) != 1:
+                raise DirectoryUnavailable('directory login is ambiguous')
             dn = entries[0]['dn']
+            subject = self._subject(cfg, entries[0])
+            # Одинаковый immutable id у разных DN — коллизия, не rename.
+            if cfg.subject_attribute == 'objectGUID':
+                encoded = ''.join('\\' + format(byte, '02x') for byte in UUID(subject).bytes_le)
+            else:
+                encoded = escape_filter_chars(subject)
+            conn.search(cfg.user_base, '(' + cfg.subject_attribute + '=' + encoded + ')',
+                attributes=attributes, size_limit=2)
+            matches = tuple(e for e in conn.response if e.get('type') == 'searchResEntry')
+            if (conn.result.get('result') != 0 or len(matches) != 1
+                    or matches[0]['dn'] != dn or self._subject(cfg, matches[0]) != subject):
+                raise DirectoryUnavailable('directory immutable subject is ambiguous')
             member = 'member:1.2.840.113556.1.4.1941:' if cfg.nested_ad else 'member'
             group_filter = '(|(' + member + '=' + escape_filter_chars(dn) + ')(uniqueMember=' + escape_filter_chars(dn) + ')(memberUid=' + escape_filter_chars(username) + '))'
             conn.search(cfg.group_base, group_filter, attributes=['cn'], size_limit=500)
             if conn.result.get('result') != 0:
                 raise DirectoryUnavailable('directory group search failed or exceeded limit')
             groups = tuple(e['dn'] for e in conn.response if e.get('type') == 'searchResEntry')
-            return (DirectoryAccount(dn, username, groups, bind_dn=dn),)
+            return (DirectoryAccount(subject, username, groups, bind_dn=dn),)
 
     @sensitive_variables('password')
     def check_password(self, cfg, subject, password):

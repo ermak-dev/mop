@@ -53,8 +53,7 @@ class Node(Record):
     class Meta(Record.Meta):
         permissions = [('configure_node', 'Can configure node'), ('drain_node', 'Can drain node'),
             ('enable_node', 'Can enable node'), ('forget_node', 'Can forget node'),
-            ('record_node_application', 'Can record node application'), ('observe_node', 'Can observe node'),
-            ('record_settings_application', 'Can record settings application')]
+            ('record_node_application', 'Can record node application'), ('observe_node', 'Can observe node')]
         constraints = Record.Meta.constraints + [
             models.CheckConstraint(condition=Q(driver__in=('host', 'pve')), name='node_known_driver'),
             models.CheckConstraint(condition=Q(ssh_port__gte=1, ssh_port__lte=65535), name='node_ssh_port'),
@@ -76,6 +75,11 @@ class InstallationConfiguration(Record):
     applied_revision = models.PositiveBigIntegerField(null=True)
     applied_receipt = models.CharField(max_length=512, blank=True)
     applied_at = models.DateTimeField(null=True)
+
+    class Meta(Record.Meta):
+        permissions = (
+            ('record_settings_application', 'Can record settings application'),
+        )
 
 
 def setting_constraint(node):
