@@ -1217,6 +1217,24 @@ issue and epic merge SHAs in CI; Django gates are added by #632, so today's old
 suite cannot be reported as Django acceptance. Report source inspection, local
 checks, CI and live experiments separately, including anything unverified.
 
+## Project configuration HTTP (#634)
+
+`POST /api/v1/projects` accepts exactly `origin` and optional nullable
+`puppet_limit`. It calls the shared Catalog creation use case and returns 201,
+`Location`, and the canonical project identity and decimal-string revision.
+A duplicate name/origin is a 409 conflict, not an implicit update.
+`PUT /api/v1/projects/<uuid>` accepts exactly `origin`, nullable `puppet_limit`
+and a positive decimal-string `expected_revision`. It calls the same aggregate
+configuration use case as Admin; an obsolete revision returns 409 without writes.
+These are configuration changes, not physical build/delete operations.
+
+Both boundaries require current Access authorization, the action-specific Django
+permissions and installation-wide scope required by Catalog. Staff status alone
+is insufficient. Foreign project scope remains 404. Unknown fields, coerced
+numeric revisions and boolean limits are refused; session mutations require CSRF.
+Responses are no-store. Project deletion remains unavailable here until a trusted
+external-removal proof is bound; it is not exposed as a direct ORM delete.
+
 ## Unified read implementation seam (#626)
 
 The initial query owner is `sessions.projections.PoolQueries`, constructed with

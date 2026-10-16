@@ -186,7 +186,54 @@ def _project(row):
             'revision': str(row.revision), 'puppet_limit': row.puppet_limit}
 
 
+class CatalogRevision(serializers.Field):
+    def to_internal_value(self, value):
+        if (type(value) is not str or not value.isascii() or not value.isdecimal()
+                or value.startswith('0') or len(value) > 19 or int(value) > 9223372036854775807):
+            raise serializers.ValidationError('expected_revision must be a positive decimal string')
+        return int(value)
+
+
+class ProjectLimit(serializers.IntegerField):
+    def to_internal_value(self, value):
+        if type(value) is not int:
+            raise serializers.ValidationError('puppet_limit must be an integer or null')
+        return super().to_internal_value(value)
+
+
+class ProjectCreate(FiniteSerializer):
+    origin = serializers.CharField(max_length=2048, trim_whitespace=False)
+    puppet_limit = ProjectLimit(min_value=0, max_value=2147483647, allow_null=True, required=False, default=None)
+
+
+class ProjectConfiguration(ProjectCreate):
+    expected_revision = CatalogRevision()
+    puppet_limit = ProjectLimit(min_value=0, max_value=2147483647, allow_null=True)
+
+
+def _catalog_mutation(function, *, created=False):
+    from mop.server.catalog.services import Conflict
+    try:
+        row = function()
+    except Conflict as error:
+        return Response({'schema_version': 1, 'error': {'code': 'catalog_conflict',
+            'message': str(error), 'retryable': False}}, status=409)
+    except ValueError as error:
+        raise serializers.ValidationError(str(error)) from None
+    response = Response({'schema_version': 1, **_project(row)}, status=201 if created else 200)
+    if created:
+        response['Location'] = '/api/v1/projects/' + str(row.id)
+    return response
+
+
 class Projects(PrivateView):
+    def post(self, request):
+        serializer = ProjectCreate(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        return _catalog_mutation(lambda: catalog_api().create_project(actor_for_request(request),
+            values['origin'], limit=values['puppet_limit']), created=True)
+
     def get(self, request):
         actor = actor_for_request(request)
         rows = catalog_api().list_projects(actor)
@@ -200,6 +247,13 @@ class Projects(PrivateView):
 
 
 class Project(PrivateView):
+    def put(self, request, project_id):
+        serializer = ProjectConfiguration(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        return _catalog_mutation(lambda: catalog_api().configure_project(actor_for_request(request), project_id,
+            origin=values['origin'], limit=values['puppet_limit'], expected_revision=values['expected_revision']))
+
     def get(self, request, project_id):
         row = catalog_api().get_project(actor_for_request(request), project_id)
         return Response({'schema_version': 1, **_project(row)})
