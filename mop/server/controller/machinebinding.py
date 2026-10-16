@@ -5,8 +5,8 @@ from mop.server.access.delegation import RoleBinding
 from mop.server.access.grants import Grants
 from mop.server.operations.puppet import RestartTarget, MachineStep
 from mop.server.sessions.protocol import WorkV1
-from mop.server.sessions.services import Assignments, MachineExecution
-from .runtime import operations_service
+from mop.server.sessions.services import Assignments
+from .runtime import operations_service, machine_execution_service
 
 
 @dataclass(frozen=True)
@@ -111,5 +111,5 @@ def authority():
 
 def compose(*, grants=None, restart_support=None):
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
-    return MachineExecution(work=OperationWork(operations(grants=grants, restart_support=restart_support)),
+    return machine_execution_service(work=OperationWork(operations(grants=grants, restart_support=restart_support)),
         grants=ReceivingGrant(grants), installation=authority)

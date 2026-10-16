@@ -28,7 +28,7 @@ class ProjectionQueries(TransactionTestCase):
         from mop.server.controller.runtime import initialize
         from mop.server.access import models as a, services as auth
         from mop.server.catalog.models import Project, Node, NodeProject
-        from mop.server.sessions.services import Assignments
+        from mop.server.controller.runtime import assignments_service as Assignments
         self.epoch = UUID(initialize()['epoch'])
         self.project = Project.objects.create(name='one', origin='https://example.invalid/one.git')
         self.other = Project.objects.create(name='two', origin='https://example.invalid/two.git')
@@ -344,7 +344,7 @@ class ProjectionQueries(TransactionTestCase):
         self.assertEqual(self.api().PoolQueries(epoch=lambda:self.epoch).detail(self.actor, self.assignment.id)['puppet']['state']['kind'], 'busy')
 
     def test_new_incarnation_rejects_old_producer_even_with_higher_sequence(self):
-        from mop.server.sessions.services import Assignments
+        from mop.server.controller.runtime import assignments_service as Assignments
         writer, run = self.writer()
         self.observed(writer)
         Assignments().activate(self.actor, self.assignment.id, expected_revision=2, executor_epoch=uuid4())

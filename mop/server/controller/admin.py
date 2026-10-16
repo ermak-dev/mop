@@ -128,7 +128,10 @@ from . import admincatalog, adminevidence  # noqa: E402,F401 — конечны�
 # основной Assignment detail читает тот же DTO, что DRF.
 assignment_evidence_admin = admin.site._registry[Assignment]
 admin.site.unregister(Assignment)
-_actor = access_actor = lambda request: access.session_context(request.session.session_key)
+
+
+def _actor(request):
+    return access.session_context(request.session.session_key)
 
 
 def _allowed(request, action, projects=()):

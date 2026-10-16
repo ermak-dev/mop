@@ -167,8 +167,6 @@ class Grants:
         return row
 
     def _owner_permission(self, owner_id, action, project_id):
-        if not Catalog.project_is_current(project_id):
-            raise auth.Denied('grant project is unavailable')
         auth.Access().authorize_owner(owner_id, action, project_ids=(project_id,))
 
     def _human(self, actor, action, project_id):

@@ -55,7 +55,7 @@ class RestartVertical(TransactionTestCase):
         from mop.server.access.grants import Grants, ApprovedPolicy, RoleBinding
         from mop.server.secrets.crypto import Keyring, XChaCha20Provider
         from mop.server.secrets.services import SecretStore
-        from mop.server.sessions.services import Assignments
+        from mop.server.controller.runtime import assignments_service as Assignments
         from mop.server.sessions.models import Assignment
         provider = XChaCha20Provider(Keyring('fixture', {'fixture': b'z'*32}))
         policy = SecretStore(provider=provider, authorizer=auth.Access()).create(self.actor,
@@ -107,6 +107,16 @@ class RestartVertical(TransactionTestCase):
             not_after=(timezone.now()+timedelta(minutes=2)).isoformat(), params={'fresh':False})
         result.update(changes)
         return result
+
+    # HYPOTHESIS: независимые roots restart/build теряют общий target claim.
+    # SOLUTION: machine root использует общий SQL target_held через runtime factory.
+    # RESULT: PG16 — unbound вместо query; после fix PG17 narrow 4/4 green.
+    # STATUS: FIXED — see #623.
+    # Проверяем настоящую SQL query, не permissive callback и не снятие default deny.
+    def test_root_machine_composition_uses_real_common_target_fence(self):
+        from mop.server.controller.machinebinding import compose
+        from mop.server.operations.resources import target_held
+        self.assertIs(compose().target_fence, target_held)
 
     def test_permissions_exist_on_actual_domain_model_content_types(self):
         from mop.server.access import permissions
@@ -323,7 +333,8 @@ class RestartVertical(TransactionTestCase):
 
     def test_clone_reassignment_refuses_manual_transaction_before_external_io(self):
         self.fixture()
-        from mop.server.sessions.services import Assignments, Unavailable
+        from mop.server.sessions.services import Unavailable
+        from mop.server.controller.runtime import assignments_service as Assignments
         released = Assignments().release(self.actor,self.target.id,expected_revision=self.target.revision)
         calls = []
         class Clones:

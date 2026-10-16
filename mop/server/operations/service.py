@@ -482,7 +482,7 @@ class Operations:
         self._require_binding()
         if not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
-        work = Q(state=State.ACCEPTED) | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
+        work = Q(state=State.ACCEPTED, target_kind='node') | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
         # Stale lease разрешает только inspection прежнего token, не новый apply.
         return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
 

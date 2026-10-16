@@ -4,7 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.apps import apps
 from django.contrib.auth import get_user_model
@@ -102,6 +102,27 @@ class DurableOperations(TransactionTestCase):
         with self.assertRaisesRegex(self.s.Refused, 'controller_unavailable'):
             self.s.Operations().pending()
         self.assertIsNone(self.m.OutboxEvent.objects.get().published_at)
+
+    # HYPOTHESIS: build discovery теряет фильтр node-only worker и выбирает restart.
+    # SOLUTION: node-only accepted lane плюс отдельная stale-build inspection ветвь.
+    # RESULT: PG16 — первым выбран UUID restart; после fix PG17 narrow 4/4 green.
+    # STATUS: FIXED — see #623.
+    # Машинные Step остаются в общей таблице, но потребляются только machine port.
+    def test_controller_worker_does_not_consume_machine_restart_lane(self):
+        from mop.server.controller.models import RestoreGuard
+        self.m.Operation.objects.create(actor=self.user, actor_binding={}, request_id=uuid4(),
+            digest='a'*64, epoch=self.epoch, restore_generation=RestoreGuard.objects.get().generation,
+            action='restart', node=self.node, expected_revision=1, eligible=None,
+            target_kind='puppet', target_id=uuid4(), incarnation_id=uuid4(),
+            not_after=timezone.now()+timedelta(minutes=2))
+        queued = self.submit()
+        self.assertEqual(self.api.pending(limit=1), (UUID(queued['id']),))
+        build = self.m.Operation.objects.create(actor=self.user, actor_binding={}, request_id=uuid4(),
+            digest='b'*64, epoch=self.epoch, restore_generation=RestoreGuard.objects.get().generation,
+            action='build', node=self.node, expected_revision=1, eligible=False, state='unknown',
+            not_after=timezone.now()+timedelta(minutes=2))
+        self.m.Step.objects.create(operation=build, name='image_build', lease_until=timezone.now()-timedelta(seconds=1))
+        self.assertEqual(set(self.api.pending()), {UUID(queued['id']), build.id})
 
     def test_restore_generation_change_without_epoch_change_fences_claim_and_result(self):
         from mop.server.controller.models import RestoreGuard
