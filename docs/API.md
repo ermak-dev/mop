@@ -1230,8 +1230,9 @@ These are configuration changes, not physical build/delete operations.
 
 Both boundaries require current Access authorization, the action-specific Django
 permissions and installation-wide scope required by Catalog. Staff status alone
-is insufficient. Foreign project scope remains 404. Unknown fields, coerced
-numeric revisions and boolean limits are refused; session mutations require CSRF.
+is insufficient. Foreign project scope remains 404. Unknown or duplicate JSON
+fields, coerced numeric revisions and boolean limits are refused. The JSON parser
+bounds input before validation; session mutations require CSRF.
 Responses are no-store. Project deletion remains unavailable here until a trusted
 external-removal proof is bound; it is not exposed as a direct ORM delete.
 
