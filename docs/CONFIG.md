@@ -191,6 +191,40 @@ through an HTTP request or distribute DB/bootstrap files to nodes.
 #644 owns concrete grants, service units and instance-wide connection accounting.
 The separately privileged builder is not an ordinary worker role.
 
+#644 provisions three ordinary runtime LOGINs (`web`, `worker`, `gateway`),
+each with PostgreSQL `CONNECTION LIMIT 8`: at most 24 connections under these
+identities across their processes, not a group-role limit. A distinct maintenance
+LOGIN has another limit of 8. The target database limit of 32 is an upper bound,
+not a reservation of eight maintenance slots. Verification rejects incoming and
+outgoing membership for all four identities (including transitive INHERIT/SET
+ROLE paths), any additional ordinary LOGIN with CONNECT to the target, and
+unconfigured object/default ACL grantees. This deliberately rejects unsupported
+ACL topologies rather than silently calculating a fictitious aggregate.
+
+This is accounting for the managed target's ordinary logins, not all PostgreSQL
+sessions: external superusers and consumers of other databases are outside that
+scope and can exhaust shared server capacity. Operators must provision adequate
+server capacity and restrict external administrative access; a database limit
+alone cannot guarantee availability. The current installer does not yet provision the separate credential-service DB
+bootstrap or LOGIN; that #669 production binding remains unavailable. Builder gets no runtime DB login. The separately privileged builder is not an
+ordinary worker role.
+
+Ordinary public application tables allow SELECT/INSERT/UPDATE/DELETE; sequences
+allow USAGE/SELECT, never UPDATE or grant options. Verification checks effective
+existing table, column and sequence privileges, plus the union of global and
+schema-local defaults for future objects (including PUBLIC). PUBLIC and
+unconfigured grantees are refused conservatively. Trust tables
+`controller_restoreguard` and `controller_installation` are exceptions: runtime
+gets SELECT and UPDATE(id) only, for Django row locks. Their singleton constraints
+make id changes fail. Only maintenance may change state/generation, installation
+identity, root evidence, epoch or effects, or insert/delete the singleton. The
+schema ACL migration removes ordinary default CRUD from these exceptions before
+schema preparation completes; changing defaults later does not regrant existing
+tables. Native restore must preserve this exception when recreating trust tables.
+`database-check` is read-only and never repairs an external database: unsafe ACLs
+require an explicit operator provisioning/schema-maintenance action. Runtime units
+and full installation apply remain blocked on the missing Root consumers.
+
 ### Isolated credential runtime (#669, Secret core #637)
 
 `mop server credentials --bootstrap /private/credential/bootstrap.json

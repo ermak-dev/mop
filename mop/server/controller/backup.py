@@ -261,6 +261,11 @@ def restore(path, using='default'):
             raise RuntimeError('restore guard generation changed before completion')
         if current.epoch != row.epoch or current.effects_enabled:
             raise RuntimeError('restored installation fence changed before completion')
+        # Archive --no-acl пересоздаёт Installation с target default CRUD.
+        # Возвращаем trust exception в той же completion transaction, прежде
+        # чем guard снова разрешит runtime. Проверка внешней БД прав не чинит.
+        from ..install_postgresql import seal_trust_tables
+        seal_trust_tables(connection.connection)
         guard.state = 'ready'
         guard.save(using=using, update_fields=['state'])
     return {'epoch': str(row.epoch), 'effects_enabled': False}
