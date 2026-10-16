@@ -37,8 +37,9 @@ def main():
 # RESULT: metadata и migration state совпадают, каждый action имеет назначаемые права.
 # STATUS: FIXED — see #634
 CUSTOM_PERMISSIONS = {
-    'project': {'configure_project', 'set_project_limit'},
-    'node': {'configure_node', 'record_node_application', 'observe_node'},
+    'project': {'view_pool', 'configure_project', 'set_project_limit', 'build_project', 'recover_build'},
+    'node': {'configure_node', 'drain_node', 'enable_node', 'forget_node',
+             'record_node_application', 'observe_node'},
     'installationconfiguration': {'record_settings_application'},
     'projectpolicysnapshot': {'pin_project_policy'},
 }

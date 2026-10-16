@@ -108,7 +108,7 @@ def typed(node):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('catalog', '0002_catalog_permissions')]
+    dependencies = [('catalog', '0002_action_permissions')]
     operations = [
         migrations.RemoveConstraint(model_name='installationsetting', name='installation_setting_typed'),
         migrations.RemoveConstraint(model_name='nodesetting', name='node_setting_typed'),

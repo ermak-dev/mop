@@ -180,6 +180,8 @@ class Catalog:
             except PermissionError:
                 continue
             result.append(snapshot(row))
+        # Отзыв, замеченный при обходе, не превращается в частичный private result.
+        self._authorize(actor, 'catalog.view_project', projects=tuple(row.id for row in result))
         return tuple(result)
 
     def replace_project_origin(self, actor, project_id, origin, *, expected_revision):
