@@ -713,6 +713,119 @@ old-generation rollback/results are conflicts, never a write to newer ownership.
 The first vertical adapter to #625 and the controlled new-node restart with #640
 are separate integration acceptance, not implied by a service/fake test.
 
+## Private client endpoints (#649)
+
+The session app's Django label is `execution`, not Django's authentication
+`sessions` app. `endpoint_models.py` adds ClientSession, Endpoint,
+ConnectionLease, MessageDelivery and DeliveryReceipt; `models.py` only reexports
+them. A client conversation is unique by authenticated human User, owned catalog
+ClientRegistration and exact external CLI conversation ID. Display names do not
+participate. Endpoints are project-specific, have opaque `private:<uuid>`
+addresses and a 60-second renewable presence TTL. Presence is always a database
+registration projection (`live:false`), never a socket health assertion.
+
+Standard Django session/DRF token authentication runs first. Human registration,
+presence and delivery reads require current project view permission/membership,
+current ClientOwnership and the corresponding `execution.register_endpoint`,
+`execution.view_delivery` or `execution.deliver_report` permission. Human report
+send checks the sending actor's project and deliver permission; it does not grant
+access to the recipient's client registration. An exact private address is a
+routing identity, not a bearer capability. Grants may use their existing finite
+`sessions.send_message` capability through Access's local current-grant authority;
+they cannot register a human endpoint, enumerate human sessions or acquire their
+transport context. Services cannot use human reports. No human endpoint operation
+changes a Nomad job or reads host socket registries.
+
+`GET /api/v1/addresses?schema_version=1&project_id=<uuid>&limit=100` returns only
+owned endpoints, with a maximum 500 rows. `GET /api/v1/addresses/<endpoint-id>`
+has the same private scope. `POST /api/v1/endpoints` accepts exactly
+`schema_version`, `client_id`, `project_id`, `external_session_id`, `display_name`.
+The owner and credential are never payload authority. Registration creates no
+subscription and returns no connection nonce.
+
+A trusted gateway subscribes an explicitly bound peer first, then calls
+`Endpoints.connect` to acquire a 15-second ConnectionLease. PostgreSQL locks and
+shared constraints choose one receiver across gateways; gateway ID, connection
+nonce, installation epoch and increasing generation fence replacements. Expired
+leases do not prove old effects stopped. An old `attempting` message becomes
+`unknown`, loses retained payload bytes, and is never replayed to a replacement.
+Unattempted queued messages can be claimed by the same endpoint's new connection
+before their original deadline. Restore readiness/epoch gates run in the root;
+its installation lock also serializes shared admission caps (64 pending per
+endpoint, 256 overall). No network call holds that transaction.
+
+`TrustedEndpointContext` lives in `mop.common.endpoint`, without Django or Access
+imports. It is returned only by trusted connection binding and rechecked on every
+use. It includes the actual human User, client-conversation identity, endpoint,
+credential, gateway, nonce and generation. #625 must carry an optional holder
+endpoint separately from Assignment's human owner: a User/token alone cannot
+identify which human CLI conversation owns work. A nonce is a transport binding,
+not another authentication backend or a replacement for current Django auth.
+
+`POST /api/v1/reports` accepts `schema_version:1`, current installation `epoch`
+(obtained from the authenticated health query), `address`, UUID `message_id`,
+`text` (at most 64 KiB), aware `not_after` (at most 24 hours), and optional UUID
+`operation_request_id`, boolean `notify_when_idle`, priority `next|now`. The
+message identity is distinct from its delivery ID and operation request ID.
+A stale installation epoch is rejected before cipher/admission, including when
+restore lost the old message row. Disabled installation effects deny new reports
+and are checked again before dispatch, not only when a connection is acquired.
+An identical sender-principal/message key in the current epoch returns stored
+metadata even after presence expiry or cipher unavailability; a changed intent
+returns 409.
+Admission returns 202 and a delivery Location, never proof of receipt. Private
+content is retained only as purpose/recipient/delivery-bound AEAD bytes, purged
+on terminal delivery state. Results expose only IDs, state and idle evidence.
+
+`GET /api/v1/deliveries/<id>` is private to the original sending principal or
+recipient human, under current project/client authority. A current connection
+can `POST /api/v1/deliveries/<id>/ack` with exactly `schema_version`, `outcome`
+(`accepted|unknown|unavailable`). `X-Mop-Endpoint` and `X-Mop-Connection` headers
+bind that acknowledgment to the authenticated current receiver; neither header
+chooses the actor. The same headers authorize addressed endpoint `/renew` POST
+and endpoint DELETE. An acknowledgment before a durable attempt, changed receipt,
+foreign recipient or old connection is rejected. `accepted` means explicit
+application acceptance, not successful completion of a task. Idle observation is
+a separate correlated immutable receipt, not acceptance or task correctness.
+No message content is exposed through events, audit or these metadata reads.
+Expired queued payloads are purged by bounded admission cleanup; they cannot
+permanently occupy shared queue capacity. Expired attempts become unknown, not
+replayable. Identity/receipt metadata is retained without automatic pruning in
+this core; retired addresses and message keys are never recycled. A deployment
+retention/erasure policy must preserve those non-replay tombstones.
+
+`create_endpoint_runtime` composes a bounded Runtime and DeliveryGateway. It owns
+peers, DB calls, effects and shutdown; peer cleanup and generation-checked lease
+release run before the DB executor stops. The gateway can drive bounded ticks
+without holding an HTTP request. Before dispatch and after each external wait it
+rechecks receiver credential, client ownership, project scope and lease; pending
+sends also recheck the initiating actor/grant. Disconnect/revoke does not convert
+an uncertain write to a known failure or release it for replay.
+
+`mop.client.local_bridge` is stdlib-only. Its trusted launcher supplies OwnSession
+with the exact own CLI socket, process and external conversation ID; remote JSON
+cannot supply them. The bridge checks canonical private UDS ownership and kernel
+peer PID/UID, never scans neighboring sockets or reads primary/legacy state files.
+It sends bounded native `msgV:1` user frames with the admitted message ID and a
+private ephemeral callback socket. Only a matching `message_accepted` callback
+confirms application acceptance; an explicit `message_refused` means unavailable.
+Successful socket writes without that evidence are unknown. `notify_when_idle`
+uses a distinct control message ID and matching `peer_idle_notice`; terminal
+input/keystrokes are never queued or replayed. The launch adapter must replace
+this binding on external conversation changes even when PID/path remain the
+same; a socket alone cannot attest to a conversation ID. Same-UID OS processes
+are not a sandbox.
+
+These core use cases and an actual isolated Unix peer are implemented/tested by
+#649. Production Channels/WS authentication, broker routing and connection loop
+binding remain #628; native CLI launch/conversation lifecycle and MCP wiring remain
+#642; protected cipher deployment remains #669/#644. The DRF root deliberately
+leaves the cipher and grant resolver unbound until that composition supplies
+them, refusing private content admission instead of giving web/gateway a root
+key. The isolated fixture explicitly binds the real AEAD provider and current
+Access/Grant authority. No old pool or native vendor CLI acceptance is implied by
+that fixture.
+
 ## Sync/async and resource lifecycle
 
 DRF admission/query, claim and result use short synchronous ORM services.

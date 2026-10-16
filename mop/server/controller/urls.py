@@ -14,6 +14,7 @@ from . import operationviews as operations
 from . import machineviews as machine
 from . import telemetryviews as telemetry
 from . import terminalviews as terminal
+from . import endpointviews as endpoint
 
 urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
@@ -35,6 +36,14 @@ urlpatterns = [path('admin/', admin.site.urls), path('api/v1/health', Health.as_
     path('api/v1/sessions/history/reset', telemetry.ResetHistory.as_view()),
     path('api/v1/terminal/attachments', terminal.Open.as_view()),
     path('api/v1/terminal/attachments/<uuid:attachment_id>', terminal.Close.as_view()),
+    path('api/v1/endpoints', endpoint.Register.as_view()),
+    path('api/v1/endpoints/<uuid:endpoint_id>', endpoint.Renew.as_view()),
+    path('api/v1/endpoints/<uuid:endpoint_id>/renew', endpoint.Renew.as_view()),
+    path('api/v1/addresses', endpoint.Addresses.as_view()),
+    path('api/v1/addresses/<uuid:endpoint_id>', endpoint.Address.as_view()),
+    path('api/v1/reports', endpoint.Reports.as_view()),
+    path('api/v1/deliveries/<uuid:delivery_id>', endpoint.Delivery.as_view()),
+    path('api/v1/deliveries/<uuid:delivery_id>/ack', endpoint.Ack.as_view()),
     path('api/v1/identity', auth.Identity.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
