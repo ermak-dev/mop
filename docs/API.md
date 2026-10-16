@@ -535,6 +535,118 @@ Each consumer defines the narrow interface it needs; no all-powerful
 is the composition root's job. Real adapters and fakes share these behavioral
 checks; fake I/O does not substitute for PostgreSQL transaction tests.
 
+## Machine execution protocol v1 (#639 / #640)
+
+The server implementation is `mop.server.sessions` (Django app label
+`execution`, distinct from Django's own `sessions`). `protocol.py` is an
+immutable, framework-free wire contract. Node code consumes JSON; it must not
+import Django or server modules. These routes are not a generic RPC interface.
+
+- `GET /api/v1/machine/work?schema_version=1&node_id=<uuid>&executor_epoch=<uuid>&limit=10`
+  returns at most 50 existing Operation/Step projections. It never creates work,
+  claims a resource, or repairs unknown outcomes. Empty work is distinct from
+  unavailable authority (503). Polls are immediate; clients bound cadence and I/O.
+- `POST /api/v1/machine/work/claim` accepts exactly `schema_version`, `request_id`
+  and `work`. `work` contains exactly `schema_version`, `epoch`, `operation_id`,
+  `step_id`, `target_id`, `incarnation_id`, `node_id`, `executor_epoch`, `owner_id`,
+  `generation`, `revision`, `role`, `bundle_digest`, `grant_id`, `action`,
+  `not_after`. UUIDs are canonical strings, positive counters and owner ID are
+  decimal strings, deadline is an aware ISO-8601 timestamp. Schema version is
+  the integer 1. The current admitted projection must match every field; caller
+  values cannot choose authority. Initial actions are `restart_session`,
+  `apply_identity`, `send_message`, `confirm_ready`; no shell, command, path,
+  callback, hypervisor build or arbitrary parameters are accepted.
+- `POST /api/v1/machine/work/result` accepts exactly `schema_version`,
+  `attempt_id`, `expected_revision`, `receipt_id`, `outcome`, `evidence`.
+  Outcomes are `succeeded`, `failed`, `unknown`. Evidence is a bounded public code,
+  never subprocess output, credentials or a proof fabricated from a timeout.
+- `POST /api/v1/machine/executor/restarted` accepts `schema_version`, `node_id`,
+  `previous_epoch`, `new_epoch`. This fences old process admissions and marks
+  unresolved attempts unknown; it does not authorize replay or claim that the
+  old process is quiescent.
+- `GET /api/v1/machine/facts` accepts `schema_version`, `node_id`, `kind`, `limit`.
+  Allowed kinds are `states`, `clone`, `sizes`, `usage`, `disk`, `junk`, `health`;
+  a bounded fact port returns explicit freshness/unavailability, never a mutation
+  Operation. Missing bindings refuse; unavailable is not an empty safe-to-delete
+  inventory. Expensive I/O must have adapter-level deadlines outside transactions.
+
+`Assignment` owns human ownership, project/node, role/digest/grant and generation.
+Creation reserves a fresh target identity; it never assigns an existing clone.
+Existing-target `reassign` requires an explicitly released human assignment,
+a fresh addressed clean-clone observation and no unresolved effect, then rechecks
+revision, incarnation, authorization and fact age under the assignment lock.
+An unresolved effect is checked before requesting a fresh clone observation and
+again under the assignment lock: a clean observation made before old-effect
+quiescence is not permission to reassign. The clone query must perform a fresh
+addressed read, not return a previously cached clean observation.
+Lease expiry alone does not establish a clean clone. Human target scope is its
+actual project, not every unrelated project hosted on the same physical node.
+`Assignments.current(project_id, target_id)` is the public internal binding query
+for Access/Secrets composition. It returns an immutable `AssignmentBinding`
+(target/project/node/incarnation/process epoch, owner, role/digest/grant,
+generation/revision and matching identity/readiness confirmations), or none for
+an unbound, released, expired or retired source. It is not an authorization or a
+credential response; consumers must recheck current access and revision before
+issuing bytes/admission and after waiting. They need not import sessions models.
+`Assignments.activate` accepts operation-reserved `incarnation_id` and `grant_id`
+UUID values. A handler must pass its stored result binding rather than generating
+a different identity when completing or recovering an admitted operation.
+`ExecutionIncarnation` binds a fresh opaque incarnation to a node process epoch.
+`AssignmentAttempt` is a resource fence and receipt for an already-admitted step,
+not a pending-work queue. Operation and Step links are UUID values, never imports
+of private operations models. A unique operation/step and a conditional unique
+unresolved assignment enforce admission across processes. `LandingToken` guards
+human landing ownership only; TerminalControl remains a separate realtime domain.
+`IdentityApplication` and `ReadinessReceipt` require matching confirmed attempts.
+Send admission requires identity confirmation for that exact assignment generation,
+incarnation, role, digest and grant. None of these rows grants terminal control.
+
+`MachineExecution` receives narrow ports and a current installation-epoch query
+from the composition root. The infrastructure restore guard is locked before
+subject rows for claim/result; disabled effects refuse new claims, not evidence
+inspection:
+
+| Port | Preconditions / confirmed return | Failure and transaction rule |
+|---|---|---|
+| WorkPort v1 | `pending(node_id, executor_epoch, project_ids, limit)` filters current authorized project IDs before applying the bound, and returns immutable WorkV1 projections; `current(operation_id, step_id)` rechecks initiating actor/operation authority; `claimed(work, attempt_id)` records existing step admission; `completed_result(work, attempt_id, outcome, evidence)` records its result | No independent queue, no external I/O. Current/claimed/result participate in caller's short atomic transaction. Idempotent by attempt ID; an unknown commit is reconciled, not replayed. |
+| GrantAuthority | `authorize(owner_id, project_id, target_id, grant_id, role, bundle_digest, incarnation_id, action)` rechecks active approved policy, current owner rights and complete ancestor chain | Deny by default. Production binding must use Access's public grant query; a fake is only a test fixture, not production authority. |
+| FactReader | `read(node_id, kind, limit)` returns a bounded versioned freshness-bearing projection | No mutation or repair; bounded I/O outside DB transactions; explicit unavailable, never false empty success. Target/project/incarnation scope and live credential are checked again after I/O. |
+| CleanCloneQuery | `observe(target_id, incarnation_id, node_id)` returns an addressed `FactV1` | Read only outside a surrounding transaction; unknown/dirty/stale or a changed source refuses reassignment. Default unbound. |
+| EffectInspector | `inspect(work, attempt_id)` returns typed `InspectionV1` bound to attempt, source incarnation and executor epoch, with known outcome/evidence and verified quiescence | Read only outside any transaction; no replay/compensation. `reconcile` requires an explicitly authorized human, repeats authorization/CAS after inspection and closes only the old fence. No client-supplied `quiescent` boolean is accepted. |
+
+`WorkPort.current` returns the pinned admitted intent for a still-active claimed
+step too: a lost claim reply must not be rejected merely because the step is now
+running. It rechecks execution authority but does not claim or enqueue anything.
+`claimed` and `completed_result` must identify the existing step by operation/step
+values and the same durable attempt ID, and write their state/audit/outbox in the
+caller transaction.
+
+Lock order inside sessions is Assignment then incarnation/attempt. Work port
+implementations must not acquire operations locks in the reverse order on another
+path. Claim admission refuses a surrounding transaction: releasing a nested
+savepoint is not the durable commit required before returning an execution permit.
+The injected work callbacks join the claim-owned transaction; they do not wrap it
+in another outer transaction. No callback may perform network I/O while these
+rows are locked. Executor restart advances the assignment revision as well as
+retiring its process binding, so pre-restart activation CAS cannot overwrite the
+newer facts. A duplicate restart report recognizes an already-activated resulting
+process and never retires that newer incarnation. Read-only
+poll results are hints; all gates run again on claim. Auth uses the actual Access
+service (live credential, action Permission, membership and enrolled node). Lease
+expiry and executor restart retain the unresolved resource fence. Explicit,
+authorized reconciliation with effect-specific quiescence/confirmation evidence
+is required to resolve unknown work. Historical pre-restore work remains fenced
+from admission/results, but a human can reconcile its old fence under a stable
+current installation epoch, including while new effects are disabled. This
+records historical evidence only; it does not revive old-epoch work. The recovery
+epoch is rechecked after inspection. No automatic second attempt is created.
+An identical claim retry can recover a still-valid admission; it cannot revive an
+expired, unknown, revoked or old-incarnation permission. Receipt retries return
+stored evidence without invoking a second effect. Changed duplicate receipts or
+old-generation rollback/results are conflicts, never a write to newer ownership.
+The first vertical adapter to #625 and the controlled new-node restart with #640
+are separate integration acceptance, not implied by a service/fake test.
+
 ## Sync/async and resource lifecycle
 
 DRF admission/query, claim and result use short synchronous ORM services.
