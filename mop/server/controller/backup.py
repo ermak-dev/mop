@@ -166,15 +166,16 @@ def _migration_history(script):
 
 
 def _archive_plan(source, connection):
-    """Guard и public schema не попадают под archive DROP/CREATE или data load."""
+    """Guard сохраняется целиком, Installation — с target schema и ACL, но source data."""
     from django.db.migrations.recorder import MigrationRecorder
-    from .models import RestoreGuard
+    from .models import Installation, RestoreGuard
     config, major = connection.settings_dict, connection.pg_version // 10000
     def inspect(extra):
         source.seek(0)
         return _tool('pg_restore', config, major=major, input=source, extra=extra, database=False)
     toc = inspect(('--list',))
     guard = RestoreGuard._meta.db_table.encode('ascii').lower()
+    installation = Installation._meta.db_table.encode('ascii').lower()
     table_entry = re.compile(
         rb'^\d+;\s+\d+\s+\d+\s+(?:TABLE DATA|FK CONSTRAINT|CONSTRAINT|DEFAULT|TRIGGER|RULE|POLICY|TABLE)'
         rb'\s+\S+\s+("[^"]*"|\S+)(?:\s|$)')
@@ -196,6 +197,12 @@ def _archive_plan(source, connection):
         if re.match(rb'^\d+;\s+\d+\s+\d+\s+SCHEMA\b', line):
             if not re.match(rb'^\d+;\s+\d+\s+\d+\s+SCHEMA\s+-\s+public\s', line):
                 raise RuntimeError('backup contains an unsupported schema')
+            continue
+        entry = table_entry.match(line)
+        if entry and entry[1].strip(b'"').lower() == installation and not re.match(
+                rb'^\d+;\s+\d+\s+\d+\s+TABLE DATA\s', line):
+            # Target уже migrated и sealed; DROP/CREATE вернул бы default CRUD
+            # сразу после archive COMMIT, раньше проверки root и завершения fence.
             continue
         plan.append(line)
     return b''.join(plan)
