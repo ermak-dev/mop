@@ -13,7 +13,6 @@ FACT_FIELDS = {
     'states': frozenset(('running', 'dirty', 'session_count')),
     'clone': frozenset(('clean', 'branch', 'untracked', 'modified')),
     'sizes': frozenset(('bytes',)),
-    'usage': frozenset(('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens')),
     'disk': frozenset(('free_bytes', 'total_bytes')),
     'junk': frozenset(('candidate_count', 'bytes', 'inventory_complete')),
     'health': frozenset(('healthy', 'latency_ms')),

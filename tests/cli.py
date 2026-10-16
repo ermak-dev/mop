@@ -53,9 +53,11 @@ def check_concise_global_help_430(c):
 
     out, err, code = run_command(cli.main, ["not-a-command"])
     c.expect("#430 unknown command leaves stdout empty", out, "")
-    c.expect("#430 unknown command exits nonzero", code, 1)
-    c.check("#430 unknown command names typo and help", all(
-        word in err for word in ("not-a-command", "mop help")), repr(err))
+    # #642: неизвестное имя также может быть ролью. Пока role query/launch не
+    # опубликованы, отказ capability честнее старого lookup через NATS/SSH.
+    c.expect("#642 unresolved role launch exits unsupported", code, 2)
+    c.check("#642 unresolved role launch names missing capability",
+            "unsupported" in err and "role" in err, repr(err))
     c.check("#430 unknown command does not dump catalog", "    add " not in err, repr(err))
 
     out, err, code = run_command(cli.main, ["help"])
@@ -753,7 +755,15 @@ def check_dispatch_sources_396(c):
             config.get("MOP_LOCALE")
             return 0
         return main
-    with patched(config, _load=read_installation), patched(cli, command=command):
+    from mop.cli import _control
+    # #642: converted entrypoints обходят environment/context целиком. Здесь
+    # проверяем выбор ветви dispatcher; реальный fake/TLS покрыт consumers.
+    routed = []
+    def invoke(words, argv, **kw):
+        routed.append(words)
+        return 0
+    with patched(config, _load=read_installation), patched(cli, command=command), \
+            patched(_control, invoke=invoke):
         for name, module, client in (("list", "mop.cli.core.list", True),
                                      ("login", "mop.cli.pool.login", True),
                                      ("mcp", "mop.cli.service.mcp", True),
@@ -761,7 +771,10 @@ def check_dispatch_sources_396(c):
                                      ("server", "mop.cli.server", False)):
             with patched(cli, resolve=lambda *a: (module, [])):
                 opened.clear()
+                routed.clear()
                 _, _, code = run_command(cli.main, [name])
+                c.expect(f"#642 {name} converted dispatch selection", routed,
+                         [name] if client else [])
                 c.expect(f"#396 {name} dispatch succeeds", code, 0)
                 c.check(f"#396 {name} installation source selection",
                         (not opened) if client else bool(opened), opened)
@@ -900,13 +913,11 @@ def check_tail_parse_431(c):
             c.fail(f"#431 tail {bad}: a trace, not a usage refusal", str(e))
         except SystemExit:
             c.check(f"#431 tail {bad}: usage", True)
-    # Соседний контракт для сверки.
+    # #642: новый stat отказывает bad input в command boundary до HTTPS.
     for bad in (["--days", "x"], ["--days"]):
-        try:
-            stat.parse(bad)
-            c.fail(f"#431 stat {bad} must refuse")
-        except SystemExit:
-            c.check(f"#431 stat {bad}: usage, as before", True)
+        out, err, code = run_command(stat.main, bad)
+        c.expect(f"#642 stat {bad} refuses without a trace or query",
+                 (out, err, code), ('', 'invalid command arguments\n', 1))
 
 
 CONCISE_431 = {
@@ -971,7 +982,7 @@ CONCISE_431 = {
         ("keeps", "delete its puppets first"),
     ),
     "mop.cli.project.list": (
-        ("syntax", "mop project list [--origins]"),
+        ("syntax", "mop project list [--cursor VALUE] [--page-size N]"),
         ("gone", "cluster service"),
         ("gone", "registry"),
     ),
@@ -1563,14 +1574,16 @@ def check_role_declarations_585(c):
         # add --role (#618): ping -- предзапрос протокола ролей до создания.
         "add": ([], ["add", "alloc", "bootstrap_result", "ping"]),
         "landing": ([], ["landing"]),
-        "stat": (["usage"], ["pool"]),
-        "profile": ([], []),
+        "stat": None,
+        "profile": None,
         # admin verbs outside the role grammar: silent for grants on purpose
         # stop (#608) -- job_stop, операторский глагол вне грамматики ролей
         "stop": None,
         "node": None, "node_drain": None, "node_up": None,
         "project_add": None, "project_limit": None,
         "models": None, "diagnose": None, "server_diagnose": None,
+        # #642: новые HTTP-командлеты не декларируют старые bus verbs.
+        "health": None, "addresses": None, "operation": None, "project_list": None,
         # #594: приватная история требует человеческого логина, терминал —
         # admin-допуска. Исходящим полномочием роли они не становятся.
         "session_history": None, "session_terminal": None,
@@ -1614,8 +1627,8 @@ def check_role_declarations_585(c):
         "prompt": "soul.md"}, b"p").manifest.capabilities
     seen = channel.tools_for(channel.GRANT, grant_caps,
                              {n: d for n, d in declared_names.items()})
-    c.check("#585 a grant's catalogue is not empty once declarations name verbs",
-            "profile" in seen, seen)
+    c.check("#642 HTTP declarations never open from legacy verb capabilities",
+            not ({'profile', 'health', 'addresses', 'operation', 'project_list', 'node_drain', 'node_up'} & seen), seen)
     c.check("#585 a role with no matching verbs gains nothing",
             not ({"wipe", "add", "stat"} & seen), seen)
     # STATUS: FIXED — see #585
@@ -2044,22 +2057,11 @@ def check_refusals_163(c):
                 c.fail(f"{fn.__name__} read a refusal as {got!r}")
             except bus.Refused as e:
                 c.expect(f"{fn.__name__} lost the reason: {e!r}", str(e), reason)
-        refusal("mop stat on a pool refusal", run(stat.main), reason)
         # Подвал `mop list`: причина видна, а не пустой пул.
         c.expect("pool_lines on a refusal", lib.pool_lines(), [f"  {reason}"])
 
-        # stat: ни один узел не ответил -- тот же текст, что раньше, но
-        # отказом: stderr, ненулевой выход, stdout пуст.
-        puppets.ready_nodes = lambda: {"n1", "n2"}
-        bus.request_many = lambda verb, nodes, **kw: {}
-        refusal("mop stat with no node answering", run(stat.main),
-                "no node answered:\n  n1: no response\n  n2: no response")
-
-        # Пустой пул без отказа сервиса -- не «никто не ответил» с пустым
-        # перечнем, а прямо: готовых узлов нет.
-        puppets.ready_nodes = lambda: set()
-        refusal("mop stat on an empty pool", run(stat.main),
-                "no ready nodes in the pool")
+        # #642/#656: stat больше не зависит от pool/node/transcripts. Его
+        # реальные HTTP refusals/nullable coverage проверены в control_consumers.
 
         # Обычный ответ -- вывод прежний, символ в символ.
         row = {"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
@@ -2086,24 +2088,17 @@ def check_refusals_163(c):
         c.expect("pool_lines", lib.pool_lines(), want)
         bus.ask_cluster = lambda verb, **kw: {"nodes": [pool[0]]}
 
-        # #245: stat --users -- по людям, от самого прожорливого; узел со
-        # старым агентом (без by_login) -- в «-». --puppets и --users разом --
-        # usage.
-        def u(i, o, w, r):
-            return {"input": i, "output": o, "cache_write": w, "cache_read": r}
-        puppets.ready_nodes = lambda: {"hyper", "gpu"}
-        bus.request_many = lambda verb, nodes, **kw: {
-            "hyper": {"ok": True, "usage": {"pu-mop-1": {"2026-09-22": u(2000, 500, 0, 10000)}},
-                      "by_login": {"pu-mop-1": {"anton": {"2026-09-22": u(2000, 500, 0, 10000)}}}},
-            "gpu": {"ok": True, "usage": {"pu-mop-2": {"2026-09-22": u(10, 0, 0, 0)}}}}
-        out, err, code = run(stat.main, ["--users"])
-        want = ("USER   INPUT  OUTPUT  CACHE-W  CACHE-R  TOTAL\n"
-                "anton  2.0k   500     0        10k      12k\n"
-                "-      10     0       0        0        10\n")
-        c.check(f"#245 mop stat --users: exit {code!r}, stderr {err!r}, stdout {out!r}",
-                not (code or err or want not in out))
-        out, err, code = run(stat.main, ["--puppets", "--users"])
-        c.check(f"#245 --puppets with --users must be a usage error: {out!r}", not (not code))
+        # #656: shared proxy keys не доказывают user/puppet attribution. Даже
+        # при доступных старых счётчиках новый stat не читает их как fallback.
+        def no_transcripts(*args, **kwargs):
+            raise AssertionError('stat attempted transcript/node usage fallback')
+        bus.request_many = no_transcripts
+        puppets.ready_nodes = no_transcripts
+        for args in (["--users"], ["--puppets"], ["--puppets", "--users"]):
+            out, err, code = run(stat.main, args)
+            c.check(f"#642 {args} is explicitly unavailable before IO",
+                    code == 2 and out == '' and 'unavailable for shared proxy keys' in err,
+                    (out, err, code))
         puppets.ready_nodes = real_ready_nodes
         # #277: ответ глагола pool -- форма pool, а не строка nodes: у той нет
         # статуса, и PoolNode её не примет.
@@ -2290,9 +2285,10 @@ def check_output_rules(c):
         lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
         # Быстрая команда на успехе молчит: MCP ответит модели `done`.
         from mop.cli.core import restart
-        from mop.cli.node import drain, forget
+        from mop.cli.node import forget
+        # #642 drain печатает versioned admission/result, а не молчит на accepted;
+        # его HTTP/TLS и exit semantics проверены в control_consumers/control_tls.
         for what, main, argv in (("restart", restart.main, ["pu-mop-1"]),
-                                 ("node drain", drain.main, ["n1"]),
                                  ("node forget", forget.main, ["n1"])):
             out, err, code = run_command(main, argv)
             c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",

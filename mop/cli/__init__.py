@@ -186,7 +186,8 @@ def describe(path):
 # "dispatch": bool. Молчащее объявление роли не открывается.
 # Таблицы команд нет: объявление живёт рядом с разбором argv, который оно
 # описывает, и расходиться им негде.
-DECL_KEYS = {"annotations", "background", "args", "node_verbs", "cluster_verbs", "dispatch"}
+DECL_KEYS = {"annotations", "background", "args", "node_verbs", "cluster_verbs", "dispatch",
+             "actions", "human_only"}
 ARG_KEYS = {"name", "type", "flag", "required", "help", "repeatable"}
 ARG_TYPES = ("string", "integer", "boolean")
 ANNOTATIONS = ("readonly", "destructive")
@@ -210,6 +211,15 @@ def declared(path):
         raise ValueError(f"MCP keys are {', '.join(sorted(DECL_KEYS))}")
     if decl.get("annotations") not in (None, *ANNOTATIONS):
         raise ValueError(f"MCP annotations: one of {', '.join(ANNOTATIONS)}")
+    if 'actions' in decl:
+        import re
+        actions = decl['actions']
+        if (not isinstance(actions, list) or any(not isinstance(action, str) or
+                re.fullmatch(r'[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*', action) is None for action in actions) or
+                {'node_verbs', 'cluster_verbs', 'dispatch'} & decl.keys()):
+            raise ValueError('MCP actions: Django action names, without legacy verbs')
+    if type(decl.get('human_only', False)) is not bool:
+        raise ValueError('MCP human_only: true or false')
     from mop.common import soul  # здесь, а не наверху: пакет cli грузит каждая команда
     for key, vocab in (("node_verbs", soul.NODE_VERBS), ("cluster_verbs", soul.CLUSTER_VERBS)):
         verbs = decl.get(key, [])
@@ -369,6 +379,22 @@ def render_reference(entries):
              "Every command of `mop`, as its commandlet in `mop/cli` describes itself: "
              "the first line of the docstring is what `mop help` lists, the whole "
              "docstring is the command's usage."]
+    from . import _control
+    bound = ', '.join('`mop ' + name + '`' for name, status in sorted(_control.SURFACES.items())
+                      if status == 'bound')
+    blocked = ', '.join('`mop ' + name + '`' for name, status in sorted(_control.SURFACES.items())
+                        if status == 'unsupported')
+    lines += ['', '### New controller migration', '',
+              'The #623/#642 migration is incomplete. The dispatcher uses only explicit transient '
+              'HTTPS origin/token/CA context for remote control; it never falls back to the old bus, '
+              'connection.json or git config stores. Local developer/setup commands stay local.', '',
+              'Bound consumers: ' + bound + '. `mop diagnose` is offline context validation only.', '',
+              'Not bound (exit 2 before any network mutation): ' + blocked + '.', '',
+              '`mop mcp --check` can read the authenticated identity. The normal MCP runtime is '
+              'unsupported until server action permissions and the private endpoint/inbox lifecycle '
+              'are bound. A User is not live presence; private attach never falls back to SSH.', '',
+              'The retained command descriptions below are not evidence that an unbound backend '
+              'exists. New commands use resource identities, not an independently assembled roster.']
     for part, blurb in PARTS:
         rows = [(s, w, d) for s, w, d in entries if _part_of(s) == part]
         if not rows:
@@ -447,7 +473,26 @@ def main(argv):
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
     if argv[:2] in (["server", "controller"], ["server", "credentials"]):
         return run(command("mop.cli.server." + argv[1]), argv[2:])
-    # Глобальная опция (#131): сервер для любой команды, с любого места argv.
+    # Новый путь выбирается до legacy context/.env: даже отсутствующая capability
+    # не должна открывать старый login store или импортировать NATS.
+    from . import _control
+    try:
+        selected, remote_argv = _control.options(argv)
+        normalized = unalias(remote_argv)
+        remote = resolve(normalized, catalog(scan()), verbs())
+        if remote is None and normalized and normalized[0] not in ('help', '-h', '--help'):
+            remote = role_route(normalized)
+        if remote is not None:
+            modname, rest = remote
+            surface = _control.route(modname, rest)
+            if surface is not None:
+                return _control.invoke(surface, rest, **selected)
+        if selected:
+            raise _control.api.ClientError('HTTPS context applies only to remote commands')
+    except _control.api.ClientError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    # Локальные dev/setup команды сохраняют свой установочный context.
     from mop.common import context
     try:
         server, argv = context.strip_server(argv)

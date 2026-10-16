@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|telemetry|credential_service] [--label dotted.test] [--realtime] [--cross-uid]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 16|17] [--check controller|hermetic|preparation|telemetry|credential_service|usage] [--label dotted.test] [--realtime] [--cross-uid]: isolated PostgreSQL checks
 
 Runs the selected check with the declared server extra and matching PostgreSQL
 client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -50,7 +50,7 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('16', '17'), default='17')
-    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation', 'telemetry', 'credential_service'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     parser.add_argument('--realtime', action='store_true', help='include the owned native TLS NATS fixture')
     parser.add_argument('--cross-uid', action='store_true')
@@ -61,7 +61,8 @@ def main(argv):
         parser.error('--label requires --check controller')
     if args.cross_uid and args.check != 'credential_service':
         parser.error('--cross-uid requires --check credential_service')
-    test_script = shlex.join(['python3', f'tests/{args.check}.py', *args.label])
+    check_script = 'proxy_usage_store' if args.check == 'usage' else args.check
+    test_script = shlex.join(['python3', f'tests/{check_script}.py', *args.label])
     docker = shutil.which('docker')
     if not docker:
         raise RuntimeError('isolated controller checks require an existing Docker installation')

@@ -1,0 +1,358 @@
+"""Transient boundary нового клиента; никакого .env, git config или login store.
+
+Таблица фиксирует реальное покрытие, а не обещает отсутствующие backend API.
+Старые командлеты не импортируются на новом пути даже ради разбора аргументов.
+Серверные полномочия проверяет сервер; отсутствие action catalogue не даёт MCP
+прав выдумать набор разрешённых человеку/гранту действий.
+"""
+import argparse
+import contextlib
+import io
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+import json
+import os
+import sys
+from uuid import uuid4
+
+from mop.client import control as api
+
+_CONTEXT = ContextVar('mop_https_context', default=None)
+
+# Конечный inventory #624/642; unsupported не означает accepted/no-op.
+SURFACES = dict.fromkeys((
+    'add', 'update', 'restart', 'recycle', 'delete', 'wipe', 'stop', 'send',
+    'dispatch', 'list', 'detail', 'model', 'models', 'agents', 'landing', 'attach',
+    'master', 'code', 'tail', 'stat', 'project add', 'project delete', 'project limit',
+    'node', 'node forget', 'secret file', 'secret var', 'build', 'driver build',
+    'session history', 'session terminal', 'server doctor', 'server gc', 'server sweep',
+    'server disk', 'server proxykey', 'login', 'mcp'), 'unsupported')
+SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
+                              'node up', 'operation', 'addresses', 'stat'), 'bound'))
+
+# Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
+# #628 physical stream, #648 builds, #649 inbox, #656 usage.
+GAPS = {
+    'list': 'puppet projection queries', 'detail': 'puppet detail queries',
+    'agents': 'puppet queries and live address aggregation',
+    'add': 'role creation admission and readiness',
+    'restart': 'restart admission and target query',
+    'update': 'update admission', 'delete': 'delete admission',
+    'recycle': 'recycle admission', 'wipe': 'wipe admission',
+    'stop': 'stop-job admission', 'send': 'message admission/receipts',
+    'dispatch': 'dispatch admission and scoped target selection',
+    'model': 'session model action', 'models': 'inference model query',
+    'attach': 'private terminal physical resolver/capability discovery',
+    'session terminal': 'private terminal physical resolver/capability discovery',
+    'session history': 'private history query',
+    'master': 'role creation/readiness and private WS terminal',
+    'code': 'explicit inference-only launcher context',
+    'project add': 'project registration/build API',
+    'build': 'durable image build API', 'driver build': 'durable image build API',
+    'node': 'authorized node projection query',
+    'node forget': 'safe forget action',
+    'login': 'Django token issuance client (no connection.json store)',
+}
+
+
+def options(argv):
+    """Только origin/CA разрешены в argv; token остаётся transient credential."""
+    selected, rest, index = {}, [], 0
+    while index < len(argv):
+        word = argv[index]
+        name = word.split('=', 1)[0]
+        if name in ('--api-origin', '--api-ca'):
+            key = 'origin' if name == '--api-origin' else 'ca_file'
+            if key in selected:
+                raise api.ClientError('duplicate HTTPS context option')
+            if '=' in word:
+                value = word.split('=', 1)[1]
+            else:
+                index += 1
+                value = argv[index] if index < len(argv) else ''
+            if not value or value.startswith('-'):
+                raise api.ClientError('HTTPS context option requires a value')
+            selected[key] = value
+        else:
+            rest.append(word)
+        index += 1
+    return selected, rest
+
+
+def route(modname, argv):
+    """Resolved command -> finite HTTPS surface; dev/setup/service остаются локальны."""
+    if modname == 'mop.cli.project':
+        return 'project list'
+    if modname == 'mop.cli.service.mcp':
+        return 'mcp'
+    if modname == 'mop.cli.core._launch':
+        return 'master'
+    if modname.startswith('mop.cli.core.'):
+        name = modname.rsplit('.', 1)[-1]
+        return name if name in SURFACES else None
+    for group in ('project', 'node', 'secret', 'session'):
+        prefix = 'mop.cli.' + group
+        if modname == prefix:
+            return group if group in SURFACES else None
+        if modname.startswith(prefix + '.'):
+            name = group + ' ' + modname.rsplit('.', 1)[-1]
+            return name if name in SURFACES else None
+    if modname.startswith('mop.cli.server.'):
+        name = 'server ' + modname.rsplit('.', 1)[-1]
+        return name if name in SURFACES else None
+    if modname == 'mop.cli.driver.build':
+        return 'driver build'
+    if modname == 'mop.cli.pool.login':
+        return 'login'
+    return None
+
+
+@contextmanager
+def use(context):
+    """Внутрипроцессный context для MCP/tests; не хранится и не сериализуется."""
+    if type(context) is not api.ServerContext:
+        raise api.ClientError('explicit HTTPS server context required')
+    token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)
+
+
+def context(origin=None, ca_file=None):
+    selected = _CONTEXT.get()
+    if selected is not None:
+        if origin is not None or ca_file is not None:
+            raise api.ClientError('server context is already selected')
+        return selected
+    # Это явный transient input, не config.get: .env и профили не читаются.
+    return api.ServerContext(origin or os.environ.get('MOP_API_ORIGIN', ''),
+        os.environ.get('MOP_API_TOKEN', ''), ca_file or os.environ.get('MOP_API_CA') or None)
+
+
+def plain(value):
+    if hasattr(value, '__dataclass_fields__'):
+        return plain(asdict(value))
+    if isinstance(value, dict) or hasattr(value, 'items'):
+        return {key: plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return [plain(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+# Лишь делегируемые действия; человеческий override/terminal/node Admin не
+# появляется у гранта от имени роли или от прав human owner.
+_GRANT_ACTIONS = frozenset('sessions.' + action for action in (
+    'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet',
+    'wipe_puppet', 'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery',
+    'deliver_report', 'send_session_command', 'change_session_model', 'view_usage',
+    'view_landing', 'acquire_landing', 'release_landing')) | frozenset((
+    'catalog.view_project', 'catalog.view_pool', 'operations.view_operation',
+    'access.view_role', 'controller.view_models'))
+_TOOL_LOCK = threading.RLock()
+
+
+def allowed(declaration, identity):
+    actions = declaration.get('actions')
+    if (type(identity) is not api.Identity or identity.action_permissions is None or
+            not isinstance(actions, list) or not actions or
+            any(not isinstance(action, str) for action in actions)):
+        return False
+    required = frozenset(actions)
+    if declaration.get('human_only') is True and identity.kind != 'human':
+        return False
+    if identity.kind == 'grant' and not required <= _GRANT_ACTIONS:
+        return False
+    return identity.kind in ('human', 'grant') and required <= identity.action_permissions
+
+
+def tool_call(words, declaration, values):
+    """MCP вызывает тот же dispatcher/commandlet, а не второй API adapter.
+
+    Блокировка нужна из-за process-global stdout; команда не исполняется в
+    фоне после возврата unknown. Key не меняется и не повторяется скрытым retry.
+    """
+    from mop import cli
+    if SURFACES.get(' '.join(words)) != 'bound':
+        raise api.ClientError('unsupported MCP commandlet')
+    argv = cli.tool_argv(declaration.get('args', []), values)
+    out, err = io.StringIO(), io.StringIO()
+    with _TOOL_LOCK, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = cli.main([*words, *argv])
+        except SystemExit as error:
+            code = error.code
+    text = out.getvalue() + err.getvalue()
+    return text.rstrip() or ('done' if code == 0 else 'command refused')
+
+
+def emit(value, *, credential=None):
+    text = json.dumps(plain(value), ensure_ascii=True, separators=(',', ':'))
+    if credential:
+        text = text.replace(credential, '[redacted]')
+    print(text)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse обычно отражает весь ошибочный argv, включая private input.
+        raise api.ClientError('invalid command arguments')
+
+
+def parser(words):
+    result = Parser(prog='mop ' + words)
+    return result
+
+
+def _operation_options(p):
+    p.add_argument('--request-id')
+    p.add_argument('--epoch', required=True)
+    p.add_argument('--expected-revision', required=True)
+    p.add_argument('--not-after')
+    p.add_argument('--wait', type=float)
+
+
+def _render_operation(operation, *, credential):
+    # Только canonical receipt; никакого stdout исходного message/credential.
+    emit({'schema_version': operation.schema_version, 'epoch': operation.epoch,
+          'operation': plain(operation.data)}, credential=credential)
+    return 0 if operation.state == 'succeeded' else 3 if operation.state in (
+        'accepted', 'running', 'reconciling', 'unknown', 'partial') else 1
+
+
+def invoke(words, argv, *, origin=None, ca_file=None):
+    """Один CLI handler для dispatcher и MCP; stdout — только ответ команды."""
+    operation = None
+    try:
+        if SURFACES.get(words) != 'bound' and words != 'mcp':
+            gap = GAPS.get(words, 'finite authorized ' + words + ' backend API')
+            print('unsupported: ' + gap + ' is not bound in this release', file=sys.stderr)
+            return 2
+        p = parser(words)
+        if words == 'mcp':
+            p.add_argument('--check', action='store_true')
+            args = p.parse_args(argv)
+            if not args.check:
+                print('unsupported: server action-permission catalogue and private inbox lifecycle are not bound',
+                      file=sys.stderr)
+                return 2
+        elif words in ('health', 'profile', 'diagnose'):
+            args = p.parse_args(argv)
+        elif words == 'stat':
+            p.add_argument('--days', type=int)
+            p.add_argument('--start')
+            p.add_argument('--end')
+            p.add_argument('--group-by', choices=('day', 'key', 'model', 'user', 'project', 'puppet'), default='day')
+            p.add_argument('--users', action='store_true')
+            p.add_argument('--puppets', action='store_true')
+            args = p.parse_args(argv)
+            if args.users or args.puppets or args.group_by in ('user', 'project', 'puppet'):
+                print('unsupported: user, project and puppet usage attribution is unavailable for shared proxy keys',
+                      file=sys.stderr)
+                return 2
+            if bool(args.start) != bool(args.end) or args.start and args.days is not None:
+                raise api.ClientError('provide start/end or days, not both')
+            if not args.start:
+                days = 14 if args.days is None else args.days
+                if not 1 <= days <= 366:
+                    raise api.ClientError('usage days must be within 1..366')
+                end = datetime.now(timezone.utc).date() + timedelta(days=1)
+                args.start, args.end = (end - timedelta(days=days)).isoformat(), end.isoformat()
+        elif words == 'addresses':
+            p.add_argument('project_id')
+            p.add_argument('--limit', type=int, default=100)
+            args = p.parse_args(argv)
+        elif words == 'project list':
+            p.add_argument('--cursor')
+            p.add_argument('--page-size', type=int, default=100)
+            args = p.parse_args(argv)
+        elif words in ('node drain', 'node up'):
+            p.add_argument('node_id')
+            _operation_options(p)
+            args = p.parse_args(argv)
+            # Ключ фиксируется до создания TLS context и любого I/O.
+            args.request_id = str(uuid4()) if args.request_id is None else args.request_id
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+            prepare = api.NodeCommand('drain' if words == 'node drain' else 'enable', args.node_id,
+                args.epoch, args.request_id, args.not_after, args.expected_revision)
+        elif words == 'operation':
+            p.add_argument('operation_id', nargs='?')
+            p.add_argument('--request-id')
+            p.add_argument('--epoch')
+            p.add_argument('--wait', type=float)
+            args = p.parse_args(argv)
+            if bool(args.operation_id) == bool(args.request_id) or args.request_id and not args.epoch:
+                raise api.ClientError('provide operation id or request-id with epoch')
+        if hasattr(args, 'wait') and args.wait is not None:
+            if not 0 < args.wait <= api.Limits().wait_timeout:
+                raise api.ClientError('wait must be within the client wait limit')
+        selected = context(origin, ca_file)
+        if words == 'diagnose':
+            emit({'schema_version': 1, 'origin': selected.origin, 'credential_source': 'transient context',
+                  'trust': 'explicit CA (unverified)' if selected.ca_file else 'system CA (unverified)',
+                  'network_observed': False})
+            return 0
+        client = api.Client(selected)
+        if words == 'health':
+            emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
+        elif words in ('profile', 'mcp'):
+            emit({'schema_version': 1, **plain(client.identity())}, credential=selected.token)
+        elif words == 'stat':
+            emit(client.proxy_usage(start=args.start, end=args.end, group_by=args.group_by),
+                 credential=selected.token)
+        elif words == 'addresses':
+            emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
+                 credential=selected.token)
+        elif words == 'project list':
+            page = client.projects_page(cursor=args.cursor, page_size=args.page_size)
+            emit({'schema_version': 1, 'results': plain(page.items), 'next_cursor': page.next_cursor},
+                 credential=selected.token)
+        elif words == 'operation':
+            operation = (client.lookup_operation(args.request_id, epoch=args.epoch) if args.request_id
+                         else client.operation(args.operation_id))
+            if args.epoch is not None and operation.epoch != args.epoch:
+                raise api.ProtocolError('operation epoch mismatch')
+            if args.wait is not None and not operation.terminal:
+                operation = client.wait_operation(operation.id, timeout=args.wait, initial=operation)
+            return _render_operation(operation, credential=selected.token)
+        else:
+            try:
+                operation = client.submit(prepare).operation
+            except api.UnknownSubmission:
+                # Не делаем POST retry, даже под старым ключом; lookup только GET.
+                try:
+                    operation = client.lookup_operation(prepare.request_id, epoch=prepare.epoch)
+                except api.ClientError:
+                    # 404 lookup тоже не доказывает отсутствие admission COMMIT.
+                    raise api.UnknownSubmission(prepare) from None
+            if args.wait is not None and not operation.terminal:
+                operation = client.wait_operation(operation.id, timeout=args.wait, initial=operation)
+            return _render_operation(operation, credential=selected.token)
+        return 0
+    except api.UnknownSubmission as error:
+        print('submission unknown; request_id=' + error.request_id + '; epoch=' + error.command.epoch +
+              '; recover with operation lookup; do not repeat the effect', file=sys.stderr)
+        return 3
+    except api.WaitTimeout as error:
+        if error.operation is not None:
+            _render_operation(error.operation, credential=selected.token)
+        print('wait expired; operation is not cancelled', file=sys.stderr)
+        return 3
+    except api.APIError as error:
+        reason = error.error.reason.replace(selected.token, '[redacted]')
+        print(f'{error.error.code}: {reason}', file=sys.stderr)
+        return 1
+    except api.ClientError as error:
+        print(str(error), file=sys.stderr)
+        if operation is not None:
+            print('operation observation unavailable; operation_id=' + operation.id +
+                  '; request_id=' + operation.request_id + '; epoch=' + operation.epoch,
+                  file=sys.stderr)
+            return 3
+        return 1

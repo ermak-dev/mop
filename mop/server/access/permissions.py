@@ -28,7 +28,7 @@ ACTIONS = frozenset(
 SERVICE_ACTIONS = SERVICE_ACTIONS | frozenset('execution.' + code for code in (
     'poll_work', 'claim_work', 'report_result', 'read_facts', 'ingest_telemetry', 'ingest_observations'))
 ACTIONS = ACTIONS | SERVICE_ACTIONS | frozenset('execution.' + code for code in (
-    'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work', 'read_history'))
+    'assign_work', 'acquire_landing', 'release_landing', 'reconcile_work', 'read_history', 'view_usage'))
 
 # Логический CONTROL namespace sessions отличается от Django app label execution.
 def permission_names(action):
@@ -47,4 +47,4 @@ GLOBAL_ACTIONS = frozenset(
     ['sessions.' + x for x in ('view_history', 'view_tail', 'read_terminal', 'control_terminal')] +
     ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation', 'view_audit',
       'diagnose_pool', 'treat_pool', 'collect_pool_garbage', 'sweep_pool', 'view_node_disk')] +
-    ['secrets.rotate_proxy_key', 'controller.manage_proxy', 'builds.force_build'])
+    ['secrets.rotate_proxy_key', 'controller.manage_proxy', 'builds.force_build', 'execution.view_usage'])

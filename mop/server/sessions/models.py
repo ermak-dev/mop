@@ -119,6 +119,8 @@ class ReadinessReceipt(ImmutableRecord):
 # Django регистрирует отдельный leaf моделей параллельно telemetry/endpoints.
 from .projection_models import (ProjectionRuntime, ProjectionClock, SourceProducer, ProducerEpoch, SourceObservation,
                                 ProjectSequence, ProjectionEvent, ReadSnapshot)  # noqa: F401,E402
+# Отдельный leaf позволяет #641/#649 добавлять свою схему без общей миграции.
+from .usage_models import UsageSource, UsageReadIntent, UsageEvent, UsageAggregate  # noqa: E402,F401
 
 
 class LandingToken(Record):
