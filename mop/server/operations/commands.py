@@ -115,6 +115,20 @@ class RestartCommand:
 
 
 @dataclass(frozen=True)
+class StopJobCommand:
+    intent: TargetIntent
+
+    def __post_init__(self):
+        _require(type(self.intent) is TargetIntent, "body")
+
+
+def parse_stop_job(target_id, body):
+    _shape(body, _COMMON, _COMMON, "body")
+    _shape(body["params"], set(), set(), "params")
+    return StopJobCommand(_intent(target_id, body))
+
+
+@dataclass(frozen=True)
 class SendCommand:
     intent: TargetIntent
     message: str = field(repr=False)

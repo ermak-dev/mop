@@ -41,9 +41,9 @@ class Operation(models.Model):
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build')), name='operation_finite_action'),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job')), name='operation_finite_action'),
             models.CheckConstraint(condition=(Q(target_kind='node', action__in=('drain','enable','build'), eligible__isnull=False,
-                target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet', action='restart',
+                target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet', action__in=('restart','stop_job'),
                 eligible__isnull=True, target_id__isnull=False, incarnation_id__isnull=False)), name='operation_typed_target'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
@@ -67,7 +67,7 @@ class Step(models.Model):
     class Meta:
         default_permissions = ()
         constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
-            'restart_session', 'confirm_ready', 'image_build')), name='step_finite_handler'),
+            'restart_session', 'confirm_ready', 'image_build', 'scheduler_stop')), name='step_finite_handler'),
             models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
             models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
 
@@ -82,6 +82,42 @@ class RestartBinding(models.Model):
     role = models.CharField(max_length=64)
     bundle_digest = models.CharField(max_length=64)
     grant_id = models.UUIDField()
+
+    class Meta:
+        default_permissions = ()
+
+
+class ScheduledPuppet(models.Model):
+    """Проверенный внешний job; только trusted enrollment, не HTTP payload."""
+    target_id = models.UUIDField(primary_key=True)
+    incarnation_id = models.UUIDField()
+    epoch = models.UUIDField()
+    restore_generation = models.UUIDField()
+    scheduler_id = models.UUIDField()
+    job_id = models.CharField(max_length=128)
+    namespace = models.CharField(max_length=128)
+    modify_index = models.PositiveBigIntegerField()
+
+    class Meta:
+        default_permissions = ()
+        constraints = [models.UniqueConstraint(fields=('scheduler_id','namespace','job_id'), name='scheduled_job_identity_unique'),
+            models.CheckConstraint(condition=Q(modify_index__gte=1), name='scheduled_job_positive_index')]
+
+
+class StopBinding(models.Model):
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    applied_revision = models.PositiveBigIntegerField(null=True)
+    project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
+    executor_epoch = models.UUIDField()
+    owner_id = models.PositiveBigIntegerField()
+    generation = models.PositiveBigIntegerField()
+    role = models.CharField(max_length=64)
+    bundle_digest = models.CharField(max_length=64)
+    grant_id = models.UUIDField()
+    scheduler_id = models.UUIDField()
+    job_id = models.CharField(max_length=128)
+    namespace = models.CharField(max_length=128)
+    modify_index = models.PositiveBigIntegerField()
 
     class Meta:
         default_permissions = ()

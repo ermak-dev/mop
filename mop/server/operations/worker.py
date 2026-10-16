@@ -16,6 +16,10 @@ class Worker:
         if not self.runtime.accepting:
             return None
         handler = await self.runtime.database(self.operations.handler, operation_id)
+        if handler == 'scheduler_stop':
+            if self.operations.stops is None:
+                return None
+            return await self.runtime.blocking(self._stop, operation_id)
         if handler == 'image_build':
             if self.image_builds is None:
                 return None
@@ -35,6 +39,13 @@ class Worker:
             return await self.runtime.database(self.operations.uncertain, claim, expected_revision=claim.revision)
         return await self.runtime.database(self.operations.complete, claim,
             expected_revision=claim.revision, applied=applied)
+
+    def _stop(self, operation_id):
+        from django.db import connections
+        try:
+            return self.operations.stops.run(operation_id)
+        finally:
+            connections.close_all()
 
     def _build(self, operation_id):
         from django.db import connections
