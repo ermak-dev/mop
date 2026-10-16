@@ -206,7 +206,7 @@ an old request key executable again. Apply these lifecycle rules:
 
 | Record/artifact | Removal boundary |
 |---|---|
-| Project/node | Refuse project removal with remaining jobs, including stopped jobs, and node removal with occupants or configured inventory membership. Explicitly reconcile external removal; a database cascade cannot prove it happened. |
+| Project/node | Metadata retirement sets a tombstone and advances the target revision; retained history/FKs are not deleted or reassigned. Refuse project retirement with remaining jobs, including stopped jobs, and node retirement with scheduler/executor occupants or configured deployment membership. Unknown, incomplete or stale inspection is not empty. External removal/reconciliation is separate; a database cascade cannot prove it happened. Re-registering a name/origin creates a fresh UUID. |
 | Puppet/incarnation and grant | Revoke future authority and retire addressed endpoints/credentials; retain identity, audit and unresolved effect evidence. A reused name gets a new identity, never the old grant. Deleting metadata does not implicitly destroy an unexamined clone. |
 | Role/bootstrap snapshot | Immutable once approved; retain while a live grant, puppet, child approval or unresolved run references it. Do not delete bytes and retain only a digest/path. |
 | Secret version/rotation | Remove plaintext execution materializations when no longer needed. Keep encrypted versions required for active delivery, safe retirement or unresolved compensation; authorize final retirement/deletion and remove stale generated copies deliberately. |
