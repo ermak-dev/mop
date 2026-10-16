@@ -1,4 +1,8 @@
 import "@testing-library/jest-dom/vitest";
+import { beforeEach } from 'vitest';
+
+// Session fixture включает CSRF cookie; проверки отказа удаляют его явно.
+beforeEach(() => { document.cookie = 'csrftoken=fixtureSessionCsrfToken0123456789; path=/'; });
 
 // Часовой пояс проверок фиксирован (#422, ревью 6): ICU даёт смещению
 // разный вид по средам (GMT+3 в node, +03:00 в браузере), а «пояс

@@ -31,7 +31,7 @@ test('reader is explicit; control closes only own reader before opening writer, 
   expect(view.result.current.canInput).toBe(true);
   for (const [, init] of calls) {
     expect(init?.credentials).toBe('same-origin');
-    if (init?.method === 'POST') expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    if (init?.method === 'POST') expect(init.headers).toEqual({ 'Content-Type': 'application/json', 'X-CSRFToken': 'fixtureSessionCsrfToken0123456789' });
   }
   expect(body(calls[0][1])).toEqual({ mode: 'ro', cols: 80, rows: 24 });
   view.unmount();
