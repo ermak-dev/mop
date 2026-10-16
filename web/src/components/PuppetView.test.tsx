@@ -11,6 +11,9 @@ import { PuppetCard } from "./PuppetCard";
 import { PuppetActions } from "./PuppetActions";
 import { emptySnapshot, renderUi } from "../test-utils";
 import type { Puppet } from "../types";
+import { ID, networkFixture, reply } from '../network-test-utils';
+let network: ReturnType<typeof networkFixture> | null = null;
+afterEach(() => { network?.stop(); network = null; });
 
 // #512: файл без cleanup держал DOM между проверками -- ростер из ранней
 // проверки оставался на экране поздней, и screen-запросы читали чужие
@@ -84,12 +87,17 @@ test("#664 panel actions stay compact without a table column", () => {
 // хода, вердикт -- экраном визарда (#487: строка чиста), модель --
 // балун (#488), визард закрывается сразу.
 test.each(["Рестарт", "Правка", "Модель"])("#487 %s result never widens the row", async (action) => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => response(
+  const currentRow = action === 'Рестарт' ? { ...row, name: ID } : row;
+  if (action === 'Рестарт') {
+    network = networkFixture(); await network.start(session);
+    const net = network, base = net.http.getMockImplementation()!;
+    net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? Promise.resolve(reply(net.operation('succeeded', '3'))) : base(url, init));
+  } else vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => response(
     init?.method === "POST" ? { id: "op-1", status: "accepted" }
       : url.endsWith("/models") ? { models: ["other-model"] }
       : { id: "op-1", status: "succeeded" })));
-  renderUi(<PuppetActions row={row} session={session} />);
-  const actions = screen.getByRole("group", { name: `действия ${row.name}` });
+  renderUi(<PuppetActions row={currentRow} session={session} />);
+  const actions = screen.getByRole("group", { name: `действия ${currentRow.name}` });
   fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   const item = within(win).getByRole("button",
@@ -195,12 +203,21 @@ test("#487 height-only resize keeps the last log line visible", async () => {
 test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves a result completed while its dialog was closed", async (action) => {
   let finish!: (r: Response) => void;
   const pending = new Promise<Response>((resolve) => { finish = resolve; });
-  const mock = vi.fn(async (url: string, init?: RequestInit) => init?.method === "POST"
-    ? response({ id: "op-1", status: "accepted" })
-    : url.endsWith("/models") ? response({ models: ["other-model"] }) : pending);
-  vi.stubGlobal("fetch", mock);
-  renderUi(<PuppetActions row={row} session={session} />);
-  const actions = screen.getByRole("group", { name: `действия ${row.name}` });
+  const currentRow = action === 'Рестарт' ? { ...row, name: ID } : row;
+  let mock;
+  if (action === 'Рестарт') {
+    network = networkFixture(); await network.start(session);
+    const net = network, base = net.http.getMockImplementation()!;
+    net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? pending : base(url, init));
+    mock = net.http;
+  } else {
+    mock = vi.fn(async (url: string, init?: RequestInit) => init?.method === "POST"
+      ? response({ id: "op-1", status: "accepted" })
+      : url.endsWith("/models") ? response({ models: ["other-model"] }) : pending);
+    vi.stubGlobal("fetch", mock);
+  }
+  renderUi(<PuppetActions row={currentRow} session={session} />);
+  const actions = screen.getByRole("group", { name: `действия ${currentRow.name}` });
   // вход #522: строка -> визард -> финальный экран -> «Завершить»
   fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
@@ -230,7 +247,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves
     fireEvent.click(within(screen.getByTestId("control-window"))
       .getAllByRole("button", { name: "Закрыть" }).at(-1)!);
     await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
-    await act(async () => { finish(response({ status: "failed", error: "review refusal" })); });
+    await act(async () => { finish(action === 'Рестарт' ? reply(network!.operation('failed', '3', 'review refusal')) : response({ status: "failed", error: "review refusal" })); });
     // терминал приехал в закрытое окно: повторный вход (#522) -- не форма,
     // а сразу экран вердикта: поднятый движком стейт открывает ход без
     // выбора пункта и без второго POST
@@ -367,17 +384,17 @@ test("#516 a destructive verdict rides the wizard progress screen", async () => 
 // Рестарт -- через финальный экран (#522: единое правило
 // подтверждения, immediate-POST ушёл): POST только после «Завершить».
 test("#516 the restart item posts from its final screen", async () => {
-  const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
-  vi.stubGlobal("fetch", fetchMock);
-  renderUi(<PuppetActions row={row} session={session} />);
-  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+  network = networkFixture(); await network.start(session);
+  const fetchMock = network.http, before = fetchMock.mock.calls.length;
+  renderUi(<PuppetActions row={{ ...row, name: ID }} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${ID}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   // финальный экран рестарта: последствия названы до POST
   expect(win.textContent).toMatch(/Рабочая копия не трогается: несохранённая работа живёт/);
-  expect(fetchMock).not.toHaveBeenCalled();
+  expect(fetchMock.mock.calls).toHaveLength(before);
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/v1/puppets/${ID}/commands/restart`,
     expect.objectContaining({ method: "POST" })));
 });

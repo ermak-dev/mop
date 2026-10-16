@@ -1,125 +1,64 @@
-// Карточка папета (#463): GET /api/puppet/<имя> (#462) при admin-сессии --
-// только по явному запросу цели, без опроса и без хранения: смена цели,
-// logout, 401/403 и опоздавший ответ прежней цели не подменяют карточку.
-//
-// HYPOTHESIS (#463): у страницы нет приватной карточки папета, хотя контракт
-// #462 уже влит: ростер публичен, факты и хвост -- только админу, и хвост
-// админ тянет сам кнопкой, не фоновым опросом.
-// RESULT: тесты написаны до реализации (RED).
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
-import { usePuppetCard } from "./usePuppetCard";
-import type { Puppet } from "./types";
-import type { Session } from "./useSession";
+// HYPOTHESIS: приватная карточка обходила scope/store отдельным GET старого API.
+// SOLUTION: проверяем общий runtime с новым DTO и произвольным порядком тела ответа.
+// RESULT: цель/контекст/права/ошибки и поздние ответы проверяются без legacy wire.
+// STATUS: FIXED — see #627
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { usePuppetCard } from './usePuppetCard';
+import { usePool } from './usePool';
+import { ADMIN, ID, EPOCH, deferred, networkFixture, puppet, reply } from './network-test-utils';
+let net: ReturnType<typeof networkFixture>;
+beforeEach(() => { net = networkFixture(); });
+afterEach(() => { net.stop(); vi.unstubAllGlobals(); });
 
-const ADMIN: Session = { login: "anton", role: "admin" };
-const USER: Session = { login: "bob", role: "user" };
-const GUEST_SESS: Session = { login: null, role: null };
-
-const CARD: Puppet = {
-  name: "pu-mop-1", node: "hyper", alloc_status: "running", state: "busy: #12",
-  kind: "busy", bucket: "busy", detail: null, branch: "#12",
-  owner: "ermak", llm: "glm", origin: "git@h:g/mop.git", disk_kb: null,
-};
-
-const cardOk = (puppet: Puppet = CARD) =>
-  ({ ok: true, status: 200, json: async () => ({ puppet }) }) as Response;
-
-afterEach(() => vi.unstubAllGlobals());
-
-test("no target: no request at all, whatever the role", async () => {
-  const fetchMock = vi.fn();
-  vi.stubGlobal("fetch", fetchMock);
-  for (const session of [ADMIN, USER, GUEST_SESS]) {
-    const view = renderHook(() => usePuppetCard(session, null));
-    expect(view.result.current.card).toBeNull();
-    expect(view.result.current.error).toBeNull();
-  }
-  expect(fetchMock).not.toHaveBeenCalled();
+test('no target triggers no detail request', async () => {
+  await net.start(); const before = net.http.mock.calls.length;
+  renderHook(() => usePuppetCard(ADMIN, null)); expect(net.http.mock.calls).toHaveLength(before);
 });
-
-test("guest and user get a synchronous refusal, the card never rides", async () => {
-  const fetchMock = vi.fn();
-  vi.stubGlobal("fetch", fetchMock);
-  for (const session of [GUEST_SESS, USER]) {
-    const view = renderHook(() => usePuppetCard(session, "pu-mop-1"));
-    expect(view.result.current.card).toBeNull();
-    expect(view.result.current.error).toBeTruthy();
-  }
-  expect(fetchMock).not.toHaveBeenCalled();
-});
-
-test("admin with a target: the card arrives once, no follow-up polls", async () => {
-  const fetchMock = vi.fn(async () => cardOk());
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => usePuppetCard(ADMIN, "pu-mop-1"));
-  await waitFor(() => expect(view.result.current.card).toEqual(CARD));
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(fetchMock).toHaveBeenCalledWith("/api/puppet/pu-mop-1",
-    expect.objectContaining({ credentials: "same-origin" }));
-});
-
-test("404 and 502 are errors, not an empty card", async () => {
-  for (const [status, word] of [[404, "нет такого папета"], [502, "панель не отвечает"]] as const) {
-    const fetchMock = vi.fn(async () => ({ ok: false, status }) as Response);
-    vi.stubGlobal("fetch", fetchMock);
-    const view = renderHook(() => usePuppetCard(ADMIN, "pu-none-1"));
-    await waitFor(() => expect(view.result.current.error).toContain(word));
-    expect(view.result.current.card).toBeNull();
+test('guest or another credential generation never sees cached private facts', async () => {
+  await net.start();
+  for (const session of [{ login: null, role: null }, { ...ADMIN, generation: 'different' }] as const) {
+    const before = net.http.mock.calls.length, view = renderHook(() => usePuppetCard(session, ID));
+    expect(view.result.current.card).toBeNull(); expect(net.http.mock.calls).toHaveLength(before);
+    view.unmount();
   }
 });
-
-test("a late answer of the former target does not replace the card", async () => {
-  let release: ((r: Response) => void) | null = null;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = vi.fn()
-    .mockImplementationOnce(async () => slow)
-    .mockImplementationOnce(async () => cardOk({ ...CARD, name: "pu-mop-2", owner: "alice" }));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ target } = { target: "pu-mop-1" as string | null }) =>
-    usePuppetCard(ADMIN, target), { initialProps: { target: "pu-mop-1" as string | null } });
-  // цель сменилась до ответа первой: вторая отвечает, первая ещё висит
-  await act(async () => { view.rerender({ target: "pu-mop-2" }); });
-  await waitFor(() => expect(view.result.current.card?.name).toBe("pu-mop-2"));
-  // опоздавший ответ прежней цели приходит позже всего
-  await act(async () => { release?.(cardOk()); });
-  expect(view.result.current.card?.name).toBe("pu-mop-2");
-  expect(view.result.current.card?.owner).toBe("alice");
+test('detail and roster share one entity; same target rerender causes no extra detail', async () => {
+  await net.start(); const view = renderHook(() => ({ card: usePuppetCard(ADMIN, ID), pool: usePool(ADMIN) }));
+  await waitFor(() => expect(net.http.mock.calls.some(([url]) => url === `/api/v1/puppets/${ID}`)).toBe(true));
+  expect(view.result.current.card.card).toEqual(view.result.current.pool.snapshot?.projects[0].puppets[0]);
+  const before = net.http.mock.calls.filter(([url]) => url.includes('/puppets/')).length;
+  view.rerender(); expect(net.http.mock.calls.filter(([url]) => url.includes('/puppets/'))).toHaveLength(before);
 });
-
-test("logout while pending: the late answer does not resurrect the card", async () => {
-  let release: ((r: Response) => void) | null = null;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = vi.fn(async () => slow);
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ session } = { session: ADMIN }) =>
-    usePuppetCard(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
-  await act(async () => { view.rerender({ session: GUEST_SESS }); });
-  expect(view.result.current.card).toBeNull();
-  // гость с целью получает синхронный отказ без фактов (контракт выше):
-  // ошибку показываем, карточку -- никогда
-  expect(view.result.current.error).toBeTruthy();
-  await act(async () => { release?.(cardOk()); });
-  expect(view.result.current.card).toBeNull();
-  expect(view.result.current.error).toBeTruthy();
+test.each([404, 502])('HTTP %s is an explicit detail error, not a fabricated empty card', async status => {
+  await net.start(); const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.includes('/puppets/') ? Promise.resolve(reply({ error: { code: 'unavailable', message: 'detail unavailable' } }, status)) : base(url, init));
+  const view = renderHook(() => usePuppetCard(ADMIN, ID));
+  await waitFor(() => expect(view.result.current.error).toBe(`HTTP ${status}: detail unavailable`)); expect(view.result.current.card).toBeNull();
 });
-
-test("role degradation clears the shown card in the same render", async () => {
-  const fetchMock = vi.fn(async () => cardOk());
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ session } = { session: ADMIN }) =>
-    usePuppetCard(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
-  await waitFor(() => expect(view.result.current.card).toEqual(CARD));
-  await act(async () => { view.rerender({ session: GUEST_SESS }); });
-  expect(view.result.current.card).toBeNull();
-  expect(view.result.current.error).toBeTruthy();
+test.each([401, 403])('HTTP %s revokes private rows, not just the current detail', async status => {
+  await net.start(); const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.includes('/puppets/') ? Promise.resolve(reply({ error: { code: 'permission_denied', message: 'access revoked' } }, status)) : base(url, init));
+  const view = renderHook(() => ({ card: usePuppetCard(ADMIN, ID), pool: usePool(ADMIN) }));
+  await waitFor(() => expect(view.result.current.pool.snapshot).toBeNull()); expect(view.result.current.card.card).toBeNull();
 });
-
-test("the same target on a rerender does not refetch", async () => {
-  const fetchMock = vi.fn(async () => cardOk());
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => usePuppetCard(ADMIN, "pu-mop-1"));
-  await waitFor(() => expect(view.result.current.card).toEqual(CARD));
-  await act(async () => { view.rerender(); });
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+test('late former-target response cannot replace the newly selected card', async () => {
+  await net.start(); const slow = deferred(), other = '00000000-0000-4000-8000-000000000006', base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url === `/api/v1/puppets/${ID}` ? slow.promise
+    : url === `/api/v1/puppets/${other}` ? Promise.resolve(reply({ schema_version: 1, epoch: EPOCH, puppet: { ...puppet(other), desired: { revision: '8', owner_id: 'alice' } } })) : base(url, init));
+  const view = renderHook(({ target }) => usePuppetCard(ADMIN, target), { initialProps: { target: ID } });
+  view.rerender({ target: other }); await waitFor(() => expect(view.result.current.card?.owner).toBe('alice'));
+  await act(async () => slow.resolve(reply({ schema_version: 1, epoch: EPOCH, puppet: puppet() })));
+  expect(view.result.current.card?.name).toBe(other); expect(view.result.current.card?.owner).toBe('alice');
+});
+test.each(['logout', 'generation', 'role'])('%s clears the shown card synchronously and late JSON cannot resurrect it', async change => {
+  await net.start(); const slow = deferred(), base = net.http.getMockImplementation()!;
+  // Headers могут уже прийти: задерживаем само JSON-тело, не только fetch.
+  net.http.mockImplementation((url, init) => url.includes('/puppets/') ? Promise.resolve({ ok: true, json: () => slow.promise.then(r => r.json()) } as Response) : base(url, init));
+  const view = renderHook(({ session }) => ({ pool: usePool(session), card: usePuppetCard(session, ID) }), { initialProps: { session: ADMIN } });
+  await waitFor(() => expect(view.result.current.card.card).not.toBeNull());
+  view.rerender({ session: change === 'logout' ? { login: null, role: null } : change === 'generation' ? { ...ADMIN, generation: 'new' } : { ...ADMIN, role: 'user' } });
+  expect(view.result.current.card.card).toBeNull();
+  await act(async () => slow.resolve(reply({ schema_version: 1, epoch: EPOCH, puppet: puppet() })));
+  expect(view.result.current.card.card).toBeNull();
 });

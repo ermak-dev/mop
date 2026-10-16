@@ -6,34 +6,36 @@
 // не failed, автоповтора нет. Никакого force. Дизейбл #508 живёт в
 // пункте визарда (restartReason), не в движке.
 //
-// RESULT: тесты написаны до реализации (RED).
+// HYPOTHESIS (#627): старый fixture отвечал без общего store и CAS.
+// SOLUTION: runtime загружается через REST/WS; движок по-прежнему получает order.
+// RESULT: сохранены подтверждение, дедуп, причина отказа, forget и запрет storage.
+// STATUS: FIXED — see #627 (миграция проверок рестарта, не всех действий).
 import { cleanup, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { ADMIN, ID, EPOCH, INCARNATION, networkFixture, reply } from '../network-test-utils';
+let net: ReturnType<typeof networkFixture>;
+beforeEach(async () => { net = networkFixture(); await net.start(); });
 import { MantineProvider } from "@mantine/core";
 import { RestartBox, restartReason } from "./RestartBox";
 import { renderUi } from "../test-utils";
 import type { Puppet } from "../types";
-import type { Session } from "../useSession";
-
-const ADMIN: Session = { login: "anton", role: "admin" };
 
 const ROW: Puppet = {
-  name: "pu-mop-1", node: "hyper", alloc_status: "running",
+  name: ID, node: "hyper", alloc_status: "running",
   state: "busy: #12", kind: "busy", bucket: "busy", detail: null,
   branch: "#12", owner: "ermak", llm: "glm",
   origin: "git@h:g/mop.git", disk_kb: null,
 };
 
-const ok202 = (id: string) =>
-  ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
-const opJson = (status: string) =>
-  ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "restart",
-     target: "pu-mop-1", status }) }) as Response;
+const ok202 = (_id: string) => reply(net.operation('accepted', '1'), 202);
+const opJson = (status: string, reason = '') => reply(net.operation(status, '2', reason));
 const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
-  vi.fn(async (url: string | URL, init?: { method?: string }) =>
-    (init?.method ?? "GET") === "POST" ? post() : get());
+  vi.fn(async (url: string | URL, init?: RequestInit) => {
+    if (init?.method === 'POST') { net.capture(init); return post(); }
+    expect(String(url)).toContain('/api/v1/operations'); return get();
+  });
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); net.stop(); vi.unstubAllGlobals(); });
 
 /** Приказ визарда (#522): подтверждение с финального экрана. */
 class Order {
@@ -71,7 +73,7 @@ test("#522 the engine renders no dialog, state goes up", async () => {
   // движок нем: ни моды, ни кнопок -- экран хода рисует визард
   expect(screen.queryByRole("dialog")).toBeNull();
   await waitFor(() => expect(onState).toHaveBeenCalledWith(
-    expect.objectContaining({ status: "accepted" })));
+    expect.objectContaining({ status: "running" })));
 });
 
 test("#522 the order posts the exact restart body", async () => {
@@ -81,17 +83,16 @@ test("#522 the order posts the exact restart body", async () => {
   const order = new Order();
   const view = mountEngine(order);
   send(view, order);
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/v1/puppets/${ID}/commands/restart`,
     expect.objectContaining({ method: "POST" })));
   const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
-  expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
+  expect(body).toEqual({ schema_version: 1, epoch: EPOCH, incarnation: INCARNATION, expected_revision: '7',
+    request_id: expect.any(String), not_after: expect.any(String), params: { fresh: false } });
 });
 
 test("#522 a failed verdict carries the server reason up", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(
-      ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "restart",
-         target: "pu-mop-1", status: "failed", error: "alloc refused" }) }) as Response));
+                            () => Promise.resolve(opJson('failed', 'alloc refused')));
   vi.stubGlobal("fetch", fetchMock);
   const order = new Order();
   const onState = vi.fn();
@@ -140,6 +141,7 @@ test("#522 a forget signal settles the engine back to idle", async () => {
   send(view, order, onState);
   await waitFor(() => expect(onState).toHaveBeenCalledWith(
     expect.objectContaining({ status: "failed" })));
+  const beforeForget = fetchMock.mock.calls.length;
   // forget-токен (#522): та же форма дерева, иначе ремоунт подделал бы idle
   const forget: { at: number; act: string; params: Record<string, unknown> } =
     { at: Date.now() + Math.random(), act: "forget", params: {} };
@@ -148,7 +150,7 @@ test("#522 a forget signal settles the engine back to idle", async () => {
   await waitFor(() => expect(onState.mock.calls[onState.mock.calls.length - 1][0])
     .toMatchObject({ status: "idle" }));
   // забытый вердикт не воскресает: нового fetch нет
-  expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(2);
+  expect(fetchMock.mock.calls.length).toBe(beforeForget);
 });
 
 // ── #508: признак строки -- чистая функция, пункт визарда её зовёт ──────
