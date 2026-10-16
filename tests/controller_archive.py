@@ -76,13 +76,28 @@ class ArchiveBoundary(unittest.TestCase):
     def test_toc_database_metadata_is_not_a_guard_object(self):
         toc = (b'; Archive metadata\n; dbname: controller_restoreguard_test\n'
                b'1; 2615 2200 SCHEMA - public mop_ci\n'
-               b'2; 1259 16401 TABLE public controller_installation mop_ci\n')
+               b'2; 1259 16401 TABLE public catalog_project mop_ci\n')
         plan = self.plan(toc)
-        self.assertIn(b'TABLE public controller_installation', plan)
+        self.assertIn(b'TABLE public catalog_project', plan)
         self.assertNotIn(b'SCHEMA - public', plan)
 
+    # HYPOTHESIS: общий archive gate требует прежний Installation DROP/CREATE,
+    # хотя #644 сохраняет sealed target schema, чтобы runtime не получил CRUD окно.
+    # SOLUTION: прежняя metadata-проверка использует обычную таблицу; trust отдельно
+    # проверяется строже: исходные data остаются, DDL и constraints не возвращаются.
+    # RESULT: после merge #644 старый expectation red; новый контракт требует обе гарантии.
+    # STATUS: FIXED — see #644 / #623.
+    def test_installation_schema_is_target_owned_but_source_data_is_restored(self):
+        data = b'3; 0 16401 TABLE DATA public controller_installation mop_ci\n'
+        ordinary = b'4; 1259 16402 TABLE public catalog_project mop_ci\n'
+        toc = (b'1; 1259 16401 TABLE public controller_installation mop_ci\n'
+               b'2; 2606 16403 CONSTRAINT public controller_installation installation_pk mop_ci\n'
+               + data + ordinary)
+        self.assertEqual(self.plan(toc), data + ordinary)
+
     def test_toc_owner_is_not_a_guard_table(self):
-        self.plan(b'2; 1259 16401 TABLE public controller_installation controller_restoreguard\n')
+        entry = b'2; 1259 16401 TABLE public catalog_project controller_restoreguard\n'
+        self.assertEqual(self.plan(entry), entry)
 
     def test_guard_table_and_data_entries_are_still_forbidden(self):
         for kind in (b'TABLE', b'TABLE DATA', b'CONSTRAINT'):
