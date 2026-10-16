@@ -105,6 +105,57 @@ handler registry, mandatory BaseOperation, business effects in save/signals,
 Event Sourcing, or duplicate entity/DTO for every ORM model. Return materialized
 snapshots, not live QuerySets, deferred ORM instances or shared mutable lists.
 
+### Catalogue retirement seam (#634)
+
+`Catalog.delete_project` and `forget_node` retire metadata only. They do not
+remove a VM, job, image, clone, secret or retained FK/history. The catalogue keeps
+`retired_at` and the advanced revision on the original UUID. Active uniqueness
+uses ordinary composite constraints on name/origin plus `identity_slot`: zero for
+an active target, its own UUID for a retired target. A check constraint ties those
+two states together. This requires no conditional index or backend-specific SQL.
+A repeated name/origin receives a new UUID; old requests still address the old row.
+
+The trusted composition root may bind the narrow `catalog.retirement.RemovalGuard`.
+Unbound removal refuses. `prepare_delete_project` / `prepare_forget_node` check
+current authority/revision and call `inspect_project` / `inspect_node` **outside**
+any SQL transaction. These calls return typed references to real retained receipts,
+not `quiescent`, `empty` or actor callbacks supplied by a client. A project receipt
+must cover all remaining jobs, including stopped jobs. A node receipt must cover
+both scheduler and executor occupants, with complete source identity/incarnation,
+sequence, actual receipt and bounded observation validity (at most five minutes;
+an adapter may impose a shorter window). Missing observations are unknown, not empty.
+
+`commit_delete_project` / `commit_forget_node` accept the prepared value and lock
+the exact parent UUID. They reauthorize, check the expected revision/currentness,
+reject configured node deployment membership and invoke the bound SQL-only
+`validate_project` / `validate_node`. The validator rereads the actual receipt and
+current authoritative source generations/coordination records; merely echoing the
+prepared fields is not validation. It refuses absent, superseded, incomplete or
+mismatched evidence. The catalogue validates the returned typed evidence and its
+freshness before writing the tombstone. No inspection/network/protection call
+occurs in this commit seam. Operations can put that seam and their own
+result/audit/outbox writes inside one outer `atomic`; an error rolls all of them
+back. No result/outbox implementation or generic callback is hidden in Catalog.
+
+Later #639/#643/#648 composition must serialize job/body/build admission and
+receipt invalidation on the same parent locks, deny retired targets and prove the
+source/executor fencing that makes inspection safe. A fresh timestamp alone
+cannot fence an independent external writer. If this cannot be established, the
+production guard must refuse; this core does not implement external adapters,
+physical effects, their recovery, or Operations publication.
+
+`Catalog.project_is_current(id)` and `node_is_current(id)` are minimal internal
+SQL queries over catalogue-owned models, not permission checks or public HTTP
+endpoints. Access/SessionGate and the current-catalog composition root must use
+those queries instead of backedge imports or treating any retained FK as active.
+In particular a SERVICE principal bound to a retired/missing node must be denied
+at authentication/authorization, after waits and before addressed telemetry,
+bootstrap, secret delivery or session stages. Retiring a node is not proof that
+its old credential/process disappeared. This Access integration remains a
+consumer task; #634 does not edit Access. Normal catalogue target/settings queries
+and new writes exclude/refuse retired parents. Explicit historical policy reads
+retain their history semantics and still require the owning access policy.
+
 ## Invariant ownership
 
 The owner column names the single rule owner, not an exclusive file. Structural
