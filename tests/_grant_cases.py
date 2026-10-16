@@ -29,6 +29,8 @@ from mop.server.secrets.crypto import Keyring, XChaCha20Provider
 # RESULT: все 33 собственных cases проходят на изолированных PG16/17; из 131 cases
 # остаётся только прежний Foundation restore/root failure. Пул не использовался.
 # STATUS: FIXED — see #635; late approval/runtime/executor bindings ещё не приёмка.
+# Combined accepted dependencies: migration seeds сохранены serialized_rollback;
+# прежний restore/root setup failure больше не основание пропускать Grant checks.
 
 
 def manifest(role='worker', *, spawn=(), dispatch=False, receives=True):
@@ -64,6 +66,9 @@ class BindingFixture:
 
 
 class RetainedSecretContract(TransactionTestCase):
+    # RestoreGuard и прочие migration seeds сохраняются после flush.
+    serialized_rollback = True
+
     def test_prepared_retention_is_public_atomic_target_bound_and_default_deny(self):
         from mop.server.secrets import services as secrets
         self.assertTrue(hasattr(secrets, 'RetainedSecrets'), 'public prepared retention port is missing')
@@ -91,6 +96,9 @@ class RetainedSecretContract(TransactionTestCase):
 
 
 class GrantCases(TransactionTestCase):
+    # Как остальные ORM cases: flush не удаляет seeds новой установки.
+    serialized_rollback = True
+
     def setUp(self):
         self.assertTrue(hasattr(access, 'RoleBundle'), 'immutable ORM RoleBundle is missing')
         self.assertTrue(hasattr(access, 'Grant'), 'ORM delegated grant lifecycle is missing')
@@ -255,6 +263,10 @@ class GrantCases(TransactionTestCase):
 
     # BUG: trusted view resolver проходит permission, но Identity повторяет default-deny lookup.
     # HYPOTHESIS: handler заново создаёт context без resolver вместо request.actor.
+    # RED: PG16/17 вернули 403 delegation resolver is not bound вместо 200.
+    # SOLUTION: revalidate request.actor тем же trusted view resolver, grant_id из context.
+    # RESULT: PG16/17 203/203; активный grant принят, отсутствие resolver/отзыв отказаны.
+    # STATUS: FIXED — see #635.
     def test_http_identity_uses_accepted_grant_context_and_rechecks_revocation(self):
         from mop.server.controller.authviews import Identity
         from rest_framework.test import APIRequestFactory
