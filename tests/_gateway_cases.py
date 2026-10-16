@@ -37,6 +37,19 @@ def bound_client(gateway, *, cookies=None, enforce_csrf_checks=False):
     return client
 
 
+def login_browser(case, user):
+    """Публичный login создаёт session binding; fixture не пишет private credential."""
+    client = Client(enforce_csrf_checks=True)
+    response = client.get('/api/v1/auth/csrf', secure=True, HTTP_HOST='testserver')
+    case.assertEqual(response.status_code, 200)
+    response = client.post('/api/v1/auth/login',
+        {'username': user.username, 'password': 'fixture-only'}, secure=True,
+        HTTP_HOST='testserver', HTTP_ORIGIN='https://testserver',
+        HTTP_X_CSRFTOKEN=client.cookies['csrftoken'].value)
+    case.assertEqual(response.status_code, 200)
+    return client
+
+
 def management_get(path, *, cookies=None):
     from mop.server.controller.runtime import Runtime
     from mop.server.gateway.service import Gateway
@@ -81,12 +94,17 @@ class GatewayBoundary(TransactionTestCase):
         from mop.server.access.services import bind_local_identity
         user = get_user_model().objects.create_user('panel', password='fixture-only', is_staff=True)
         bind_local_identity(user.pk)
-        client = Client()
-        client.force_login(user)
+        from mop.server.access.models import AllProjectMembership, LoginIdentity
+        AllProjectMembership.objects.create(user=user, source=LoginIdentity.objects.get(user=user).source)
+        client = login_browser(self, user)
         response = management_get('/llm/management.html', cookies=client.cookies)
         self.assertEqual(response.status_code, 403)
         permission = Permission.objects.get(content_type__app_label='gateway', codename='manage_proxy')
         user.user_permissions.add(permission)
+        # Даже полный scope/permission не усыновляет session мимо trusted login.
+        unbound = Client()
+        unbound.force_login(user)
+        self.assertEqual(management_get('/v8/management/config', cookies=unbound.cookies).status_code, 403)
         response = management_get('/v8/management/config', cookies=client.cookies)
         self.assertEqual(response.status_code, 503)
         self.assertIn(b'proxy management upstream is not bound', response.content)
@@ -146,6 +164,12 @@ class GatewayCoordination(TransactionTestCase):
         self.assertEqual(restarted.claim(key, write=True).state, 'unknown')
 
 
+# HYPOTHESIS: force_login обходит trusted login hook и не создаёт binding.
+# RED: PG17 — credential binding is unavailable в setUp; boundary 403 вместо 503.
+# SOLUTION: enrollment, явный global scope и публичный login с настоящим CSRF.
+# RESULT: PG17 — 34/34, включая CSRF, redaction, cancel и удержание physical claim.
+# STATUS: FIXED — see #647
+@override_settings(ALLOWED_HOSTS=['testserver'])
 class GatewayExecution(TransactionTestCase):
     serialized_rollback = True
 
@@ -156,10 +180,12 @@ class GatewayExecution(TransactionTestCase):
         initialize()
         self.user = get_user_model().objects.create_user('gateway-human', password='fixture-only')
         bind_local_identity(self.user.pk)
+        from mop.server.access.models import AllProjectMembership, LoginIdentity
+        AllProjectMembership.objects.create(user=self.user,
+            source=LoginIdentity.objects.get(user=self.user).source)
         self.user.user_permissions.add(Permission.objects.get(
             content_type__app_label='gateway', codename='manage_proxy'))
-        self.client = Client(enforce_csrf_checks=True)
-        self.client.force_login(self.user)
+        self.client = login_browser(self, self.user)
         self.actor = session_context(self.client.session.session_key)
         self.key_id = uuid.uuid4()
 
@@ -662,7 +688,7 @@ class GatewayExecution(TransactionTestCase):
         from mop.server.gateway.service import Gateway
         from mop.server.gateway.values import Credential, Reply
         from mop.server.controller.runtime import Runtime
-        from mop.server.controller.asgi import unbound_websocket
+        from mop.server.realtime.gateway import Gateway as RealtimeGateway
         key = Credential(self.key_id, 'fixture-heartbeat-key')
         entered = threading.Event()
         class Source:
@@ -691,7 +717,14 @@ class GatewayExecution(TransactionTestCase):
                 messages = []
                 async def send(message):
                     messages.append(message)
-                await unbound_websocket({}, None, send)
+                # RED: PG17 — удалённый unbound_websocket не давал дойти до probe.
+                # SOLUTION: текущий WS adapter сохраняет отказ неизвестному route.
+                realtime = RealtimeGateway(runtime=runtime)
+                await realtime.start()
+                try:
+                    await realtime({'type': 'websocket', 'path': '/ws/unregistered'}, None, send)
+                finally:
+                    await realtime.aclose()
                 self.assertEqual(messages[0]['code'], 4404)
                 await asyncio.sleep(.01)
                 self.assertLess(time.monotonic() - started, .3)
