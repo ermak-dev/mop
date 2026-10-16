@@ -4,7 +4,8 @@
 SOLUTION: собственный HTTPS fixture с отдельным CA, без old pool и credentials.
 Он хранит один admission по ключу, теряет ответ POST и отдаёт итог через GET.
 Это настоящий TLS/CLI, но не Django/PostgreSQL и не доказательство executor.
-RESULT: четыре TLS/wheel checks проходят без Django/NATS в чистом клиенте.
+RESULT: четыре TLS/wheel checks проходят на declared PG16/17 Docker fixtures;
+чистый runtime клиент не получает Django/NATS или build backend.
 STATUS: FIXED — see #642; production controller acceptance отдельна.
 """
 import contextlib
@@ -185,8 +186,14 @@ class TLSConsumers(unittest.TestCase):
         for name in ('setup.py', 'pyproject.toml'):
             shutil.copyfile(checkout/name, source/name)
         wheels = root/'wheels'
-        # Собираем собственный пакет offline; никаких pip install зависимостей.
-        build = subprocess.run([sys.executable, '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation',
+        # HYPOTHESIS: --no-build-isolation случайно требует host setuptools;
+        # CI содержит объявленный backend в /opt/mop-wheels, но не в runner site.
+        # SOLUTION: PEP 517 isolation берёт build-system.requires из wheelhouse;
+        # dependency-free runtime venv ниже по-прежнему не получает зависимости.
+        # RESULT: Python 3.13 red — Cannot import 'setuptools.build_meta';
+        # затем 4 TLS/wheel + 5 native HTTPS/PG checks green на PG16 и PG17.
+        # STATUS: FIXED — see #642.
+        build = subprocess.run([sys.executable, '-m', 'pip', 'wheel', '--no-deps',
             '--no-index', '--wheel-dir', str(wheels), str(source)], cwd=root,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
         self.assertEqual(build.returncode, 0, build.stdout)

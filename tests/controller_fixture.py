@@ -51,7 +51,7 @@ controller:pg17:
                         'public.py', '.mop/sandbox.yaml'], check=True)
         return root
 
-    def invoke(self, root, *, cleanup_failure=False, labels=()):
+    def invoke(self, root, *, cleanup_failure=False, labels=(), check='controller'):
         original_run, original_which = subprocess.run, shutil.which
         snapshots, commands = [], []
 
@@ -73,7 +73,8 @@ controller:pg17:
                 patch.object(controller.shutil, 'which', side_effect=lambda name:
                              '/fixture/docker' if name == 'docker' else original_which(name)), \
                 patch.object(controller.subprocess, 'run', side_effect=run):
-            result = controller.main(['--postgres', '16', *[word for label in labels for word in ('--label', label)]])
+            result = controller.main(['--postgres', '16', '--check', check,
+                                      *[word for label in labels for word in ('--label', label)]])
         return result, snapshots, commands
 
     def test_snapshot_contains_tracked_and_new_source_but_no_ignored_inputs(self):
@@ -101,6 +102,22 @@ controller:pg17:
         runner = next(command for command in commands if 'bash' in command)
         script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
         self.assertEqual(shlex.split(script), ['python3', 'tests/controller.py', *labels])
+
+    def test_client_fixture_runs_clean_wheel_tls_and_real_postgres_contracts(self):
+        # HYPOTHESIS: один control_tls не доказывает Django admission contracts.
+        # SOLUTION: последовательный script с &&, обе проверки обязательны.
+        # RESULT: missing PostgreSQL command red, затем четыре fixture checks green.
+        # STATUS: FIXED — see #642.
+        import shlex
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            result, _, commands = self.invoke(root, check='client')
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if 'bash' in command)
+        script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
+        self.assertEqual(script.split(' && '), [
+            shlex.join(['python3', 'tests/control_tls.py']),
+            shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])])
 
     def test_failed_cleanup_cannot_report_a_successful_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
