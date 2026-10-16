@@ -1583,7 +1583,7 @@ def check_role_declarations_585(c):
         "project_add": None, "project_limit": None,
         "models": None, "diagnose": None, "server_diagnose": None,
         # #642: новые HTTP-командлеты не декларируют старые bus verbs.
-        "health": None, "addresses": None, "operation": None, "project_list": None,
+        "health": None, "addresses": None, "operation": None, "project_list": None, "build": None,
         # #594: приватная история требует человеческого логина, терминал —
         # admin-допуска. Исходящим полномочием роли они не становятся.
         "session_history": None, "session_terminal": None,

@@ -8,9 +8,11 @@ Every command of `mop`, as its commandlet in `mop/cli` describes itself: the fir
 
 The #623/#642 migration is incomplete. The dispatcher uses only explicit transient HTTPS origin/token/CA context for remote control; it never falls back to the old bus, connection.json or git config stores. Local developer/setup commands stay local.
 
-Bound consumers: `mop addresses`, `mop diagnose`, `mop health`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop stat`. `mop diagnose` is offline context validation only.
+Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop build`, `mop code`, `mop delete`, `mop detail`, `mop dispatch`, `mop driver build`, `mop landing`, `mop list`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop restart`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop session history`, `mop session terminal`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
+Bound consumers: `mop addresses`, `mop build`, `mop diagnose`, `mop health`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop stat`. `mop diagnose` is offline context validation only.
+
+Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop delete`, `mop detail`, `mop dispatch`, `mop driver build`, `mop landing`, `mop list`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop restart`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop session history`, `mop session terminal`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -64,6 +66,24 @@ Reconnects to a running puppet and creates nothing: a new one is
 `mop add` or `mop <role>`. Detaching (or a dropped connection) leaves the
 puppet running. Goes over ssh, not the bus: a live terminal is not
 something a bus verb hands over.
+```
+
+#### mop build
+
+```text
+mop build <project-id> --policy-id <id> --target-node <id> --epoch <id> --expected-revision N
+
+Submit a durable image build from an existing approved immutable policy. Repeat
+--target-node for the explicit bounded node set; --mode is missing (default),
+update or rebuild. No local manifest, origin, branch or unapproved policy is
+uploaded. --not-after is the absolute UTC execution deadline (default one hour).
+--request-id fixes the initial identity before I/O; --wait is a bounded GET wait.
+
+An accepted receipt is not a usable image: exit 3 retains its outstanding/unknown
+operation. Recover with mop operation using the original key and epoch. There
+is no automatic effect retry. Privileged force recovery and branch-policy
+approval remain explicitly unsupported before submission.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop code

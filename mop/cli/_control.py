@@ -31,7 +31,7 @@ SURFACES = dict.fromkeys((
     'session history', 'session terminal', 'server doctor', 'server gc', 'server sweep',
     'server disk', 'server proxykey', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
-                              'node up', 'operation', 'addresses', 'stat'), 'bound'))
+                              'node up', 'operation', 'addresses', 'stat', 'build'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -51,16 +51,15 @@ GAPS = {
     'master': 'role creation/readiness and private WS terminal',
     'code': 'explicit inference-only launcher context',
     'project add': 'project registration/build API',
-    'build': 'durable image build API', 'driver build': 'durable image build API',
+    'driver build': 'approved local-source policy preparation for durable image builds',
     'node': 'authorized node projection query',
     'node forget': 'safe forget action',
     'login': 'Django token issuance client (no connection.json store)',
 }
 
 
-def options(argv):
-    """Только origin/CA разрешены в argv; token остаётся transient credential."""
-    selected, rest, index = {}, [], 0
+def _prefix(argv, *, legacy=False):
+    selected, index, old_selector = {}, 0, False
     while index < len(argv):
         word = argv[index]
         name = word.split('=', 1)[0]
@@ -68,18 +67,34 @@ def options(argv):
             key = 'origin' if name == '--api-origin' else 'ca_file'
             if key in selected:
                 raise api.ClientError('duplicate HTTPS context option')
-            if '=' in word:
-                value = word.split('=', 1)[1]
-            else:
-                index += 1
-                value = argv[index] if index < len(argv) else ''
-            if not value or value.startswith('-'):
-                raise api.ClientError('HTTPS context option requires a value')
-            selected[key] = value
+        elif legacy and name == '--server':
+            key, old_selector = None, True
+        elif name.startswith('--api-'):
+            raise api.ClientError('unsupported HTTPS context option')
         else:
-            rest.append(word)
+            break
+        if '=' in word:
+            value = word.split('=', 1)[1]
+        else:
+            index += 1
+            value = argv[index] if index < len(argv) else ''
+        if not value or value.startswith('-'):
+            raise api.ClientError('context option requires a value')
+        if key is not None:
+            selected[key] = value
         index += 1
+    return selected, list(argv[index:]), old_selector
+
+
+def options(argv):
+    """Только global prefix; command data не становится trust/token selector."""
+    selected, rest, _ = _prefix(argv)
     return selected, rest
+
+
+def dispatch_options(argv):
+    """Legacy selector нужен только для запрета до context/.env, не для HTTP."""
+    return _prefix(argv, legacy=True)
 
 
 def route(modname, argv):
@@ -160,8 +175,10 @@ _TOOL_LOCK = threading.RLock()
 def allowed(declaration, identity):
     actions = declaration.get('actions')
     if (type(identity) is not api.Identity or identity.action_permissions is None or
-            not isinstance(actions, list) or not actions or
+            not isinstance(actions, list) or
             any(not isinstance(action, str) for action in actions)):
+        return False
+    if not actions and declaration.get('annotations') != 'readonly':
         return False
     required = frozenset(actions)
     if declaration.get('human_only') is True and identity.kind != 'human':
@@ -191,7 +208,7 @@ def tool_call(words, declaration, values):
     return text.rstrip() or ('done' if code == 0 else 'command refused')
 
 
-def emit(value, *, credential=None):
+def emit(value, *, credential):
     text = json.dumps(plain(value), ensure_ascii=True, separators=(',', ':'))
     if credential:
         text = text.replace(credential, '[redacted]')
@@ -225,9 +242,23 @@ def _render_operation(operation, *, credential):
         'accepted', 'running', 'reconciling', 'unknown', 'partial') else 1
 
 
+def _failure(error, credential):
+    if isinstance(error, api.APIError):
+        code, reason = error.error.code, error.error.reason
+        text = reason if reason.startswith(code + ':') else code + ': ' + reason
+    else:
+        text = str(error)
+    return text.replace(credential, '[redacted]') if credential else text
+
+
+def _operation_note(operation):
+    print('operation observation unavailable; operation_id=' + operation.id +
+          '; request_id=' + operation.request_id + '; epoch=' + operation.epoch, file=sys.stderr)
+
+
 def invoke(words, argv, *, origin=None, ca_file=None):
     """Один CLI handler для dispatcher и MCP; stdout — только ответ команды."""
-    operation = None
+    operation = selected = lookup_failure = None
     try:
         if SURFACES.get(words) != 'bound' and words != 'mcp':
             gap = GAPS.get(words, 'finite authorized ' + words + ' backend API')
@@ -271,6 +302,24 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
             args = p.parse_args(argv)
+        elif words == 'build':
+            p.add_argument('project_id')
+            p.add_argument('--policy-id', required=True)
+            p.add_argument('--target-node', action='append', required=True)
+            p.add_argument('--mode', choices=('missing', 'update', 'rebuild'), default='missing')
+            p.add_argument('--force', action='store_true')
+            p.add_argument('--force-safety', action='store_true')
+            p.add_argument('--branch')
+            _operation_options(p)
+            args = p.parse_args(argv)
+            if args.force or args.force_safety or args.branch is not None:
+                print('unsupported: privileged build recovery and branch policy approval are not bound', file=sys.stderr)
+                return 2
+            args.request_id = str(uuid4()) if args.request_id is None else args.request_id
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            prepare = api.BuildCommand(args.project_id, args.policy_id, args.epoch, args.request_id,
+                args.not_after, args.expected_revision, tuple(args.target_node), args.mode)
         elif words in ('node drain', 'node up'):
             p.add_argument('node_id')
             _operation_options(p)
@@ -296,7 +345,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         if words == 'diagnose':
             emit({'schema_version': 1, 'origin': selected.origin, 'credential_source': 'transient context',
                   'trust': 'explicit CA (unverified)' if selected.ca_file else 'system CA (unverified)',
-                  'network_observed': False})
+                  'network_observed': False}, credential=selected.token)
             return 0
         client = api.Client(selected)
         if words == 'health':
@@ -327,9 +376,11 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             except api.UnknownSubmission:
                 # Не делаем POST retry, даже под старым ключом; lookup только GET.
                 try:
-                    operation = client.lookup_operation(prepare.request_id, epoch=prepare.epoch)
-                except api.ClientError:
-                    # 404 lookup тоже не доказывает отсутствие admission COMMIT.
+                    operation = client.recover(prepare)
+                except api.ClientError as failure:
+                    # 404 lookup тоже не доказывает отсутствие admission COMMIT,
+                    # но безопасная причина чтения не должна исчезнуть в unknown.
+                    lookup_failure = failure
                     raise api.UnknownSubmission(prepare) from None
             if args.wait is not None and not operation.terminal:
                 operation = client.wait_operation(operation.id, timeout=args.wait, initial=operation)
@@ -338,6 +389,8 @@ def invoke(words, argv, *, origin=None, ca_file=None):
     except api.UnknownSubmission as error:
         print('submission unknown; request_id=' + error.request_id + '; epoch=' + error.command.epoch +
               '; recover with operation lookup; do not repeat the effect', file=sys.stderr)
+        if lookup_failure is not None:
+            print('lookup failed: ' + _failure(lookup_failure, selected.token), file=sys.stderr)
         return 3
     except api.WaitTimeout as error:
         if error.operation is not None:
@@ -345,14 +398,13 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         print('wait expired; operation is not cancelled', file=sys.stderr)
         return 3
     except api.APIError as error:
-        reason = error.error.reason.replace(selected.token, '[redacted]')
-        print(f'{error.error.code}: {reason}', file=sys.stderr)
+        print(_failure(error, selected.token), file=sys.stderr)
+        if operation is not None:
+            _operation_note(operation)
         return 1
     except api.ClientError as error:
-        print(str(error), file=sys.stderr)
+        print(_failure(error, selected.token if selected else None), file=sys.stderr)
         if operation is not None:
-            print('operation observation unavailable; operation_id=' + operation.id +
-                  '; request_id=' + operation.request_id + '; epoch=' + operation.epoch,
-                  file=sys.stderr)
+            _operation_note(operation)
             return 3
         return 1

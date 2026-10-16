@@ -7,7 +7,7 @@ The response describes observed controller readiness, not puppet health.
 """
 from mop.cli import _control
 
-MCP = {"annotations": "readonly", "args": []}
+MCP = {"annotations": "readonly", "actions": [], "args": []}
 
 
 def main(argv):

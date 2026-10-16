@@ -67,7 +67,7 @@ class ResetRequired(APIError):
 class UnknownSubmission(ClientError):
     """POST мог достичь admission COMMIT; восстановление только по тому же ключу."""
 
-    def __init__(self, command: "PreparedCommand"):
+    def __init__(self, command: "PreparedCommand | NodeCommand | BuildCommand"):
         self.command = command
         self.request_id = command.request_id
         super().__init__("submission outcome unknown; recover by request_id")
@@ -276,6 +276,42 @@ class NodeCommand:
 
 
 @dataclass(frozen=True)
+class BuildCommand:
+    """Конечный build intent: только одобренный policy ID, не shell/manifest."""
+
+    project_id: str
+    policy_id: str
+    epoch: str
+    request_id: str
+    not_after: str
+    expected_revision: str
+    target_nodes: tuple[str, ...]
+    mode: str = 'missing'
+    force_safety: bool = False
+
+    def __post_init__(self):
+        for value in (self.project_id, self.policy_id, self.epoch, self.request_id):
+            _key(value)
+        _deadline(self.not_after)
+        _revision(self.expected_revision)
+        _require(int(self.expected_revision) >= 1 and self.mode in ('missing', 'update', 'rebuild'))
+        _require(type(self.target_nodes) is tuple and 1 <= len(self.target_nodes) <= 64)
+        for value in self.target_nodes:
+            _key(value)
+        _require(len(set(self.target_nodes)) == len(self.target_nodes))
+        # Отдельный привилегированный recovery path пока не связан клиентом.
+        _require(self.force_safety is False)
+
+    @property
+    def body(self) -> bytes:
+        return json.dumps({'schema_version': 1, 'epoch': self.epoch,
+            'request_id': self.request_id, 'expected_revision': self.expected_revision,
+            'not_after': self.not_after, 'policy_id': self.policy_id, 'mode': self.mode,
+            'target_nodes': self.target_nodes, 'force_safety': self.force_safety},
+            sort_keys=True, separators=(',', ':')).encode('ascii')
+
+
+@dataclass(frozen=True)
 class Identity:
     user_id: int
     principal_id: str
@@ -433,6 +469,26 @@ def _operation(data, epoch):
             _revision(data["target"]["revision"])
             _revision(data["target"]["source_revision"])
             _require(incarnation is None)
+        elif data['target'].get('kind') == 'project':
+            _key(data['target']['id'])
+            _revision(data['target']['source_revision'])
+            _require(incarnation is None)
+            build = data['build']
+            _require(isinstance(build, Mapping) and build['mode'] in ('missing', 'update', 'rebuild'))
+            _key(build['policy_id'])
+            nodes = build['target_nodes']
+            _require(isinstance(nodes, tuple) and 1 <= len(nodes) <= 64)
+            for node in nodes:
+                _key(node)
+            _require(len(set(nodes)) == len(nodes))
+            for name in ('manifest_digest', 'source_digest'):
+                _require(isinstance(build[name], str) and re.fullmatch('[0-9a-f]{64}', build[name]) is not None)
+            _require(isinstance(build['source_commit'], str) and
+                     re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', build['source_commit']) is not None)
+            _require(isinstance(build['source_ref'], str) and 0 < len(build['source_ref']) <= 256)
+            _require(type(build['planned']) is bool and type(build['skipped']) is bool)
+            for name in ('affected_targets', 'unresolved_stages', 'stages', 'compensation_failures'):
+                _require(isinstance(build[name], tuple))
         else:
             _identity(incarnation)
         if data["state"] not in _STATES or data.get("epoch", epoch) != epoch:
@@ -624,6 +680,12 @@ class Client:
         return NodeCommand("enable", node_id, epoch, str(uuid4()) if request_id is None else request_id,
                            not_after, expected_revision)
 
+    def prepare_build(self, project_id: str, *, policy_id: str, epoch: str, expected_revision: str,
+                      not_after: str, target_nodes: tuple[str, ...], mode: str = 'missing',
+                      request_id: str | None = None) -> BuildCommand:
+        return BuildCommand(project_id, policy_id, epoch, str(uuid4()) if request_id is None else request_id,
+                            not_after, expected_revision, target_nodes, mode)
+
     def _exchange(self, method, path, body=None, *, command=None, budget=None):
         limits = self._limits
         _require(body is None or len(body) <= limits.max_request_bytes)
@@ -707,15 +769,15 @@ class Client:
             raise ProtocolError("unexpected control API query status")
         return data
 
-    def submit(self, command: PreparedCommand | NodeCommand) -> Submission:
-        _require(type(command) in (PreparedCommand, NodeCommand))
+    def submit(self, command: PreparedCommand | NodeCommand | BuildCommand) -> Submission:
+        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand))
         if type(command) is NodeCommand:
             path = f"/api/v1/nodes/{command.node_id}/commands/{command.action}"
-            target_id, incarnation = command.node_id, None
+        elif type(command) is BuildCommand:
+            path = f'/api/v1/projects/{command.project_id}/commands/build'
         else:
             path = (f"/api/v1/puppets/{command.target.id}/commands/restart" if command.action == "restart"
                     else "/api/v1/messages")
-            target_id, incarnation = command.target.id, command.target.incarnation
         # Слишком большой локальный ввод — ещё не неизвестный admission.
         body = command.body
         _require(len(body) <= self._limits.max_request_bytes)
@@ -725,14 +787,39 @@ class Client:
             if status not in (200, 202):
                 raise ProtocolError("unexpected control API submission status")
             result = self._read_operation(data)
-            if (result.request_id != command.request_id or result.epoch != command.epoch or
-                    result.target_id != target_id or result.incarnation != incarnation):
-                raise ProtocolError("operation binding mismatch")
+            self._command_binding(command, result)
         except ProtocolError:
             failed = True
         if failed:
             raise UnknownSubmission(command)
         return Submission(status, result)
+
+    @staticmethod
+    def _command_binding(command, result):
+        if type(command) is NodeCommand:
+            target_id, incarnation, kind = command.node_id, None, 'node'
+        elif type(command) is BuildCommand:
+            target_id, incarnation, kind = command.project_id, None, 'project'
+        else:
+            target_id, incarnation, kind = command.target.id, command.target.incarnation, None
+        if (result.request_id != command.request_id or result.epoch != command.epoch or
+                result.target_id != target_id or result.incarnation != incarnation):
+            raise ProtocolError('operation binding mismatch')
+        if kind is not None:
+            target = result.data['target']
+            if target.get('kind') != kind or target.get('source_revision') != command.expected_revision:
+                raise ProtocolError('operation source binding mismatch')
+        if type(command) is BuildCommand:
+            build = result.data['build']
+            if (build['policy_id'] != command.policy_id or build['mode'] != command.mode or
+                    sorted(build['target_nodes']) != sorted(command.target_nodes)):
+                raise ProtocolError('build policy binding mismatch')
+
+    def recover(self, command: PreparedCommand | NodeCommand | BuildCommand) -> Operation:
+        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand))
+        result = self.lookup_operation(command.request_id, epoch=command.epoch)
+        self._command_binding(command, result)
+        return result
 
     @staticmethod
     def _read_operation(data):

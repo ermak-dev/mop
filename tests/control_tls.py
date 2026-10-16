@@ -4,7 +4,8 @@
 SOLUTION: собственный HTTPS fixture с отдельным CA, без old pool и credentials.
 Он хранит один admission по ключу, теряет ответ POST и отдаёт итог через GET.
 Это настоящий TLS/CLI, но не Django/PostgreSQL и не доказательство executor.
-STATUS: INCOMPLETE — see #642; production controller acceptance отдельна.
+RESULT: четыре TLS/wheel checks проходят без Django/NATS в чистом клиенте.
+STATUS: FIXED — see #642; production controller acceptance отдельна.
 """
 import contextlib
 import http.server
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
+from types import SimpleNamespace
 
 import hermetic  # noqa: F401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -28,6 +30,36 @@ from mop import cli
 from mop.cli import _control
 from mop.client import control as api
 from control_consumers import KEY, EPOCH, NODE, DEADLINE, TOKEN, node_operation
+
+
+@contextlib.contextmanager
+def own_tls(handler):
+    """Один TLS fixture для stdlib и настоящего Django/PostgreSQL клиента."""
+    if shutil.which('openssl') is None:
+        raise AssertionError('declared test environment needs openssl for own TLS fixture')
+    with tempfile.TemporaryDirectory(prefix='mop-642-own-tls-') as directory:
+        root = Path(directory)
+        cert, key = root/'ca.pem', root/'key.pem'
+        result = subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+            '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost',
+            '-addext', 'subjectAltName=DNS:localhost'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode:
+            raise AssertionError('could not create isolated TLS certificate')
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        server.daemon_threads = True
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert, key)
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server, 'https://localhost:'+str(server.server_port), cert, directory
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+            if thread.is_alive():
+                raise AssertionError('own TLS fixture did not shut down')
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -98,32 +130,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class TLSConsumers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if shutil.which('openssl') is None:
-            raise AssertionError('declared test environment needs openssl for own TLS fixture')
-        cls.directory = tempfile.TemporaryDirectory(prefix='mop-642-own-tls-')
-        root = Path(cls.directory.name)
-        cls.cert, cls.key = root/'ca.pem', root/'key.pem'
-        result = subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-            '-keyout', str(cls.key), '-out', str(cls.cert), '-days', '1', '-subj', '/CN=localhost',
-            '-addext', 'subjectAltName=DNS:localhost'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode:
-            cls.directory.cleanup()
-            raise AssertionError('could not create isolated TLS certificate')
-        cls.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-        cls.server.daemon_threads = True
-        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.load_cert_chain(cls.cert, cls.key)
-        cls.server.socket = tls.wrap_socket(cls.server.socket, server_side=True)
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-        cls.origin = 'https://localhost:'+str(cls.server.server_port)
+        cls.fixture = own_tls(Handler)
+        cls.server, cls.origin, cls.cert, directory = cls.fixture.__enter__()
+        cls.directory = SimpleNamespace(name=directory)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.thread.join(5)
-        cls.directory.cleanup()
+        cls.fixture.__exit__(None, None, None)
 
     def setUp(self):
         self.server.calls, self.server.admissions = [], []

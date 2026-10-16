@@ -214,6 +214,8 @@ def declared(path):
     if 'actions' in decl:
         import re
         actions = decl['actions']
+        if actions == [] and decl.get('annotations') != 'readonly':
+            raise ValueError('MCP empty actions require an explicit readonly query')
         if (not isinstance(actions, list) or any(not isinstance(action, str) or
                 re.fullmatch(r'[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*', action) is None for action in actions) or
                 {'node_verbs', 'cluster_verbs', 'dispatch'} & decl.keys()):
@@ -327,7 +329,8 @@ def usage(found=None):
     """Список команд по секциям — ответ на `mop` без аргументов."""
     found = scan() if found is None else found
     lines = ["mop — manage the pool",
-             "", "  mop [--server host] <command> [arguments]"]
+             "", "  mop [--server host] <local command> [arguments]",
+             "  mop [--api-origin https://host] [--api-ca path] <remote command> [arguments]"]
     groups = [(s, n, p) for s, n, p in found if p]
     for section in SECTIONS:
         rows = [(n, describe(_path_of(section, n, False)))
@@ -388,6 +391,9 @@ def render_reference(entries):
               'The #623/#642 migration is incomplete. The dispatcher uses only explicit transient '
               'HTTPS origin/token/CA context for remote control; it never falls back to the old bus, '
               'connection.json or git config stores. Local developer/setup commands stay local.', '',
+              'Put `--api-origin` and `--api-ca` before the command, or supply transient '
+              '`MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget '
+              'the selected credential. Legacy `--server` does not authorize remote control.', '',
               'Bound consumers: ' + bound + '. `mop diagnose` is offline context validation only.', '',
               'Not bound (exit 2 before any network mutation): ' + blocked + '.', '',
               '`mop mcp --check` can read the authenticated identity. The normal MCP runtime is '
@@ -477,7 +483,7 @@ def main(argv):
     # не должна открывать старый login store или импортировать NATS.
     from . import _control
     try:
-        selected, remote_argv = _control.options(argv)
+        selected, remote_argv, legacy_selector = _control.dispatch_options(argv)
         normalized = unalias(remote_argv)
         remote = resolve(normalized, catalog(scan()), verbs())
         if remote is None and normalized and normalized[0] not in ('help', '-h', '--help'):
@@ -486,6 +492,10 @@ def main(argv):
             modname, rest = remote
             surface = _control.route(modname, rest)
             if surface is not None:
+                if legacy_selector:
+                    print('unsupported: legacy server selection cannot authorize HTTPS control; use --api-origin',
+                          file=sys.stderr)
+                    return 2
                 return _control.invoke(surface, rest, **selected)
         if selected:
             raise _control.api.ClientError('HTTPS context applies only to remote commands')
