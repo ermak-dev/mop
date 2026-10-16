@@ -190,6 +190,29 @@ identifiers and decryptability until re-encryption and verification complete;
 unknown key identifiers or failed authentication are hard errors, not an
 empty secret or fallback to a file.
 
+Maintenance composition uses `controller.bootstrap.secret_provider` with the
+verified Installation identity/fingerprint and an explicit retained key identifier.
+It reads the protected root once, checks the fingerprint, then derives a 32-byte
+AEAD key using HKDF-SHA256 (RFC 5869) from every root byte. The fixed extract salt
+is `mop.secret.root.hkdf-sha256.v1\0`; expand info is `mop.secret.aead\0`, the
+ASCII installation identity, a NUL separator and the ASCII key identifier. The
+single expand block ends with byte `0x01`. A public fingerprint is never used as
+key material, and changing the identifier changes the derived key. The root must
+contain at least 32 random bytes, not a human password. This factory supplies one
+retained root version; rotation composition must explicitly retain providers for
+old identifiers until all referencing envelopes are safely retired. It does not
+grant root access to ordinary web, worker, gateway or node processes.
+
+When Secrets is installed, native restore authenticates every retained SecretVersion
+in bounded batches against its actual relational context and envelope metadata,
+using the separately protected bootstrap root. This runs after the new epoch and
+`effects_enabled=False` commit, but before the independent restore guard becomes
+ready. A corrupt tag, incompatible key, inconsistent metadata or unavailable
+storage leaves the guard closed for maintenance recovery. Matching the public
+root fingerprint alone is not proof that the encrypted archive is readable.
+The verification assumes the restore precondition: services and other writers
+are stopped; it does not create a concurrent online re-encryption procedure.
+
 Bootstrap storage retains the exact accepted source bytes, validated execution
 snapshot, approval/digest relationship and per-run log/progress content. A
 hash plus a path is insufficient: losing the path must not lose the approved
@@ -206,7 +229,7 @@ an old request key executable again. Apply these lifecycle rules:
 
 | Record/artifact | Removal boundary |
 |---|---|
-| Project/node | Refuse project removal with remaining jobs, including stopped jobs, and node removal with occupants or configured inventory membership. Explicitly reconcile external removal; a database cascade cannot prove it happened. |
+| Project/node | Metadata retirement sets a tombstone and advances the target revision; retained history/FKs are not deleted or reassigned. Refuse project retirement with remaining jobs, including stopped jobs, and node retirement with scheduler/executor occupants or configured deployment membership. Unknown, incomplete or stale inspection is not empty. External removal/reconciliation is separate; a database cascade cannot prove it happened. Re-registering a name/origin creates a fresh UUID. |
 | Puppet/incarnation and grant | Revoke future authority and retire addressed endpoints/credentials; retain identity, audit and unresolved effect evidence. A reused name gets a new identity, never the old grant. Deleting metadata does not implicitly destroy an unexamined clone. |
 | Role/bootstrap snapshot | Immutable once approved; retain while a live grant, puppet, child approval or unresolved run references it. Do not delete bytes and retain only a digest/path. |
 | Secret version/rotation | Remove plaintext execution materializations when no longer needed. Keep encrypted versions required for active delivery, safe retirement or unresolved compensation; authorize final retirement/deletion and remove stale generated copies deliberately. |

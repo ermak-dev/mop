@@ -105,6 +105,57 @@ handler registry, mandatory BaseOperation, business effects in save/signals,
 Event Sourcing, or duplicate entity/DTO for every ORM model. Return materialized
 snapshots, not live QuerySets, deferred ORM instances or shared mutable lists.
 
+### Catalogue retirement seam (#634)
+
+`Catalog.delete_project` and `forget_node` retire metadata only. They do not
+remove a VM, job, image, clone, secret or retained FK/history. The catalogue keeps
+`retired_at` and the advanced revision on the original UUID. Active uniqueness
+uses ordinary composite constraints on name/origin plus `identity_slot`: zero for
+an active target, its own UUID for a retired target. A check constraint ties those
+two states together. This requires no conditional index or backend-specific SQL.
+A repeated name/origin receives a new UUID; old requests still address the old row.
+
+The trusted composition root may bind the narrow `catalog.retirement.RemovalGuard`.
+Unbound removal refuses. `prepare_delete_project` / `prepare_forget_node` check
+current authority/revision and call `inspect_project` / `inspect_node` **outside**
+any SQL transaction. These calls return typed references to real retained receipts,
+not `quiescent`, `empty` or actor callbacks supplied by a client. A project receipt
+must cover all remaining jobs, including stopped jobs. A node receipt must cover
+both scheduler and executor occupants, with complete source identity/incarnation,
+sequence, actual receipt and bounded observation validity (at most five minutes;
+an adapter may impose a shorter window). Missing observations are unknown, not empty.
+
+`commit_delete_project` / `commit_forget_node` accept the prepared value and lock
+the exact parent UUID. They reauthorize, check the expected revision/currentness,
+reject configured node deployment membership and invoke the bound SQL-only
+`validate_project` / `validate_node`. The validator rereads the actual receipt and
+current authoritative source generations/coordination records; merely echoing the
+prepared fields is not validation. It refuses absent, superseded, incomplete or
+mismatched evidence. The catalogue validates the returned typed evidence and its
+freshness before writing the tombstone. No inspection/network/protection call
+occurs in this commit seam. Operations can put that seam and their own
+result/audit/outbox writes inside one outer `atomic`; an error rolls all of them
+back. No result/outbox implementation or generic callback is hidden in Catalog.
+
+Later #639/#643/#648 composition must serialize job/body/build admission and
+receipt invalidation on the same parent locks, deny retired targets and prove the
+source/executor fencing that makes inspection safe. A fresh timestamp alone
+cannot fence an independent external writer. If this cannot be established, the
+production guard must refuse; this core does not implement external adapters,
+physical effects, their recovery, or Operations publication.
+
+`Catalog.project_is_current(id)` and `node_is_current(id)` are minimal internal
+SQL queries over catalogue-owned models, not permission checks or public HTTP
+endpoints. Access/SessionGate and the current-catalog composition root must use
+those queries instead of backedge imports or treating any retained FK as active.
+In particular a SERVICE principal bound to a retired/missing node must be denied
+at authentication/authorization, after waits and before addressed telemetry,
+bootstrap, secret delivery or session stages. Retiring a node is not proof that
+its old credential/process disappeared. This Access integration remains a
+consumer task; #634 does not edit Access. Normal catalogue target/settings queries
+and new writes exclude/refuse retired parents. Explicit historical policy reads
+retain their history semantics and still require the owning access policy.
+
 ## Invariant ownership
 
 The owner column names the single rule owner, not an exclusive file. Structural
@@ -317,6 +368,124 @@ Preserve safe library refusal reasons. Raw untrusted exceptions are translated
 once at their adapter, not repeatedly sanitized into an empty generic error.
 A failed HTTP response is not proof the external effect failed.
 
+## Durable operations implementation checkpoint (#625)
+
+The first ORM/DRF vertical is **node drain/enable**, not a production replacement
+for every operation in CONTROL. It uses the canonical catalog and Access migration
+graph. `Operation`, `Step`, `EffectReceipt`, ordered durable resource claims,
+`AuditEvent` and `OutboxEvent` are database records. Admission, claim, catalog intent,
+result/application evidence and publication acknowledgment have independent short
+commit boundaries. No operation model runs an effect from `save` or a signal.
+
+Implemented endpoints are `POST /api/v1/nodes/<uuid>/commands/drain` and `/enable`,
+`GET /api/v1/operations/<uuid>` and
+`GET /api/v1/operations?request_id=<uuid>&epoch=<uuid>`. Node command envelopes use
+schema version, epoch, client request ID, expected catalog revision, UTC deadline
+and empty `params`; they accept no shell, subject or adapter selection. Catalog
+node IDs are stable configuration identities, not puppet runtime incarnations.
+Admission needs the specific `catalog.drain_node`/`enable_node` permission and
+installation-wide membership; queries need `operations.view_operation` and current
+scope. Executor confirmation uses a separately enrolled node-bound service actor
+with `record_node_application`/`observe_node` permissions. A lost owner's rights
+cannot authorize a new stage, but does not erase an already confirmed effect fact.
+
+The worker accepts only the finite managed `set_eligibility(Claim)` adapter port.
+After claim commit it rechecks current authority, target revision and expiry in a
+separate durable dispatch checkpoint. The claim carries its immutable deadline;
+the real receiver must also enforce it after transport waits, before the physical
+effect. A boolean confirmation means the effect is finished and either applied or
+known not applied; an exception/uncertain response records `unknown` and retains
+every claim. Lease expiry, caller timeout and worker restart do not mint a new executor.
+The test composition owns a managed fake adapter and real PostgreSQL connections;
+there is no fake adapter or automatic-success workflow in the production root.
+Safe authorization refusal phrases remain in the scoped operation result and
+audit; the general outbox contains codes and revisions, not credentials or raw
+exceptions. A confirmed receipt for an older configuration still records
+quiescence and releases its claims. It does not mark a newer catalog revision
+applied or overwrite that revision's observation; the result explicitly reports
+`effect_confirmed_prior_revision` and `projection_updated: false`.
+
+| Consumer or handler | Actual remaining dependency before cutover |
+|---|---|
+| Production drain/enable effects | #639 NodeExecutor adapter, runtime/incarnation and physical receipt fencing; bind its managed lifecycle in the controller root |
+| Restart/send | Typed pure inputs exist, but no ORM admission endpoint or effect handler; #639/#640 must provide session identity, encrypted delivery and confirmation ports |
+| Create/update/recycle/delete/wipe, grant activation, credential rotation, terminal and maintenance operations | Finite subject-owned handlers and receipt/recovery rules; not an arbitrary callback registry and not accepted as implemented commands |
+| Project build | #648 has finite DRF admission/status and the durable build process manager below; real scheduler/body/image consumers and privileged deployment remain root bindings, not automatic-success defaults |
+| Worker process | Bounded Runtime-owned `Worker.run_one`/`run_pending` exist; root must wire the real executor, wake/poll and shutdown ownership rather than reuse the old web worker |
+| Realtime publication | Durable outbox publishing seam exists, including duplicate event IDs after lost ACK; #626 connects authorized event fan-out and resync |
+| Grants | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it |
+| Admin and CLI | #638/#642 call the same local service/DRF boundary; remove old admission/workflow owners only when these consumers are connected in the epic |
+| Retention | Completed results become undisclosable after the 90-day prune boundary; request identity cannot be reused. Physical audit/receipt erasure still requires the operator's explicit privacy/retention policy |
+
+This checkpoint does not authorize an old-pool deployment or imply that those
+remaining handlers have passed transport, crash or performance acceptance.
+
+## Durable image builds (#648)
+
+`POST /api/v1/projects/{id}/commands/build` accepts schema version, epoch,
+request ID, expected project revision, execution deadline, an immutable policy ID,
+`mode` (`missing`, `update`, `rebuild`), explicit `target_nodes` and boolean
+`force_safety`. Build deadlines are bounded to two hours (not the short node
+eligibility command's five-minute horizon); each owned subprocess is additionally
+bounded by its remaining execution deadline. Branch, exact commit and manifest digest come from the saved
+policy, not request-supplied shell/argv/paths. Acceptance requires current
+`catalog.build_project`, `operations.view_operation` and their existing scope;
+forcing clone safety additionally requires the actual `builds.force_build`
+permission. Confidential policies are refused until protected manifest
+materialization is bound; ciphertext is never treated as an executable manifest.
+
+The handler uses the same `Operation`, `Step`, admission counts, request identity,
+audit/outbox and resource claims. `BuildRun`, `BuildNodePlan`,
+`AffectedTargetPlan`, stage intents and receipts are metadata with protected
+foreign keys, not another queue or a generic saga description. Claims for the
+shared `build:mirror`, projects, nodes and affected targets remain held across
+unknown outcomes and expired leases. The common worker discovers stale build
+steps for inspection using the original token, never a new destructive attempt.
+
+The complete affected-target plan commits before the first clear. Each target
+records assignment identity, incarnation, revision, generation, role/grant and
+exact source-spec bytes/digest. Clear, wipe, bake, restore and announce have
+separate durable intents. A previously committed intent allows inspection, not
+blind replay. Restoration attempts every affected target whose clear was
+attempted; newer identities/revisions are not overwritten. Original failures and
+individual compensation failures remain separate. Process quiescence and a
+known effect outcome are distinct persisted facts. An unknown-but-stopped process
+still needs effect readback before resource release.
+
+`missing` may skip only with fresh external availability for the pinned source
+digest, persisted as addressed evidence. Desired ORM image state, project
+registration or an Ansible exit code alone are not proof. Host nodes never have
+container templates cleared/baked; mixed scopes send only PVE targets to the image
+adapter. `GET /api/v1/operations/{id}` and request lookup expose bounded stage
+progress, unresolved intents and failure details without a realtime subscription.
+
+The privileged Unix executor checks both OS peer identity and the root-provided
+Step/claim gate. It runs under a distinct non-root UID, never a node-bound
+`Access.kind=service` identity. Its finite protocol carries durable IDs and tokens,
+not keys, inventory, shell or arbitrary arguments. Dispatch consumption commits
+before privileged execution; replay is denied. Disconnect does not undo a result
+or authorize resource release. The isolated Docker SETUP fixture proves separate
+UIDs, an owned socket, rejected foreign peers, scoped dispatch/inspection and a
+real owned subprocess. It is not a PVE build acceptance test.
+
+Root composition supplies named Scheduler, ImageBuilder and NodeExecutor ports
+and their capability preflight. `SafeAnsibleSubprocess` owns process groups through
+timeout/cancel quiescence and bounds output/private log retention; actual known
+secrets are redacted across pipe chunks and excluded from argv/environment.
+Inventory, playbook, private workspace, secret inventory and physical inspection
+are trusted deployment bindings. The Unix client advertises image-builder
+capability only when a fresh physical availability reader is also supplied.
+
+Remaining integration boundaries are explicit: bind real conditional scheduler
+and body consumers (including external spec/body identity fencing), physical image
+revision/readback and Nomad announcement, wire confirmed catalog image projection,
+protected manifest materialization, and configure the worker/executor lifecycle
+and restricted OS/DB credentials in the installation root. No legacy build RPC
+or file journal is used by this handler. Legacy consumer removal belongs to the
+epic cutover; their presence in this source tree is not a runtime fallback.
+Real builds on a new container/PVE installation still require operator-provided
+resources. No old pool or image is an acceptance fixture.
+
 ## Operation, claim and compensation lifecycle
 
 | From | To | Evidence/precondition |
@@ -360,9 +529,56 @@ is a separately recorded fallible stage, never a reason to keep logical access.
 Revocation never reactivates an old grant. Role edits create a new immutable
 bundle and require a new approval; they do not change existing digest bytes.
 
+The Access ORM boundary exposes `Grants.publish_bundle`, `approve_bundle`,
+`read_bundle`, `reserve`, `reservation`, `provision`, `activate`, `revoke`,
+`expire`, `record_retirement`, `resolve_actor` and the explicit message/dispatch
+admission methods. `reserve` accepts either a credential-bound human or an active
+delegated actor, never an owner/holder/force or workspace payload. CreationIntent
+retains the first approved policy SecretVersion reference; retry queries that
+intent instead of fetching the parent's latest policy or creating a second child.
+The injected approval query must validate the exact stored intent binding, not a
+boolean approval supplied by a caller. A grant's public bundle read returns only
+its own pinned role, not other private prompts owned by the same human. Preparation owns the approval evidence;
+Access owns only its immutable reference and the creation request identity.
+
+`RetainedSecrets` is the narrow Secrets composition port used for bundle bytes
+and generated grant credentials: `prepare(actor, RetentionScope, bytes)` performs
+AEAD outside SQL; `commit(actor, PreparedRetention)` repeats target-bound authority
+and inserts those exact prepared IDs/envelope in the aggregate's transaction.
+`read(actor, scope, version_id)` is an internal protected read with checks before
+and after provider I/O, not a general API serializer.
+`check_reference(scope, version_id)` and
+`validate_policy_reference(version_id, project_id=...)` return no ORM object or
+plaintext; they validate current same-target or approved-policy references and
+are safe local checks inside the aggregate transaction. The scope names the actual
+project, human owner, aggregate UUID and purpose. This authority is explicitly
+bound by Access from the stored intent; it does not grant human secret-management
+permissions merely to provision a role's own credential. The standard DRF Token
+row is the framework's credential-bearing plaintext exception described in
+STORAGE.md; RoleBundle, CreationIntent, Grant, events and public metadata contain
+no raw token. Grant metadata refers to the encrypted SecretVersion instead.
+
+Approval, runtime-binding/activation/retirement queries and message/dispatch
+executors default to denial. Binding queries are trusted local authoritative
+reads, not network calls inside transactions. Later Preparation and Sessions
+composition supplies these queries and the physical delivery executor; an
+unbound executor refuses before an allowed effect. `token_context`,
+`current_actor` and `Access` take an explicit grant resolver; browser sessions
+and node service identities cannot become grant contexts. Grant plain-send
+admission carries no assignment claim or git identity; dispatch admission carries
+the current human owner for the separate fenced identity-before-send operation.
+No legacy registry reader, credential import or dual write is used by this path.
+
 Rotation transitions are `staged -> delivering -> active -> retiring -> retired`,
 with `reconciling` on uncertain delivery/revoke and `failed` only on a known safe
-failure. Activation requires the configured addressed receipts; old credentials
+failure. Confirmed partial application plus proven executor quiescence moves to
+`recovery_required`, preserving the known receipt subset and safe reason. It may
+start explicit `restoring_old -> old_restored -> revoking_new -> compensated`
+steps, never replay the original effect. A partially applied compensation ends
+in `partial` with both original and compensation reasons retained; it does not
+pretend rollback completed. Current authorization, version/incarnation and
+external ownership are rechecked before each recovery effect.
+Activation requires the configured addressed receipts; old credentials
 are not retired merely because a send timed out. Build records pinned inputs,
 affected bodies/resources, per-stage receipts and known prior state before any
 removal. Recovery checks current revision/incarnation before restoring anything.

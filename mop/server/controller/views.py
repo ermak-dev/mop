@@ -16,6 +16,14 @@ def exception_handler(error, context):
             'retryable': not unknown}}, status=503)
         response['Cache-Control'] = 'no-store'
         return response
+    from mop.server.operations.service import Refused
+    if isinstance(error, Refused):
+        response = Response({'schema_version': 1, 'error': {'code': error.code,
+            'message': str(error), 'retryable': error.status in (429, 503)}}, status=error.status)
+        response['Cache-Control'] = 'no-store'
+        if error.status == 429:
+            response['Retry-After'] = '1'
+        return response
     from django.core.exceptions import ObjectDoesNotExist
     from mop.server.access.services import Denied, NotVisible
     from .authbackend import AuthenticationUnavailable

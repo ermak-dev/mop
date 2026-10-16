@@ -33,6 +33,7 @@ class Allow:
 # RESULT: реальные User/Group проверяют каждый дополнительный gate, не is_staff/superuser.
 # STATUS: FIXED — see #634
 class CatalogPermissionCases(TransactionTestCase):
+    # Migration seeds, включая restore guard, переживают flush как в foundation.
     serialized_rollback = True
 
     def user(self):
@@ -150,6 +151,7 @@ class CatalogPermissionCases(TransactionTestCase):
 
 
 class CatalogCases(TransactionTestCase):
+    # Без внешней test-транзакции; Django восстанавливает только migration seeds.
     serialized_rollback = True
 
     def setUp(self):
@@ -276,6 +278,58 @@ class CatalogCases(TransactionTestCase):
             models.Project.objects.get(pk=p.id).delete()
         with self.assertRaises(services.UnsafeRemoval):
             self.api.delete_project(self.actor, q.id, expected_revision=q.revision)
+
+    # HYPOTHESIS: пять ключей и раздельные snapshots не дают accepted effective
+    # revision; cross-field batch может сохраниться частично или вопреки узлу.
+    # SOLUTION: конечные definitions, общий resolver и installation-first lock.
+    # RESULT: PG16 red (query отсутствовал), затем 65/65 green на PG16 и PG17.
+    # STATUS: FIXED — see #634
+    def test_effective_settings_are_revisioned_authorized_and_durable(self):
+        self.assertTrue(callable(getattr(self.api, 'get_effective_settings', None)),
+                        'catalogue has no effective-setting query')
+        node = self.node()
+        initial = self.api.get_installation_settings(self.actor)
+        installed = self.api.set_installation_settings(self.actor,
+            {'public_origin': 'https://pool.example.test', 'pool_home': '/srv/pool',
+             'pool_user': 'puppet', 'log_level': 'warning', 'sweep_timeout_s': 400},
+            expected_revision=initial.revision)
+        ns = self.api.get_node_settings(self.actor, node.id)
+        ns = self.api.set_node_settings(self.actor, node.id,
+            {'log_level': 'debug', 'sweep_timeout_s': 300}, expected_revision=ns.revision)
+        effective = self.api.get_effective_settings(self.actor, node_id=node.id,
+                                                    require=('public_origin', 'pool_home'))
+        self.assertEqual((effective.installation_revision, effective.node_revision),
+                         (installed.revision, ns.revision))
+        self.assertEqual(dict(effective.values)['log_level'], 'debug')
+        self.assertEqual(dict(effective.sources)['log_level'], 'node')
+        self.assertEqual(dict(effective.sources)['public_origin'], 'installation')
+        self.assertEqual(effective.installation_applied_revision, None)
+        self.assertEqual(effective.node_applied_revision, None)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'puppet_memory_mb': 16384},
+                                               expected_revision=installed.revision)
+        self.assertEqual(self.api.get_installation_settings(self.actor), installed)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'sweep_free_min_gb': 10},
+                                               expected_revision=installed.revision)
+        self.assertEqual(self.api.get_installation_settings(self.actor), installed)
+        # Installation edit тоже проверяет уже принятые узловые overrides.
+        ns = self.api.set_node_settings(self.actor, node.id, {'sweep_free_min_gb': 40},
+                                        expected_revision=ns.revision)
+        with self.assertRaises(ValueError):
+            self.api.set_installation_settings(self.actor, {'gc_free_min_gb': 50},
+                                               expected_revision=installed.revision)
+        self.assertEqual(self.api.get_installation_settings(self.actor), installed)
+        self.assertTrue(services.Catalog().get_effective_settings)
+        with self.assertRaises(PermissionError):
+            services.Catalog().get_effective_settings(self.actor, node_id=node.id)
+        with patch.object(models.InstallationSetting.objects, 'filter', side_effect=DatabaseError('offline')):
+            with self.assertRaises(DatabaseError):
+                self.api.get_effective_settings(self.actor)
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                models.NodeSetting.objects.create(node_id=node.id, key='pool_home',
+                    value_kind='text', text_value='/forged')
 
     def test_typed_settings_invalid_batch_rolls_back_and_node_scope_is_finite(self):
         initial = self.api.get_installation_settings(self.actor)

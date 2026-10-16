@@ -3,9 +3,9 @@ from uuid import UUID
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from mop.server.sessions import protocol as p
-from mop.server.sessions.services import MachineExecution, Conflict, Unavailable
+from mop.server.sessions.services import Conflict, Unavailable
 from django.db import transaction
-from .runtime import installation_snapshot, require_restore_ready
+from .runtime import installation_snapshot, require_restore_ready, machine_execution_service
 
 
 def authority():
@@ -20,7 +20,7 @@ def authority():
 
 # #625 связывает existing Operation/Step port здесь, не в sessions import graph.
 # Отсутствие #635/#640 adapters — явный 503, не fake authority/вторая очередь.
-execution = MachineExecution(installation=authority)
+execution = machine_execution_service(installation=authority)
 
 
 def query(request, names, *, optional=()):

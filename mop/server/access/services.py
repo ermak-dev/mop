@@ -34,6 +34,8 @@ def _identity(user, principal):
     if principal.kind == 'service':
         if user.has_usable_password() or user.is_staff or user.is_superuser or principal.bound_node_id is None:
             raise Denied('invalid service identity')
+        if not Catalog.node_is_current(principal.bound_node_id):
+            raise Denied('service node is unavailable')
         return None
     if principal.kind != 'human' or principal.bound_node_id is not None:
         raise Denied('invalid human identity')
@@ -94,12 +96,18 @@ def _session_user(session, user):
 
 
 @sensitive_variables('key')
-def token_context(key):
+def token_context(key, *, grants=None):
     if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{40}', key):
         raise Denied('token is unavailable')
     user_id = Token.objects.filter(key=key).values_list('user_id', flat=True).first()
     if user_id is None:
         raise Denied('token revoked or rotated')
+    if m.Principal.objects.filter(user_id=user_id, kind='grant').exists():
+        if grants is None:
+            raise Denied('delegation resolver is not bound')
+        # Проверенный resolver делает provider I/O вне SQL. Human/service path
+        # остаётся штатным; сессия браузера не становится grant credential.
+        return grants.token_context(key)
     with transaction.atomic():
         user = get_user_model().objects.select_for_update().get(pk=user_id)
         if not Token.objects.filter(user=user, key=key).exists():
@@ -173,7 +181,11 @@ def _resolve(actor):
     return user, principal
 
 
-def current_actor(actor):
+def current_actor(actor, *, grants=None):
+    if type(actor) is ActorContext and actor.kind is PrincipalKind.GRANT:
+        if grants is None:
+            raise Denied('delegation resolver is not bound')
+        return grants.resolve_actor(actor)
     _resolve(actor)
     return actor
 
@@ -182,19 +194,59 @@ def _global(user):
     return user.is_superuser or m.AllProjectMembership.objects.filter(user=user, source__enabled=True).exists()
 
 
+def _require_permissions(user, action, reason):
+    """Одна permission matrix для текущего actor и закреплённого human owner."""
+    if action not in ACTIONS:
+        raise Denied('action is not registered')
+    for permission in ACTION_PERMISSIONS.get(action, (action,)):
+        app, code = permission.split('.', 1)
+        if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
+                or not user.has_perm(permission)):
+            raise Denied(reason)
+
+
 def visible_project_ids(actor):
     user, principal = _resolve(actor)
     if principal.kind != 'human':
         raise Denied('human project query required')
     if _global(user):
-        return tuple(catalog.Project.objects.order_by('pk').values_list('pk', flat=True))
-    return tuple(catalog.Project.objects.filter(projectmembership__user=user,
-        projectmembership__source__enabled=True).order_by('pk').values_list('pk', flat=True).distinct())
+        return Catalog.current_project_ids()
+    memberships = m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True)
+    return Catalog.current_project_ids(memberships)
 
 
 class Access:
     """Реализация Catalog.Authorizer; никаких callback из request/payload."""
+    def __init__(self, *, grants=None):
+        self.grants = grants
+
+    def authorize_owner(self, owner_id, action, *, project_ids=()):
+        """Локальная проверка текущего human owner для закреплённого server proof.
+
+        Не создаёт ActorContext и не допускает команду от имени владельца.
+        Вызывается только trusted прикладным слоем, не HTTP по owner JSON.
+        """
+        user = get_user_model().objects.filter(pk=owner_id).first()
+        if user is None:
+            raise Denied('human owner is unavailable')
+        principal, _ = _principal(user)
+        if principal.kind != 'human':
+            raise Denied('human owner required')
+        projects = set(project_ids)
+        if projects != set(Catalog.current_project_ids(projects)):
+            raise Denied('human owner project is unavailable')
+        if not _global(user):
+            allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
+            if not projects <= allowed:
+                raise Denied('human owner no longer belongs to project')
+        _require_permissions(user, action, 'current human owner permission required')
+
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
+        if type(actor) is ActorContext and actor.kind is PrincipalKind.GRANT:
+            if self.grants is None:
+                raise Denied('delegation resolver is not bound')
+            return self.grants.authorize(actor, action, project_ids=project_ids,
+                                         node_ids=node_ids, client_ids=client_ids)
         user, principal = _resolve(actor)
         projects, nodes, clients = set(project_ids), set(node_ids), set(client_ids)
         if principal.kind == 'service':
@@ -202,12 +254,13 @@ class Access:
                 raise Denied('service action or node is outside enrollment')
             node_projects = set(catalog.NodeProject.objects.filter(node_id=principal.bound_node_id).values_list('project_id', flat=True))
             allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
-            if not projects <= node_projects & allowed:
+            if not projects <= node_projects & allowed or projects != set(Catalog.current_project_ids(projects)):
                 raise Denied('service project is outside enrollment')
         else:
-            if len(nodes) != catalog.Node.objects.filter(pk__in=nodes).count():
+            if nodes != set(Catalog.current_node_ids(nodes)):
                 raise NotVisible('resource not found')
-            projects.update(catalog.NodeProject.objects.filter(node_id__in=nodes).values_list('project_id', flat=True))
+            node_projects = catalog.NodeProject.objects.filter(node_id__in=nodes).values_list('project_id', flat=True)
+            projects.update(Catalog.current_project_ids(node_projects))
             if clients != set(m.ClientOwnership.objects.filter(client_id__in=clients, user=user).values_list('client_id', flat=True)):
                 raise NotVisible('resource not found')
             allowed = set(visible_project_ids(actor))
@@ -215,13 +268,7 @@ class Access:
                 raise NotVisible('resource not found')
             if action in GLOBAL_ACTIONS and not _global(user):
                 raise Denied('installation-wide scope required')
-        if action not in ACTIONS:
-            raise Denied('action is not registered')
-        for permission in ACTION_PERMISSIONS.get(action, (action,)):
-            app, code = permission.split('.', 1)
-            if (not Permission.objects.filter(content_type__app_label=app, codename=code).exists()
-                    or not user.has_perm(permission)):
-                raise Denied('action permission required')
+        _require_permissions(user, action, 'action permission required')
 
 
 class AuthorizedCatalog(Catalog):
@@ -321,10 +368,13 @@ def enroll_service(username, node_id, *, project_ids, permissions):
     if not permissions or not set(permissions) <= SERVICE_ACTIONS:
         raise ValueError('service permissions exceed enrollment allowlist')
     with transaction.atomic():
-        projects = set(catalog.Project.objects.select_for_update().filter(pk__in=project_ids).values_list('pk', flat=True))
+        projects = set(catalog.Project.objects.select_for_update().filter(pk__in=project_ids)
+                       .order_by('pk').values_list('pk', flat=True))
         catalog.Node.objects.select_for_update().get(pk=node_id)
+        if not Catalog.node_is_current(node_id):
+            raise Denied('service node is unavailable')
         assigned = set(catalog.NodeProject.objects.filter(node_id=node_id).values_list('project_id', flat=True))
-        if projects != set(project_ids) or not projects <= assigned:
+        if projects != set(project_ids) or projects != set(Catalog.current_project_ids(projects)) or not projects <= assigned:
             raise ValueError('service projects must be assigned to its node')
         source, _ = m.IdentitySource.objects.get_or_create(name='local', defaults={'kind': 'local'})
         if get_user_model().objects.filter(username=username).exists():

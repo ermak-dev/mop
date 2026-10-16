@@ -93,7 +93,7 @@ class ResultReceipt(ImmutableRecord):
         constraints = Record.Meta.constraints + [
             models.CheckConstraint(condition=Q(expected_revision__gte=1,
                 resulting_revision=models.F('expected_revision') + 1), name='receipt_revision_successor'),
-            models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='receipt_known_outcome'),
+            models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='execution_receipt_known_outcome'),
         ]
 
 

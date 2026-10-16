@@ -69,6 +69,8 @@ stages: [test, deploy]
         pip wheel -q --disable-pip-version-check --wheel-dir /opt/mop-wheels '.[server]' jinja2 'setuptools>=64'
         pip install -q --root-user-action=ignore --disable-pip-version-check --no-index --find-links /opt/mop-wheels 'mop[server]' jinja2
         export PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/mop-wheels
+        # Только новая owned Docker fixture: отдельный uid и Unix executor.
+        python3 tests/_build_uid_fixture.py
         for attempt in $(seq 1 60); do
           pg_isready -h postgres -U mop_ci && break
           test "$attempt" -lt 60
@@ -104,6 +106,8 @@ stages: [test, deploy]
 test:py3.12:
   extends: .tests
   variables:
+    # Полный строгий suite, включая Access и Secret cases, без narrow overrides.
+    TESTS: bin/mop dev test -v
     PYTHON_IMAGE: python:3.12-slim-trixie
     POSTGRES_IMAGE: postgres:16-bookworm
     POSTGRES_MAJOR: "16"
@@ -111,6 +115,8 @@ test:py3.12:
 controller:pg17:
   extends: .tests
   variables:
+    # Тот же полный строгий suite на втором поддержанном PostgreSQL.
+    TESTS: bin/mop dev test -v
     PYTHON_IMAGE: python:3.13-slim-trixie
     POSTGRES_IMAGE: postgres:17-bookworm
     POSTGRES_MAJOR: "17"
