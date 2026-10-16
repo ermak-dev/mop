@@ -201,6 +201,30 @@ def _archive_plan(source, connection):
     return b''.join(plan)
 
 
+def _verify_restored_secrets(using):
+    from django.apps import apps
+    if not apps.is_installed('mop.server.secrets'):
+        return
+    from django.conf import settings
+    from .bootstrap import secret_provider
+    from .models import Installation
+    from mop.server.secrets.crypto import SecretCryptoError
+    from mop.server.secrets.services import verify_storage, StorageUnavailable
+    installation = Installation.objects.using(using).get(pk=1)
+    def provider(key_id):
+        return secret_provider(settings.BOOTSTRAP, installation_id=installation.identity,
+            expected_root_digest=installation.root_digest, key_id=key_id)
+    failure = None
+    try:
+        verify_storage(provider, installation_id=installation.identity, using=using)
+    except SecretCryptoError:
+        failure = 'restored secret authentication failed; maintenance recovery required'
+    except StorageUnavailable:
+        failure = 'restored secret storage is unavailable; maintenance recovery required'
+    if failure:
+        raise RuntimeError(failure)
+
+
 def restore(path, using='default'):
     from .runtime import _maintenance_role, _guard_row, _verify_installation_state, short_transaction
     from .models import Installation
@@ -229,6 +253,7 @@ def restore(path, using='default'):
         row.save(using=using, update_fields=['epoch', 'effects_enabled'])
     # Root-файл и schema loader читаются без SQL locks; guard ещё dirty.
     _verify_installation_state(using)
+    _verify_restored_secrets(using)
     with short_transaction(using):
         guard = _guard_row(using, lock=True)
         current = Installation.objects.using(using).select_for_update().get(pk=1)
