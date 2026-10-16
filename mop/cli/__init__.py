@@ -395,6 +395,10 @@ def render_reference(entries):
               '`MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget '
               'the selected credential. Legacy `--server` does not authorize remote control.', '',
               'Bound consumers: ' + bound + '. `mop diagnose` is offline context validation only.', '',
+              'The restart wire adapter requires the published restart backend and its physical '
+              'binding. This combined backend graph still needs restart/build operation-model '
+              'integration; no native restart effect is claimed here. Fresh restart and privileged '
+              'takeover remain unsupported.', '',
               'Not bound (exit 2 before any network mutation): ' + blocked + '.', '',
               '`mop mcp --check` can read the authenticated identity. The normal MCP runtime is '
               'unsupported until server action permissions and the private endpoint/inbox lifecycle '

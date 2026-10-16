@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop import cli
 from mop.cli import _control
 from mop.client import control as api
-from control_consumers import KEY, EPOCH, NODE, DEADLINE, TOKEN, node_operation
+from control_consumers import KEY, EPOCH, NODE, DEADLINE, TOKEN, PUPPET, node_operation, pool_page, puppet_row
 
 
 @contextlib.contextmanager
@@ -95,6 +95,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path.path == '/api/v1/usage':
             from usage_query import page
             self.reply(200, page())
+        elif path.path == '/api/v1/puppets':
+            self.reply(200, pool_page())
+        elif path.path == '/api/v1/puppets/'+PUPPET:
+            self.reply(200, {'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
         elif path.path == '/api/v1/operations':
             query = parse_qs(path.query)
             if query != {'request_id': [KEY], 'epoch': [EPOCH]}:
@@ -218,6 +222,19 @@ result = json.loads(private.getvalue())
 assert result['source'] == 'cliproxy' and result['source_complete'] is False
 assert result['attribution']['puppet'] == 'unavailable'
 assert result['groups'][0]['counters']['cache_read']['value'] is None
+from mop.cli.core import list as listing, detail
+private = io.StringIO()
+with contextlib.redirect_stdout(private):
+    assert listing.main([]) == 0
+snapshot = json.loads(private.getvalue())
+assert snapshot['coverage']['pending_operations'] is False
+assert snapshot['handshake_complete'] is False
+row = snapshot['results'][0]
+assert isinstance(row['revision'], str) and row['desired']['revision'] == '7'
+private = io.StringIO()
+with contextlib.redirect_stdout(private):
+    assert detail.main([row['id']]) == 0
+assert json.loads(private.getvalue())['puppet'] == row
 assert not any(x == 'django' or x.startswith(('django.', 'mop.server.', 'nats.')) for x in sys.modules)
 '''
         env = {key: value for key, value in os.environ.items() if not key.startswith(('MOP_', 'PYTHON'))}

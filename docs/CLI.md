@@ -10,9 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop addresses`, `mop build`, `mop diagnose`, `mop health`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop stat`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop addresses`, `mop build`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`. `mop diagnose` is offline context validation only.
 
-Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop delete`, `mop detail`, `mop dispatch`, `mop driver build`, `mop landing`, `mop list`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop restart`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop session history`, `mop session terminal`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
+The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
+
+Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop delete`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -128,6 +130,18 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 ```
 
+#### mop detail
+
+```text
+mop detail <id>: read one authorized puppet projection
+
+Returns the server's versioned detail, including unknown observations and the
+separate desired revision. The projection clock is not a mutation CAS revision.
+A missing incarnation is unavailable, not an inferred live session or address.
+No clone scan, transcript path, node RPC or local credential store is used.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
+```
+
 #### mop diagnose
 
 ```text
@@ -180,10 +194,16 @@ went away is released with --force.
 #### mop list
 
 ```text
-pool puppets: who's where, busy or free, what LLM it runs on
+mop list [--project-id <id>] [--cursor VALUE] [--page-size N] [--all-pages]
 
-"free" means the clone has no unsaved work, not that the session is silent:
-the dispatch decision rests on this.
+Read the controller's authorized pool projection, not a client-built roster.
+One bounded page is returned with its snapshot id, opaque next cursor and
+coverage. --all-pages emits canonical pages of the same snapshot as separate
+JSON lines. It never polls nodes or invents facts missing from the server.
+
+Unknown observations, unavailable usage/endpoints/pending-operation coverage and
+an incomplete realtime handshake remain explicit. Silent does not mean free.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop master
@@ -261,13 +281,20 @@ refused with that master's name; --force acts anyway and says whose it was.
 #### mop restart
 
 ```text
-restart a stuck puppet: mop restart <name> [--force]
+mop restart <id> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-The clone and branch survive a restart — the wrapper comes up on the same
-directory.
+Submit the finite durable restart action, keeping the clone and branch. With no
+explicit binding, first read authorized detail and use desired.revision, never
+the observation/projection clock. The request key and absolute UTC --not-after
+(default two minutes) are fixed before that query. A full explicit binding needs
+no roster read; the server still rechecks current identity, scope and ownership.
 
-Another master's puppet (work in its clone, or dispatched minutes ago) is
-refused with that master's name; --force acts anyway and says whose it was.
+accepted is not restarted: outstanding/unknown operations return exit 3. Recover
+through mop operation with the original key/epoch; neither a lost reply nor wait
+reposts the effect. --force and --fresh are explicitly unsupported before I/O.
+The server must supply its physical restart binding; an unavailable API never
+opens SSH or falls back to the old bus. MCP requires the full explicit binding.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop send

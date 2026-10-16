@@ -4,7 +4,8 @@ HYPOTHESIS: header double не доказывает standard Token/auth или d
 SOLUTION: свой TLS listener перед Django test handler с независимыми DB connections;
 ответ теряется только после настоящего COMMIT. Effect заменён контролируемой
 распиской существующего node handler, не операцией на живом пуле.
-RESULT: четыре native TLS/DRF checks прошли на собственных PG16 и PG17 fixtures.
+RESULT: пять native TLS/DRF checks прошли на собственных PG16 и PG17 fixtures;
+list/detail сохраняют unknown/coverage и отдельную desired CAS revision.
 STATUS: FIXED — see #642; эти cases не принимают отсутствующие consumers.
 """
 import contextlib
@@ -126,6 +127,43 @@ class NativeControlClient(TransactionTestCase):
             self.assertEqual([method for method, _ in server.calls], ['POST', 'GET', 'GET'])
             self.assertEqual(self.m.Operation.objects.count(), 1)
             self.assertEqual(self.m.EffectReceipt.objects.count(), 1)
+        self.assertNotIn(self.token, out.getvalue()+err.getvalue())
+
+    def test_real_pool_and_detail_preserve_unknowns_and_the_desired_cas_revision(self):
+        from django.contrib.auth.models import Permission
+        from mop.server.controller.runtime import assignments_service
+        self.user.user_permissions.add(
+            Permission.objects.get(content_type__app_label='catalog', codename='view_pool'),
+            Permission.objects.get(content_type__app_label='execution', codename='assign_work'))
+        assignments = assignments_service()
+        target = assignments.create(self.actor, project_id=self.project.pk, node_id=self.node.pk,
+            role='worker', bundle_digest='a'*64, grant_id=uuid4(), expires_at=timezone.now()+timedelta(hours=1))
+        # Use cases возвращают materialized values, не Django instances.
+        # Первый fixture red на .pk исправлен чтением настоящего binding DTO.
+        incarnation = assignments.activate(self.actor, target.id, expected_revision=1, executor_epoch=uuid4())
+        current = assignments.current(project_id=self.project.pk, target_id=target.id)
+        self.assertIsNotNone(current)
+        out, err = io.StringIO(), io.StringIO()
+        with self.https() as (server, client):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(['list', '--project-id', str(self.project.pk)]), 0, err.getvalue())
+            page = json.loads(out.getvalue())
+            self.assertEqual(page['results'][0]['id'], str(target.id))
+            self.assertIsNone(page['results'][0]['name'])
+            self.assertEqual(page['results'][0]['state']['kind'], 'unknown')
+            self.assertFalse(page['coverage']['pending_operations'])
+            self.assertFalse(page['handshake_complete'])
+            self.assertNotIn('pending_operations', page)
+            view = client.read_puppet(str(target.id))
+            self.assertEqual(view.target.revision, str(current.revision))
+            self.assertNotEqual(view.revision, view.desired_revision)
+            self.assertEqual(view.target.incarnation, str(incarnation.id))
+            from mop.server.operations.commands import parse_restart
+            command = client.prepare_restart(view.target, epoch=view.epoch,
+                not_after=(timezone.now()+timedelta(minutes=2)).isoformat())
+            parsed = parse_restart(str(target.id), json.loads(command.body))
+            self.assertEqual(parsed.intent.expected_revision, current.revision)
+            self.assertEqual([method for method, _ in server.calls], ['GET', 'GET'])
         self.assertNotIn(self.token, out.getvalue()+err.getvalue())
 
     def test_real_build_acceptance_pins_existing_policy_and_recovers_by_get(self):

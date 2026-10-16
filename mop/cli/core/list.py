@@ -1,49 +1,40 @@
-"""pool puppets: who's where, busy or free, what LLM it runs on
+"""mop list [--project-id <id>] [--cursor VALUE] [--page-size N] [--all-pages]
 
-"free" means the clone has no unsaved work, not that the session is silent:
-the dispatch decision rests on this.
+Read the controller's authorized pool projection, not a client-built roster.
+One bounded page is returned with its snapshot id, opaque next cursor and
+coverage. --all-pages emits canonical pages of the same snapshot as separate
+JSON lines. It never polls nodes or invents facts missing from the server.
+
+Unknown observations, unavailable usage/endpoints/pending-operation coverage and
+an incomplete realtime handshake remain explicit. Silent does not mean free.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 """
-from mop.cli import lib
-from mop.common import puppets
+from mop.cli import _control
 
-# Ширины фиксированные, и это плата за потоковый вывод: выровнять по самой
-# длинной строке можно только собрав их все, то есть промолчав до конца обмера.
-# Значение шире своей колонки не режется, а сдвигает хвост строки — как в df.
-# Последняя колонка (origin) не добивается вовсе.
+MCP = {"annotations": "readonly", "actions": ["catalog.view_pool"], "args": [
+    {"name": "project_id", "type": "string", "flag": "--project-id", "help": "authorized project resource id"},
+    {"name": "cursor", "type": "string", "flag": "--cursor", "help": "opaque page cursor from the server"},
+    {"name": "page_size", "type": "integer", "flag": "--page-size", "help": "page size within 1..500"},
+    {"name": "all_pages", "type": "boolean", "flag": "--all-pages", "help": "emit bounded canonical pages without building another roster"}]}
+
+# Чистый formatter прежнего PuppetRow нужен старым локальным render-проверкам;
+# сетевого reader и решения о доступности здесь больше нет.
 WIDTHS = (15, 7, 8, 46, 10, 7)
 
 
 def place(row):
-    """Колонка «место»: клон + target папета, обмер спросом (du без кэша).
-    Прочерк — обмер не доехал: не ноль, ноль был бы «измерено и пусто»."""
+    """Прочерк — неизвестно, не измеренный ноль."""
     kb = row.disk_kb
     if kb is None:
-        return "-"
-    return f"{kb / 2**20:.0f} GB" if kb >= 2**20 else f"{kb / 2**10:.0f} MB"
+        return '-'
+    return f'{kb / 2**20:.0f} GB' if kb >= 2**20 else f'{kb / 2**10:.0f} MB'
 
 
-def line(r):
-    s = r.render()
-    cells = (s["name"], s["node"], s["alloc_status"], s["state"], s["owner"], place(r))
-    return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + s["origin"]
+def line(row):
+    value = row.render()
+    cells = (value['name'], value['node'], value['alloc_status'], value['state'], value['owner'], place(row))
+    return '  '.join(cell.ljust(width) for cell, width in zip(cells, WIDTHS)) + '  ' + value['origin']
 
 
 def main(argv):
-    if argv:
-        lib.usage(__doc__)
-    # Печатаем по мере готовности: состояния всего пула приходят за десятые
-    # доли секунды, а обмер места — секунды, и собирать таблицу целиком значит
-    # молчать всё это время. Порядок здесь — по готовности, а не по имени.
-    rows = []
-    for r in puppets.puppet_rows_stream():
-        print(line(r), flush=True)
-        rows.append(r)
-    if not rows:
-        print("no puppets")
-    print("pool:")
-    print("\n".join(lib.pool_lines()))
-
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+    return _control.invoke('list', argv)

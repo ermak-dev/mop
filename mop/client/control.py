@@ -107,6 +107,11 @@ def _key(value):
     return value
 
 
+def new_request_id(value: str | None = None) -> str:
+    """Единственный transient key фиксируется и проверяется до первого I/O."""
+    return _key(str(uuid4()) if value is None else value)
+
+
 def _deadline(value):
     valid = False
     if isinstance(value, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)", value):
@@ -362,6 +367,38 @@ class ProjectPage:
     next_cursor: str | None = field(repr=False)
 
 
+@dataclass(frozen=True)
+class PuppetView:
+    schema_version: int
+    epoch: str
+    id: str
+    incarnation: str | None
+    revision: str
+    desired_revision: str
+    data: Mapping = field(repr=False)
+
+    @property
+    def target(self) -> Target:
+        # Projection clock включает source observations и не является CAS
+        # Assignment. Мутации связываются только с desired.revision.
+        if self.incarnation is None or self.data['deleted']:
+            raise ClientError('current puppet incarnation is unavailable')
+        return Target(self.id, self.incarnation, self.desired_revision)
+
+
+@dataclass(frozen=True)
+class PuppetPage:
+    schema_version: int
+    epoch: str
+    items: tuple[PuppetView, ...]
+    snapshot_id: str
+    event_cursor: str = field(repr=False)
+    next_cursor: str | None = field(repr=False)
+    coverage: Mapping = field(repr=False)
+    handshake_complete: bool
+    data: Mapping = field(repr=False)
+
+
 _STATES = frozenset(("accepted", "running", "succeeded", "refused", "expired", "cancelled",
                      "failed", "partial", "reconciling", "unknown"))
 _TERMINAL = _STATES - {"accepted", "running", "reconciling"}
@@ -445,7 +482,7 @@ def _json(raw):
                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid JSON number")))
         if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != 1:
             raise ValueError("unsupported schema")
-        if "epoch" in data:
+        if "epoch" in data and not (data['epoch'] is None and 'error' in data):
             _identity(data["epoch"])
         frozen = _freeze(data)
     except (ValueError, TypeError, RecursionError, ClientError):
@@ -453,6 +490,29 @@ def _json(raw):
     if failed:
         raise ProtocolError("invalid control API response")
     return frozen
+
+
+def _puppet_view(data, epoch):
+    failed = False
+    try:
+        _key(epoch)
+        _require(isinstance(data, Mapping))
+        for name in ('id', 'project_id', 'node_id'):
+            _key(data[name])
+        incarnation = data['incarnation']
+        if incarnation is not None:
+            _key(incarnation)
+        _revision(data['revision'])
+        desired = data['desired']
+        _require(isinstance(desired, Mapping))
+        _revision(desired['revision'])
+        _require(int(desired['revision']) >= 1 and data['kind'] == 'puppet' and type(data['deleted']) is bool)
+        result = PuppetView(1, epoch, data['id'], incarnation, data['revision'], desired['revision'], data)
+    except (KeyError, TypeError, ClientError):
+        failed = True
+    if failed:
+        raise ProtocolError('invalid puppet projection')
+    return result
 
 
 def _operation(data, epoch):
@@ -660,30 +720,30 @@ class Client:
 
     def prepare_restart(self, target: Target, *, epoch: str, not_after: str,
                         request_id: str | None = None, fresh: bool = False) -> PreparedCommand:
-        return PreparedCommand("restart", target, epoch, str(uuid4()) if request_id is None else request_id,
+        return PreparedCommand("restart", target, epoch, new_request_id(request_id),
                                not_after, fresh=fresh)
 
     def prepare_send(self, target: Target, *, epoch: str, not_after: str, message: str,
                      request_id: str | None = None, priority: str = "next", wait_seconds: int = 0,
                      notify_when_idle: bool = False) -> PreparedCommand:
-        return PreparedCommand("send", target, epoch, str(uuid4()) if request_id is None else request_id,
+        return PreparedCommand("send", target, epoch, new_request_id(request_id),
                                not_after, message=message, priority=priority,
                                wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
 
     def prepare_node_drain(self, node_id: str, *, epoch: str, expected_revision: str,
                            not_after: str, request_id: str | None = None) -> NodeCommand:
-        return NodeCommand("drain", node_id, epoch, str(uuid4()) if request_id is None else request_id,
+        return NodeCommand("drain", node_id, epoch, new_request_id(request_id),
                            not_after, expected_revision)
 
     def prepare_node_enable(self, node_id: str, *, epoch: str, expected_revision: str,
                             not_after: str, request_id: str | None = None) -> NodeCommand:
-        return NodeCommand("enable", node_id, epoch, str(uuid4()) if request_id is None else request_id,
+        return NodeCommand("enable", node_id, epoch, new_request_id(request_id),
                            not_after, expected_revision)
 
     def prepare_build(self, project_id: str, *, policy_id: str, epoch: str, expected_revision: str,
                       not_after: str, target_nodes: tuple[str, ...], mode: str = 'missing',
                       request_id: str | None = None) -> BuildCommand:
-        return BuildCommand(project_id, policy_id, epoch, str(uuid4()) if request_id is None else request_id,
+        return BuildCommand(project_id, policy_id, epoch, new_request_id(request_id),
                             not_after, expected_revision, target_nodes, mode)
 
     def _exchange(self, method, path, body=None, *, command=None, budget=None):
@@ -809,6 +869,9 @@ class Client:
             target = result.data['target']
             if target.get('kind') != kind or target.get('source_revision') != command.expected_revision:
                 raise ProtocolError('operation source binding mismatch')
+        if type(command) is PreparedCommand and result.data['target'].get('kind') == 'puppet':
+            if result.data['target'].get('source_revision') != command.target.revision:
+                raise ProtocolError('puppet source binding mismatch')
         if type(command) is BuildCommand:
             build = result.data['build']
             if (build['policy_id'] != command.policy_id or build['mode'] != command.mode or
@@ -978,6 +1041,8 @@ class Client:
 
     @staticmethod
     def _snapshot(data):
+        if not isinstance(data.get('epoch'), str):
+            raise ProtocolError('missing snapshot epoch')
         pending = data.get("pending_operations", ())
         if not isinstance(pending, tuple):
             raise ProtocolError("invalid pending operations")
@@ -999,6 +1064,48 @@ class Client:
 
     def puppet(self, puppet_id: str) -> Snapshot:
         return self._snapshot(self._get("/api/v1/puppets/" + _identity(puppet_id)))
+
+    def read_puppet(self, puppet_id: str) -> PuppetView:
+        snapshot = self.puppet(_key(puppet_id))
+        result = _puppet_view(snapshot.data.get('puppet'), snapshot.epoch)
+        if result.id != puppet_id:
+            raise ProtocolError('puppet resource identity mismatch')
+        return result
+
+    def puppets_page(self, *, project_id: str | None = None, cursor: str | None = None,
+                     page_size: int = 100) -> PuppetPage:
+        if project_id is not None:
+            _key(project_id)
+        data = self._get('/api/v1/puppets?' + self._page_query(page_size, cursor, project_id))
+        failed = False
+        try:
+            _key(data['epoch'])
+            _key(data['snapshot_id'])
+            _cursor(data['cursor'])
+            rows, following, coverage = data['results'], data['next_cursor'], data['coverage']
+            _require(isinstance(rows, tuple) and len(rows) <= page_size)
+            if following is not None:
+                _cursor(following)
+            required = {'catalog', 'assignments', 'observations', 'operation_publication',
+                        'pending_operations', 'endpoints', 'telemetry', 'usage'}
+            _require(isinstance(coverage, Mapping) and required <= coverage.keys() and
+                     all(type(value) is bool for value in coverage.values()) and
+                     type(data['handshake_complete']) is bool)
+            items = tuple(_puppet_view(row, data['epoch']) for row in rows)
+            _require(len({item.id for item in items}) == len(items))
+            if project_id is not None:
+                _require(all(item.data['project_id'] == project_id for item in items))
+            result = PuppetPage(1, data['epoch'], items, data['snapshot_id'], data['cursor'],
+                                following, coverage, data['handshake_complete'], data)
+        except (KeyError, TypeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError('invalid puppet page')
+        return result
+
+    def puppet_pages(self, *, project_id: str | None = None, page_size: int = 100) -> Iterator[PuppetPage]:
+        return self._pages(lambda cursor: self.puppets_page(project_id=project_id, cursor=cursor, page_size=page_size),
+                           lambda page: ((page.epoch, page.snapshot_id, page.event_cursor), page.next_cursor))
 
     def operations_page(self, *, cursor: str | None = None, page_size: int = 100) -> Page:
         data = self._get("/api/v1/operations?" + self._page_query(page_size, cursor))

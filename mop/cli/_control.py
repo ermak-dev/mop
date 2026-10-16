@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
-from uuid import uuid4
 
 from mop.client import control as api
 
@@ -29,17 +28,16 @@ SURFACES = dict.fromkeys((
     'master', 'code', 'tail', 'stat', 'project add', 'project delete', 'project limit',
     'node', 'node forget', 'secret file', 'secret var', 'build', 'driver build',
     'session history', 'session terminal', 'server doctor', 'server gc', 'server sweep',
-    'server disk', 'server proxykey', 'login', 'mcp'), 'unsupported')
+    'server disk', 'server proxykey', 'server user', 'server user add', 'server user delete',
+    'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
-                              'node up', 'operation', 'addresses', 'stat', 'build'), 'bound'))
+                              'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
 GAPS = {
-    'list': 'puppet projection queries', 'detail': 'puppet detail queries',
-    'agents': 'puppet queries and live address aggregation',
+    'agents': 'live address aggregation and private endpoint inbox binding',
     'add': 'role creation admission and readiness',
-    'restart': 'restart admission and target query',
     'update': 'update admission', 'delete': 'delete admission',
     'recycle': 'recycle admission', 'wipe': 'wipe admission',
     'stop': 'stop-job admission', 'send': 'message admission/receipts',
@@ -115,6 +113,11 @@ def route(modname, argv):
         if modname.startswith(prefix + '.'):
             name = group + ' ' + modname.rsplit('.', 1)[-1]
             return name if name in SURFACES else None
+    if modname == 'mop.cli.server.user':
+        return 'server user'
+    if modname.startswith('mop.cli.server.user.'):
+        name = 'server user ' + modname.rsplit('.', 1)[-1]
+        return name if name in SURFACES else None
     if modname.startswith('mop.cli.server.'):
         name = 'server ' + modname.rsplit('.', 1)[-1]
         return name if name in SURFACES else None
@@ -226,10 +229,10 @@ def parser(words):
     return result
 
 
-def _operation_options(p):
+def _operation_options(p, *, binding_required=True):
     p.add_argument('--request-id')
-    p.add_argument('--epoch', required=True)
-    p.add_argument('--expected-revision', required=True)
+    p.add_argument('--epoch', required=binding_required)
+    p.add_argument('--expected-revision', required=binding_required)
     p.add_argument('--not-after')
     p.add_argument('--wait', type=float)
 
@@ -298,10 +301,41 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('project_id')
             p.add_argument('--limit', type=int, default=100)
             args = p.parse_args(argv)
+        elif words == 'list':
+            p.add_argument('--project-id')
+            p.add_argument('--cursor')
+            p.add_argument('--page-size', type=int, default=100)
+            p.add_argument('--all-pages', action='store_true')
+            args = p.parse_args(argv)
+            if args.all_pages and args.cursor is not None:
+                raise api.ClientError('all-pages starts a fresh snapshot; do not combine with cursor')
+        elif words == 'detail':
+            p.add_argument('puppet_id')
+            args = p.parse_args(argv)
         elif words == 'project list':
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
             args = p.parse_args(argv)
+        elif words == 'restart':
+            p.add_argument('puppet_id')
+            p.add_argument('--incarnation')
+            p.add_argument('--fresh', action='store_true')
+            p.add_argument('--force', action='store_true')
+            _operation_options(p, binding_required=False)
+            args = p.parse_args(argv)
+            if args.fresh or args.force:
+                print('unsupported: fresh restart and privileged assignment takeover are not bound', file=sys.stderr)
+                return 2
+            args.request_id = api.new_request_id(args.request_id)
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc)+timedelta(minutes=2)).isoformat()
+            values = (args.epoch, args.incarnation, args.expected_revision)
+            args.explicit_binding = all(value is not None for value in values)
+            if any(value is not None for value in values) and not args.explicit_binding:
+                raise api.ClientError('provide epoch, incarnation and expected-revision together')
+            if args.explicit_binding:
+                prepare = api.PreparedCommand('restart', api.Target(args.puppet_id, args.incarnation,
+                    args.expected_revision), args.epoch, args.request_id, args.not_after)
         elif words == 'build':
             p.add_argument('project_id')
             p.add_argument('--policy-id', required=True)
@@ -315,7 +349,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             if args.force or args.force_safety or args.branch is not None:
                 print('unsupported: privileged build recovery and branch policy approval are not bound', file=sys.stderr)
                 return 2
-            args.request_id = str(uuid4()) if args.request_id is None else args.request_id
+            args.request_id = api.new_request_id(args.request_id)
             if args.not_after is None:
                 args.not_after = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
             prepare = api.BuildCommand(args.project_id, args.policy_id, args.epoch, args.request_id,
@@ -325,7 +359,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             _operation_options(p)
             args = p.parse_args(argv)
             # Ключ фиксируется до создания TLS context и любого I/O.
-            args.request_id = str(uuid4()) if args.request_id is None else args.request_id
+            args.request_id = api.new_request_id(args.request_id)
             if args.not_after is None:
                 args.not_after = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
             prepare = api.NodeCommand('drain' if words == 'node drain' else 'enable', args.node_id,
@@ -348,6 +382,10 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                   'network_observed': False}, credential=selected.token)
             return 0
         client = api.Client(selected)
+        if words == 'restart' and not args.explicit_binding:
+            view = client.read_puppet(args.puppet_id)
+            prepare = client.prepare_restart(view.target, epoch=view.epoch, not_after=args.not_after,
+                                             request_id=args.request_id)
         if words == 'health':
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
         elif words in ('profile', 'mcp'):
@@ -357,6 +395,17 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                  credential=selected.token)
         elif words == 'addresses':
             emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
+                 credential=selected.token)
+        elif words == 'list':
+            if args.all_pages:
+                for page in client.puppet_pages(project_id=args.project_id, page_size=args.page_size):
+                    emit(page.data, credential=selected.token)
+            else:
+                page = client.puppets_page(project_id=args.project_id, cursor=args.cursor, page_size=args.page_size)
+                emit(page.data, credential=selected.token)
+        elif words == 'detail':
+            view = client.read_puppet(args.puppet_id)
+            emit({'schema_version': view.schema_version, 'epoch': view.epoch, 'puppet': view.data},
                  credential=selected.token)
         elif words == 'project list':
             page = client.projects_page(cursor=args.cursor, page_size=args.page_size)
