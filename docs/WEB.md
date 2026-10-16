@@ -162,7 +162,7 @@ CSS.
 |---|---|
 | собрать `dist` | `mop dev web build` (`npm ci` и `vite build`; нужен node 22) |
 | сверить `dist` со свежей сборкой | `mop dev web build --check`: собирает в сторону, различия — списком, код 1 |
-| на каждый push | задача `web:dist` в `.gitlab-ci.yml`; `deploy:mop` от неё зависит |
+| на каждый push | все три frontend-гейта в `test:py3.12` (#678): `mop dev web build --check`, `mop dev web test --types`, `mop dev web test`; `deploy:mop` от него зависит |
 | тесты компонентов | `mop dev web test [file ...]` (Vitest + Testing Library) |
 | проверка TypeScript | `mop dev web test --types` |
 | локальный просмотр | `mop dev web preview [--port N]`: собранный `dist` на localhost, без API пула |
@@ -292,7 +292,8 @@ succeeded/refused/failed/partial/unknown. Дюрабельности «клик 
   той же природы (#499): дедуп и статусы — словарь адаптера в памяти,
   рестарт службы читает незнакомый id как `unknown` со ссылкой на журнал.
 * `tsc --noEmit`, `npm test` и lint — локальные проверки разработчика;
-  CI-гейт по фронтенду — только сборка `web:dist --check`.
+  CI-гейты по фронтенду (#678) — сборка `build --check`, полная проверка
+  TypeScript и весь Vitest, все три в единственном test job.
 
 ## Пять расписаний
 

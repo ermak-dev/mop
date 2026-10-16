@@ -723,10 +723,10 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 16|17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client] [--label dotted.test] [--realtime] [--cross-uid]: isolated PostgreSQL checks
+mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
 
-Runs the selected check with the declared server extra and matching PostgreSQL
-client tools in fresh Docker containers, using the same setup as CI. Requires
+Runs the selected check on Python 3.12 and PostgreSQL 17 with the declared server
+extra and matching client tools in fresh Docker containers, using the same setup as CI. Requires
 an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The client check runs clean-wheel HTTPS checks and
 native Django/PostgreSQL client contracts. The snapshot contains tracked and
@@ -736,6 +736,11 @@ Docker socket enter test containers. Cleanup failures are reported explicitly.
 checks start their own native TLS broker with fixture-only principals and ACLs.
 --cross-uid runs only credential_service as root inside the owned container to
 exercise distinct OS peers; the default suite still runs as unprivileged ci.
+--web adds the frontend gates — the dashboard build check, full TypeScript
+checking and the complete Vitest interaction suite — with Node tools in the
+same Python 3.12 container; every check runs under its own exit status and any
+failure rejects the fixture. It cannot be combined with the narrow root-only
+--cross-uid mode.
 ```
 
 #### mop dev docs
@@ -1505,7 +1510,8 @@ mop server install <action> --spec PATH: independent fresh-install preparation
   apply         refuse until runtime executors and realtime composition are accepted
 
 The finite JSON specification contains only installation identity, PostgreSQL
-16/17 topology, absolute disjoint paths and six distinct OS service identities.
+topology, absolute disjoint paths and six distinct OS service identities.
+Compatibility acceptance covers Python 3.12 with PostgreSQL 17 only.
 It contains no passwords, root bytes or general settings. No legacy input is
 read and no old service is stopped. Plan does not execute provisioning.
 Dependencies use mop server controller setup --venv PATH and its declared server

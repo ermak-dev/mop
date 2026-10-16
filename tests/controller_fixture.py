@@ -34,12 +34,10 @@ class FixtureSafety(unittest.TestCase):
       value: exit 0
 test:py3.12:
   variables:
-    POSTGRES_IMAGE: postgres:16-bookworm
-    PYTHON_IMAGE: python:3.12-slim-trixie
-controller:pg17:
-  variables:
     POSTGRES_IMAGE: postgres:17-bookworm
-    PYTHON_IMAGE: python:3.13-slim-trixie
+    POSTGRES_MAJOR: "17"
+    PYTHON_IMAGE: python:3.12-slim-trixie
+    NODE_IMAGE: node:22-bookworm
 ''')
         for name, text in {'public.py': 'public source', 'new_case.py': 'new untracked source',
                            '.mop/sandbox.yaml': 'project input', '.env.backup': 'synthetic private marker',
@@ -73,9 +71,80 @@ controller:pg17:
                 patch.object(controller.shutil, 'which', side_effect=lambda name:
                              '/fixture/docker' if name == 'docker' else original_which(name)), \
                 patch.object(controller.subprocess, 'run', side_effect=run):
-            result = controller.main(arguments or ['--postgres', '16', '--check', check,
+            result = controller.main(arguments or ['--postgres', '17', '--check', check,
                 *[word for label in labels for word in ('--label', label)]])
         return result, snapshots, commands
+
+    # RED: PG17 выбирал Python 3.13, а отдельный PG16 fixture оставался доступен.
+    # SOLUTION: один объявленный CI job и та же 3.12/17 пара в локальной fixture.
+    # RESULT: 14 fixture checks и 6 strict файлов green; actual --check client
+    # --web: 4 TLS + 5 native PG/HTTPS green, из трёх frontend-гейтов build
+    # green, types и полный Vitest выполнены до конца и честно красны (legacy
+    # TS errors и journal-формат дат) -- fixture отказал кодом 1, все гейты
+    # отчитались. STATUS: FIXED (контракт fixture) — see #678
+    def test_fixture_uses_the_single_python312_postgres17_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            result, _, commands = self.invoke(root, arguments=['--postgres', '17'])
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        database = next(command for command in commands if 'POSTGRES_DB=mop_ci' in command)
+        self.assertIn('python:3.12-slim-trixie', runner)
+        self.assertIn('POSTGRES_MAJOR=17', runner)
+        self.assertIn('postgres:17-bookworm', database)
+        self.assertNotIn('python:3.13-slim-trixie', runner)
+
+    def test_web_gate_uses_the_same_python_container_and_cleans_up_its_toolchain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            result, _, commands = self.invoke(root, arguments=['--postgres', '17', '--check', 'client', '--web'])
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        self.assertIn('python:3.12-slim-trixie', runner)
+        self.assertTrue(any(word.endswith(':/opt/mop-node:ro') for word in runner))
+        script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
+        self.assertIn('tests/_web_dist_fixture.py', script)
+        self.assertIn('_control_client_cases', script)
+        created = next(command[command.index('--name')+1] for command in commands
+                       if command[1] == 'create' and 'node:22-bookworm' in command)
+        self.assertTrue(any(command[1:3] == ['rm', '-f'] and created in command for command in commands))
+
+    # #678: web gate -- не один build --check, а все три frontend-гейта
+    # (build, types, полный Vitest) в процессе, через общий _lib.run_command,
+    # а не subprocess другого командлета (#160). Каждый отказ виден, любой
+    # из них красит fixture, без fail-fast.
+    def test_web_fixture_invokes_the_actual_build_check_not_the_group_help(self):
+        import runpy
+        from unittest.mock import call
+        with patch('mop.cli.dev.web.build.main', return_value=0) as build, \
+                patch('mop.cli.dev.web.test.main', return_value=0) as web_test:
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_path(str(Path(__file__).with_name('_web_dist_fixture.py')), run_name='__main__')
+        build.assert_called_once_with(['--check'])
+        self.assertEqual(web_test.call_args_list, [call(['--types']), call([])])
+        self.assertEqual(caught.exception.code, 0)
+
+    def test_web_fixture_keeps_running_after_a_failed_gate_and_exits_nonzero(self):
+        import runpy
+        with patch('mop.cli.dev.web.build.main', return_value=1), \
+                patch('mop.cli.dev.web.test.main', return_value=0) as web_test:
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_path(str(Path(__file__).with_name('_web_dist_fixture.py')), run_name='__main__')
+        self.assertEqual(web_test.call_args_list[0].args, (['--types'],))
+        self.assertEqual(len(web_test.call_args_list), 2)
+        self.assertEqual(caught.exception.code, 1)
+
+    def test_web_gate_cannot_expand_the_root_only_uid_fixture(self):
+        with self.assertRaises(SystemExit) as caught:
+            controller.main(['--check', 'credential_service', '--cross-uid', '--web'])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_other_postgres_matrix_is_rejected_before_any_fixture_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.source(directory)
+            with self.assertRaises(SystemExit) as caught:
+                self.invoke(root, arguments=['--postgres', '16'])
+        self.assertEqual(caught.exception.code, 2)
 
     def test_snapshot_contains_tracked_and_new_source_but_no_ignored_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,7 +171,7 @@ controller:pg17:
             setup_path = root / '.gitlab-ci.yml'
             setup_path.write_text(setup_path.read_text().replace('value: exit 0',
                 "value: |\n        prepare-declared-fixture\n        exec su ci -s /bin/bash -c \"$TESTS\""))
-            result, _, commands = self.invoke(root, arguments=['--postgres', '16',
+            result, _, commands = self.invoke(root, arguments=['--postgres', '17',
                 '--check', 'credential_service', '--cross-uid'])
             self.assertEqual(result, 0)
             worker = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
