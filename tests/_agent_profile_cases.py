@@ -22,7 +22,7 @@ from mop.server.secrets.crypto import Keyring, XChaCha20Provider
 from mop.server.sessions import protocol
 from mop.server.sessions.services import Assignments
 
-from _grant_cases import ApprovalFixture, BindingFixture, manifest
+from _grant_cases import ApprovalFixture, BindingFixture, delegation_subject, manifest
 
 
 class AgentProgramCases(TransactionTestCase):
@@ -83,8 +83,12 @@ class AgentProgramCases(TransactionTestCase):
             target_id=target_id or uuid4(), definition_id=(definition or self.definition).id)
 
     def active(self, *, definition=None, actor=None):
+        # #688: субъект — заранее зарегистрированный agent Actor со своим token.
+        definition_id = (definition or self.definition).id
+        profile, agent, key = delegation_subject(self.api, self.actor, project_id=self.project.pk,
+            definition_id=definition_id, actions=('execution.send_message',))
         row = self.api.reserve(actor or self.actor, project_id=self.project.pk,
-            definition_id=(definition or self.definition).id, target_id=uuid4(), incarnation=uuid4(),
+            definition_id=definition_id, target_id=profile.target_id, incarnation=uuid4(),
             request_id=uuid4(), expires_at=timezone.now() + timedelta(hours=1))
         self.api.provision(actor or self.actor, row.id, expected_revision=row.revision)
         row = self.api.get(actor or self.actor, row.id)
@@ -93,8 +97,7 @@ class AgentProgramCases(TransactionTestCase):
         self.bindings.bindings[(self.project.pk, row.target_id)] = binding
         self.bindings.receipts[row.id] = binding
         self.api.activate(row.id, expected_revision=row.revision)
-        return self.api.get(self.actor, row.id), auth.token_context(
-            Token.objects.get(user__grant_machine__id=row.id).key, grants=self.api)
+        return self.api.get(self.actor, row.id), auth.token_context(key, grants=self.api)
 
     def test_register_agent_creates_stable_agent_actor_without_new_identity(self):
         info = self.register()
@@ -137,6 +140,7 @@ class AgentProgramCases(TransactionTestCase):
         User = get_user_model()
         parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         info = self.register(target_id=parent.target_id)
+        self.assertEqual(parent.subject_id, info.agent_id, 'the delegation subject is the stable agent Actor')
         node = Node.objects.create(name='node', driver='host', ssh_host='example.invalid',
             control_origin='https://example.invalid', lan_address='example.invalid', bootstrap_address='example.invalid')
         NodeProject.objects.create(node=node, project=self.project)
@@ -163,11 +167,13 @@ class AgentProgramCases(TransactionTestCase):
         self.assertNotEqual(first.id, second.id, 'restart must be a new execution incarnation')
         self.assertEqual(User.objects.count(), before, 'assignment lifecycle created or deleted an Actor')
         self.assertTrue(access.AgentProfile.objects.filter(agent_id=info.agent_id, target_id=info.target_id).exists())
-        # Отзыв отдельного делегирования не удаляет ни agent Actor, ни машину делегирования.
+        # Отзыв отдельного делегирования не удаляет ни agent Actor, ни его token (#688).
+        token = Token.objects.get(user_id=info.agent_id).key
         revoked = self.api.revoke(self.actor, parent.id, expected_revision=parent.revision)
         self.assertEqual(revoked.state, 'revoked')
         self.assertEqual(User.objects.count(), before, 'delegation revocation deleted an Actor')
         self.assertTrue(User.objects.filter(pk=info.agent_id, kind='agent').exists())
+        self.assertTrue(Token.objects.filter(user_id=info.agent_id, key=token).exists())
         events = access.GrantEvent.objects.filter(grant_id=parent.id).order_by('created_at')
         self.assertGreaterEqual(events.count(), 3, 'history must stay attached to the same grant')
 

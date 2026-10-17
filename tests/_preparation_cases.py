@@ -549,18 +549,24 @@ finally:
                 expires_at=timezone.now() + timedelta(hours=1))
         self.user.user_permissions.add(Permission.objects.get(content_type__app_label='execution',
             content_type__model='assignment', codename='create_puppet'))
+        # #688: субъекты — заранее зарегистрированные agent Actor со своим
+        # token; делегированный issuer выдаёт ребёнка собственными правами.
+        from _grant_cases import delegation_subject
+        parent_subject, _, key = delegation_subject(grants, self.actor, project_id=self.project.pk,
+            definition_id=parent_bundle.id, actions=('access.issue_grant', 'execution.create_puppet'))
+        child_subject, _, _ = delegation_subject(grants, self.actor, project_id=self.project.pk,
+            definition_id=child_bundle.id)
         parent = grants.reserve(self.actor, project_id=self.project.pk, definition_id=parent_bundle.id,
-            target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
+            target_id=parent_subject.target_id, incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
             expires_at=timezone.now() + timedelta(hours=1))
         grants.provision(self.actor, parent.id, expected_revision=parent.revision)
         parent = grants.get(self.actor, parent.id)
         bindings.current_value = RoleBinding(parent.project_id, parent.target_id, parent.incarnation,
             parent.role, parent.digest, parent.id, self.user.pk)
         grants.activate(parent.id, expected_revision=parent.revision)
-        key = Token.objects.get(user__grant_machine__id=parent.id).key
         delegated = auth.token_context(key, grants=grants)
         newer, _ = self.approved(tasks=b'new snapshot after first parent intent')
-        args = dict(project_id=self.project.pk, definition_id=child_bundle.id, target_id=uuid.uuid4(),
+        args = dict(project_id=self.project.pk, definition_id=child_bundle.id, target_id=child_subject.target_id,
             incarnation=uuid.uuid4(), request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
         child = grants.reserve(delegated, **args)
         retry = grants.reserve(delegated, **args)

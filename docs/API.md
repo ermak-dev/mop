@@ -220,8 +220,9 @@ the same pipeline — not a second RBAC, GodManager or permission map.
 This is the target contract. Since #683 the implemented identity is the single
 `actor.Actor` (`AUTH_USER_MODEL`, a standard `AbstractUser` subclass whose
 `kind` column only classifies); the remaining `Principal` table is deprecated
-metadata awaiting its #684 retarget, and the Grant-linked service-user paths
-are reworked by #684–#689; see AUTH.md.
+metadata awaiting its #684 retarget; since #688 a delegation (`access.Grant`)
+binds an existing issuer and an existing agent subject Actor instead of a
+Grant-linked service User, and #689 cuts the remaining consumers over; see AUTH.md.
 
 Use standard Django User mechanics through Actor: password hashers and
 database-backed sessions, `is_staff` grants Admin login eligibility only,
@@ -456,7 +457,7 @@ applied or overwrite that revision's observation; the result explicitly reports
 | Project build | #648 has finite DRF admission/status and the durable build process manager below; real scheduler/body/image consumers and privileged deployment remain root bindings, not automatic-success defaults |
 | Worker process | Bounded Runtime-owned `Worker.run_one`/`run_pending` exist; root must wire the real executor, wake/poll and shutdown ownership rather than reuse the old web worker |
 | Realtime publication | Durable outbox publishing seam exists, including duplicate event IDs after lost ACK; #626 connects authorized event fan-out and resync |
-| Grants/Delegation | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it. The Actor-contract rework #683–#689 replaces the Principal/grant-identity wiring without weakening these fences |
+| Grants/Delegation | Access resolver injection is supported; unbound grant authority fails closed. Root must bind #635's reviewed resolver, never bypass it. Since #688 the subject is an existing agent Actor and rights are the RBAC intersection along the chain; #689 cuts the remaining consumers over without weakening these fences |
 | Admin and CLI | #638/#642 call the same local service/DRF boundary; remove old admission/workflow owners only when these consumers are connected in the epic |
 | Retention | Completed results become undisclosable after the 90-day prune boundary; request identity cannot be reused. Physical audit/receipt erasure still requires the operator's explicit privacy/retention policy |
 
@@ -660,7 +661,13 @@ The Access ORM boundary exposes `Grants.publish_definition`, `approve_definition
 `reserve`, `reservation`, `provision`, `activate`, `revoke`,
 `expire`, `record_retirement`, `resolve_actor` and the explicit message/dispatch
 admission methods. `reserve` accepts either a credential-bound human Actor or an
-actively delegated agent Actor, never an owner/holder/force or workspace payload. CreationIntent
+actively delegated agent Actor, never an owner/holder/subject/force or workspace
+payload. The delegation subject is resolved on the server: the agent Actor the
+same human owner registered for that target with `register_agent`; an
+unregistered or foreign-owner target is a 404 before any write, and no
+delegation step creates, deletes or re-keys an Actor or a DRF Token. A
+delegated issuer additionally needs `access.issue_grant` and
+`execution.create_puppet` itself, intersected with its chain and owner. CreationIntent
 retains the first approved policy SecretVersion reference; retry queries that
 intent instead of fetching the parent's latest policy or creating a second child.
 The injected approval query must validate the exact stored intent binding, not a
@@ -673,7 +680,8 @@ returns the existing profile for the same target idempotently; no grant, restart
 or assignment lifecycle creates or deletes an Actor.
 
 `RetainedSecrets` is the narrow Secrets composition port used for definition bytes
-and generated grant credentials: `prepare(actor, RetentionScope, bytes)` performs
+and a delegation's generated transport credential (never the subject's DRF
+Token): `prepare(actor, RetentionScope, bytes)` performs
 AEAD outside SQL; `commit(actor, PreparedRetention)` repeats target-bound authority
 and inserts those exact prepared IDs/envelope in the aggregate's transaction.
 `read(actor, scope, version_id)` is an internal protected read with checks before
@@ -865,8 +873,9 @@ current ClientOwnership and the corresponding `execution.register_endpoint`,
 `execution.view_delivery` or `execution.deliver_report` permission. Human report
 send checks the sending actor's project and deliver permission; it does not grant
 access to the recipient's client registration. An exact private address is a
-routing identity, not a bearer capability. Grants may use their existing finite
-`execution.send_message` capability through Access's local current-grant authority;
+routing identity, not a bearer capability. A delegated subject may send when it,
+every subject of its chain and the human owner hold `execution.send_message`,
+checked by Access's local current-grant resolver (#688);
 they cannot register a human endpoint, enumerate human sessions or acquire their
 transport context. Services cannot use human reports. No human endpoint operation
 changes a Nomad job or reads host socket registries.

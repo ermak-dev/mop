@@ -3,7 +3,7 @@
 Проверяется словарь wire-протокола и доменные имена записей программы:
 версия определения программы агента существует под целевым именем из docs/API,
 старый bundle-словарь не остаётся второй параллельной номенклатурой, словарь
-технических предусловий ACTION_CAPABILITIES не меняется (его сведение — #685).
+технических предусловий ACTION_CAPABILITIES сведён к предусловию spawn (#688).
 """
 import ast
 import unittest
@@ -51,22 +51,22 @@ class AgentProgramVocabulary(unittest.TestCase):
             self.assertNotIn(stale, text, f'stale bundle wire token {stale} survives')
         self.assertIn("'definition_id'", text, 'definition reference argument is missing')
 
-    def test_capability_precondition_map_is_frozen_unchanged(self):
-        # Словарь остаётся техническим предусловием программы; сведение без
-        # словаря — #685/#688, здесь поведения и состава менять нельзя.
+    # FEATURE: #688 — словарь сведён к техническим предусловиям программы.
+    # HYPOTHESIS: action→verb словарь работал вторым каталогом прав рядом с
+    # Django RBAC #685: делегированное действие требовало verb манифеста.
+    # SOLUTION: права решает только RBAC; в словаре осталось лишь предусловие
+    # spawn (программа объявила cluster add), dispatch/send/landing ушли.
+    # RED: словарь держал 16 действий (на базе 59f70c0f эта проверка уже
+    # падала: она ждала прежние sessions.* имена до #685).
+    def test_capability_map_is_reduced_to_technical_preconditions(self):
         source = _tree('mop/server/access/delegation.py')
-        expected = {'catalog.view_pool', 'catalog.view_project', 'sessions.create_puppet',
-            'sessions.update_puppet', 'sessions.restart_puppet', 'sessions.delete_puppet',
-            'sessions.stop_allocation', 'sessions.wipe_puppet', 'sessions.send_message',
-            'sessions.send_session_command', 'sessions.change_session_model',
-            'sessions.view_usage', 'sessions.view_landing', 'sessions.acquire_landing',
-            'sessions.release_landing', 'sessions.dispatch_task'}
         for node in ast.walk(source):
             if isinstance(node, ast.Assign) and any(
                     isinstance(target, ast.Name) and target.id == 'ACTION_CAPABILITIES'
                     for target in node.targets):
                 keys = {element.value for element in node.value.keys}
-                self.assertEqual(keys, expected, 'capability precondition map changed composition')
+                self.assertEqual(keys, {'execution.create_puppet'},
+                    'capability map is a second permission catalog again')
                 break
         else:
             self.fail('capability precondition map is missing')
