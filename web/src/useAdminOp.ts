@@ -21,7 +21,7 @@ export function useAdminOp(session: Session, target: string | null) {
   // Один снимок исхода -- один объект: потребители (балуны) различают попытки
   // по идентичности, и перерисовка не должна выглядеть новым исходом.
   const op = useMemo(() => fresh,
-    [selected?.requestId, fresh.status, fresh.id, fresh.error, fresh.lost]);  // eslint-disable-line react-hooks/exhaustive-deps
+    [selected?.requestId, fresh.status, fresh.id, fresh.error, fresh.lost]);
   useEffect(() => {
     if (selected && poolNetwork.matches(session) && (selected.local.status === 'submitted' || selected.local.lost)) {
       poolNetwork.track(selected.requestId);

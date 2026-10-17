@@ -45,12 +45,18 @@ const ROW: Puppet = {
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+// #627: потоки визарда проверяются у каждого пункта, в том числе у тех,
+// которых контроллер ещё не принимает (update, model, recycle) -- они
+// вернутся вместе с командами. Поэтому здесь допуск -- «всё принимается»;
+// боевой допуск по таблице store проверяется отдельно ниже.
+const ALL = () => true;
+
 /** Открыть визард со шпионами приказа и закрытия. */
 const mount = (row: Puppet = ROW,
                engineState: Record<string, EngineState> = {}) => {
   const onOrder = vi.fn();
   const onClose = vi.fn();
-  const view = renderUi(<ControlWindow opened row={row} session={ADMIN}
+  const view = renderUi(<ControlWindow opened row={row} session={ADMIN} admits={ALL}
     onClose={onClose} onOrder={onOrder} engineState={engineState} />);
   return { view, onOrder, onClose };
 };
@@ -60,9 +66,29 @@ const mount = (row: Puppet = ROW,
 const remount = (view: ReturnType<typeof mount>,
                  engineState: Record<string, EngineState>) =>
   view.view.rerender(<MantineProvider>
-    <ControlWindow opened row={ROW} session={ADMIN}
+    <ControlWindow opened row={ROW} session={ADMIN} admits={ALL}
       onClose={vi.fn()} onOrder={vi.fn()} engineState={engineState} />
   </MantineProvider>);
+
+// HYPOTHESIS: визард предлагал обновление, модель и пересоздание, которых
+// контроллер не принимает: обновление и пересоздание доходили до «Завершить»
+// и только там получали отказ, шаг модели звал каталог /api/admin/models,
+// которого у контроллера нет.
+// SOLUTION: допуск пункта -- таблица команд общего store; непринятый пункт
+// виден, но выключен с причиной, как рестарт у незапущенного папета (#508).
+test("#627 the choice screen disables what the controller does not admit", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  renderUi(<ControlWindow opened row={ROW} session={ADMIN} onClose={vi.fn()} onOrder={vi.fn()} />);
+  const win = screen.getByTestId("control-window");
+  for (const label of [LABELS.update, LABELS.model, LABELS.recycle]) {
+    const item = within(win).getByRole("button", { name: new RegExp(`^${label}`) });
+    expect(item).toBeDisabled();
+    expect(item).toHaveAccessibleName(expect.stringContaining("контроллер эту команду ещё не принимает"));
+  }
+  for (const label of [LABELS.restart, LABELS.stop, LABELS.delete, LABELS.wipe])
+    expect(within(win).getByRole("button", { name: label })).toBeEnabled();
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+});
 
 test("#522 the choice screen lists six actions, update is named Обновление", () => {
   vi.stubGlobal("fetch", vi.fn());
@@ -466,7 +492,7 @@ test("#522 a target change under an open wizard resets to the choice screen", ()
   fireEvent.click(screen.getByRole("button", { name: "Сбросить" }));
   expect(screen.getByTestId("control-window").textContent).toMatch(/Тело пересоздаётся/);
   view.rerender(<MantineProvider>
-    <ControlWindow opened row={{ ...ROW, name: "pu-mop-2" }} session={ADMIN}
+    <ControlWindow opened row={{ ...ROW, name: "pu-mop-2" }} session={ADMIN} admits={ALL}
       onClose={vi.fn()} onOrder={vi.fn()} />
   </MantineProvider>);
   const win = screen.getByTestId("control-window");

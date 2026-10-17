@@ -415,6 +415,8 @@ export const PUPPET_COMMANDS: Record<string, CommandRoute> = {
   send: { path: () => '/api/v1/messages', params: message, targetInBody: true },
   dispatch: { path: () => '/api/v1/dispatches', params: message, targetInBody: true },
 };
+/** Принимает ли контроллер команду цели (#627): то, чего нет в таблице, отказывается до POST. */
+export const admits = (action: string) => Object.hasOwn(PUPPET_COMMANDS, action);
 export function presentPuppet(row: Entity, now = Date.now(), invalidated = false): Puppet {
   const data = row.data as ObjectValue, desired = object(data.desired), state = object(data.state), observed = object(data.observed);
   const stateFact = object(observed.state ?? {}), clone = object(observed.clone ?? {});

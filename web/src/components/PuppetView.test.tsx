@@ -86,46 +86,24 @@ test("#664 panel actions stay compact without a table column", () => {
 // «Завершить» = согласие (#522); после него визард показывает экран
 // хода, вердикт -- экраном визарда (#487: строка чиста), модель --
 // балун (#488), визард закрывается сразу.
-test.each(["Рестарт", "Правка", "Модель"])("#487 %s result never widens the row", async (action) => {
-  const currentRow = action === 'Рестарт' ? { ...row, name: ID } : row;
-  if (action === 'Рестарт') {
-    network = networkFixture(); await network.start(session);
-    const net = network, base = net.http.getMockImplementation()!;
-    net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? Promise.resolve(reply(net.operation('succeeded', '3'))) : base(url, init));
-  } else vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => response(
-    init?.method === "POST" ? { id: "op-1", status: "accepted" }
-      : url.endsWith("/models") ? { models: ["other-model"] }
-      : { id: "op-1", status: "succeeded" })));
+// #627: обновление и модель контроллер ещё не принимает -- их пункты
+// закрыты (ControlWindow), инвариант строки держат принятые команды.
+test.each(["Рестарт", "Сбросить"])("#487 %s result never widens the row", async (action) => {
+  const currentRow = { ...row, name: ID };
+  network = networkFixture(); await network.start(session);
+  const net = network, base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? Promise.resolve(reply(net.operation('succeeded', '3'))) : base(url, init));
   renderUi(<PuppetActions row={currentRow} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${currentRow.name}` });
   fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  const item = within(win).getByRole("button",
-    { name: action === "Правка" ? "Обновление" : action });
-  fireEvent.click(item);
-  // #522: финальный экран у всех; выбор режима/модели ведёт на него,
-  // «Завершить» шлёт приказ
-  if (action === "Правка") {
-    fireEvent.click(screen.getByRole("radio", { name: "Продолжить работу" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  } else if (action === "Модель") {
-    fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  }
+  fireEvent.click(within(win).getByRole("button", { name: action }));
+  // #522: финальный экран у всех, «Завершить» шлёт приказ
   fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
-  // #487: вердикт строку не расширяет. #522: у рестарта и обновления
-  // ход и вердикт -- экран визарда; #488: у модели вердикт -- балун,
-  // визард закрылся сразу. Инвариант один -- строки действий чисты.
-  if (action === "Модель") {
-    await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
-    await waitFor(() => expect(actions).not.toHaveTextContent("Перезапущен"));
-  } else {
-    // экран хода визарда жив: слово статуса и Loader внутри окна
-    const win = screen.getByTestId("control-window");
-    await waitFor(() => expect(within(win).getByRole("status")).toBeInTheDocument());
-    expect(actions).not.toHaveTextContent("Обновлено");
-    expect(actions).not.toHaveTextContent("Перезапущен");
-  }
+  // #487: вердикт строку не расширяет; #522: ход и вердикт -- экран визарда
+  await waitFor(() => expect(within(screen.getByTestId("control-window")).getByRole("status")).toBeInTheDocument());
+  expect(actions).not.toHaveTextContent("Перезапущен");
+  expect(actions).not.toHaveTextContent("Выполнено");
 });
 
 // #507: карточка открывает один источник -- экран.
@@ -200,75 +178,40 @@ test("#487 height-only resize keeps the last log line visible", async () => {
   expect(top).toBe(1100);
 });
 
-test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves a result completed while its dialog was closed", async (action) => {
+test.each(["Рестарт", "Сбросить"])("#487 %s preserves a result completed while its dialog was closed", async (action) => {
   let finish!: (r: Response) => void;
   const pending = new Promise<Response>((resolve) => { finish = resolve; });
-  const currentRow = action === 'Рестарт' ? { ...row, name: ID } : row;
-  let mock;
-  if (action === 'Рестарт') {
-    network = networkFixture(); await network.start(session);
-    const net = network, base = net.http.getMockImplementation()!;
-    net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? pending : base(url, init));
-    mock = net.http;
-  } else {
-    mock = vi.fn(async (url: string, init?: RequestInit) => init?.method === "POST"
-      ? response({ id: "op-1", status: "accepted" })
-      : url.endsWith("/models") ? response({ models: ["other-model"] }) : pending);
-    vi.stubGlobal("fetch", mock);
-  }
+  const currentRow = { ...row, name: ID };
+  network = networkFixture(); await network.start(session);
+  const net = network, base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? pending : base(url, init));
+  const posts = () => net.posts();
   renderUi(<PuppetActions row={currentRow} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${currentRow.name}` });
   // вход #522: строка -> визард -> финальный экран -> «Завершить»
   fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button",
-    { name: action === "Правка" ? "Обновление" : action }));
-  if (action === "Правка") {
-    fireEvent.click(screen.getByRole("radio", { name: "Продолжить работу" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  } else if (action === "Модель") {
-    fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  }
+  fireEvent.click(within(win).getByRole("button", { name: action }));
   fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
-  if (action === "Модель") {
-    // #488: вердикт модели -- балун; визард закрылся исполнением,
-    // повторная команда открывает форму, дедуп на сервере (id на месте).
-    await waitFor(() => expect(mock.mock.calls
-      .filter((c) => c[1]?.method === "POST")).toHaveLength(1));
-    fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
-    const again = await screen.findByTestId("control-window");
-    fireEvent.click(within(again).getByRole("button", { name: "Модель" }));
-    expect(await screen.findByTestId("model-choices")).toBeInTheDocument();
-  } else {
-    // #522: экран хода живёт в визарде -- «Принято» на экране хода
-    await screen.findByText("Принято");
-    // #664: действительно закрываем визард до позднего вердикта, движок живёт.
-    fireEvent.click(within(screen.getByTestId("control-window"))
-      .getAllByRole("button", { name: "Закрыть" }).at(-1)!);
-    await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
-    await act(async () => { finish(action === 'Рестарт' ? reply(network!.operation('failed', '3', 'review refusal')) : response({ status: "failed", error: "review refusal" })); });
-    // терминал приехал в закрытое окно: повторный вход (#522) -- не форма,
-    // а сразу экран вердикта: поднятый движком стейт открывает ход без
-    // выбора пункта и без второго POST
-    fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
-    await screen.findByTestId("control-window");
-    expect(await screen.findByText(/review refusal/)).toBeInTheDocument();
-    expect(mock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Новая команда" }));
-    // новая команда -- с выбора; у рестарта/обновления свой честный
-    // вход через финальный экран
-    if (action === "Рестарт") {
-      fireEvent.click(screen.getByRole("button", { name: "Рестарт" }));
-      fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
-      await waitFor(() => expect(mock.mock.calls
-        .filter((c) => c[1]?.method === "POST")).toHaveLength(2));
-    } else {
-      fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
-      expect(await screen.findByRole("radio", { name: "Продолжить работу" }))
-        .toBeInTheDocument();
-    }
-  }
+  // #522: экран хода живёт в визарде -- «Принято» на экране хода
+  await screen.findByText("Принято");
+  // #664: действительно закрываем визард до позднего вердикта, движок живёт.
+  fireEvent.click(within(screen.getByTestId("control-window"))
+    .getAllByRole("button", { name: "Закрыть" }).at(-1)!);
+  await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
+  await act(async () => { finish(reply(net.operation('failed', '3', 'review refusal'))); });
+  // терминал приехал в закрытое окно: повторный вход (#522) -- не форма,
+  // а сразу экран вердикта: поднятый движком стейт открывает ход без
+  // выбора пункта и без второго POST
+  fireEvent.click(within(actions).getByRole("button", { name: "Правка" }));
+  await screen.findByTestId("control-window");
+  expect(await screen.findByText(/review refusal/)).toBeInTheDocument();
+  expect(posts()).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Новая команда" }));
+  // новая команда -- с выбора, через свой финальный экран
+  fireEvent.click(screen.getByRole("button", { name: action }));
+  fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
+  await waitFor(() => expect(posts()).toHaveLength(2));
 });
 
 test("#512 the row offers the destructive actions, a non-admin never sees them", () => {
@@ -279,8 +222,9 @@ test("#512 the row offers the destructive actions, a non-admin never sees them",
   // #512/#516/#520: три разрушительных действия -- пунктами визарда
   // правки цели, каждое -- единый экран последствий с одним
   // подтверждением
+  // #627: пересоздание контроллер ещё не принимает -- пункт есть, но закрыт
   for (const label of ["Пересоздать", "Удалить", "Сбросить"]) {
-    expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
+    expect(within(win).getByRole("button", { name: new RegExp(`^${label}`) })).toBeInTheDocument();
   }
   // не-админ всей колонки действий не видит -- окна и разрушительных
   // тоже; первый стол убираем до второго рендера, иначе он отвечает за
@@ -288,7 +232,7 @@ test("#512 the row offers the destructive actions, a non-admin never sees them",
   cleanup();
   renderUi(<PuppetActions row={row} session={{ login: "user", role: "user" }} />);
   expect(screen.queryByRole("button", { name: "Правка" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Пересоздать" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Пересоздать/ })).toBeNull();
   expect(screen.queryByRole("button", { name: "Удалить" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Сбросить" })).toBeNull();
 });
@@ -309,14 +253,15 @@ test("#487 opening the screen scrolls its viewport to the end", async () => {
 // #520: окно больше не закрывается выбором пункта -- оно визард: выбор
 // переключает шаг, приказ уходит движку с последнего экрана.
 test("#516 the edit window lists every operation as an item", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => response({ models: [] })));
+  vi.stubGlobal("fetch", vi.fn());
   renderUi(<PuppetActions row={row} session={session} />);
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   expect(win.textContent).toContain(row.name);
+  // #627: пункты без команды контроллера перечислены тоже -- закрытыми
   for (const label of ["Обновление", "Модель", "Рестарт", "Пересоздать", "Удалить", "Сбросить"]) {
-    expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
+    expect(within(win).getByRole("button", { name: new RegExp(`^${label}`) })).toBeInTheDocument();
   }
 });
 
@@ -342,43 +287,45 @@ test.each([
 // Разрушительный пункт (#516 -> #522): выбор -- сразу финальный экран
 // последствий, «Завершить» = согласие, POST уходит с него.
 test("#516 a destructive item rides its two-step flow from the window", async () => {
-  const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
-  vi.stubGlobal("fetch", fetchMock);
-  renderUi(<PuppetActions row={row} session={session} />);
-  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+  network = networkFixture(); await network.start(session);
+  const net = network;
+  renderUi(<PuppetActions row={{ ...row, name: ID }} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${ID}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "Пересоздать" }));
+  fireEvent.click(within(win).getByRole("button", { name: "Сбросить" }));
   // окно живо (#522): финальный экран последствий с фактами цели
   expect(screen.getByTestId("control-window")).toBeInTheDocument();
-  expect(await screen.findByText(/несохранённая работа погибнет/)).toBeInTheDocument();
-  expect(screen.getByTestId("control-window").textContent).toContain(row.name);
+  expect(await screen.findByText(/контекст диалога с Claude теряется/)).toBeInTheDocument();
+  expect(screen.getByTestId("control-window").textContent).toContain(ID);
   expect(screen.queryByRole("button", { name: /продолжить/i })).toBeNull();
+  expect(net.posts()).toHaveLength(0);
   fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",
+  await waitFor(() => expect(net.http).toHaveBeenCalledWith(`/api/v1/puppets/${ID}/commands/wipe`,
     expect.objectContaining({ method: "POST" })));
 });
 
 // Вердикт разрушительной операции (#516 -> #522): экран хода визарда --
 // терминальное слово с причиной внутри окна, второй моды нет.
 test("#516 a destructive verdict rides the wizard progress screen", async () => {
-  const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) =>
-    response(init?.method === "POST" ? { id: "op-1", status: "accepted" }
-      : { id: "op-1", action: "recycle", target: row.name, status: "failed",
-          error: "image builder refused" }));
-  vi.stubGlobal("fetch", fetchMock);
-  renderUi(<PuppetActions row={row} session={session} />);
-  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+  network = networkFixture(); await network.start(session);
+  const net = network, base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations')
+    ? Promise.resolve(reply(net.operation('failed', '3', 'session is alive'))) : base(url, init));
+  renderUi(<PuppetActions row={{ ...row, name: ID }} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${ID}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "Пересоздать" }));
-  expect(await screen.findByText(/несохранённая работа погибнет/)).toBeInTheDocument();
+  fireEvent.click(within(win).getByRole("button", { name: "Сбросить" }));
+  expect(await screen.findByText(/контекст диалога с Claude теряется/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
+  await net.invalidateOperation();
   const verdict = await screen.findByText(/Не удался/);
   // вердикт -- экраном визарда, в его же моде, не строкой и не второй модой
   expect(verdict.closest('[data-testid="control-window"]')).not.toBeNull();
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  expect(verdict).toHaveTextContent("image builder refused");
+  expect(verdict).toHaveTextContent("session is alive");
 });
 
 // Рестарт -- через финальный экран (#522: единое правило

@@ -58,21 +58,19 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
   expect(net.posts()).toHaveLength(1);
 });
 
-test("the row offers update with explicit fresh modes", () => {
+// #627: режимы обновления (#527) проверяет визард в изоляции; через строку
+// пункт виден, но закрыт, пока контроллер не принимает обновление.
+test("#627 the row offers update closed with the reason until the controller admits it", () => {
   vi.stubGlobal("fetch", vi.fn());
   renderUi(<PuppetActions row={CARD} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = screen.getByTestId("control-window");
-  // #527: пункт update ведёт на СВОЙ шаг выбора режима -- три радио,
-  // не смешанные с кнопками чужих операций
-  fireEvent.click(within(win).getByRole("button", { name: "Обновление" }));
-  const dialog = screen.getByRole("dialog");
-  for (const m of ["Продолжить работу", "Пересобрать чистый клон",
-                   "Переключить на другой проект"]) {
-    expect(within(dialog).getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
-  }
-  expect(within(dialog).getAllByRole("radio")
-    .filter((r) => (r as HTMLInputElement).checked)).toHaveLength(0);
+  const update = within(win).getByRole("button", { name: /^Обновление/ });
+  expect(update).toBeDisabled();
+  expect(update).toHaveAccessibleName(expect.stringContaining("контроллер эту команду ещё не принимает"));
+  fireEvent.click(update);
+  expect(within(win).queryAllByRole("radio")).toHaveLength(0);
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
 test("a guest never sees restart or update", () => {
