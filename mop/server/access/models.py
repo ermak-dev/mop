@@ -93,6 +93,36 @@ class CredentialBinding(Identifier):
             Q(token_user__isnull=True, session__isnull=False, token_digest=''), name='access_credential_exclusive')]
 
 
+# Технические контексты enrollment (#687): узловой исполнитель и безузловые
+# controller/credential/builder контексты. Словарь конечен; прав он не даёт —
+# операционные права остаются штатным Django RBAC (#685).
+SERVICE_USE_CASES = ('node-executor', 'controller-worker', 'credential-runtime', 'image-builder')
+NODE_ENROLLMENT_USE_CASES = ('node-executor',)
+
+
+class ServiceEnrollment(Identifier):
+    """Минимальное отношение технического контекста service Actor (#687).
+
+    Use case и, для узловых сервисов, узел — проверяемые сервером факты
+    enrollment, а не вторая ролевая модель: credential умирает вместе со
+    своим контекстом, переоформление не плодит новых Actor. Машины
+    делегирования (#688) живут своим Grant lifecycle и строки не имеют.
+    """
+    actor = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='service_enrollment')
+    use_case = models.CharField(max_length=32, choices=tuple((x, x) for x in SERVICE_USE_CASES))
+    node = models.ForeignKey('catalog.Node', null=True, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta(Identifier.Meta):
+        constraints = [
+            models.CheckConstraint(condition=Q(use_case__in=SERVICE_USE_CASES), name='access_enrollment_use_case'),
+            # Узловой use case несёт узел; безузловые контексты узла не имеют.
+            models.CheckConstraint(condition=(Q(use_case__in=NODE_ENROLLMENT_USE_CASES, node__isnull=False)
+                | (Q(~Q(use_case__in=NODE_ENROLLMENT_USE_CASES)) & Q(node__isnull=True))), name='access_enrollment_node_context'),
+        ]
+
+
 class DirectoryConfiguration(models.Model):
     source = models.OneToOneField(IdentitySource, primary_key=True, on_delete=models.PROTECT, related_name='directory')
     url = models.CharField(max_length=2048)

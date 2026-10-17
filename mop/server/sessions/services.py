@@ -6,8 +6,8 @@ from django.db.models import Q, F
 from django.utils import timezone
 from mop.server.access.context import ActorKind
 from mop.server.access.services import Access, Denied, current_actor
+from mop.server.catalog.services import snapshot, readmission
 from mop.server.catalog.models import Project, NodeProject
-from mop.server.catalog.services import snapshot
 from . import models as m
 from .protocol import (WorkV1, AuthorityV1, ReceiptV1, FactPageV1, FACT_FIELDS,
     positive, role_binding, result_codes, WorkPort, GrantAuthority, FactReader,
@@ -703,6 +703,7 @@ class MachineExecution:
                 raise Denied('fact target is outside enrolled node')
             if item.incarnation_id != target.current_incarnation_id:
                 raise Conflict('fact source incarnation changed')
-        # Авторизацию повторяем после потенциального I/O, даже при пустой странице.
-        machine(actor, node_id, 'read_facts')
+        # Повторный допуск после потенциального I/O — одна общая короткая
+        # SQL-only секция под locks (#687), теми же словами допуска.
+        readmission(lambda: machine(actor, node_id, 'read_facts'), reason='fact readmission')
         return page

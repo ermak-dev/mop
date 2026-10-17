@@ -120,13 +120,32 @@ maintenance hook used by initial administrator creation; it never resets a passw
 with unusable password, no staff/superuser flags and only the finite machine-work,
 observation, application-receipt and addressed project-secret permission allowlist.
 Its caller must enforce maintenance identity and deliver the returned token through
-authorized enrollment, not a log. Under the target contract (#687) enrollment binds
-a service Actor through minimal profiles/relations checked as explicit technical
-preconditions by the same authorizer; the allowlist becomes ordinary Django
-permissions, and node binding is a use-case fact, not a kind route.
+authorized enrollment, not a log. Service enrollment (#687) is one relation,
+`ServiceEnrollment`: a service Actor, a finite use-case vocabulary — `node-executor`
+(carries its node), `controller-worker`, `credential-runtime`, `image-builder`
+(node-free, installation catalog receipts only) — and the node the use case
+declares. The relation records the technical context next to the Actor and grants
+nothing: operational rights stay ordinary Django permissions, and admission still
+rides the existing credential fences — binding node, enrollment row, generation
+digest, assignment target/incarnation/revision, current claim, approved bytes and
+OS peer UID are server-owned facts rechecked per machine use case, never inferred
+from kind, staff or permission. Re-enrollment renews the same Actor (`renew=True`):
+a context change (use case or node) kills the old token and binding, an unchanged
+context keeps the same key, and no claim or incarnation spawns a new Actor;
+deleting the enrollment row closes the context — its token and saved context no
+longer resolve. Node-free contexts authenticate but stay denied in
+`Access.authorize` until the permission retarget (#685) consumes the relation.
 Enrollment alone supplies no readiness, grant
 activation, transport retirement or installation-secret authority; addressed secret
 issuance independently validates the current execution and approved role proofs.
+
+After scheduler, worker or private-pipeline I/O, admission repeats once before
+effect or issuance through the common `readmission` helper (#687), defined beside
+the Catalog authorizer port — the one subject access, secrets and sessions all
+import. The recheck runs in a single short SQL-only section under locks, network
+and crypto waits stay outside it, and entry refuses an active transaction.
+Machine fact reads and addressed secret delivery route through it after their
+reader/provider wait.
 
 `Access.authorize` implements Catalog's existing authorizer port. It separates
 ordinary Django action permission, actual Catalog FK scope, client ownership and
