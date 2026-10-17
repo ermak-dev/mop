@@ -510,7 +510,7 @@ class Grants:
         if (self._owner(actor) != intent.owner_id or actor.user_id != intent.actor_id
                 or actor.credential_id != intent.actor_credential_id):
             raise auth.Denied('creation actor or owner mismatch')
-        self._owner_permission(intent.owner_id, 'sessions.create_puppet', intent.project_id)
+        self._owner_permission(intent.owner_id, 'execution.create_puppet', intent.project_id)
         self._owner_permission(intent.owner_id, 'access.issue_grant', intent.project_id)
         if actor.kind in (ActorKind.HUMAN, ActorKind.AGENT):
             self._human(actor, 'access.issue_grant', intent.project_id)
@@ -550,7 +550,7 @@ class Grants:
                     raise auth.Denied('spawn role or secrets are outside approved allowlist')
         else:
             self._human(actor, 'access.issue_grant', project_id)
-        self._owner_permission(owner, 'sessions.create_puppet', project_id)
+        self._owner_permission(owner, 'execution.create_puppet', project_id)
         self._owner_permission(owner, 'access.issue_grant', project_id)
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
@@ -559,7 +559,7 @@ class Grants:
                 self._recheck(actor, chain)
             else:
                 self._human(actor, 'access.issue_grant', project_id)
-            self._owner_permission(owner, 'sessions.create_puppet', project_id)
+            self._owner_permission(owner, 'execution.create_puppet', project_id)
             self._owner_permission(owner, 'access.issue_grant', project_id)
             existing = m.CreationIntent.objects.filter(owner_id=owner, actor_id=actor.user_id,
                 project_id=project_id, request_id=request_id).first()
@@ -783,7 +783,7 @@ class Grants:
     def _message_authority(self, actor, target_id, dispatch):
         chain = self._chain(actor)
         info = chain[0][0]
-        action = 'sessions.dispatch_task' if dispatch else 'sessions.send_message'
+        action = 'execution.dispatch_task' if dispatch else 'execution.send_message'
         self.authorize(actor, action, project_ids=(info.project_id,))
         target = self.bindings.current(info.project_id, target_id)
         if type(target) is not RoleBinding or target.project_id != info.project_id:

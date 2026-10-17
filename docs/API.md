@@ -490,9 +490,10 @@ queries and `Assignments.current`/`target`; Sessions imports no Operations ORM.
 Admission and current work checks use the initiating actor's current restart
 permission and human ownership. The receiving grant is separately validated by
 `Grants.authorize_execution(RoleBinding)` and its live ancestry, not by asking the
-recipient role to have an outgoing restart capability. Logical `sessions.*`
-permissions map explicitly to actual `execution.*` Django permissions, registered
-on real domain model content types by standard migrations/post_migrate.
+recipient role to have an outgoing restart capability. Execution actions use
+their `execution.*` Django permissions directly (the logical `sessions.*` alias
+is gone since #685), registered on real domain model content types by standard
+migrations/post_migrate.
 
 `GET /api/v1/machine/work/input?schema_version=1&operation_id=...&step_id=...`
 is a private addressed input gate for the admitted service attempt. It repeats
@@ -859,7 +860,7 @@ current ClientOwnership and the corresponding `execution.register_endpoint`,
 send checks the sending actor's project and deliver permission; it does not grant
 access to the recipient's client registration. An exact private address is a
 routing identity, not a bearer capability. Grants may use their existing finite
-`sessions.send_message` capability through Access's local current-grant authority;
+`execution.send_message` capability through Access's local current-grant authority;
 they cannot register a human endpoint, enumerate human sessions or acquire their
 transport context. Services cannot use human reports. No human endpoint operation
 changes a Nomad job or reads host socket registries.

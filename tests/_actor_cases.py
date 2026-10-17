@@ -125,7 +125,7 @@ class UnifiedActorIdentity(TransactionTestCase):
         from django.contrib.auth.models import Permission
         for action in ('access.view_role', 'access.approve_role', 'access.issue_grant',
                        'access.revoke_grant', 'catalog.view_pool', 'secrets.manage_project_secret',
-                       'sessions.create_puppet'):
+                       'execution.create_puppet'):
             for permission in permission_names(action):
                 app, code = permission.split('.')
                 user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))

@@ -16,7 +16,7 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 from mop.cli import _control
 
 MCP = {"annotations": "destructive",
-       "actions": ["sessions.restart_puppet", "operations.view_operation"], "args": [
+       "actions": ["execution.restart_puppet", "operations.view_operation"], "args": [
     {"name": "puppet_id", "type": "string", "required": True, "help": "puppet assignment resource id"},
     {"name": "epoch", "type": "string", "flag": "--epoch", "required": True, "help": "installation epoch"},
     {"name": "incarnation", "type": "string", "flag": "--incarnation", "required": True, "help": "current execution incarnation"},

@@ -35,10 +35,7 @@ class Migration(migrations.Migration):
             ('session', fk('execution.clientsession')), ('project', fk('catalog.project')),
             ('address_id', models.UUIDField(default=uuid.uuid4, unique=True, editable=False)),
             ('expires_at', models.DateTimeField()), ('retired', models.BooleanField(default=False)),
-        ], options=options('endpoint', models.UniqueConstraint(fields=('session', 'project'), name='endpoint_session_project'),
-            permissions=[('register_endpoint', 'Can register own human endpoint'),
-                         ('view_delivery', 'Can inspect own private deliveries'),
-                         ('deliver_report', 'Can deliver addressed private reports')])),
+        ], options=options('endpoint', models.UniqueConstraint(fields=('session', 'project'), name='endpoint_session_project'))),
         migrations.CreateModel(name='ConnectionLease', fields=identity()+[
             ('endpoint', models.OneToOneField('execution.endpoint', on_delete=models.PROTECT)),
             ('epoch', models.UUIDField()), ('gateway_id', models.UUIDField()),

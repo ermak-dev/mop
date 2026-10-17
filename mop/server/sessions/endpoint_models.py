@@ -26,9 +26,8 @@ class Endpoint(Record):
     retired = models.BooleanField(default=False)
 
     class Meta(Record.Meta):
-        permissions = [('register_endpoint', 'Can register own human endpoint'),
-                       ('view_delivery', 'Can inspect own private deliveries'),
-                       ('deliver_report', 'Can deliver addressed private reports')]
+        # Права endpoint-действий регистрирует Assignment — один ContentType
+        # на codename (#685); Endpoint не держит дублей регистрации.
         constraints = Record.Meta.constraints + [models.UniqueConstraint(
             fields=('session', 'project'), name='endpoint_session_project')]
 

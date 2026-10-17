@@ -517,7 +517,7 @@ class Consumers(unittest.TestCase):
         self.assertEqual(declaration.get('actions'), ['operations.view_operation'])
         self.assertFalse({'cluster_verbs', 'node_verbs', 'dispatch'} & declaration.keys())
         address = cli.declared(os.path.join(cli.PACKAGE, 'core', 'addresses.py'))
-        self.assertEqual(address.get('actions'), ['sessions.view_delivery', 'catalog.view_project'])
+        self.assertEqual(address.get('actions'), ['execution.view_delivery', 'catalog.view_project'])
         self.assertIs(address.get('human_only'), True)
         drain = cli.declared(os.path.join(cli.PACKAGE, 'node', 'drain.py'))
         self.assertEqual(drain.get('actions'), ['catalog.drain_node', 'operations.view_operation'])
@@ -533,10 +533,10 @@ class Consumers(unittest.TestCase):
 
     def test_mcp_action_filter_fails_closed_and_invokes_same_commandlet(self):
         from mop.cli import _control
-        identity = api.Identity(1, 'service', 1, None, OP, frozenset({'sessions.restart_puppet',
+        identity = api.Identity(1, 'service', 1, None, OP, frozenset({'execution.restart_puppet',
             'operations.override_assignment'}))
         self.assertTrue(hasattr(_control, 'allowed'), '#642 missing server action permission filter')
-        self.assertTrue(_control.allowed({'actions': ['sessions.restart_puppet']}, identity))
+        self.assertTrue(_control.allowed({'actions': ['execution.restart_puppet']}, identity))
         self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']}, identity))
         self.assertFalse(_control.allowed({'actions': ['operations.override_assignment']}, identity))
         self.assertFalse(_control.allowed({'cluster_verbs': ['restart']}, identity))

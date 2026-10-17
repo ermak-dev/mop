@@ -14,7 +14,7 @@ from ..catalog import models as catalog
 from ..catalog.services import Catalog
 from . import models as m
 from .context import ActorContext, ActorKind
-from .permissions import ACTIONS, GLOBAL_ACTIONS, SERVICE_ACTIONS, permission_names
+from .permissions import ACTIONS, GLOBAL_ACTIONS, MACHINE_ACTIONS, permission_names
 
 
 class Denied(PermissionError):
@@ -58,8 +58,6 @@ def _identity(user, node_id=None):
             raise Denied('directory identity requires current validation')
     elif source.kind != 'local':
         raise Denied('unknown identity source')
-    if m.DirectoryGroupOwnership.objects.filter(group__user=user).exclude(user=user).exists():
-        raise Denied('invalid managed group binding')
     return identity
 
 
@@ -217,9 +215,9 @@ def _require_permissions(user, action, reason):
 
 
 def visible_project_ids(actor):
+    # Вид Actor не выбирает систему проверок (#685): проектная область для
+    # человека, агента и сервиса — одна и та же membership-таблица.
     user = _resolve(actor)
-    if user.kind != 'human':
-        raise Denied('human project query required')
     if _global(user):
         return Catalog.current_project_ids()
     memberships = m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True)
@@ -258,11 +256,17 @@ class Access:
                 raise Denied('delegation resolver is not bound')
             return self.grants.authorize(actor, action, project_ids=project_ids,
                                          node_ids=node_ids, client_ids=client_ids)
+        # Один pipeline для human/agent/service (#685): неизвестное действие
+        # отказывает одинаково до всяких видовых веток.
+        if action not in ACTIONS:
+            raise Denied('action is not registered')
         user = _resolve(actor)
         projects, nodes, clients = set(project_ids), set(node_ids), set(client_ids)
         if user.kind == 'service':
+            # Узловой enrollment — именованное доменное предусловие сервиса,
+            # не второй RBAC: права проверяет общий has_perm ниже.
             node_id = m.CredentialBinding.objects.filter(token_user=user).values_list('bound_node_id', flat=True).first()
-            if action not in SERVICE_ACTIONS or node_id is None or nodes != {node_id} or clients:
+            if node_id is None or nodes != {node_id} or clients:
                 raise Denied('service action or node is outside enrollment')
             node_projects = set(catalog.NodeProject.objects.filter(node_id=node_id).values_list('project_id', flat=True))
             allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
@@ -381,8 +385,12 @@ def revoke_token(actor):
 
 @sensitive_variables('token')
 def enroll_service(username, node_id, *, project_ids, permissions):
-    """Привилегированный local enrollment hook; root проверяет maintenance principal."""
-    if not permissions or not set(permissions) <= SERVICE_ACTIONS:
+    """Привилегированный local enrollment hook; root проверяет maintenance principal.
+
+    Права сервиса — обычные Django permissions; MACHINE_ACTIONS остаётся
+    предусловием enrollment-хука, а не вторым runtime RBAC.
+    """
+    if not permissions or not set(permissions) <= MACHINE_ACTIONS:
         raise ValueError('service permissions exceed enrollment allowlist')
     with transaction.atomic():
         projects = set(catalog.Project.objects.select_for_update().filter(pk__in=project_ids)

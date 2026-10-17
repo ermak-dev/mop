@@ -102,24 +102,27 @@ finally:
             self.assertRegex(reason, 'restore|guard|maintenance')
 
     def test_restore_arm_checks_physical_models_not_permission_metadata(self):
-        # BUG: unmanaged DomainPermission имеет ContentType, но не SQL-таблицу.
+        # BUG: unmanaged metadata-модель имеет ContentType, но не SQL-таблицу.
         # HYPOTHESIS: проверка пустоты должна обходить только модели, для которых
         # Django действительно создаёт таблицы, не пропуская реальные данные.
         # SOLUTION: ModelOptions.can_migrate отделяет физические модели от metadata.
         # RESULT: PG17 red — UndefinedTable при полном migration ledger;
         # PG16/17 green — по 23 restore/secret/trust проверки, реальные данные отклонены.
-        # STATUS: FIXED — see #623
+        # STATUS: FIXED — see #623; с #685 контрольные права controller
+        # регистрирует Installation, unmanaged дубль удалён.
         from django.contrib.auth import get_user_model
         from django.contrib.auth.models import Permission
-        from mop.server.controller.models import DomainPermission, RestoreGuard
+        from mop.server.controller.models import Installation, RestoreGuard
         from mop.server.controller.runtime import _schema_ready
         with self.target(migrate=True) as target:
             _schema_ready(target)
-            self.assertNotIn(DomainPermission._meta.db_table,
-                             connections[target].introspection.table_names())
+            # Канонический владелец controller-прав — Installation (#685);
+            # единственная registration-строка без unmanaged дубля.
             self.assertTrue(Permission.objects.using(target).filter(
-                content_type__app_label='controller', content_type__model='domainpermission',
+                content_type__app_label='controller', content_type__model='installation',
                 codename='manage_proxy').exists())
+            self.assertEqual(Permission.objects.using(target).filter(
+                content_type__app_label='controller', codename='manage_proxy').count(), 1)
             generation = archive_tools._arm_restore(target)
             connections[target].close()
             connections[target].close_pool()

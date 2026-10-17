@@ -100,7 +100,7 @@ class Endpoints:
             raise Denied('trusted actor required')
         if actor.grant_id is not None:
             # Существующая конечная send capability; grant не приобретает human endpoint.
-            self.access.authorize(actor, 'sessions.send_message', project_ids=(project_id,))
+            self.access.authorize(actor, 'execution.send_message', project_ids=(project_id,))
         else:
             if actor.kind is not ActorKind.HUMAN:
                 raise Denied('service cannot send human reports')

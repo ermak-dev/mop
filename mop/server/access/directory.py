@@ -88,12 +88,26 @@ def _mapping(source, account):
 
 
 def _revoke_owned(user, source):
+    """Source-owned revoke: снимает только membership/scope этого источника.
+
+    Права общей группы правила и участия других пользователей не трогаем;
+    ручные группы, прямые права и права других источников остаются.
+    """
     m.ProjectMembership.objects.filter(user=user, source=source).delete()
     m.AllProjectMembership.objects.filter(user=user, source=source).delete()
-    ownership = m.DirectoryGroupOwnership.objects.select_related('group').filter(user=user, source=source).first()
-    if ownership:
-        ownership.group.permissions.clear()
-        user.groups.remove(ownership.group)
+    for rule in m.DirectoryGroupRule.objects.select_related('group').filter(source=source, group__user=user):
+        user.groups.remove(rule.group)
+
+
+def _rule_group(rule):
+    """Одна общая Group на правило; имя устойчиво и не зависит от пользователя."""
+    if rule.group_id is None:
+        # Уникальность даёт pk правила: DN длиннее 64 символов мог бы
+        # столкнуться после усечения имени.
+        group = Group.objects.create(name='directory-' + str(rule.pk))
+        m.DirectoryGroupRule.objects.filter(pk=rule.pk).update(group=group)
+        rule.group = group
+    return rule.group
 
 
 def apply_directory(source_id, revision, result, *, configuration=None, expected_user_id=None):
@@ -141,23 +155,25 @@ def apply_directory(source_id, revision, result, *, configuration=None, expected
             ids = set(result.project_ids)
             if Project.objects.filter(pk__in=ids).count() != len(ids):
                 raise ValueError('directory mapping references an unknown project')
+            # Каталог права мог потерять строку; проекция отказывает целиком,
+            # а не принимает пользователя с усечённым набором (#670).
+            for action in result.permissions:
+                app, code = action.split('.')
+                if not Permission.objects.filter(content_type__app_label=app, codename=code).exists():
+                    raise DirectoryUnavailable('directory permission catalogue is unavailable')
             for project_id in ids:
                 m.ProjectMembership.objects.create(user=user, source=source, project_id=project_id)
             if result.all_projects:
                 m.AllProjectMembership.objects.create(user=user, source=source)
-            ownership = m.DirectoryGroupOwnership.objects.select_related('group').filter(user=user, source=source).first()
-            if ownership is None:
-                group = Group.objects.create(name='directory-' + source.pk.hex + '-' + str(user.pk))
-                ownership = m.DirectoryGroupOwnership.objects.create(user=user, source=source, group=group)
-            permissions = []
-            for action in result.permissions:
-                app, code = action.split('.')
-                matches = list(Permission.objects.filter(content_type__app_label=app, codename=code))
-                if not matches:
-                    raise DirectoryUnavailable('directory permission catalogue is unavailable')
-                permissions.extend(matches)
-            ownership.group.permissions.set(permissions)
-            user.groups.add(ownership.group)
+            # Проекция права — общая Group правила, не контейнер на пользователя:
+            # участие только add/remove, права группы зеркалит каталог правила.
+            for rule in m.DirectoryGroupRule.objects.filter(source=source).prefetch_related('permissions'):
+                if _norm(rule.group_dn) in {_norm(dn) for dn in result.groups}:
+                    group = _rule_group(rule)
+                    rule_permissions = set(rule.permissions.all())
+                    if rule_permissions != set(group.permissions.all()):
+                        group.permissions.set(rule_permissions)
+                    user.groups.add(group)
         m.CredentialEvent.objects.create(user=user, action='directory_validated' if result.allowed else 'directory_denied')
         return user.pk
 

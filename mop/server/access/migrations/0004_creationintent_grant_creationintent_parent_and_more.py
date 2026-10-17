@@ -53,6 +53,8 @@ class Migration(migrations.Migration):
             options={
                 'abstract': False,
                 'default_permissions': (),
+                'permissions': [('view_role', 'Can view role'), ('approve_role', 'Can approve role'),
+                                ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant')],
             },
         ),
         migrations.AddField(

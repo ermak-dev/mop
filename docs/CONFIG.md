@@ -331,9 +331,9 @@ Connecting those identities for a new target still needs an accepted owning
 admission use case. The current Operations vertical is node drain/enable, not a
 generic role-create/stage handler. Socket tests with persisted matching
 assignments prove the binding checks, not that missing end-to-end workflow.
-Grants also requires the registered `sessions.create_puppet` permission; the
-current execution app installs `execution.*`, not that role-create permission.
-The socket fixture explicitly supplies it. Production admission must own its
+Grants also requires the registered `execution.create_puppet` permission (the
+execution app installs `execution.*` directly since #685, with no logical
+alias). The socket fixture explicitly supplies it. Production admission must own its
 registration rather than treating a superuser or caller-selected owner as a
 substitute for a missing capability.
 

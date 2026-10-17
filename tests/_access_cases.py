@@ -507,6 +507,13 @@ class AccessContracts(TransactionTestCase):
         # Credential с самого начала LDAP-bound: смена provider — отдельный revoke,
         # а не допустимый способ подготовить проверку freshness старого local token.
         source = self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=1)
+        # Права проектирует правило группы (#685): фикстура объявляет правило,
+        # как это делает живой _mapping.
+        from django.contrib.auth.models import Permission
+        rule = self.m.DirectoryGroupRule.objects.create(source=source, group_dn='direct',
+                                                        project=self.project)
+        rule.permissions.add(Permission.objects.get(content_type__app_label='catalog',
+                                                    codename='view_project'))
         result = DirectoryResult(subject='uid=fresh', username='fresh-directory', groups=('direct',),
             project_ids=(self.project.pk,), all_projects=False, permissions=('catalog.view_project',))
         user_id = apply_directory(source.pk, source.revision, result)

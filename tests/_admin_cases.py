@@ -56,12 +56,10 @@ class OperationBackedAdmin(TransactionTestCase):
     def allow(self, *names):
         for name in names:
             app, code = name.split('.')
-            if app == 'controller':
-                permission = Permission.objects.get_by_natural_key(code, app, 'domainpermission')
-            elif app == 'auth':  # logical namespace; rows live under actor label
+            if app == 'auth':  # logical namespace; rows live under actor label
                 code = code.replace('_user', '_actor', 1)
                 permission = Permission.objects.get(content_type__app_label='actor', codename=code)
-            else:
+            else:  # единственный канонический владелец на codename (#685)
                 permission = Permission.objects.get(content_type__app_label=app, codename=code)
             self.user.user_permissions.add(permission)
 
@@ -556,18 +554,18 @@ class OperationBackedAdmin(TransactionTestCase):
         a.ProjectMembership.objects.filter(user=self.user).delete()
         self.assertNotContains(self.get('/admin/'), str(self.project.pk))
 
-    # HYPOTHESIS: manage_proxy зарегистрирован у DomainPermission и Installation;
+    # HYPOTHESIS: manage_proxy зарегистрирован у Installation и DomainPermission;
     # положительная фикстура должна выбирать ContentType, не случайную строку.
-    # SOLUTION: natural key DomainPermission; отзыв удаляет оба grants действия,
-    # сохраняя независимое view_project и проверку отсутствующей gateway-ссылки.
+    # SOLUTION: единый канонический владелец Installation (#685), ровно одна
+    # строка registration: её отзыв скрывает ссылку без очистки прочих прав.
     # RESULT: положительная фикстура выбирает зарегистрированный ContentType;
     # отзыв логического действия скрывает ссылку без очистки прочих разрешений.
-    # STATUS: FIXED — see #638 (только интеграционная фикстура).
+    # STATUS: FIXED — see #638; единственный владелец с #685.
     def test_admin_fixture_grants_registered_controller_permission(self):
         self.allow('controller.manage_proxy')
         self.assertEqual(list(self.user.user_permissions.filter(
             content_type__app_label='controller').values_list('content_type__model', 'codename')),
-            [('domainpermission', 'manage_proxy')])
+            [('installation', 'manage_proxy')])
 
     def test_authorized_admin_index_links_separate_management_gateway(self):
         self.global_scope()
@@ -575,10 +573,9 @@ class OperationBackedAdmin(TransactionTestCase):
         response = self.get('/admin/')
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '/llm/management.html')
-        self.user.user_permissions.add(Permission.objects.get_by_natural_key(
-            'manage_proxy', 'controller', 'installation'))
+        # Ровно одна registration-строка: её отзыв закрывает действие.
         self.assertEqual(self.user.user_permissions.filter(
-            content_type__app_label='controller', codename='manage_proxy').count(), 2)
+            content_type__app_label='controller', codename='manage_proxy').count(), 1)
         self.user.user_permissions.remove(*Permission.objects.filter(
             content_type__app_label='controller', codename='manage_proxy'))
         self.assertNotContains(self.get('/admin/'), '/llm/management.html')

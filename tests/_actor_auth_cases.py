@@ -89,7 +89,7 @@ class SingleAuthenticationPathCases(TransactionTestCase):
         m.ProjectMembership.objects.create(user=self.human, project=self.project, source=self.source)
         self.permit('catalog.view_project', 'access.view_role', 'access.approve_role',
                     'access.issue_grant', 'access.revoke_grant', 'secrets.manage_project_secret',
-                    'sessions.create_puppet')
+                    'execution.create_puppet')
         self.token = s.issue_token(self.human.pk)
         self.actor = s.token_context(self.token)
 
