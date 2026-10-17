@@ -328,6 +328,29 @@ test:py3.12:
         runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
         self.assertIn('TESTS=python3 tests/controller_runtime.py', runner)
 
+    # #697: DiscoverRunner.run_tests возвращает ЦЕЛОЕ число провалов, а не
+    # объект результата; strict_failure_count над целым всегда видит ноль,
+    # и gate выходит 0 даже при FAILED. Агрегация выхода обязана считать
+    # целое и добавлять skipped только по захваченному объекту результата.
+    # RED: run_exit_code не существовал, а main маршрутизировал целое в
+    # strict_failure_count. RESULT: 21/21 офлайн; живой зонд — намеренно
+    # красный лейбл даёт exit 1, зелёный 0.
+    # STATUS: FIXED — see #697
+    def test_controller_gate_exit_aggregates_the_integer_run_result(self):
+        from _controller_fixture import run_exit_code
+        import inspect as _inspect
+        from pathlib import Path as _P
+        import _controller_fixture as _mod
+        self.assertEqual(run_exit_code(0, strict=True, skipped=0), 0)
+        self.assertEqual(run_exit_code(39, strict=False, skipped=5), 1)
+        self.assertEqual(run_exit_code(0, strict=True, skipped=2), 1)
+        self.assertEqual(run_exit_code(0, strict=False, skipped=2), 0)
+        source = _P(_mod.__file__).read_text(encoding='utf-8')
+        self.assertIn('run_exit_code(', source,
+                      'the fixture main must route its exit through run_exit_code')
+        self.assertNotIn('int(bool(strict_failure_count(suite_result', source,
+                         'the integer run_tests result must not reach strict_failure_count')
+
     def test_drop_diagnostic_reads_only_owned_database_and_known_pid_metadata(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock
