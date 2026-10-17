@@ -21,8 +21,9 @@ class Principal(Identifier):
     revision = models.PositiveBigIntegerField(default=1)
 
     class Meta(Identifier.Meta):
-        permissions = [('view_role', 'Can view role'), ('approve_role', 'Can approve role'),
-                       ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant')]
+        # Владение action-правами переехало на живую модель Grant (#685);
+        # Principal не регистрирует прав, строки не создаются (#684).
+        # Удаление таблицы подготовлено в #645 после потребителей #688.
         constraints = [models.CheckConstraint(condition=Q(kind__in=('human', 'service', 'grant'), revision__gte=1), name='access_principal_valid')]
 
 
@@ -116,18 +117,13 @@ class DirectoryGroupRule(Identifier):
     project = models.ForeignKey('catalog.Project', null=True, on_delete=models.PROTECT)
     all_projects = models.BooleanField(default=False)
     permissions = models.ManyToManyField('auth.Permission', blank=True)
+    # Проекция правила — одна общая Group на правило, не контейнер на
+    # пользователя (#685): участие add/remove, права зеркалит каталог правила.
+    group = models.OneToOneField('auth.Group', null=True, on_delete=models.PROTECT,
+                                 related_name='directory_rule')
 
     class Meta(Identifier.Meta):
         constraints = [models.UniqueConstraint(fields=('source', 'group_dn'), name='access_directory_rule_unique')]
-
-
-class DirectoryGroupOwnership(Identifier):
-    source = models.ForeignKey(IdentitySource, on_delete=models.PROTECT)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-    group = models.OneToOneField('auth.Group', on_delete=models.PROTECT, related_name='directory_owner')
-
-    class Meta(Identifier.Meta):
-        constraints = [models.UniqueConstraint(fields=('source', 'user'), name='access_directory_group_unique')]
 
 
 class AuthAttempt(models.Model):
@@ -338,6 +334,10 @@ class Grant(Evidence):
         return next_state(self.state, event)
 
     class Meta(Evidence.Meta):
+        # Владелец регистрации access-прав жизненного цикла делегирования (#685):
+        # ровно один ContentType на codename; deprecated Principal их не держит.
+        permissions = [('view_role', 'Can view role'), ('approve_role', 'Can approve role'),
+                       ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant')]
         constraints = [models.CheckConstraint(condition=Q(state__in=('reserved', 'active', 'revoked', 'expired'), revision__gte=1), name='access_grant_lifecycle'),
             models.CheckConstraint(condition=Q(retirement__in=('pending', 'applied', 'refused', 'unknown')), name='access_grant_retirement'),
             models.CheckConstraint(condition=~Q(state='active') | Q(credential_version__isnull=False), name='access_active_credential')]

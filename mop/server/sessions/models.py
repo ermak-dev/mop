@@ -24,11 +24,13 @@ class Assignment(Record):
         on_delete=models.PROTECT, related_name='+')
 
     class Meta(Record.Meta):
+        # Канонический владелец регистрации execution-прав, кроме view_usage
+        # (UsageSource) и машинного протокола наблюдений (#670/#685).
         permissions = [('assign_work', 'Can assign human work')] + [(code, 'Can '+code.replace('_', ' ')) for code in (
             'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet', 'wipe_puppet',
             'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery', 'register_endpoint', 'deliver_report',
             'view_history', 'view_tail', 'read_terminal', 'control_terminal', 'send_session_command',
-            'change_session_model', 'view_usage', 'view_landing')]
+            'change_session_model', 'view_landing')]
         constraints = Record.Meta.constraints + [models.CheckConstraint(
             condition=Q(generation__gte=1), name='assignment_generation_positive')]
 

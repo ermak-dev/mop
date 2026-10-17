@@ -73,7 +73,7 @@ class RestartHandler:
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
 
     def _authorize(self, actor, target):
-        self.ops.access.authorize(actor, 'sessions.restart_puppet', project_ids=(target.project_id,))
+        self.ops.access.authorize(actor, 'execution.restart_puppet', project_ids=(target.project_id,))
         # Разрешение action не даёт права уничтожить чужую человеческую работу.
         if actor.human_owner_id != target.owner_id:
             raise Denied('restart belongs to another human assignment')

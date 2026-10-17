@@ -36,9 +36,7 @@ class Migration(migrations.Migration):
             ('user', models.OneToOneField(to=settings.AUTH_USER_MODEL, on_delete=deletion.PROTECT)),
             ('kind', models.CharField(max_length=8, choices=[('human', 'Human'), ('service', 'Service'), ('grant', 'Grant')])),
             ('bound_node', fk('catalog.node', null=True)), ('revision', models.PositiveBigIntegerField(default=1)),
-        ], options=options(models.CheckConstraint(condition=models.Q(kind__in=('human', 'service', 'grant'), revision__gte=1), name='access_principal_valid'),
-            permissions=[('view_role', 'Can view role'), ('approve_role', 'Can approve role'),
-                ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant')])),
+        ], options=options(models.CheckConstraint(condition=models.Q(kind__in=('human', 'service', 'grant'), revision__gte=1), name='access_principal_valid'))),
         migrations.CreateModel(name='LoginIdentity', fields=identifier() + [
             ('user', models.OneToOneField(to=settings.AUTH_USER_MODEL, on_delete=deletion.PROTECT)),
             ('source', fk('access.identitysource')), ('external_subject', models.CharField(max_length=1024)),
@@ -78,11 +76,8 @@ class Migration(migrations.Migration):
             ('source', fk('access.identitysource')), ('group_dn', models.CharField(max_length=1024)),
             ('project', fk('catalog.project', null=True)), ('all_projects', models.BooleanField(default=False)),
             ('permissions', models.ManyToManyField(to='auth.permission', blank=True)),
+            ('group', models.OneToOneField(to='auth.group', null=True, on_delete=deletion.PROTECT, related_name='directory_rule')),
         ], options=options(models.UniqueConstraint(fields=('source', 'group_dn'), name='access_directory_rule_unique'))),
-        migrations.CreateModel(name='DirectoryGroupOwnership', fields=identifier() + [
-            ('source', fk('access.identitysource')), ('user', fk(settings.AUTH_USER_MODEL)),
-            ('group', models.OneToOneField(to='auth.group', on_delete=deletion.PROTECT, related_name='directory_owner')),
-        ], options=options(models.UniqueConstraint(fields=('source', 'user'), name='access_directory_group_unique'))),
         migrations.CreateModel(name='AuthAttempt', fields=[
             ('key', models.CharField(max_length=64, primary_key=True, serialize=False)),
             ('count', models.PositiveIntegerField(default=0)),

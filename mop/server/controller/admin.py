@@ -104,13 +104,15 @@ class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
 
     def formfield_for_manytomany(self, db_field, request, **kwargs):
         if db_field.name == 'groups':
-            kwargs['queryset'] = Group.objects.filter(directory_owner__isnull=True)
+            # Управляемые общие группы правил скрыты из ручного назначения (#685).
+            kwargs['queryset'] = Group.objects.filter(directory_rule__isnull=True)
         return super().formfield_for_manytomany(db_field, request, **kwargs)
 
 
 class ScopedGroupAdmin(GlobalAuthAdmin, GroupAdmin):
     def get_queryset(self, request):
-        return super().get_queryset(request).filter(directory_owner__isnull=True)
+        # Проекция правила — общая группа, редактирование через admin запрещено.
+        return super().get_queryset(request).filter(directory_rule__isnull=True)
 
     def save_model(self, request, obj, form, change):
         permitted = self.has_change_permission(request) if change else self.has_add_permission(request)

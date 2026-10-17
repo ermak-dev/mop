@@ -129,37 +129,40 @@ explicit global scope, not a service/ownership bypass. Service users cannot
 be elevated by editing User flags. Since #684 kind no longer routes
 authentication: the same path resolves human, agent and service Actors from
 their credential, and a delegated machine is a service Actor whose fence is the
-Grant lifecycle behind the injected resolver — unbound means denied. Under the
-target contract the remaining kind fences disappear into the one authorizer
-(#685): kind stops routing authorization, and delegation stays a narrowing
-context (`grant_id`) on existing Actors rather than a third branch. Catalog's
-immutable `permissions.ACTION_PERMISSIONS` is the
-canonical conjunction of ordinary model and domain permissions; Access consumes
-that map rather than treating its entries as alternatives. `set_project_limit`
+Grant lifecycle behind the injected resolver — unbound means denied. Since #685
+kind no longer routes authorization: one pipeline serves every kind, and
+delegation stays a narrowing context (`grant_id`) on existing Actors rather
+than a third branch. `access.permissions.ACTION_PERMISSIONS` is the single
+action dictionary — action → conjunction of Django permissions — with exactly
+one registration owner per action; `ACTIONS`, `GLOBAL_ACTIONS` and
+`MACHINE_ACTIONS` are all derived from it. Catalog's immutable
+`catalog.permissions.ACTION_PERMISSIONS` supplies the `catalog.*` conjunctions
+inside that dictionary; Access consumes the map rather than treating its
+entries as alternatives. `set_project_limit`
 is a separate action. Catalog's extra permissions are declared on Project, Node,
 InstallationConfiguration and ProjectPolicySnapshot; `record_settings_application`
 belongs only to InstallationConfiguration, including node-setting receipts.
 Standard `view_project`/`view_node` are not declared twice. The fresh-install
 catalog migration graph has one permissions leaf, `0002_action_permissions`.
-Access's role/grant actions still declare their Permission ownership through the
-legacy Principal-shaped tables in the current slice; #685 fixes one
-permission-codename dictionary with a named registration owner per action and
-removes the sessions→execution alias and capability matrices of operational
-rights. Later owning apps register their CONTROL actions before the evaluator
-can admit them.
+Since #685 each action permission has one canonical ContentType owner:
+`controller.*` on Installation, `execution.view_usage` on UsageSource, the
+endpoint trio (`register_endpoint`, `view_delivery`, `deliver_report`) on
+Assignment, and the delegation quartet (`view_role`, `approve_role`,
+`issue_grant`, `revoke_grant`) on Grant — Principal registers nothing. The
+deprecated Principal table keeps no invariant of its own: rows stopped being
+created in #684, permission ownership moved to Grant in #685, and the table's
+deletion is prepared in #645 after the remaining consumers from #688 land.
 
-The logical `sessions.*` CONTROL namespace maps to Django `execution.*` permissions
-through `access.permissions.permission_names`; it is not the built-in Django sessions app.
-Since #683 the same holds for `auth.*`: the logical `auth.<verb>_user` action maps
-to the `actor.<verb>_actor` permission rows, because the single Actor model
-carries its app label `actor`, while the CONTROL vocabulary keeps the human
-name `auth.*` for User/Group administration.
-Inventing a `sessions.create_puppet` Permission row cannot authorize the action.
-Django identifies an effective permission by `app_label.codename`, while rows are
-unique by ContentType and codename. Multiple registered models can therefore
-supply the same logical action, such as `execution.view_delivery`. Fixtures select
-their intended registered ContentType by natural key. Removing one row does not
-prove revocation while another direct or group grant still supplies that action;
+There is no `sessions.*` logical namespace anymore: execution actions are
+named by their owner's app label (`execution.restart_puppet`) and
+`access.permissions.permission_names` reads the one dictionary, with only the
+`auth.<verb>_user` → `actor.<verb>_actor` mapping remaining, because the
+single Actor model carries its app label `actor` while the CONTROL vocabulary
+keeps the human name `auth.*` for User/Group administration.
+Django identifies an effective permission by `app_label.codename`; with one
+registration owner per codename there is no second row that could keep an
+action alive after revocation. Revocation still requires removing every
+remaining direct or group grant of that action;
 source-owned directory revocation removes only that source's grants.
 
 ### Transaction-local delegated authority (#635 / #639; target rework #688)
@@ -216,12 +219,14 @@ The authoritative Router respects an existing LoginIdentity before source order.
 Otherwise the first knowing source decides, including wrong password, ambiguous
 login, absent groups and outage; no backend fall-through adopts another identity.
 LDAP users retain unusable local passwords. Direct/nested AD groups map to
-ordinary Django permissions and explicit project/all-project rows — under the
-target contract (#685) they map to shared Django Groups, never a per-user Group
-container, and there is no second permission catalog. Refresh removes only the
-source-owned scope and managed Group; unrelated local grants remain, and
-source-owned revocation never performs a destructive `user_permissions.set` that
-would erase manual or other-source rights. LDAP I/O is
+shared Django Groups — exactly one Group per DirectoryGroupRule — plus
+explicit project/all-project rows; there is no per-user Group container and no
+second permission catalog (since #685). The rule's group mirrors the rule's
+permission catalogue; users are only added to and removed from it. Refresh
+removes only the source-owned scope and that user's membership in the rule
+groups; unrelated local grants, manual Groups and other-source rights remain,
+and source-owned revocation never performs a destructive
+`user_permissions.set` that would erase manual or other-source rights. LDAP I/O is
 outside SQL, followed by source-revision and complete configuration CAS. Expired
 validation or a changed configuration fails closed until authoritative refresh.
 The configured immutable subject is `entryUUID` (default) or AD `objectGUID`, not

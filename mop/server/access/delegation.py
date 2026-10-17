@@ -150,20 +150,20 @@ class MessageAuthority:
 ACTION_CAPABILITIES = {
     'catalog.view_pool': ('cluster', 'roster'),
     'catalog.view_project': ('cluster', 'roster'),
-    'sessions.create_puppet': ('cluster', 'add'),
-    'sessions.update_puppet': ('cluster', 'update'),
-    'sessions.restart_puppet': ('cluster', 'restart'),
-    'sessions.delete_puppet': ('cluster', 'delete'),
-    'sessions.stop_allocation': ('cluster', 'stop'),
-    'sessions.wipe_puppet': ('node', 'wipe'),
-    'sessions.send_message': ('node', 'send'),
-    'sessions.send_session_command': ('node', 'type'),
-    'sessions.change_session_model': ('node', 'type'),
-    'sessions.view_usage': ('node', 'usage'),
-    'sessions.view_landing': ('cluster', 'landing'),
-    'sessions.acquire_landing': ('cluster', 'landing'),
-    'sessions.release_landing': ('cluster', 'landing'),
-    'sessions.dispatch_task': ('dispatch', ''),
+    'execution.create_puppet': ('cluster', 'add'),
+    'execution.update_puppet': ('cluster', 'update'),
+    'execution.restart_puppet': ('cluster', 'restart'),
+    'execution.delete_puppet': ('cluster', 'delete'),
+    'execution.stop_allocation': ('cluster', 'stop'),
+    'execution.wipe_puppet': ('node', 'wipe'),
+    'execution.send_message': ('node', 'send'),
+    'execution.send_session_command': ('node', 'type'),
+    'execution.change_session_model': ('node', 'type'),
+    'execution.view_usage': ('node', 'usage'),
+    'execution.view_landing': ('cluster', 'landing'),
+    'execution.acquire_landing': ('cluster', 'landing'),
+    'execution.release_landing': ('cluster', 'landing'),
+    'execution.dispatch_task': ('dispatch', ''),
 }
 
 
@@ -182,7 +182,7 @@ def allows(bundle, action):
 
 
 def allows_spawn(parent, child):
-    return (allows(parent, 'sessions.create_puppet') and child.role in parent.capabilities.spawn
+    return (allows(parent, 'execution.create_puppet') and child.role in parent.capabilities.spawn
             and set(child.secrets.files) <= set(parent.secrets.files)
             and set(child.secrets.vars) <= set(parent.secrets.vars))
 

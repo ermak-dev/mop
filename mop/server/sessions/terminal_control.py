@@ -43,7 +43,7 @@ class Terminals:
     def _scope(self, actor, target, mode, *, current=True):
         if actor.kind is not ActorKind.HUMAN:
             raise Denied('terminal requires a human principal')
-        self.authorizer.authorize(actor,'sessions.control_terminal' if mode=='rw' else 'sessions.read_terminal',
+        self.authorizer.authorize(actor,'execution.control_terminal' if mode=='rw' else 'execution.read_terminal',
                                   project_ids=(target.project_id,))
         if current and (target.expires_at <= timezone.now() or target.current_incarnation_id is None):
             raise Conflict('terminal target is not current')

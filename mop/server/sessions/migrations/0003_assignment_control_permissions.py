@@ -9,4 +9,4 @@ class Migration(migrations.Migration):
             'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet', 'wipe_puppet',
             'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery', 'register_endpoint', 'deliver_report',
             'view_history', 'view_tail', 'read_terminal', 'control_terminal', 'send_session_command',
-            'change_session_model', 'view_usage', 'view_landing')]})]
+            'change_session_model', 'view_landing')]})]

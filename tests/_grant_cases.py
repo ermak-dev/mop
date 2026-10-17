@@ -125,7 +125,7 @@ class GrantCases(TransactionTestCase):
         self.api = self.g.Grants(provider=self.provider, approvals=self.approvals, bindings=self.bindings)
         # Настоящие CONTROL permissions новой БД, без искусственных content types.
         for code in ('create_puppet', 'send_message', 'dispatch_task'):
-            self.permit('sessions.' + code)
+            self.permit('execution.' + code)
         self.bundle = self.publish()
 
     def permit(self, *actions):
@@ -211,9 +211,9 @@ class GrantCases(TransactionTestCase):
         row, actor = self.active(actor=parent_actor)
         token = Token.objects.get(user_id=row.principal_id).key
         local = self.api.local_authority()
-        self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        self.api.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         with transaction.atomic():
-            local.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            local.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
             self.api.authorize_execution(row.binding)
         self.user.is_superuser = True
         self.user.save()
@@ -236,9 +236,9 @@ class GrantCases(TransactionTestCase):
                     with self.assertRaises(auth.Denied):
                         auth.current_actor(actor, grants=resolver)
                     with self.assertRaises(auth.Denied):
-                        auth.Access(grants=resolver).authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+                        auth.Access(grants=resolver).authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
                     with self.assertRaises(auth.Denied):
-                        auth.Access(grants=resolver).authorize(actor, 'sessions.send_message', project_ids=(replacement.id,))
+                        auth.Access(grants=resolver).authorize(actor, 'execution.send_message', project_ids=(replacement.id,))
             with transaction.atomic(), self.assertRaises(auth.Denied):
                 self.api.authorize_execution(row.binding)
 
@@ -314,17 +314,17 @@ class GrantCases(TransactionTestCase):
         authority = auth.Access(grants=local)
         with transaction.atomic():
             self.assertEqual(local.resolve_actor(actor), actor)
-            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            authority.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         # Полная human authority нужна, чтобы проверять именно pinned caps,
         # а не ранний отказ owner permission (combined PG17 red, #625).
         self.permit('catalog.change_project', 'catalog.configure_project')
         with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'capabilities'):
             authority.authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
         with transaction.atomic(), self.assertRaises(PermissionError):
-            authority.authorize(actor, 'sessions.send_message', project_ids=(self.foreign.pk,))
+            authority.authorize(actor, 'execution.send_message', project_ids=(self.foreign.pk,))
         Token.objects.filter(user_id=row.principal_id).delete()
         with transaction.atomic(), self.assertRaises(PermissionError):
-            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            authority.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
 
     # BUG: обычный append расширяет утверждённые capabilities локального gate;
     # token lookup по user усыновляет binding выпущенного параллельно ключа.
@@ -352,19 +352,20 @@ class GrantCases(TransactionTestCase):
 
     def test_local_and_full_authority_cannot_gain_appended_restart(self):
         row, actor = self.active()
-        from django.contrib.contenttypes.models import ContentType
-        ct, _ = ContentType.objects.get_or_create(app_label='sessions', model='grant_test_fixture')
-        Permission.objects.get_or_create(content_type=ct, codename='restart_puppet')
-        self.permit('sessions.restart_puppet')
+        # Ровно одна каноническая registration-строка Assignment (#685):
+        # выдуманный ContentType для аппенда больше не нужен.
+        self.assertEqual(Permission.objects.filter(
+            content_type__app_label='execution', codename='restart_puppet').count(), 1)
+        self.permit('execution.restart_puppet')
         for authority in (self.api, self.api.local_authority()):
-            authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            authority.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
             with self.assertRaises(PermissionError):
-                authority.authorize(actor, 'sessions.restart_puppet', project_ids=(self.project.pk,))
+                authority.authorize(actor, 'execution.restart_puppet', project_ids=(self.project.pk,))
         with self.assertRaisesRegex(ValueError, 'sealed'):
             access.RoleCapability.objects.create(bundle_id=row.bundle_id, scope='cluster', verb='restart')
         for authority in (self.api, self.api.local_authority()):
             with self.assertRaises(PermissionError):
-                authority.authorize(actor, 'sessions.restart_puppet', project_ids=(self.project.pk,))
+                authority.authorize(actor, 'execution.restart_puppet', project_ids=(self.project.pk,))
 
     def test_presented_old_token_never_adopts_concurrently_replaced_binding(self):
         for local in (False, True):
@@ -434,7 +435,7 @@ class GrantCases(TransactionTestCase):
             with self.assertRaisesRegex(PermissionError, 'sealed'):
                 authority.resolve_actor(actor)
             with self.assertRaisesRegex(PermissionError, 'sealed'):
-                authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+                authority.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'sealed'):
             self.api.authorize_execution(row.binding)
         with self.assertRaisesRegex(PermissionError, 'sealed'):
@@ -647,7 +648,7 @@ class GrantCases(TransactionTestCase):
         key = Token.objects.get(user_id=actor.user_id).key
         with self.assertRaises(PermissionError):
             auth.token_context(key)
-        self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        self.api.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         Token.objects.filter(user_id=actor.user_id).delete()
         with self.assertRaises(PermissionError):
             self.api.resolve_actor(actor)
@@ -656,11 +657,11 @@ class GrantCases(TransactionTestCase):
 
     def test_owner_permission_membership_and_deactivation_are_current(self):
         row, actor = self.active()
-        self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        self.api.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         permission = Permission.objects.get(content_type__app_label='execution', codename='send_message')
         self.user.user_permissions.remove(permission)
         with self.assertRaises(PermissionError):
-            self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+            self.api.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         self.user.user_permissions.add(permission)
         access.ProjectMembership.objects.filter(user=self.user).delete()
         with self.assertRaises(PermissionError):
@@ -673,11 +674,11 @@ class GrantCases(TransactionTestCase):
 
     def test_same_project_plain_send_is_not_dispatch_or_human_override(self):
         row, actor = self.active()
-        auth.Access(grants=self.api).authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
+        auth.Access(grants=self.api).authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         with self.assertRaises(PermissionError):
-            self.api.authorize(actor, 'sessions.dispatch_task', project_ids=(self.project.pk,))
+            self.api.authorize(actor, 'execution.dispatch_task', project_ids=(self.project.pk,))
         with self.assertRaises(PermissionError):
-            self.api.authorize(actor, 'sessions.send_message', project_ids=(self.foreign.pk,))
+            self.api.authorize(actor, 'execution.send_message', project_ids=(self.foreign.pk,))
         with self.assertRaises(PermissionError):
             self.api.authorize(actor, 'operations.override_assignment', project_ids=(self.project.pk,))
         with self.assertRaises(PermissionError):

@@ -83,8 +83,9 @@ class Endpoints(TransactionTestCase):
         user = get_user_model().objects.create_user(name)
         self.a.LoginIdentity.objects.create(user=user, source=self.source, external_subject=name)
         self.a.ProjectMembership.objects.create(user=user, project=self.project, source=self.source)
+        # Канонический владелец endpoint-прав — Assignment, не Endpoint (#685).
         for code in ('register_endpoint', 'view_delivery', 'deliver_report'):
-            user.user_permissions.add(Permission.objects.get_by_natural_key(code, 'execution', 'endpoint'))
+            user.user_permissions.add(Permission.objects.get_by_natural_key(code, 'execution', 'assignment'))
         user.user_permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='view_project'))
         key = self.auth.issue_token(user.pk)
         return user, self.auth.token_context(key), key
@@ -894,25 +895,23 @@ class Endpoints(TransactionTestCase):
         asyncio.run(scenario())
 
     # HYPOTHESIS: app.codename — логическое действие, а не уникальная строка;
-    # Assignment и Endpoint регистрируют одинаковые действия без выдуманных CT.
-    # SOLUTION: положительные разрешения только от Endpoint; при двух grants отзыв
-    # удаляет всё логическое view_delivery, не ослабляя независимый read gate.
-    # RESULT: точная фикстура и отказ после отзыва обоих grants проверены отдельно.
-    # STATUS: FIXED — see #649 (только интеграционная фикстура).
+    # регистрация ровно одна: Assignment — канонический владелец (#685/#670).
+    # SOLUTION: положительная фикстура выбирает зарегистрированный ContentType;
+    # отзыв единственной строки закрывает действие без второй регистрации.
+    # RESULT: точная фикстура и отказ после отзыва проверены отдельно.
+    # STATUS: FIXED — see #649, канонический владелец изменён в #685.
     def test_endpoint_fixture_grants_only_registered_endpoint_permissions(self):
         self.assertEqual(set(self.user.user_permissions.filter(
             content_type__app_label='execution').values_list('content_type__model', 'codename')),
-            {('endpoint', code) for code in ('register_endpoint', 'view_delivery', 'deliver_report')})
+            {('assignment', code) for code in ('register_endpoint', 'view_delivery', 'deliver_report')})
 
     def test_sender_read_requires_independent_view_delivery_permission(self):
         self.connect()
         report = self.send()
         self.assertEqual(self.api.delivery(self.actor, report.id).id, report.id)
-        # Держим оба настоящих grants: отзыв только Endpoint оставил бы действие.
-        self.user.user_permissions.add(Permission.objects.get_by_natural_key(
-            'view_delivery', 'execution', 'assignment'))
+        # Ровно одна registration-строка: её отзыв закрывает действие.
         self.assertEqual(self.user.user_permissions.filter(
-            content_type__app_label='execution', codename='view_delivery').count(), 2)
+            content_type__app_label='execution', codename='view_delivery').count(), 1)
         self.user.user_permissions.remove(*Permission.objects.filter(
             content_type__app_label='execution', codename='view_delivery'))
         with self.assertRaises(PermissionError):

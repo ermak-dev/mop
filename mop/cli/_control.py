@@ -165,7 +165,7 @@ def plain(value):
 
 # Лишь делегируемые действия; человеческий override/terminal/node Admin не
 # появляется у гранта от имени роли или от прав human owner.
-_GRANT_ACTIONS = frozenset('sessions.' + action for action in (
+_GRANT_ACTIONS = frozenset('execution.' + action for action in (
     'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet',
     'wipe_puppet', 'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery',
     'deliver_report', 'send_session_command', 'change_session_model', 'view_usage',

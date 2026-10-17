@@ -182,17 +182,19 @@ class DirectoryIdentityContracts(TransactionTestCase):
         return self.router.authenticate(None, username=username, password='test-password')
 
     # HYPOTHESIS: app.codename — логическое право Django, не уникальная строка
-    # Permission; несколько ContentTypes не должны срывать directory projection.
+    # Permission; ровно один канонический ContentType не даёт неоднозначности.
     # RED: PG17 — MultipleObjectsReturned и сырой DoesNotExist до исправления.
-    # SOLUTION: все эквивалентные Django rows; отсутствие даёт DirectoryUnavailable.
+    # SOLUTION: один канонический владелец UsageSource (#685), отсутствие строки
+    # даёт DirectoryUnavailable; дублей регистрации больше нет.
     # RESULT: PG16/17 — по 13/13 LDAP checks green, локальные права не затронуты.
-    # STATUS: FIXED — see #670
+    # STATUS: FIXED — see #670; канонический владелец один с #685.
     def test_duplicate_permission_codenames_preserve_authority_and_source_revocation(self):
         from django.contrib.auth.models import Permission
         choices = Permission.objects.filter(content_type__app_label='execution', codename='view_usage')
-        self.assertGreater(choices.count(), 1)
+        self.assertEqual(choices.count(), 1)
+        self.assertEqual(choices.get().content_type.model, 'usagesource')
         rule = self.m.DirectoryGroupRule.objects.get(source=self.source, group_dn=GROUP)
-        rule.permissions.add(choices.get(content_type__model='usagesource'))
+        rule.permissions.add(choices.get())
         user = self.login()
         self.assertTrue(user.has_perm('execution.view_usage'))
         self.assertFalse(user.has_perm('execution.assign_work'))

@@ -8,7 +8,7 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 from mop.cli import _control
 
 MCP = {"annotations": "readonly", "human_only": True,
-       "actions": ["sessions.view_delivery", "catalog.view_project"], "args": [
+       "actions": ["execution.view_delivery", "catalog.view_project"], "args": [
     {"name": "project_id", "type": "string", "required": True, "help": "authorized project id"},
     {"name": "limit", "type": "integer", "flag": "--limit", "help": "bounded number of own endpoint records"}]}
 
