@@ -259,7 +259,7 @@ service password, credential file or persisted socket session is introduced.
 Rootless `mop.common.credential_client.CredentialClient(path, server_uid=UID)` is stdlib
 only. It verifies the service peer UID and protected endpoint and exposes typed
 `create`, `stage`, `update`, `issue_addressed`, `issue_rotation`,
-`publish_bundle`, `read_bundle`, `approve_bundle`, `reserve_grant`,
+`publish_definition`, `read_definition`, `approve_definition`, `reserve_grant`,
 `provision_grant`, `publish_preparation`, `read_preparation` and
 `approve_preparation` methods. Forward a `mop.common.credentials.Credential('token'|'session', value)`
 privately per call; neither it nor returned secret bytes have a value-bearing
@@ -282,8 +282,8 @@ calls the provider inside an authorization transaction. Installation-scoped
 credential mutation is explicitly unbound and denied: project-secret permission
 does not authorize changing Nomad, signer or installation integration credentials.
 Their finite application-level composition must be accepted separately.
-`read_bundle(bundle_id)` calls public `Grants.read_bundle`: retained
-bytes, exact owner/project, current permission, immutable bundle/digest and
+`read_definition(definition_id)` calls public `Grants.read_definition`: retained
+bytes, exact owner/project, current permission, immutable definition/digest and
 normalized capability checks, not a caller-selected ciphertext/context oracle.
 There is no raw `RetainedSecrets.prepare/commit` socket pair: passing an opaque
 prepared envelope back would widen the interface and putting socket I/O inside

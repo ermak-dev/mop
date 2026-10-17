@@ -26,9 +26,9 @@ class Command(str, Enum):
     UPDATE = 'update'
     ADDRESSED = 'issue_addressed'
     ROTATION = 'issue_rotation'
-    BUNDLE = 'read_bundle'
-    PUBLISH_BUNDLE = 'publish_bundle'
-    APPROVE_BUNDLE = 'approve_bundle'
+    DEFINITION = 'read_definition'
+    PUBLISH_DEFINITION = 'publish_definition'
+    APPROVE_DEFINITION = 'approve_definition'
     RESERVE_GRANT = 'reserve_grant'
     PROVISION_GRANT = 'provision_grant'
     PUBLISH_PREPARATION = 'publish_preparation'
@@ -82,7 +82,7 @@ class DeliveredSecret:
 
 
 @dataclass(frozen=True, slots=True)
-class BundleInfo:
+class DefinitionInfo:
     id: UUID
     role: str
     digest: str
@@ -91,7 +91,7 @@ class BundleInfo:
 
 
 @dataclass(frozen=True, slots=True)
-class BundleBytes:
+class DefinitionBytes:
     id: UUID
     role: str
     digest: str
@@ -224,16 +224,16 @@ def parse_request(data):
               Command.STAGE: ('secret_id', 'value', 'expected_revision'),
               Command.UPDATE: ('secret_id', 'value', 'expected_revision'),
               Command.ADDRESSED: ('target_id',), Command.ROTATION: ('rotation_id', 'claim_id', 'generation'),
-              Command.BUNDLE: ('bundle_id',),
-              Command.PUBLISH_BUNDLE: ('project_id', 'manifest', 'prompt', 'provenance'),
-              Command.APPROVE_BUNDLE: ('bundle_id',),
-              Command.RESERVE_GRANT: ('project_id', 'bundle_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),
+              Command.DEFINITION: ('definition_id',),
+              Command.PUBLISH_DEFINITION: ('project_id', 'manifest', 'prompt', 'provenance'),
+              Command.APPROVE_DEFINITION: ('definition_id',),
+              Command.RESERVE_GRANT: ('project_id', 'definition_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),
               Command.PROVISION_GRANT: ('grant_id', 'expected_revision'),
               Command.PUBLISH_PREPARATION: ('project_id', 'tasks', 'variables', 'provenance', 'commit', 'secret_refs'),
               Command.READ_PREPARATION: ('revision_id',), Command.APPROVE_PREPARATION: ('revision_id',)}
     exact(args, shapes[command])
     result = dict(args)
-    for name in ('project_id', 'secret_id', 'rotation_id', 'claim_id', 'bundle_id',
+    for name in ('project_id', 'secret_id', 'rotation_id', 'claim_id', 'definition_id',
                  'grant_id', 'revision_id', 'target_id', 'incarnation', 'request_id'):
         if name in result:
             optional = command is Command.CREATE and name == 'project_id' and result[name] is None

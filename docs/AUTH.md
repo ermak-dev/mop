@@ -47,7 +47,13 @@ one model. Identity resolves directly from the Actor and its CredentialBinding:
 login/enrollment/bind/rotation create no Principal row, delegation is a
 `grant_id` context on a service Actor (not a third kind), and CredentialBinding
 keeps only the proven generation/subject-change/enrollment metadata standard
-Django credentials do not provide. The remaining Principal table is deprecated
+Django credentials do not provide. The #686 slice lands the program side on that
+identity: the RoleBundle family is renamed to the AgentDefinition family
+(AgentDefinitionVersion/Seal/Approval, DefinitionCapability/Spawn/SecretName)
+and the new AgentProfile domain record links a stable agent Actor to its current
+approved definition — `Grants.register_agent` is the only agent-kind Actor
+creation path, idempotent per target, and `repin_definition` moves the program
+under CAS without touching the Actor. The remaining Principal table is deprecated
 metadata owned by the permission retarget (#685/#688); it is not a second
 identity. The paragraphs below describe the credential/scope mechanics that
 #685
@@ -181,14 +187,15 @@ manifest. It validates live credentials, current owner/source/permissions, activ
 ancestors, pinned approvals and runtime bindings. Outgoing action authorization
 uses the immutable normalized capability rows and the same pure capability policy
 as the content-reading service. Publication writes all capability, spawn and secret
-name rows, checks their complete sets against the actual parsed bundle, then writes
-an immutable `RoleBundleSeal` in the same transaction. Ordinary child inserts lock
-the parent bundle and refuse any append after that seal, including before human
-approval. Approval uses the same parent lock for its final normalized check.
-The seal is publication evidence, not a flag edited on an existing RoleBundle;
-ordinary ORM creation, mutation, deletion and bulk writes cannot manufacture or
-replace it. The schema migration does not backfill seals or trust unsealed rows:
-reads, approvals and full/local grant authority fail closed for them.
+name rows, checks their complete sets against the actual parsed definition, then
+writes an immutable `AgentDefinitionSeal` in the same transaction. Ordinary child
+inserts lock the parent definition and refuse any append after that seal, including
+before human approval. Approval uses the same parent lock for its final normalized
+check. The seal is publication evidence, not a flag edited on an existing
+AgentDefinitionVersion; ordinary ORM creation, mutation, deletion and bulk writes
+cannot manufacture or replace it. The schema migration does not backfill seals or
+trust unsealed rows: reads, approvals and full/local grant authority fail closed
+for them.
 
 The local authority owns a short SQL transaction, or joins the caller's transaction;
 no provider/network I/O is permitted in its approval and binding query ports.

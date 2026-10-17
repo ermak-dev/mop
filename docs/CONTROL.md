@@ -106,7 +106,7 @@ this contract; an anonymous projection requires an explicit API policy decision.
 | Operations | `view_operation`, `view_audit`, `diagnose_pool`, `treat_pool`, `collect_pool_garbage`, `sweep_pool`, `view_node_disk` | Operation actor/project audience; private audit and installation maintenance initially Admin. Preview is a read with the same cross-tenant scope, not a bypass. |
 | Composition / proxy gateway | `manage_proxy`, `view_models` | Current human Admin for management; authorized inference catalogue for models. Neither permission exposes upstream keys. |
 
-These action permissions do not replace the role bundle's finite capability
+These action permissions do not replace the agent definition's finite capability
 allowlists. A grant request must pass both its delegated operation mapping and
 current owner/project authority; it receives no Admin, secret-management or
 private-terminal privilege merely because its human owner has one. Internal

@@ -51,14 +51,14 @@ class ClientBoundary(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     self.assertFalse(any(a.name.startswith(('django', 'mop.server', 'nacl', 'channels')) for a in node.names))
 
-    def test_publish_bundle_protocol_accepts_only_exact_domain_inputs(self):
+    def test_publish_definition_protocol_accepts_only_exact_domain_inputs(self):
         from mop.common import credentials as p
         from uuid import uuid4
         request = {'version': 1, 'auth': {'kind': 'token', 'value': 'a' * 40},
-            'command': 'publish_bundle', 'args': {'project_id': str(uuid4()),
+            'command': 'publish_definition', 'args': {'project_id': str(uuid4()),
                 'manifest': p.encoded(b'{}'), 'prompt': p.encoded(b'private prompt'), 'provenance': 'fixture'}}
         auth, command, args = p.parse_request(request)
-        self.assertEqual(command.value, 'publish_bundle')
+        self.assertEqual(command.value, 'publish_definition')
         self.assertEqual(args['prompt'], b'private prompt')
         for name, value in (('owner_id', 1), ('ciphertext', 'bad'), ('context', 'bad')):
             with self.subTest(name=name), self.assertRaises(p.CredentialError):
@@ -73,8 +73,8 @@ class ClientBoundary(unittest.TestCase):
                 'variables': p.encoded(b'vars'), 'provenance': 'fixture', 'commit': 'a' * 40, 'secret_refs': []},
             'read_preparation': {'revision_id': identity},
             'approve_preparation': {'revision_id': identity},
-            'approve_bundle': {'bundle_id': identity},
-            'reserve_grant': {'project_id': identity, 'bundle_id': identity, 'target_id': identity,
+            'approve_definition': {'definition_id': identity},
+            'reserve_grant': {'project_id': identity, 'definition_id': identity, 'target_id': identity,
                 'incarnation': identity, 'request_id': identity, 'expires_at': '2026-10-16T12:00:00+00:00'},
             'provision_grant': {'grant_id': identity, 'expected_revision': 1}}
         for command, args in shapes.items():
@@ -107,7 +107,7 @@ class ClientBoundary(unittest.TestCase):
     def test_publish_requires_concrete_project_and_bounded_reference_list(self):
         from mop.common import credentials as p
         from uuid import uuid4
-        request = {'version': 1, 'auth': {'kind': 'token', 'value': 'a' * 40}, 'command': 'publish_bundle',
+        request = {'version': 1, 'auth': {'kind': 'token', 'value': 'a' * 40}, 'command': 'publish_definition',
             'args': {'project_id': None, 'manifest': p.encoded(b'{}'), 'prompt': p.encoded(b'p'), 'provenance': 'fixture'}}
         with self.assertRaises(p.CredentialError):
             p.parse_request(request)
@@ -143,7 +143,7 @@ class ClientBoundary(unittest.TestCase):
         from mop.common import credentials as p
         from dataclasses import FrozenInstanceError
         from uuid import uuid4
-        value = p.BundleBytes(uuid4(), 'worker', 'a' * 64, b'private manifest',
+        value = p.DefinitionBytes(uuid4(), 'worker', 'a' * 64, b'private manifest',
             b'private prompt', 'private provenance')
         for marker in ('private manifest', 'private prompt', 'private provenance'):
             self.assertNotIn(marker, repr(value))

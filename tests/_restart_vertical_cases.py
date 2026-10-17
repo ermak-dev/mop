@@ -63,11 +63,11 @@ class RestartVertical(TransactionTestCase):
         self.bindings = BindingFixture()
         self.grants = Grants(provider=provider, approvals=ApprovalFixture(proof), bindings=self.bindings)
         raw = json.dumps(manifest(receives=False)).encode()
-        bundle = self.grants.publish_bundle(self.actor, project_id=self.project.pk, manifest=raw,
+        bundle = self.grants.publish_definition(self.actor, project_id=self.project.pk, manifest=raw,
             prompt=b'fixture role', provenance='controlled fixture')
-        self.grants.approve_bundle(self.actor, bundle.id)
+        self.grants.approve_definition(self.actor, bundle.id)
         target_id, incarnation_id = uuid4(), uuid4()
-        grant = self.grants.reserve(self.actor, project_id=self.project.pk, bundle_id=bundle.id,
+        grant = self.grants.reserve(self.actor, project_id=self.project.pk, definition_id=bundle.id,
             target_id=target_id, incarnation=incarnation_id, request_id=uuid4(), expires_at=timezone.now()+timedelta(hours=1))
         self.grants.provision(self.actor, grant.id, expected_revision=grant.revision)
         binding = RoleBinding(self.project.pk, target_id, incarnation_id, grant.role, grant.digest, grant.id, self.user.pk)

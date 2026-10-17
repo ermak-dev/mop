@@ -172,7 +172,36 @@ class Evidence(Identifier):
         abstract = True
 
 
-class RoleBundle(Evidence):
+class AgentProfile(Identifier):
+    """Доменная запись программы агента, не identity (#686).
+
+    Стабильный agent Actor переживает повторное назначение, restart и смену
+    инкарнации; здесь закреплена только текущая approved версия программы.
+    Никаких Django permissions: права читаются только с самого Actor (#685).
+    """
+    agent = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='agent_profile')
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
+    target_id = models.UUIDField()
+    definition = models.ForeignKey('AgentDefinitionVersion', on_delete=models.PROTECT)
+    revision = models.PositiveBigIntegerField(default=1)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def clean(self):
+        if self.agent.kind != 'agent':
+            raise ValueError('agent profile requires a stable agent actor')
+
+    class Meta(Identifier.Meta):
+        constraints = [models.UniqueConstraint(fields=('project', 'target_id'), name='access_agent_profile_target'),
+            models.CheckConstraint(condition=Q(revision__gte=1), name='access_agent_profile_revision')]
+
+
+class AgentDefinitionVersion(Evidence):
+    """Immutable версия определения программы агента; не роль и не identity.
+
+    Побайтовое содержание живёт в secrets.SecretVersion; здесь только
+    технические метаданные программы (driver/dispatch/prompt name) и digest.
+    """
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
     role = models.CharField(max_length=128)
@@ -188,60 +217,61 @@ class RoleBundle(Evidence):
         from mop.common import soul
         if (not soul.NAME.fullmatch(self.role) or not soul.HEX64.fullmatch(self.digest)
                 or self.driver not in soul.DRIVERS):
-            raise ValueError('invalid role bundle identity')
+            raise ValueError('invalid agent definition identity')
 
     class Meta(Evidence.Meta):
-        constraints = [models.UniqueConstraint(fields=('owner', 'project', 'digest'), name='access_bundle_digest'),
-            models.CheckConstraint(condition=Q(driver__in=('any', 'isolating')), name='access_bundle_driver')]
+        constraints = [models.UniqueConstraint(fields=('owner', 'project', 'digest'), name='access_definition_digest'),
+            models.CheckConstraint(condition=Q(driver__in=('any', 'isolating')), name='access_definition_driver')]
 
 
-class RoleBundleSeal(Evidence):
+class AgentDefinitionSeal(Evidence):
     """Доказательство проверки полного normalized set, не автоматическое доверие старым rows."""
-    bundle = models.OneToOneField(RoleBundle, on_delete=models.PROTECT)
+    definition = models.OneToOneField(AgentDefinitionVersion, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
 
     def save(self, *args, **kwargs):
-        raise ValueError('use verified bundle publication')
+        raise ValueError('use verified definition publication')
 
     @classmethod
-    def _record_verified(cls, bundle):
+    def _record_verified(cls, definition):
         # Только publisher: parent уже locked, все children сверены с actual bytes.
-        seal = cls(bundle=bundle)
+        seal = cls(definition=definition)
         Evidence.save(seal)
         return seal
 
 
-class BundleChild(Evidence):
+class DefinitionChild(Evidence):
     """Обычный append сериализован с проверкой publisher и человеческим approval."""
     def save(self, *args, **kwargs):
         using = kwargs.get('using') or router.db_for_write(type(self), instance=self)
         with transaction.atomic(using=using):
-            RoleBundle.objects.using(using).select_for_update().get(pk=self.bundle_id)
-            if RoleBundleSeal.objects.using(using).filter(bundle_id=self.bundle_id).exists():
-                raise ValueError('role bundle normalized set is sealed')
+            AgentDefinitionVersion.objects.using(using).select_for_update().get(pk=self.definition_id)
+            if AgentDefinitionSeal.objects.using(using).filter(definition_id=self.definition_id).exists():
+                raise ValueError('agent definition normalized set is sealed')
             return super().save(*args, **kwargs)
 
     class Meta(Evidence.Meta):
         abstract = True
 
 
-class RoleCapability(BundleChild):
-    bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
+class DefinitionCapability(DefinitionChild):
+    """Техническое предусловие программы (verb словаря), не permission (#685)."""
+    definition = models.ForeignKey(AgentDefinitionVersion, on_delete=models.PROTECT)
     scope = models.CharField(max_length=8)
     verb = models.CharField(max_length=32)
 
     def clean(self):
         from mop.common import soul
         if self.verb not in {'node': soul.NODE_VERBS, 'cluster': soul.CLUSTER_VERBS}.get(self.scope, ()):
-            raise ValueError('unknown role capability')
+            raise ValueError('unknown definition capability')
 
     class Meta(Evidence.Meta):
-        constraints = [models.UniqueConstraint(fields=('bundle', 'scope', 'verb'), name='access_bundle_capability'),
+        constraints = [models.UniqueConstraint(fields=('definition', 'scope', 'verb'), name='access_definition_capability'),
             models.CheckConstraint(condition=Q(scope__in=('node', 'cluster')), name='access_capability_scope')]
 
 
-class RoleSpawn(BundleChild):
-    bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
+class DefinitionSpawn(DefinitionChild):
+    definition = models.ForeignKey(AgentDefinitionVersion, on_delete=models.PROTECT)
     role = models.CharField(max_length=128)
 
     def clean(self):
@@ -250,35 +280,35 @@ class RoleSpawn(BundleChild):
             raise ValueError('invalid allowed spawn role')
 
     class Meta(Evidence.Meta):
-        constraints = [models.UniqueConstraint(fields=('bundle', 'role'), name='access_bundle_spawn')]
+        constraints = [models.UniqueConstraint(fields=('definition', 'role'), name='access_definition_spawn')]
 
 
-class RoleSecretName(BundleChild):
-    bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
+class DefinitionSecretName(DefinitionChild):
+    definition = models.ForeignKey(AgentDefinitionVersion, on_delete=models.PROTECT)
     kind = models.CharField(max_length=8)
     name = models.CharField(max_length=256)
 
     class Meta(Evidence.Meta):
-        constraints = [models.UniqueConstraint(fields=('bundle', 'kind', 'name'), name='access_bundle_secret'),
+        constraints = [models.UniqueConstraint(fields=('definition', 'kind', 'name'), name='access_definition_secret'),
             models.CheckConstraint(condition=Q(kind__in=('files', 'vars')), name='access_secret_kind')]
 
 
-class RoleBundleApproval(Evidence):
-    bundle = models.OneToOneField(RoleBundle, on_delete=models.PROTECT)
+class AgentDefinitionApproval(Evidence):
+    definition = models.OneToOneField(AgentDefinitionVersion, on_delete=models.PROTECT)
     human = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
 
     def save(self, *args, **kwargs):
         using = kwargs.get('using') or router.db_for_write(type(self), instance=self)
         with transaction.atomic(using=using):
-            RoleBundle.objects.using(using).select_for_update().get(pk=self.bundle_id)
-            if not RoleBundleSeal.objects.using(using).filter(bundle_id=self.bundle_id).exists():
-                raise ValueError('role bundle is not verified and sealed')
+            AgentDefinitionVersion.objects.using(using).select_for_update().get(pk=self.definition_id)
+            if not AgentDefinitionSeal.objects.using(using).filter(definition_id=self.definition_id).exists():
+                raise ValueError('agent definition is not verified and sealed')
             return super().save(*args, **kwargs)
 
     def clean(self):
-        if self.human_id != self.bundle.owner_id:
-            raise ValueError('bundle approval requires its human owner')
+        if self.human_id != self.definition.owner_id:
+            raise ValueError('definition approval requires its human owner')
 
 
 class CreationIntent(Evidence):
@@ -288,7 +318,7 @@ class CreationIntent(Evidence):
     # UUID, не FK: logout удаляет credential, но не immutable намерение.
     actor_credential_id = models.UUIDField()
     project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
-    bundle = models.ForeignKey(RoleBundle, on_delete=models.PROTECT)
+    definition = models.ForeignKey(AgentDefinitionVersion, on_delete=models.PROTECT)
     parent = models.ForeignKey('Grant', null=True, on_delete=models.PROTECT, related_name='+')
     request_id = models.UUIDField()
     target_id = models.UUIDField()
@@ -302,8 +332,8 @@ class CreationIntent(Evidence):
     def clean(self):
         from .delegation import ApprovedPolicy
         ApprovedPolicy(self.policy_approval_id, self.policy_version_id, self.policy_digest, self.owner_id, self.project_id)
-        if self.bundle.owner_id != self.owner_id or self.bundle.project_id != self.project_id:
-            raise ValueError('creation bundle owner or project mismatch')
+        if self.definition.owner_id != self.owner_id or self.definition.project_id != self.project_id:
+            raise ValueError('creation definition owner or project mismatch')
         if self.parent_id and (self.parent.intent.owner_id, self.parent.intent.project_id) != (self.owner_id, self.project_id):
             raise ValueError('creation parent scope mismatch')
 

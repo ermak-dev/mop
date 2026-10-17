@@ -52,7 +52,7 @@ class PolicyBinding:
     owner_id: int
     actor_id: int
     project_id: UUID
-    bundle_id: UUID
+    definition_id: UUID
     role: str
     digest: str
     parent_id: UUID | None
@@ -60,7 +60,7 @@ class PolicyBinding:
     incarnation: UUID
 
     def __post_init__(self):
-        for value in (self.intent_id, self.project_id, self.bundle_id,
+        for value in (self.intent_id, self.project_id, self.definition_id,
                       self.target_id, self.incarnation):
             uuid_value(value)
         if self.parent_id is not None:
@@ -84,7 +84,7 @@ class RetirementReceipt:
 
 
 @dataclass(frozen=True)
-class BundleMetadata:
+class DefinitionMetadata:
     id: UUID
     role: str
     digest: str
@@ -93,7 +93,27 @@ class BundleMetadata:
 
 
 @dataclass(frozen=True)
-class BundleContent:
+class AgentProfileInfo:
+    """Программа агента как доменные данные; ни одного права внутри (#686)."""
+    target_id: UUID
+    agent_id: int
+    definition_id: UUID
+    revision: int
+    project_id: UUID
+    owner_id: int
+
+    def __post_init__(self):
+        uuid_value(self.target_id)
+        uuid_value(self.definition_id)
+        uuid_value(self.project_id)
+        if type(self.agent_id) is not int or self.agent_id < 1:
+            raise ValueError('stable agent actor reference required')
+        if type(self.revision) is not int or self.revision < 1:
+            raise ValueError('profile revision required')
+
+
+@dataclass(frozen=True)
+class DefinitionContent:
     id: UUID
     role: str
     digest: str
@@ -113,7 +133,7 @@ class GrantInfo:
     project_id: UUID
     target_id: UUID
     incarnation: UUID
-    bundle_id: UUID
+    definition_id: UUID
     role: str
     digest: str
     parent_id: UUID | None
@@ -147,6 +167,9 @@ class MessageAuthority:
 
 # CONTROL принадлежит серверу. Нет общего execute, admin/write/terminal bypass
 # или вывода прав из имени роли. Неперенесённые действия закрыты по умолчанию.
+# #686: словарь остаётся техническим предусловием программы агента (какие
+# runtime facts обязаны существовать), не каталогом прав: допуск даёт только
+# штатный Django RBAC владельца. Сведение к предусловиям без словаря — #685/#688.
 ACTION_CAPABILITIES = {
     'catalog.view_pool': ('cluster', 'roster'),
     'catalog.view_project': ('cluster', 'roster'),
@@ -177,8 +200,8 @@ def allows_capabilities(caps, action):
     return verb in (caps.node_verbs if scope == 'node' else caps.cluster_verbs)
 
 
-def allows(bundle, action):
-    return allows_capabilities(bundle.capabilities, action)
+def allows(definition, action):
+    return allows_capabilities(definition.capabilities, action)
 
 
 def allows_spawn(parent, child):

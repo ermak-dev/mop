@@ -152,10 +152,10 @@ class UnifiedActorIdentity(TransactionTestCase):
             'runtime': {'driver': 'any', 'receives_dispatch': True},
             'capabilities': {'node_verbs': ['send'], 'cluster_verbs': [], 'dispatch': False, 'spawn': []},
             'prompt': 'soul.md'}, ensure_ascii=False).encode()
-        bundle = api.publish_bundle(actor, project_id=project.pk, manifest=raw,
+        bundle = api.publish_definition(actor, project_id=project.pk, manifest=raw,
                                     prompt=b'prompt', provenance='test')
-        api.approve_bundle(actor, bundle.id)
-        row = api.reserve(actor, project_id=project.pk, bundle_id=bundle.id,
+        api.approve_definition(actor, bundle.id)
+        row = api.reserve(actor, project_id=project.pk, definition_id=bundle.id,
                           target_id=_uuid.uuid4(), incarnation=_uuid.uuid4(),
                           request_id=_uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
         machine = User.objects.get(username='grant-' + row.id.hex)
