@@ -58,11 +58,13 @@ def _input(request):
 def _password_user(request, data, *, browser_login=False):
     if not data.get('username') or not data.get('password'):
         raise serializers.ValidationError('username and password required')
-    address = str(request.META.get('REMOTE_ADDR', 'local')) if request is not None else 'local'
-    user = authenticate(request=request if browser_login else None, username=data['username'],
-        password=data['password'], remote_address=address)
+    # axes требует request (#694): блокировку по логину/адресу проверяет первый
+    # backend до bind каталога; сессию сбрасывает только браузерный вход.
+    raw = getattr(request, '_request', request)
+    user = authenticate(request=raw, username=data['username'], password=data['password'],
+        session_login=browser_login)
     if user is None:
-        if access.attempts_blocked(data['username'], address):
+        if getattr(raw, 'axes_locked_out', False):
             raise Throttled(wait=300, detail='authentication rate limit exceeded')
         raise PermissionDenied('authentication refused')
     return user

@@ -1,4 +1,5 @@
 """Настройки framework до ORM-конфигурации предметных модулей."""
+from datetime import timedelta
 import os
 from .bootstrap import load, private_bytes
 
@@ -27,6 +28,7 @@ INSTALLED_APPS = [
     'mop.server.sessions.apps.ExecutionConfig',
     'mop.server.builds.apps.BuildsConfig',
     'mop.server.gateway',
+    'axes',
 ]
 # Один субъект #683: единый Actor вместо stock auth.User; все identity FK —
 # swappable ссылки на него, второй user-модели нет.
@@ -39,6 +41,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Последним (#694): превращает блокировку axes в ответ до view.
+    'axes.middleware.AxesMiddleware',
 ]
 TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates',
               'APP_DIRS': True, 'OPTIONS': {'context_processors': [
@@ -67,7 +71,23 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 USE_TZ = True
 TIME_ZONE = 'UTC'
 STATIC_URL = '/static/'
-AUTHENTICATION_BACKENDS = ['mop.server.controller.authbackend.ControllerBackend']
+# Блокировка axes проверяется ДО bind каталога (#694): токен-эндпоинт не
+# становится онлайн-оракулом пароля против LDAP.
+AUTHENTICATION_BACKENDS = ['axes.backends.AxesStandaloneBackend',
+                           'mop.server.controller.authbackend.ControllerBackend']
+# Логин ИЛИ адрес, как прежний самописный счётчик: 10 неудач за 5 минут.
+AXES_FAILURE_LIMIT = 10
+AXES_COOLOFF_TIME = timedelta(minutes=5)
+AXES_LOCKOUT_PARAMETERS = ['username', 'ip_address']
+AXES_RESET_ON_SUCCESS = True
+AXES_HTTP_RESPONSE_CODE = 429
+# Приватность: логин в записях — HMAC-дайджест (блокировка по тому же ключу
+# работает, логина в БД нет); журнал успешных входов не ведётся. IP остаётся
+# открытым: поле axes типизировано как IP-адрес, тот же адрес уже есть в
+# журнале веб-сервера; записи видны только в Admin и сбрасываются окном.
+AXES_USERNAME_CALLABLE = 'mop.server.controller.authbackend.lockout_username'
+AXES_DISABLE_ACCESS_LOG = True
+AXES_ENABLE_ACCESS_FAILURE_LOG = False
 CSRF_FAILURE_VIEW = 'mop.server.controller.authviews.csrf_failure'
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_SECURE = True
