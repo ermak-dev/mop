@@ -250,6 +250,15 @@ class ReadinessPort(Protocol):
     async def confirmed(self, work: Work, target: BoundTarget) -> bool: ...
 
 
+class BodyPort(Protocol):
+    # Что именно сносится, решает драйвер тела: у host — нажитое в клоне,
+    # у контейнера — сам контейнер. quiescent доказывает, что живой сессии
+    # цели нет; wipe обязан сам держать запрет запуска сессии до конца сноса
+    # и вернуть True только после физической проверки результата.
+    async def quiescent(self, work: Work, target: BoundTarget) -> bool: ...
+    async def wipe(self, work: Work, target: BoundTarget) -> bool: ...
+
+
 class LocalExecutor:
     """Host/body namespace adapter. Resolver обязателен; нет legacy fallback.
 
@@ -258,11 +267,12 @@ class LocalExecutor:
     """
     def __init__(self, runner: ProcessRunner, resolver: BindingResolver | None, *,
                  sender=None, readiness: ReadinessPort | None = None,
-                 replacement: ReplacementPort | None = None):
+                 replacement: ReplacementPort | None = None, body: BodyPort | None = None):
         self.runner, self.resolver = runner, resolver
         self.sender = sender or UnixSessionSender()
         self.readiness = readiness
         self.replacement = replacement
+        self.body = body
 
     async def reconcile(self, node_id, previous_epoch, new_epoch):
         if self.resolver is None:
@@ -290,6 +300,8 @@ class LocalExecutor:
         # Наличие port не обещает успех: его неподтверждённый ответ остаётся unknown.
         if work.action == 'restart_session' and self.replacement is None:
             raise Unavailable('session replacement confirmation source unavailable')
+        if work.action == 'wipe_clone' and self.body is None:
+            raise Unavailable('body wipe port unavailable')
         if work.action == 'send_message':
             preflight = getattr(self.sender, 'preflight', None)
             if preflight is not None:
@@ -337,6 +349,17 @@ class LocalExecutor:
                 if confirmed is True:
                     return 'succeeded', 'session-replaced'
             return 'unknown', 'effect-running'
+        if work.action == 'wipe_clone':
+            await before_spawn()
+            async with asyncio.timeout(10):
+                quiet = await self.body.quiescent(work, target)
+            guard.check()
+            # Только явное True доказывает тишину; снос под живой сессией недопустим.
+            if quiet is not True:
+                return 'failed', 'failed-before-effect'
+            await before_spawn()
+            wiped = await self.body.wipe(work, target)
+            return ('succeeded', 'clone-wiped') if wiped is True else ('unknown', 'effect-running')
         if work.action == 'confirm_ready':
             if self.readiness is None:
                 raise Unavailable('confirmed session readiness source unavailable')

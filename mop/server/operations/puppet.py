@@ -13,7 +13,7 @@ from django.db import transaction
 from django.utils import timezone
 from mop.server.access.services import Denied, current_actor
 from . import models as m
-from .commands import RestartCommand, InvalidCommand
+from .commands import RestartCommand, WipeCommand, InvalidCommand
 from .lifecycle import State
 from .requests import resolve_retry, RequestRefused, Retry
 from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
@@ -56,16 +56,20 @@ class MachineStep:
 STAGES = ('apply_identity', 'restart_session', 'confirm_ready')
 
 
-def digest(command):
+def digest(command, action='restart'):
     intent = command.intent
     value = {name: str(getattr(intent, name)) for name in (
         'epoch','target_id','incarnation','expected_revision','not_after')}
-    value.update(action='restart', fresh=command.fresh)
+    value.update(action=action)
+    if action == 'restart':
+        value.update(fresh=command.fresh)
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 class RestartHandler:
     stages = STAGES
+    action = 'restart'
+    permission = 'execution.restart_puppet'
 
     def __init__(self, operations):
         self.ops = operations
@@ -73,9 +77,14 @@ class RestartHandler:
     def _ports(self):
         if self.ops.targets is None:
             raise Refused('controller_unavailable', safe_reason='current target binding is unavailable')
-        messages = self.ops.messages
-        if self.ops.restart_support is None and (messages is None or messages.support is None):
+        messages, wipes = self.ops.messages, self.ops.wipes
+        if (self.ops.restart_support is None and (messages is None or messages.support is None)
+                and (wipes is None or wipes.support is None)):
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
+
+    def _valid(self, command):
+        if type(command) is not RestartCommand or command.fresh:
+            raise InvalidCommand(field='fresh')
 
     def require(self, target, row=None):
         if self.ops.restart_support is None:
@@ -84,14 +93,13 @@ class RestartHandler:
         self.ops.restart_support.require(target)
 
     def _authorize(self, actor, target, row=None):
-        self.ops.access.authorize(actor, 'execution.restart_puppet', project_ids=(target.project_id,))
+        self.ops.access.authorize(actor, self.permission, project_ids=(target.project_id,))
         # Разрешение action не даёт права уничтожить чужую человеческую работу.
         if actor.human_owner_id != target.owner_id:
-            raise Denied('restart belongs to another human assignment')
+            raise Denied(self.action + ' belongs to another human assignment')
 
     def submit(self, actor, command):
-        if type(command) is not RestartCommand or command.fresh:
-            raise InvalidCommand(field='fresh')
+        self._valid(command)
         _independent()
         intent = command.intent
         with self.ops._transaction():
@@ -103,7 +111,7 @@ class RestartHandler:
             old = m.Operation.objects.filter(actor_id=actor.user_id, request_id=intent.request_id).first()
             try:
                 retry = resolve_retry(expected_epoch=intent.epoch, current_epoch=installation.epoch,
-                    submitted_digest=digest(command), stored_digest=old.digest if old else None,
+                    submitted_digest=digest(command, self.action), stored_digest=old.digest if old else None,
                     result_available=not old.result_pruned if old else True)
             except RequestRefused as error:
                 raise Refused(error.code) from None
@@ -130,14 +138,14 @@ class RestartHandler:
             if active.count() >= self.ops.queue_limit or active.filter(projects=target.project_id).count() >= self.ops.project_limit:
                 raise Refused('admission_limit')
             row = m.Operation.objects.create(actor_id=actor.user_id, actor_binding=_binding(actor), request_id=intent.request_id,
-                digest=digest(command), epoch=intent.epoch, restore_generation=installation.generation, action='restart',
+                digest=digest(command, self.action), epoch=intent.epoch, restore_generation=installation.generation, action=self.action,
                 node_id=target.node_id, target_kind='puppet', target_id=target.target_id, incarnation_id=target.incarnation_id,
                 expected_revision=target.revision, eligible=None, not_after=intent.not_after)
             row.projects.set((target.project_id,))
             m.RestartBinding.objects.create(operation=row, project_id=target.project_id, executor_epoch=target.executor_epoch,
                 owner_id=target.owner_id, generation=target.generation, role=target.role,
                 bundle_digest=target.bundle_digest, grant_id=target.grant_id)
-            for ordinal, name in enumerate(STAGES, 1):
+            for ordinal, name in enumerate(self.stages, 1):
                 m.Step.objects.create(operation=row, ordinal=ordinal, name=name)
             _event(row)
             result = _snapshot(row)
@@ -173,7 +181,7 @@ class RestartHandler:
             raise Refused('transaction_boundary')
         self._ports()
         installation = self.ops._installation()
-        row = m.Operation.objects.select_for_update().get(pk=operation_id, action__in=('restart', 'send', 'dispatch'), target_kind='puppet')
+        row = m.Operation.objects.select_for_update().get(pk=operation_id, action__in=('restart', 'send', 'dispatch', 'wipe'), target_kind='puppet')
         step = m.Step.objects.select_for_update().get(pk=step_id, operation=row)
         value = self._value(row, step)
         expected = RestartTarget(value.target_id, row.restartbinding.project_id, value.node_id, value.incarnation_id,
@@ -281,3 +289,29 @@ class RestartHandler:
                     revision=row.revision, code=row.code, reason=row.reason):
                 raise Refused('revision_conflict')
             _event(row)
+
+
+class WipeHandler(RestartHandler):
+    """Сброс клона на теле цели одним машинным шагом общего журнала.
+
+    Уничтожает несохранённую работу, поэтому своё право и тот же запрет на чужое
+    человеческое назначение, что у restart. Тишину сессии доказывает узел перед
+    эффектом: живая сессия — failed-before-effect, а не снос под ней.
+    """
+    stages = ('wipe_clone',)
+    action = 'wipe'
+    permission = 'execution.wipe_puppet'
+
+    def __init__(self, operations, *, support=None):
+        super().__init__(operations)
+        self.support = support
+
+    def _valid(self, command):
+        if type(command) is not WipeCommand:
+            raise InvalidCommand(field='body')
+
+    def require(self, target, row=None):
+        if self.support is None:
+            raise Refused('controller_unavailable', safe_reason='physical wipe binding is unavailable')
+        self.ops.targets.authorize(target)
+        self.support.require(target)

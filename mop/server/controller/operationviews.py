@@ -96,6 +96,24 @@ def stop_api():
     return service()
 
 
+@method_decorator(never_cache, name='dispatch')
+class WipePuppet(APIView):
+    def post(self, request, target_id):
+        from ..operations.commands import parse_wipe
+        try:
+            command = parse_wipe(target_id, decode_body(request.body))
+        except InvalidCommand as error:
+            raise serializers.ValidationError(str(error)) from None
+        operation = wipe_api().submit(request.actor, command)
+        return _reply(operation, status=202 if operation['state'] == 'accepted' else 200)
+
+
+def wipe_api():
+    # Порт тела ставит composition узла (#643); до него production отказывает.
+    from .machinebinding import operations
+    return operations()
+
+
 def message_api():
     from .machinebinding import operations
     from .endpointviews import endpoints

@@ -544,7 +544,8 @@ class MachineExecution:
             raise ValueError('failure requires confirmed effect boundary')
         if outcome == 'succeeded':
             confirmations = {'restart_session': ('session-replaced', 'confirmed'),
-                'apply_identity': ('identity-applied',), 'confirm_ready': ('ready',), 'send_message': ('delivered',)}
+                'apply_identity': ('identity-applied',), 'confirm_ready': ('ready',), 'send_message': ('delivered',),
+                'wipe_clone': ('clone-wiped',)}
             if evidence not in confirmations[attempt.action]:
                 raise ValueError('named action confirmation required')
         # Результат после deadline подтверждает эффект, но не запускает новый.

@@ -5,9 +5,9 @@ import re
 from typing import Protocol, Callable
 from uuid import UUID
 
-ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready'))
+ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
 OUTCOMES = frozenset(('succeeded', 'failed', 'unknown'))
-EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered',
+EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
     'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
 FACT_FIELDS = {
     'states': frozenset(('running', 'dirty', 'session_count')),

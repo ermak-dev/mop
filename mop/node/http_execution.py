@@ -22,8 +22,8 @@ class Unavailable(RuntimeError):
     pass
 
 
-ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready'))
-EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered',
+ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
+EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
     'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
 FACT_TYPES = {
     'states': dict(running=bool, dirty=bool, session_count=int),

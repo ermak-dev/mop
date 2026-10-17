@@ -153,6 +153,7 @@ class Operations:
         self.builds = None
         self.stops = None
         self.messages = None
+        self.wipes = None
         self.queue_limit, self.project_limit, self.execution_limit = queue_limit, project_limit, execution_limit
 
     def _require_binding(self):
@@ -206,12 +207,16 @@ class Operations:
         return _snapshot(row)
 
     def submit(self, actor, command):
-        from .commands import RestartCommand, StopJobCommand, SendCommand, DispatchCommand
+        from .commands import RestartCommand, StopJobCommand, SendCommand, DispatchCommand, WipeCommand
         from .puppet import RestartHandler
         if type(command) is StopJobCommand:
             if self.stops is None:
                 raise Refused('controller_unavailable', safe_reason='conditional stop-job scheduler is unavailable')
             return self.stops.submit(actor, command)
+        if type(command) is WipeCommand:
+            if self.wipes is None:
+                raise Refused('controller_unavailable', safe_reason='physical wipe binding is unavailable')
+            return self.wipes.submit(actor, command)
         # Конечный registry, не выбор метода/import из payload.
         handlers = {NodeEligibility: self.submit_node, RestartCommand: RestartHandler(self).submit,
             SendCommand: self.submit_message, DispatchCommand: self.submit_message}
@@ -231,6 +236,8 @@ class Operations:
             return RestartHandler(self)
         if action in ('send', 'dispatch') and self.messages is not None:
             return self.messages
+        if action == 'wipe' and self.wipes is not None:
+            return self.wipes
         raise Refused('controller_unavailable', safe_reason='named puppet handler is unavailable')
 
     def submit_node(self, actor, command):
