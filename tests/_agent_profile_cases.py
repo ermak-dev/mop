@@ -52,8 +52,10 @@ class AgentProgramCases(TransactionTestCase):
         self.user = get_user_model().objects.create_user('owner', password='test-only-password')
         access.LoginIdentity.objects.create(user=self.user, source=self.source, external_subject='owner')
         access.ProjectMembership.objects.create(user=self.user, project=self.project, source=self.source)
+        # После #685 sessions-алиаса нет: словарь знает только execution.*,
+        # а каноническая регистрация create_puppet живёт на Assignment.
         for action in ('access.view_role', 'access.approve_role', 'access.issue_grant',
-                       'access.revoke_grant', 'catalog.view_pool', 'sessions.create_puppet',
+                       'access.revoke_grant', 'catalog.view_pool', 'execution.create_puppet',
                        'secrets.manage_project_secret'):
             app, code = auth.permission_names(action)[0].split('.')
             self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))

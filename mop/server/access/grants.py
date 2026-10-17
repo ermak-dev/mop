@@ -464,7 +464,7 @@ class Grants:
         outside_transaction()
         for value in (project_id, target_id, definition_id):
             uuid_value(value)
-        owner = self._human(actor, 'sessions.create_puppet', project_id)
+        owner = self._human(actor, 'execution.create_puppet', project_id)
         row = self._definition_row(actor, definition_id)
         if row.project_id != project_id or not m.AgentDefinitionApproval.objects.filter(
                 definition=row, human_id=owner).exists():
@@ -472,7 +472,7 @@ class Grants:
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
             get_user_model().objects.select_for_update().get(pk=owner)
-            owner = self._human(actor, 'sessions.create_puppet', project_id)
+            owner = self._human(actor, 'execution.create_puppet', project_id)
             profile = m.AgentProfile.objects.select_for_update().filter(
                 project_id=project_id, target_id=target_id).first()
             if profile is not None:
@@ -498,7 +498,7 @@ class Grants:
                 target_id=target_id).first()
             if profile is None:
                 raise auth.NotVisible('agent profile not found')
-            owner = self._human(actor, 'sessions.create_puppet', profile.project_id)
+            owner = self._human(actor, 'execution.create_puppet', profile.project_id)
             if profile.owner_id != owner:
                 raise auth.NotVisible('agent profile not found')
             self._expected(profile, expected_revision)
