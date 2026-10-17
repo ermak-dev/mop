@@ -6,7 +6,8 @@ SPEC: bounded text, message/request IDs, finite priority; не RPC/shell/owner.
 import unittest
 from uuid import uuid4
 import hermetic
-from http_execution import wire
+import _lib  # noqa: F401 -- общий временный корень процесса (#338)
+from _body_fixture import wire
 from mop.node.http_execution import MachineClient, Work, Refused
 
 
