@@ -59,21 +59,13 @@ def presence(value):
 class EndpointView(APIView):
     # Grant resolver назначается доверенной root composition, не request JSON.
     grant_resolver = None
+    # #691: сырой ValueError конечных парсеров (exact/uid) -- клиентский 400;
+    # доменные отказы переводит глобальный handler по реестру errors.
+    value_error_is_input = True
 
     def context(self, request):
         return endpoints.trusted_context(request.actor, uid(request.headers.get('X-Mop-Endpoint')),
                                          uid(request.headers.get('X-Mop-Connection')))
-
-    def handle_exception(self, error):
-        if isinstance(error, (s.Conflict, s.Capacity, s.Unavailable, ValueError)):
-            status = 429 if isinstance(error, s.Capacity) else 503 if isinstance(error, s.Unavailable) else 409 if isinstance(error, s.Conflict) else 400
-            code = {429: 'delivery_capacity', 503: 'delivery_unavailable', 409: 'delivery_conflict', 400: 'validation_error'}[status]
-            response = Response({'schema_version': 1, 'error': {'code': code,
-                'message': str(error), 'retryable': status in (429, 503)}}, status=status)
-            if status == 429:
-                response['Retry-After'] = '5'
-            return response
-        return super().handle_exception(error)
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)

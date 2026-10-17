@@ -1,46 +1,50 @@
 """Синхронный DRF query инфраструктуры; admission принадлежит #625."""
-from django.db import DatabaseError
 from rest_framework.response import Response
 from rest_framework.views import APIView, exception_handler as framework_exception_handler
+from . import errors
 from .runtime import installation_snapshot
 
 
+def _envelope(entry, error, *, epoch=None):
+    """Конверт {schema_version, error{code,message,retryable}} из записи реестра.
+
+    Порядок ключей -- прежний: error, затем epoch, затем reset; no-store и
+    Retry-After назначаются здесь, чтобы ни один view их не забыл.
+    """
+    body = {'schema_version': 1, 'error': {'code': entry.code,
+        'message': str(error) if entry.message is None else entry.message,
+        'retryable': entry.retryable}}
+    if epoch is not None:
+        body['epoch'] = epoch
+    if entry.reset:
+        body['reset'] = {'required': True}
+    response = Response(body, status=entry.status)
+    response['Cache-Control'] = 'no-store'
+    if entry.retry_after is not None:
+        response['Retry-After'] = entry.retry_after
+    return response
+
+
 def exception_handler(error, context):
-    """Отказ DB, включая auth lookup, не становится anonymous/empty success."""
-    if isinstance(error, DatabaseError):
-        unknown = getattr(error.__cause__, 'outcome_unknown', False)
-        response = Response({'schema_version': 1, 'error': {
-            'code': 'database_outcome_unknown' if unknown else 'database_unavailable',
-            'message': ('database commit outcome unknown; reconcile before retry' if unknown
-                        else 'controller database unavailable'),
-            'retryable': not unknown}}, status=503)
-        response['Cache-Control'] = 'no-store'
-        return response
-    from mop.server.operations.service import Refused
-    if isinstance(error, Refused):
-        response = Response({'schema_version': 1, 'error': {'code': error.code,
-            'message': str(error), 'retryable': error.status in (429, 503)}}, status=error.status)
-        response['Cache-Control'] = 'no-store'
-        if error.status == 429:
-            response['Retry-After'] = '1'
-        return response
-    from django.core.exceptions import ObjectDoesNotExist
-    from mop.server.access.services import Denied, NotVisible
-    from .authbackend import AuthenticationUnavailable
-    if isinstance(error, (Denied, AuthenticationUnavailable, ObjectDoesNotExist)):
-        status = 503 if isinstance(error, AuthenticationUnavailable) else 404 if isinstance(error, (NotVisible, ObjectDoesNotExist)) else 403
-        message = 'resource not found' if status == 404 else str(error)
-        response = Response({'schema_version': 1, 'error': {'code':
-            'authority_unavailable' if status == 503 else 'not_found' if status == 404 else 'access_denied',
-            'message': message, 'retryable': status == 503}}, status=status)
-        response['Cache-Control'] = 'no-store'
-        return response
+    """Единственный перевод исключений границы в конверт (#691).
+
+    Доменные отказы, доступ и БД -- по реестру errors; framework-исключения
+    DRF -- по своему статусу. Чего нет ни там, ни там (незарегистрированный
+    тип, подменённый код Refused), получает None: DRF делает re-raise, и
+    клиент видит generic 500, а не придуманный статус.
+    """
+    if isinstance(error, errors.ReadRefusal):
+        entry = errors.read_verdict(error)
+        return None if entry is None else _envelope(entry, error.error, epoch=error.epoch)
+    view = context.get('view') if isinstance(context, dict) else None
+    entry = errors.verdict(error, value_error_is_input=getattr(view, 'value_error_is_input', False))
+    if entry is not None:
+        return _envelope(entry, error)
     response = framework_exception_handler(error, context)
     if response is not None:
         from .pagination import CursorReset
         detail = response.data.get('detail') if isinstance(response.data, dict) else None
-        code = {400: 'validation_error', 401: 'authentication_required', 403: 'permission_denied',
-            404: 'not_found', 405: 'method_not_allowed', 429: 'throttled'}.get(response.status_code, 'request_refused')
+        code = errors.FRAMEWORK_CODES.get(response.status_code, 'request_refused')
         message = str(detail) if detail is not None else 'input validation failed'
         if message.startswith('CSRF Failed:'):
             code, message = 'csrf_failed', 'CSRF validation failed'
