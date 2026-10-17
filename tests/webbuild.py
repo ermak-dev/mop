@@ -107,6 +107,23 @@ def main():
         ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"],
         ["npm", "run", "test:store"],
     ])
+    # HYPOTHESIS: упакованного зеркала нет (#627/#644): wheel не везёт
+    # web/dist, а «второй dist», скопированный руками, разошёлся бы молча.
+    # SOLUTION: одна команда mop dev web build пишет web/dist И зеркало
+    # mop/server/controller/dist; --check сравнивает оба дерева с чистой
+    # сборкой. mirror(from_dir, to_dir) -- чистая функция над файлами.
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = os.path.join(d, "fresh"), os.path.join(d, "package", "dist")
+        tree(src, {"index.html": b"<html>", "assets/x.js": b"js", "assets/y.css": b"css"})
+        tree(os.path.join(d, "package"), {"dist/stale.txt": b"old"})
+        build.mirror(src, dst)
+        c.expect("#627 mirror reproduces the fresh build byte for byte",
+                 build.diff_trees(src, dst), [])
+        # Зеркало перезаписывается целиком: устаревший файл не выживает.
+        c.expect("#627 a stale mirror file is gone after the rebuild",
+                 "stale.txt" not in build.files_of(dst), True)
+        with open(os.path.join(dst, "index.html"), "rb") as f:
+            c.expect("#627 mirror bytes equal the fresh build", f.read(), b"<html>")
     return c.report("webbuild")
 
 
