@@ -532,6 +532,22 @@ NodeHTTP validates that finite shape. The isolated PostgreSQL/TLS checks use
 production DRF and NodeHTTP with explicitly controlled machine receipts, not a
 claim of native application's delivery/idle acceptance or deployment readiness.
 
+### Puppet delete vertical (#625)
+
+`POST /api/v1/puppets/<uuid>/commands/delete` takes the version-1 target intent with
+empty `params`; it needs `execution.delete_puppet` and belongs to the human who owns
+the assignment. One scheduler step `scheduler_delete` first stops the job with the
+same conditional write and physical readback as stop-job, then purges only the job
+it stopped itself (a fresh consistent read must still carry this operation's stop
+token) and proves the purge by a consistent 404. Nomad has no conditional
+deregister, so a re-registration between that read and the DELETE would be purged
+too; the window is short and documented, not hidden. A lost purge reply is
+`unknown`; reconciliation only reads. On success the assignment is closed for good:
+`deleted_at` is set, owner and current incarnation are cleared, `current()` no
+longer returns it, activation refuses, and a database constraint keeps a deleted
+assignment ownerless. The container body goes with the purged allocation; a host
+body keeps its clone.
+
 ### Clone wipe vertical (#625)
 
 `POST /api/v1/puppets/<uuid>/commands/wipe` takes the version-1 target intent with

@@ -129,6 +129,21 @@ def parse_stop_job(target_id, body):
 
 
 @dataclass(frozen=True)
+class DeleteCommand:
+    """Удаление цели (#625): без force и параметров -- чужую работу защищает право."""
+    intent: TargetIntent
+
+    def __post_init__(self):
+        _require(type(self.intent) is TargetIntent, "body")
+
+
+def parse_delete(target_id, body):
+    _shape(body, _COMMON, _COMMON, "body")
+    _shape(body["params"], set(), set(), "params")
+    return DeleteCommand(_intent(target_id, body))
+
+
+@dataclass(frozen=True)
 class WipeCommand:
     """Сброс клона цели; force и пути не параметры — чужую работу защищает право."""
     intent: TargetIntent

@@ -97,6 +97,24 @@ def stop_api():
 
 
 @method_decorator(never_cache, name='dispatch')
+class DeletePuppet(APIView):
+    def post(self, request, target_id):
+        from ..operations.commands import parse_delete
+        try:
+            command = parse_delete(target_id, decode_body(request.body))
+        except InvalidCommand as error:
+            raise serializers.ValidationError(str(error)) from None
+        operation = delete_api().submit(request.actor, command)
+        return _reply(operation, status=202 if operation['state'] == 'accepted' else 200)
+
+
+def delete_api():
+    # Порт планировщика ставит composition контроллера; без него -- отказ.
+    from .stopbinding import service
+    return service()
+
+
+@method_decorator(never_cache, name='dispatch')
 class WipePuppet(APIView):
     def post(self, request, target_id):
         from ..operations.commands import parse_wipe

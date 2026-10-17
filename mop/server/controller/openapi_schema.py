@@ -356,6 +356,8 @@ def annotations():
             'Submits a puppet restart command; fresh requires its own credential binding.')},
         operationviews.StopPuppetJob: {'post': (RestartCommand, OperationReply, 202,
             'Submits a conditional scheduler stop of the puppet job; requires stop_puppet_job.')},
+        operationviews.DeletePuppet: {'post': (RestartCommand, OperationReply, 202,
+            'Submits a puppet delete: conditional job stop, purge and permanent assignment closure.')},
         operationviews.WipePuppet: {'post': (RestartCommand, OperationReply, 202,
             'Submits a clone wipe; empty params only, its own wipe_puppet permission.')},
         operationviews.SendMessage: {'post': (RestartCommand, OperationReply, 202,

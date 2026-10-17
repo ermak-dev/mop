@@ -74,6 +74,7 @@ urlpatterns = [
     path('api/v1/puppets/<uuid:target_id>/commands/restart', operations.RestartPuppet.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/stop-job', operations.StopPuppetJob.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/wipe', operations.WipePuppet.as_view()),
+    path('api/v1/puppets/<uuid:target_id>/commands/delete', operations.DeletePuppet.as_view()),
     path('api/v1/messages', operations.SendMessage.as_view()),
     path('api/v1/dispatches', operations.DispatchTask.as_view()),
     path('api/v1/operations', operations.RequestLookup.as_view()),

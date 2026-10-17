@@ -22,6 +22,8 @@ class Assignment(Record):
     expires_at = models.DateTimeField()
     current_incarnation = models.ForeignKey('ExecutionIncarnation', null=True,
         on_delete=models.PROTECT, related_name='+')
+    # #625 delete: закрыто навсегда -- ни владельца, ни инкарнации, ни активации.
+    deleted_at = models.DateTimeField(null=True)
 
     class Meta(Record.Meta):
         # Канонический владелец регистрации execution-прав, кроме view_usage
@@ -32,7 +34,9 @@ class Assignment(Record):
             'view_history', 'view_tail', 'read_terminal', 'control_terminal', 'send_session_command',
             'change_session_model', 'view_landing')]
         constraints = Record.Meta.constraints + [models.CheckConstraint(
-            condition=Q(generation__gte=1), name='assignment_generation_positive')]
+            condition=Q(generation__gte=1), name='assignment_generation_positive'),
+            models.CheckConstraint(condition=Q(deleted_at__isnull=True)
+                | Q(owner__isnull=True, current_incarnation__isnull=True), name='assignment_deleted_is_closed')]
 
 
 class ExecutionIncarnation(Record):

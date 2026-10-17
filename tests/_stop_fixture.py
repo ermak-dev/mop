@@ -20,7 +20,7 @@ def serve(listener, job, clone):
     # unittest SIGINT handler нельзя наследовать: он лишь ставит shouldStop.
     signal.signal(signal.SIGINT,signal.default_int_handler)
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],cwd=clone,start_new_session=True)
-    state = {'job':job, 'writes':0, 'mode':'', 'all_allocations':False}
+    state = {'job':job, 'writes':0, 'purges':0, 'mode':'', 'all_allocations':False}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -37,15 +37,31 @@ def serve(listener, job, clone):
             path = urlsplit(self.path).path
             if path == '/fixture':
                 from urllib.parse import parse_qs
-                return self.reply({'alive':child.poll() is None,'writes':state['writes'],'all_allocations':state['all_allocations'],
-                    'metadata':state['job']['Meta'], 'nonce':parse_qs(urlsplit(self.path).query).get('nonce',[''])[0]})
+                return self.reply({'alive':child.poll() is None,'writes':state['writes'],'purges':state['purges'],
+                    'exists':state['job'] is not None,'all_allocations':state['all_allocations'],
+                    'metadata':state['job']['Meta'] if state['job'] else state['purged_meta'],
+                    'nonce':parse_qs(urlsplit(self.path).query).get('nonce',[''])[0]})
             if path.endswith('/allocations'):
                 from urllib.parse import parse_qs
                 state['all_allocations'] = parse_qs(urlsplit(self.path).query).get('all')==['true']
                 return self.reply([{'ID':'fixture-allocation','JobID':job['ID'],
                     'ClientStatus':'running' if child.poll() is None and state['mode']!='false-terminal' else 'complete',
                     'DesiredStatus':'run' if child.poll() is None and state['mode']!='false-terminal' else 'stop'}])
+            if state['job'] is None:
+                return self.reply({'error':'job not found'},404)
             return self.reply(state['job'])
+
+        def do_DELETE(self):
+            # #625 delete: purge снимает job целиком; повторный GET -- 404.
+            if state['job'] is None:
+                return self.reply({'error':'job not found'},404)
+            state['purges'] += 1
+            state['purged_meta'] = state['job']['Meta']
+            state['job'] = None
+            if state['mode']=='lose-delete':
+                self.close_connection = True
+                return
+            return self.reply({'EvalID':'fixture-eval'})
 
         def do_POST(self):
             value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
