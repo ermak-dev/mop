@@ -102,13 +102,22 @@ class StopScheduler(Protocol):
     def inspect_delete(self, ticket: StopTicket) -> StopProof: ...
 
 
+ADDRESSED = ('target_id','incarnation_id','node_id','executor_epoch','owner_id',
+             'generation','revision','role','bundle_digest','grant_id')
+
+
+def addressed_metadata(epoch, restore_generation, target):
+    """Несекретный точный authority binding внешнего job.
+
+    Одна функция для регистрации нового тела и для его остановки/удаления
+    (#643): иначе job, поднятый одним путём, читался бы другим как чужой."""
+    return {'mop.epoch':str(epoch),'mop.restore_generation':str(restore_generation),
+            **{'mop.'+name:str(getattr(target,name)) for name in ADDRESSED}}
+
+
 def job_metadata(pin):
     """Внешняя spec содержит только несекретный точный authority binding."""
-    target = pin.target
-    fields = ('target_id','incarnation_id','node_id','executor_epoch','owner_id',
-              'generation','revision','role','bundle_digest','grant_id')
-    return {'mop.epoch':str(pin.epoch),'mop.restore_generation':str(pin.restore_generation),
-            **{'mop.'+name:str(getattr(target,name)) for name in fields}}
+    return addressed_metadata(pin.epoch, pin.restore_generation, pin.target)
 
 
 class NomadStopScheduler:

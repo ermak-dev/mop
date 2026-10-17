@@ -803,7 +803,7 @@ exec "$${MOP_REGISTERED_LAUNCHER:?registered launch entry unavailable}" \
 
 
 def api_job_spec(*, layout, machine, bundle, nomad_node_id, datacenter, user,
-                 memory_mb, cpu, capabilities=frozenset()):
+                 memory_mb, cpu, restore_generation, capabilities=frozenset()):
     """Новая регистрация из public Root ports, не JSON команды пользователя.
 
     Launcher — производный executable в доверенном registered layout. Его
@@ -814,6 +814,7 @@ def api_job_spec(*, layout, machine, bundle, nomad_node_id, datacenter, user,
     """
     from uuid import UUID
     from mop.driver.launch import MachineConfig, RegisteredLayout, LaunchResponse
+    from mop.server.operations.scheduler import addressed_metadata
     if (type(capabilities) is not frozenset or not API_LAUNCH_CAPABILITIES <= capabilities):
         raise ValueError('new body launch capabilities are not bound')
     if type(layout) is not RegisteredLayout or type(machine) is not MachineConfig:
@@ -829,15 +830,19 @@ def api_job_spec(*, layout, machine, bundle, nomad_node_id, datacenter, user,
             or type(memory_mb) is not int or not 128 <= memory_mb < 2**31
             or type(cpu) is not int or not 1 <= cpu < 2**31):
         raise ValueError('bounded registered scheduler resources required')
+    if type(restore_generation) is not UUID:
+        raise ValueError('typed restore generation required')
     w = registration.work
     env = dict(MOP_REGISTERED_LAUNCHER=str(layout.launcher), MOP_TARGET_ID=w.target_id,
         MOP_INCARNATION_ID=w.incarnation_id, MOP_EXECUTOR_EPOCH=w.executor_epoch,
         MOP_GENERATION=str(w.generation), MOP_BOOTSTRAP_REVISION=registration.bootstrap_revision)
-    meta = {key: str(getattr(w, key)) for key in ('epoch', 'target_id', 'incarnation_id',
-        'node_id', 'executor_epoch', 'generation', 'role', 'bundle_digest', 'grant_id')}
-    meta.update(bootstrap_revision=registration.bootstrap_revision,
-        bootstrap_digest=registration.bootstrap_digest, image_digest=registration.image_digest,
-        launch_schema='1', launch_template=hashlib.sha256(API_WRAPPER.encode()).hexdigest())
+    # Те же адресные ключи, по которым stop/delete узнают свой job (#643);
+    # пины запуска -- дополнительные ключи того же префикса.
+    meta = addressed_metadata(w.epoch, restore_generation, w)
+    meta.update({'mop.bootstrap_revision': registration.bootstrap_revision,
+        'mop.bootstrap_digest': registration.bootstrap_digest,
+        'mop.image_digest': registration.image_digest, 'mop.launch_schema': '1',
+        'mop.launch_template': hashlib.sha256(API_WRAPPER.encode()).hexdigest()})
     return {'Job': dict(ID=w.target_id, Name=registration.display_name,
         Datacenters=[datacenter], Type='service', Meta=meta,
         Constraints=[dict(LTarget='${node.unique.id}', Operand='=', RTarget=nomad_node_id)],
