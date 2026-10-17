@@ -225,10 +225,10 @@ class PreparedCommand:
         _identity(self.epoch)
         _key(self.request_id)
         _deadline(self.not_after)
-        _require(self.action in ("restart", "send", "wipe", "stop") and type(self.fresh) is bool and
+        _require(self.action in ("restart", "send", "wipe", "stop", "delete") and type(self.fresh) is bool and
                  type(self.notify_when_idle) is bool and self.priority in ("now", "next", "later") and
                  type(self.wait_seconds) is int and 0 <= self.wait_seconds <= 60)
-        if self.action in ("restart", "wipe", "stop"):
+        if self.action in ("restart", "wipe", "stop", "delete"):
             _require(self.message is None and self.priority == "next" and
                      self.wait_seconds == 0 and not self.notify_when_idle)
             # wipe и stop-job не несут параметров (#642): ни fresh, ни force.
@@ -743,6 +743,10 @@ class Client:
                      request_id: str | None = None) -> PreparedCommand:
         return PreparedCommand("stop", target, epoch, new_request_id(request_id), not_after)
 
+    def prepare_delete(self, target: Target, *, epoch: str, not_after: str,
+                       request_id: str | None = None) -> PreparedCommand:
+        return PreparedCommand("delete", target, epoch, new_request_id(request_id), not_after)
+
     def prepare_node_drain(self, node_id: str, *, epoch: str, expected_revision: str,
                            not_after: str, request_id: str | None = None) -> NodeCommand:
         return NodeCommand("drain", node_id, epoch, new_request_id(request_id),
@@ -852,6 +856,7 @@ class Client:
             path = {"restart": f"/api/v1/puppets/{command.target.id}/commands/restart",
                     "wipe": f"/api/v1/puppets/{command.target.id}/commands/wipe",
                     "stop": f"/api/v1/puppets/{command.target.id}/commands/stop-job",
+                    "delete": f"/api/v1/puppets/{command.target.id}/commands/delete",
                     "send": "/api/v1/messages"}[command.action]
         # Слишком большой локальный ввод — ещё не неизвестный admission.
         body = command.body

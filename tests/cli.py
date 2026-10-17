@@ -940,9 +940,10 @@ CONCISE_431 = {
         ("gone", "mop mcp, spawned"),
     ),
     "mop.cli.core.delete": (
-        ("syntax", "mop delete <name> [--force]"),
-        ("keeps", "the clone stays"),
-        ("keeps", "refused with that master's name"),
+        # #642: delete -- HTTP-командлет; host-клон остаётся, перехват не подключён.
+        ("syntax", "mop delete <id>"),
+        ("keeps", "a host body keeps its clone"),
+        ("keeps", "--force takeover is explicitly unsupported"),
         ("gone", "a body nobody owns is a running container"),
     ),
     "mop.cli.pool.login": (
@@ -1568,7 +1569,8 @@ def check_role_declarations_585(c):
         # #642: wipe переехал на HTTP-командлет -- старых bus verbs не декларирует.
         "wipe": None,
         "restart": None,
-        "delete": (["wipe"], ["alloc", "delete"]),
+        # #642: delete переехал на HTTP-командлет -- старых bus verbs не декларирует.
+        "delete": None,
         "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
                               "bootstrap_result"]),
         "update": ([], ["spec", "update", "bootstrap_result"]),
@@ -3193,7 +3195,7 @@ def check_nomad_import_187(c):
                            command="mop.cli.driver.build", argv=["--nope"])
 
 
-def missing_library(c, lib, module, text, command="mop.cli.core.delete", argv=()):
+def missing_library(c, lib, module, text, command="mop.cli.core.recycle", argv=()):
     """Импорт module без библиотеки lib -- ImportError с текстом text, а
     командлет command, которому module нужен, через cli.run -- одна строка в
     stderr и код 1. Модули перезагружаются: проверка идёт последней."""
@@ -3658,7 +3660,6 @@ def check_named_263(c):
             patched(core_common, workspace_text=lambda o: ("", NOFILE_334)):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
-            "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
             "recycle": line,
             "update": line + core_common.sent_line(NOFILE_334) + "\n",
         }
@@ -3675,7 +3676,7 @@ def check_named_263(c):
                 c.check(f"#263 mop {module} {bad}: must exit with its usage",
                         not ((out, err, code) != ("", "", usage)), repr((out, err, str(code)[:60])))
         # #642: human takeover не переехал в новые restart/wipe/stop как обычный флаг.
-        for module in ('restart', 'wipe', 'stop'):
+        for module in ('restart', 'wipe', 'stop', 'delete'):
             calls.clear()
             out, err, code, usage = run(module, ['pu-mop-1', '--force'])
             c.check(f'#642 {module} refuses takeover before any old RPC',

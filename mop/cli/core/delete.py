@@ -1,35 +1,31 @@
-"""delete a puppet: mop delete <name> [--force]
+"""mop delete <id> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-Where the body is the node itself, the clone stays and is reused if a puppet
-of that name comes back; where it is a container, the body goes with the
-puppet — memory and disk with it.
+Submit the durable puppet delete: the scheduler job is stopped with a
+conditional write and physical readback, then purged, and the assignment is
+closed for good -- no owner, no incarnation, never activated again. A container
+body goes with the purged allocation; a host body keeps its clone. Delete needs
+its own permission and belongs only to the human who owns the assignment;
+--force takeover is explicitly unsupported before I/O.
 
-Another master's puppet (work in its clone, or dispatched minutes ago) is
-refused with that master's name; --force acts anyway and says whose it was.
+With no explicit binding, first read authorized detail and use desired.revision.
+The request key and absolute UTC --not-after (default two minutes) are fixed
+before that query. Outstanding/unknown operations return exit 3; recover
+through mop operation with the original key/epoch, never by reposting. MCP
+requires the full explicit binding. The explicit HTTPS origin/CA and transient
+Django token follow mop health.
 """
-from mop.cli import lib
-from mop.common import puppets
+from mop.cli import _control
 
-
-# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "node_verbs": ['wipe'], "cluster_verbs": ['alloc', 'delete'], "args": [
-    {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
-    {"name": "force", "type": "boolean", "flag": "--force",
-     "help": "act on a puppet another master leads; the answer names whom"}]}
+MCP = {"annotations": "destructive",
+       "actions": ["execution.delete_puppet", "operations.view_operation"], "args": [
+    {"name": "puppet_id", "type": "string", "required": True, "help": "puppet assignment resource id"},
+    {"name": "epoch", "type": "string", "flag": "--epoch", "required": True, "help": "installation epoch"},
+    {"name": "incarnation", "type": "string", "flag": "--incarnation", "required": True, "help": "current execution incarnation"},
+    {"name": "expected_revision", "type": "string", "flag": "--expected-revision", "required": True, "help": "desired assignment revision, not projection clock"},
+    {"name": "request_id", "type": "string", "flag": "--request-id", "help": "initial command identity"},
+    {"name": "not_after", "type": "string", "flag": "--not-after", "help": "absolute UTC admission deadline"},
+    {"name": "wait", "type": "integer", "flag": "--wait", "help": "bounded GET wait in seconds"}]}
 
 
 def main(argv):
-    name, force = lib.named(argv, __doc__)
-    r = puppets.delete(name, force=force)
-    lib.note(name, r)
-    if r["body"] == "destroyed":
-        print(f"deleted {name} (body gone from {r['node']})")
-    elif r["body"] == "kept":
-        print(f"deleted {name} (clone left at {puppets.clone_dir(name)} on {r['node']})")
-    else:
-        print(f"deleted {name} (no allocation — nothing to clean up)")
-
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+    return _control.invoke('delete', argv)
