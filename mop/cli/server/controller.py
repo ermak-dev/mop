@@ -65,7 +65,7 @@ def main(argv):
         subprocess.run([str(target / 'bin/python'), '-m', 'pip', 'install',
                         str(source) + '[server]'], check=True)
         subprocess.run([str(target / 'bin/python'), '-I', '-c',
-                        'import django, rest_framework, channels, psycopg, uvicorn'], check=True)
+                        'import django, rest_framework, channels, psycopg, uvicorn, ldap, django_auth_ldap'], check=True)
         return 0
     from mop.server.controller.runtime import configure, maintenance, serve, worker, create_admin, close_pools
     configure()

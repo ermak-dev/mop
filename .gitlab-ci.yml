@@ -58,6 +58,9 @@ stages: [test, deploy]
       value: |
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends git openssl jq curl ca-certificates tmux libstdc++6 libatomic1 >/dev/null
+        # python-ldap серверного extra (#693) -- только sdist: компилятор и
+        # заголовки libldap/libsasl2 для pip wheel ниже.
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev libldap-dev libsasl2-dev >/dev/null
         export PATH="/opt/mop-node/bin:$PATH"
         # Native backup/restore использует matching-major клиент PostgreSQL 17.
         # Пакет берётся из подписанного upstream apt repo.

@@ -19,6 +19,12 @@ SERVER = (
     "uvicorn[standard]==0.54.0",
     "psycopg[binary,pool]==3.3.6",
     "psycopg-pool==3.3.3",  # shutdown проверяет workers этого отдельного release
+    # Единственный механизм bind/поиска/групп каталога (#693). Адаптер
+    # access/ldap.py опирается на внутренности backend (_LDAPUser) и прямо на
+    # python-ldap, поэтому оба -- точные пины. python-ldap есть только sdist:
+    # сборке нужны компилятор и заголовки libldap/libsasl2.
+    "django-auth-ldap==5.3.0",
+    "python-ldap==3.4.8",
 )
 
 PIP = (
