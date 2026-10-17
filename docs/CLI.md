@@ -152,20 +152,17 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 #### mop diagnose
 
 ```text
-mop diagnose: offline summary of the selected server login
+mop diagnose: offline check of the HTTPS controller context
 
-Prints which server the next command would talk to, where that choice
-came from (command line, environment, clone binding, or the sole joined
-directory), where its login directory is, and whether the login is whole:
-complete, empty (no whole connection.json; leftovers of the old
-operator.json+client.json pair are no login) or a machine service
-identity. No network, no prompts, no writes; the login's secrets are
-never shown. The schema line names the version of a validated
-connection.json only; other formats carry no schema claim.
+Prints one JSON object, with no network and no writes: whether the next
+remote command has a server context, its origin, where the credential comes
+from and which CA is trusted. Without a context the answer is ready false and
+names the missing transient variables (MOP_API_ORIGIN, MOP_API_TOKEN) -- that
+is information, exit code 0. A malformed context refuses with exit code 1.
 
-Broken or conflicting directories refuse with exit code 1 -- the refusal
-is the diagnosis. empty/machine are informational: exit code 0 with an
-explicit not-ready line, not a success message.
+Select --api-origin and optional --api-ca, or transient MOP_API_ORIGIN,
+MOP_API_CA and MOP_API_TOKEN. No connection.json, .env or git config is read;
+the token is never shown.
 ```
 
 #### mop health
