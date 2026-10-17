@@ -17,7 +17,7 @@ import uuid
 from django.db import DatabaseError, transaction
 from django.utils import timezone
 
-from ..access.context import ActorContext, PrincipalKind
+from ..access.context import ActorContext, ActorKind
 from ..access.delegation import ApprovedPolicy, PolicyBinding
 from ..catalog.models import Project
 from ..secrets.services import (RetainedSecrets, RetentionScope, outside_transaction,
@@ -156,7 +156,7 @@ class Preparation:
         self.secrets = RetainedSecrets(provider=provider, authority=_RevisionAuthority(self))
 
     def _human(self, actor, project_id, *, owner_id=None):
-        if type(actor) is not ActorContext or actor.kind is not PrincipalKind.HUMAN:
+        if type(actor) is not ActorContext or actor.kind is not ActorKind.HUMAN:
             raise PermissionError('authenticated human bootstrap authority required')
         self.authorizer.authorize(actor, 'preparation.approve_bootstrap', project_ids=(project_id,))
         if owner_id is not None and actor.user_id != owner_id:
@@ -185,7 +185,7 @@ class Preparation:
         if type(actor) is not ActorContext:
             raise PermissionError('trusted bootstrap actor required')
         revision = row.approval.revision
-        if actor.kind is PrincipalKind.HUMAN:
+        if actor.kind is ActorKind.HUMAN:
             self._human(actor, revision.project_id, owner_id=revision.owner_id)
         # Exact receipt — запись уже случившегося эффекта, не допуск к новому.
         # Gate всё равно обязан проверить текущего writer и exact assignment.
@@ -489,7 +489,7 @@ class Preparation:
                 # Не подтверждаем неизвестный/неполный/чужой binding и не выдаём его fields.
                 if type(actor) is not ActorContext:
                     raise PermissionError('trusted bootstrap actor required')
-                if actor.kind is PrincipalKind.HUMAN:
+                if actor.kind is ActorKind.HUMAN:
                     self._human(actor, binding.project_id)
                 if self.gate.check(actor, binding, 'readback') is not None:
                     raise PermissionError('invalid bootstrap gate result')

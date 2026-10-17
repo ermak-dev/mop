@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 from django.db import transaction
 from django.utils import timezone
-from mop.server.access.context import ActorContext, PrincipalKind
+from mop.server.access.context import ActorContext, ActorKind
 from mop.server.access.services import Access, Denied, NotVisible
 from mop.server.catalog.models import Project
 from .models import Assignment
@@ -106,7 +106,7 @@ class ProjectionWriter:
         return self.changed(target_id=target_id, retire=True)
 
     def _source_target(self, actor, target_id, incarnation_id):
-        if type(actor) is not ActorContext or actor.kind is not PrincipalKind.SERVICE:
+        if type(actor) is not ActorContext or actor.kind is not ActorKind.SERVICE:
             raise Denied('observation requires an enrolled node credential')
         source = Assignment.objects.filter(pk=target_id).values('project_id').first()
         if source is None:

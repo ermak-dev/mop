@@ -31,10 +31,11 @@ class Values(unittest.TestCase):
     def test_initiator_session_is_endpoint_session_identity_not_external_cli_name(self):
         from mop.common.telemetry import SourceRef
         # #649 TrustedEndpointContext.session_id — UUID, external CLI id отдельно.
-        value = SourceRef(1, uuid4(), uuid4(), uuid4(), uuid4(), uuid4())
+        # #684 инициатор назван Actor id: параллельного principal UUID нет.
+        value = SourceRef(1, uuid4(), uuid4(), uuid4(), uuid4())
         self.assertIsNotNone(value.session_id)
         with self.assertRaises(ValueError):
-            SourceRef(1, uuid4(), uuid4(), 'external-cli-name', uuid4(), uuid4())
+            SourceRef(1, uuid4(), 'external-cli-name', uuid4(), uuid4())
 
 
 class Hook(unittest.TestCase):

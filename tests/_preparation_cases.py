@@ -557,7 +557,7 @@ finally:
         bindings.current_value = RoleBinding(parent.project_id, parent.target_id, parent.incarnation,
             parent.role, parent.digest, parent.id, self.user.pk)
         grants.activate(parent.id, expected_revision=parent.revision)
-        key = Token.objects.get(user__principal__grant__id=parent.id).key
+        key = Token.objects.get(user__grant_machine__id=parent.id).key
         delegated = auth.token_context(key, grants=grants)
         newer, _ = self.approved(tasks=b'new snapshot after first parent intent')
         args = dict(project_id=self.project.pk, bundle_id=child_bundle.id, target_id=uuid.uuid4(),
@@ -576,7 +576,7 @@ finally:
     def test_grants_approval_query_pins_exact_revision_and_validates_old_not_latest(self):
         revision, approval = self.approved()
         query = self.api.approval_query()
-        binding = PolicyBinding(uuid.uuid4(), self.user.pk, self.actor.principal_id, self.project.pk,
+        binding = PolicyBinding(uuid.uuid4(), self.user.pk, self.actor.user_id, self.project.pk,
                                 uuid.uuid4(), 'worker', 'b' * 64, None, self.target, self.incarnation)
         proof = query.pin(binding)
         self.assertEqual((proof.approval_id, proof.version_id, proof.digest),

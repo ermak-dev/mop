@@ -250,7 +250,7 @@ class Consumers(unittest.TestCase):
 
     def test_published_identity_is_typed_and_not_a_live_endpoint_or_permission_list(self):
         self.assertTrue(hasattr(self.client, 'identity'), '#642 missing typed identity consumer')
-        self.response({'schema_version': 1, 'user_id': 2, 'principal_id': NODE,
+        self.response({'schema_version': 1, 'user_id': 2,
             'kind': 'human', 'human_owner_id': 2, 'node_id': None, 'grant_id': None})
         result = self.client.identity()
         self.assertEqual(result.user_id, 2)
@@ -315,7 +315,7 @@ class Consumers(unittest.TestCase):
     def test_mcp_never_starts_legacy_channel_or_invents_action_permissions(self):
         from mop.common import context
         from mop.cli import _control
-        self.response({'schema_version': 1, 'user_id': 2, 'principal_id': NODE,
+        self.response({'schema_version': 1, 'user_id': 2,
             'kind': 'human', 'human_owner_id': 2, 'node_id': None, 'grant_id': None})
         with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
              patch.object(context, 'here', side_effect=AssertionError('legacy MCP started')):
@@ -499,7 +499,7 @@ class Consumers(unittest.TestCase):
         from mop.cli.node import drain
         from mop.cli import _control
         from mop.common import bus
-        self.response({'schema_version': 1, 'user_id': 2, 'principal_id': NODE,
+        self.response({'schema_version': 1, 'user_id': 2,
             'kind': 'human', 'human_owner_id': 2, 'node_id': None, 'grant_id': None})
         self.response({'schema_version': 1, 'count': 0, 'results': [], 'next_cursor': None})
         self.response(node_operation('succeeded'), 200)
@@ -533,7 +533,7 @@ class Consumers(unittest.TestCase):
 
     def test_mcp_action_filter_fails_closed_and_invokes_same_commandlet(self):
         from mop.cli import _control
-        identity = api.Identity(1, NODE, 'grant', 1, None, OP, frozenset({'sessions.restart_puppet',
+        identity = api.Identity(1, 'service', 1, None, OP, frozenset({'sessions.restart_puppet',
             'operations.override_assignment'}))
         self.assertTrue(hasattr(_control, 'allowed'), '#642 missing server action permission filter')
         self.assertTrue(_control.allowed({'actions': ['sessions.restart_puppet']}, identity))
@@ -541,8 +541,8 @@ class Consumers(unittest.TestCase):
         self.assertFalse(_control.allowed({'actions': ['operations.override_assignment']}, identity))
         self.assertFalse(_control.allowed({'cluster_verbs': ['restart']}, identity))
         self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']},
-            api.Identity(1, NODE, 'human', 1, None, None)))
-        scoped = api.Identity(1, NODE, 'human', 1, None, None, frozenset())
+            api.Identity(1, 'human', 1, None, None)))
+        scoped = api.Identity(1, 'human', 1, None, None, frozenset())
         self.assertTrue(_control.allowed({'annotations': 'readonly', 'actions': []}, scoped))
         self.assertFalse(_control.allowed({'annotations': 'destructive', 'actions': []}, scoped))
         self.assertFalse(_control.allowed({'annotations': 'readonly'}, scoped))

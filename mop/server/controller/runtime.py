@@ -555,7 +555,7 @@ def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None
     installation root: без них standalone worker явно отказывает на startup.
     Restart потребляется только machine HTTP, не этим controller poll.
     """
-    from ..access.context import ActorContext, PrincipalKind
+    from ..access.context import ActorContext, ActorKind
     from ..access.grants import Grants
     from ..operations.worker import Worker
     from .machinebinding import AssignmentBindings
@@ -563,7 +563,7 @@ def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None
     node_bound = node_executor is not None
     if node_bound != (executor is not None):
         raise RuntimeError('node executor and enrolled service authority are required together')
-    if node_bound and (type(executor) is not ActorContext or executor.kind is not PrincipalKind.SERVICE
+    if node_bound and (type(executor) is not ActorContext or executor.kind is not ActorKind.SERVICE
                        or executor.node_id is None):
         raise RuntimeError('enrolled node executor authority required')
     if node_bound and not asyncio.iscoroutinefunction(getattr(node_executor, 'set_eligibility', None)):

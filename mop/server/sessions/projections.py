@@ -177,7 +177,7 @@ class PoolQueries:
         return {'schema_version':1, 'epoch':str(epoch), 'puppet':rows[0]}
 
     def _binding(self, actor, projects):
-        return salted_hmac('mop.read.binding.v1', str(actor.credential_id)+':'+str(actor.principal_id),
+        return salted_hmac('mop.read.binding.v1', str(actor.credential_id)+':'+str(actor.user_id),
                            algorithm='sha256').hexdigest(), _hash([str(value) for value in projects])
 
     def snapshot(self, actor, *, project_id=None, page_size=100, cursor=None):

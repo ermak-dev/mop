@@ -53,7 +53,6 @@ class DurableOperations(TransactionTestCase):
         NodeProject.objects.create(node=self.node, project=self.project)
         self.user = get_user_model().objects.create_user('operator', password='test-only')
         source = access.IdentitySource.objects.create(name='local', kind='local')
-        access.Principal.objects.create(user=self.user, kind='human')
         access.LoginIdentity.objects.create(user=self.user, source=source, external_subject='operator')
         access.ProjectMembership.objects.create(user=self.user, project=self.project, source=source)
         access.AllProjectMembership.objects.create(user=self.user, source=source)

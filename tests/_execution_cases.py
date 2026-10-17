@@ -55,7 +55,6 @@ class MachineExecution(TransactionTestCase):
         NodeProject.objects.create(node=self.node, project=self.project)
         source = a.IdentitySource.objects.create(name='local', kind='local', priority=0)
         self.human = get_user_model().objects.create_user('owner')
-        a.Principal.objects.create(user=self.human, kind='human')
         a.LoginIdentity.objects.create(user=self.human, source=source, external_subject='owner')
         a.ProjectMembership.objects.create(user=self.human, project=self.project, source=source)
         self.human.user_permissions.add(Permission.objects.get(content_type__app_label='execution', codename='assign_work'))

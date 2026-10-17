@@ -52,7 +52,6 @@ class AccessContracts(TransactionTestCase):
         initialize()
         self.source = m.IdentitySource.objects.create(name='local', kind='local', priority=0)
         self.user = get_user_model().objects.create_user('human', password='test-password-only')
-        m.Principal.objects.create(user=self.user, kind='human')
         m.LoginIdentity.objects.create(user=self.user, source=self.source, external_subject='human')
         self.project = Project.objects.create(name='one', origin='https://example.invalid/one.git')
         self.foreign = Project.objects.create(name='two', origin='https://example.invalid/two.git')
@@ -219,9 +218,11 @@ class AccessContracts(TransactionTestCase):
         with self.assertRaises(self.s.Denied):
             self.s.token_context(key)
 
-    def test_unused_rotated_token_cannot_adopt_changed_principal_revision(self):
+    def test_unused_rotated_token_cannot_adopt_changed_identity(self):
+        # #684: revision Principal ушла; живой fence -- subject-change digest
+        # в самом credential, ротация его не сбрасывает.
         key = self.s.rotate_token(self.actor)
-        self.m.Principal.objects.filter(user=self.user).update(revision=2)
+        self.m.LoginIdentity.objects.filter(user=self.user).update(external_subject='rotated-subject')
         with self.assertRaises(self.s.Denied):
             self.s.token_context(key)
 
@@ -264,6 +265,8 @@ class AccessContracts(TransactionTestCase):
         self.assertFalse(self.m.CredentialBinding.objects.filter(session_id=client.session.session_key).exists())
 
     def test_unused_enrollment_token_cannot_adopt_changed_node(self):
+        # #684: enrollment живёт в самом credential;credential не принимает
+        # чужой узел и действует только в границах собственного enrollment.
         from mop.server.catalog.models import Node, NodeProject
         def node(name):
             return Node.objects.create(name=name, driver='host', ssh_host='node.invalid', ssh_port=22,
@@ -273,9 +276,15 @@ class AccessContracts(TransactionTestCase):
             NodeProject.objects.create(node=row, project=self.project)
         key = self.s.enroll_service('unused-service', first.pk, project_ids=(self.project.pk,),
             permissions=('catalog.observe_node',))
-        self.m.Principal.objects.filter(user__username='unused-service').update(bound_node=second)
+        actor = self.s.token_context(key)
+        self.assertEqual(actor.node_id, first.pk)
+        # Действие за пределами собственного узла отказано.
         with self.assertRaises(self.s.Denied):
-            self.s.token_context(key)
+            self.s.Access().authorize(actor, 'catalog.observe_node', node_ids=(second.pk,),
+                project_ids=(self.project.pk,))
+        # Ротация не расширяет enrollment на другой узел.
+        rotated = self.s.rotate_token(actor)
+        self.assertEqual(self.s.token_context(rotated).node_id, first.pk)
 
     # BUG: Catalog создавал client без Access ownership, bind всегда давал 404.
     # HYPOTHESIS: trusted composition должна записывать обе строки атомарно.
@@ -431,7 +440,7 @@ class AccessContracts(TransactionTestCase):
         self.user.set_unusable_password()
         self.user.is_staff = self.user.is_superuser = True
         self.user.save()
-        self.m.Principal.objects.filter(user=self.user).update(kind='service')
+        get_user_model().objects.filter(pk=self.user.pk).update(kind='service')
         with self.assertRaises(self.s.Denied):
             self.s.Access().authorize(self.s.token_context(self.token), 'catalog.view_project',
                 project_ids=(self.project.pk,))
@@ -474,7 +483,6 @@ class AccessContracts(TransactionTestCase):
         from django.contrib.auth.models import Group
         source = self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=1)
         user = get_user_model().objects.create_user('ldap-human')
-        self.m.Principal.objects.create(user=user, kind='human')
         identity = self.m.LoginIdentity.objects.create(user=user, source=source, external_subject='uid=human')
         independent = Group.objects.create(name='local-manual')
         user.groups.add(independent)
@@ -703,11 +711,16 @@ class AccessContracts(TransactionTestCase):
                 permissions=('access.manage_proxy',))
         self.assertFalse(get_user_model().objects.filter(username='amplified-service').exists())
 
-    def test_grant_kind_fails_closed_until_delegation_resolver_is_bound(self):
-        self.m.Principal.objects.filter(user=self.user).update(kind='grant')
+    def test_delegation_context_fails_closed_until_resolver_is_bound(self):
+        # #684: делегирование -- grant_id в контексте, не вид Actor; без
+        # привязанного resolver отказ по умолчанию.
+        from dataclasses import replace
+        from uuid import uuid4
+        delegated = replace(self.actor, grant_id=uuid4())
         with self.assertRaises(self.s.Denied):
-            self.s.Access().authorize(self.s.token_context(self.token), 'catalog.view_project',
-                project_ids=(self.project.pk,))
+            self.s.Access().authorize(delegated, 'catalog.view_project', project_ids=(self.project.pk,))
+        with self.assertRaises(self.s.Denied):
+            self.s.current_actor(delegated)
 
     def test_limit_action_is_distinct_from_generic_configuration_permission(self):
         from mop.server.catalog.services import Catalog
@@ -818,7 +831,8 @@ class AccessContracts(TransactionTestCase):
             'password2': 'a-long-distinct-passphrase-633', '_save': 'Save'}, secure=True)
         self.assertEqual(response.status_code, 302)
         user = get_user_model().objects.get(username='created-human')
-        self.assertTrue(self.m.Principal.objects.filter(user=user, kind='human').exists())
+        self.assertEqual(user.kind, 'human')
+        self.assertFalse(self.m.Principal.objects.filter(user=user).exists())
         self.assertEqual(self.m.LoginIdentity.objects.get(user=user).source.kind, 'local')
 
     @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -897,7 +911,7 @@ class AccessContracts(TransactionTestCase):
         initialize()
         create_admin('initial-admin', 'a-long-distinct-passphrase-633')
         user = get_user_model().objects.get(username='initial-admin')
-        self.assertEqual(self.m.Principal.objects.get(user=user).kind, 'human')
+        self.assertEqual(user.kind, 'human')
         self.assertEqual(self.m.LoginIdentity.objects.get(user=user).source.kind, 'local')
         before = user.password
         bind_local_identity(user.pk)

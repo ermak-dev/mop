@@ -186,9 +186,11 @@ def allowed(declaration, identity):
     required = frozenset(actions)
     if declaration.get('human_only') is True and identity.kind != 'human':
         return False
-    if identity.kind == 'grant' and not required <= _GRANT_ACTIONS:
+    delegated = identity.grant_id is not None
+    if delegated and identity.kind == 'service' and not required <= _GRANT_ACTIONS:
         return False
-    return identity.kind in ('human', 'grant') and required <= identity.action_permissions
+    return (identity.kind in ('human', 'service') if delegated
+            else identity.kind in ('human', 'agent')) and required <= identity.action_permissions
 
 
 def tool_call(words, declaration, values):

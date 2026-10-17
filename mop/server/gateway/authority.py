@@ -1,6 +1,6 @@
 """Current human/session authority и узкий controller SecretStore consumer."""
 from django.contrib.auth import get_user_model
-from mop.server.access.context import PrincipalKind
+from mop.server.access.context import ActorKind
 from mop.server.access.services import current_actor, session_context, Denied
 from mop.server.secrets.services import Refused
 from .values import Credential
@@ -9,7 +9,7 @@ from .values import Credential
 class HumanAuthority:
     def authorize(self, actor):
         current_actor(actor)
-        if actor.kind != PrincipalKind.HUMAN or actor.grant_id is not None:
+        if actor.kind not in (ActorKind.HUMAN, ActorKind.AGENT) or actor.grant_id is not None:
             raise Denied('proxy management requires a current human principal')
         # Никаких cached request.user permissions после await.
         user = get_user_model().objects.get(pk=actor.user_id)

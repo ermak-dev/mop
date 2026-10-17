@@ -18,7 +18,7 @@ class TerminalAttachment(models.Model):
     target = models.ForeignKey('execution.Assignment', on_delete=models.PROTECT)
     incarnation = models.ForeignKey('execution.ExecutionIncarnation', on_delete=models.PROTECT)
     credential_id = models.UUIDField()
-    principal_id = models.UUIDField()
+    user_id = models.PositiveBigIntegerField()
     mode = models.CharField(max_length=2)
     state = models.CharField(max_length=8, default='reserved')
     generation = models.PositiveBigIntegerField()

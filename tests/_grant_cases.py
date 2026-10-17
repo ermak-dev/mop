@@ -109,7 +109,6 @@ class GrantCases(TransactionTestCase):
         self.foreign = Project.objects.create(name='beta', origin='https://example.invalid/beta.git')
         self.source = access.IdentitySource.objects.create(name='local', kind='local')
         self.user = get_user_model().objects.create_user('owner', password='test-only-password')
-        access.Principal.objects.create(user=self.user, kind='human')
         access.LoginIdentity.objects.create(user=self.user, source=self.source, external_subject='owner')
         access.ProjectMembership.objects.create(user=self.user, project=self.project, source=self.source)
         self.permit('access.view_role', 'access.approve_role', 'access.issue_grant', 'access.revoke_grant',
@@ -160,7 +159,7 @@ class GrantCases(TransactionTestCase):
         self.bindings.receipts[row.id] = binding
         self.api.activate(row.id, expected_revision=row.revision)
         row = self.api.get(self.actor, row.id)
-        token = Token.objects.get(user__principal__grant__id=row.id).key
+        token = Token.objects.get(user__grant_machine__id=row.id).key
         return row, auth.token_context(token, grants=self.api)
 
     def test_gateway_uses_sealed_local_grant_and_rechecks_current_authority(self):
@@ -210,7 +209,7 @@ class GrantCases(TransactionTestCase):
         from _catalog_retirement_cases import retirement_catalog
         parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
         row, actor = self.active(actor=parent_actor)
-        token = Token.objects.get(user__principal__pk=row.principal_id).key
+        token = Token.objects.get(user_id=row.principal_id).key
         local = self.api.local_authority()
         self.api.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
         with transaction.atomic():
@@ -284,7 +283,7 @@ class GrantCases(TransactionTestCase):
         self.user.user_permissions.add(permission)
         with transaction.atomic():
             self.assertIsNone(query(child.binding))
-        Token.objects.filter(user__principal__pk=parent.principal_id).delete()
+        Token.objects.filter(user_id=parent.principal_id).delete()
         with transaction.atomic(), self.assertRaises(PermissionError):
             query(child.binding)
 
@@ -310,7 +309,7 @@ class GrantCases(TransactionTestCase):
             decrypt = encrypt
         self.api.secrets.provider = ForbiddenProvider()
         local = factory()
-        token = Token.objects.get(user__principal__pk=row.principal_id).key
+        token = Token.objects.get(user_id=row.principal_id).key
         self.assertEqual(auth.token_context(token, grants=local), actor)
         authority = auth.Access(grants=local)
         with transaction.atomic():
@@ -323,7 +322,7 @@ class GrantCases(TransactionTestCase):
             authority.authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
         with transaction.atomic(), self.assertRaises(PermissionError):
             authority.authorize(actor, 'sessions.send_message', project_ids=(self.foreign.pk,))
-        Token.objects.filter(user__principal__pk=row.principal_id).delete()
+        Token.objects.filter(user_id=row.principal_id).delete()
         with transaction.atomic(), self.assertRaises(PermissionError):
             authority.authorize(actor, 'sessions.send_message', project_ids=(self.project.pk,))
 
@@ -381,9 +380,8 @@ class GrantCases(TransactionTestCase):
                             Token.objects.filter(user_id=actor.user_id).delete()
                             access.CredentialBinding.objects.filter(pk=actor.credential_id).delete()
                             token = Token.objects.create(user_id=actor.user_id)
-                            principal = access.Principal.objects.get(pk=actor.principal_id)
                             binding = access.CredentialBinding.objects.create(token_user_id=actor.user_id,
-                                token_digest=auth._digest(token.key), **auth._binding_values(principal, None))
+                                token_digest=auth._digest(token.key), **auth._binding_values(actor, None, None))
                             return token.key, binding.pk
                     finally:
                         connections.close_all()
@@ -592,7 +590,7 @@ class GrantCases(TransactionTestCase):
     def test_reserved_has_no_runtime_authority_and_default_ports_deny(self):
         row = self.reserve()
         self.api.provision(self.actor, row.id, expected_revision=row.revision)
-        token = Token.objects.get(user__principal__grant__id=row.id).key
+        token = Token.objects.get(user__grant_machine__id=row.id).key
         with self.assertRaises(PermissionError):
             auth.token_context(token, grants=self.api)
         with self.assertRaises(PermissionError):
@@ -633,8 +631,7 @@ class GrantCases(TransactionTestCase):
         factory = APIRequestFactory()
         response = view(factory.get('/identity', HTTP_AUTHORIZATION='Token ' + key))
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data['kind'], 'grant')
-        self.assertEqual(response.data['principal_id'], str(actor.principal_id))
+        self.assertEqual(response.data['kind'], 'service')
         self.assertEqual(response.data['human_owner_id'], self.user.pk)
         self.assertEqual(response.data['grant_id'], str(row.id))
         # Никакой настройки из payload: без trusted root прежний deny обязателен.
@@ -839,7 +836,7 @@ class GrantCases(TransactionTestCase):
     def test_prepared_credential_roundtrip_and_plaintext_free_real_pg_dump(self):
         row = self.reserve()
         provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
-        token = Token.objects.get(user__principal__grant__id=row.id).key
+        token = Token.objects.get(user__grant_machine__id=row.id).key
         from mop.server.secrets.services import RetentionScope
         self.assertEqual(self.api.secrets.read(self.actor, RetentionScope(self.project.pk, self.user.pk,
             row.id, 'grant'), provisioned.credential_version_id), token.encode())
@@ -879,7 +876,7 @@ class GrantCases(TransactionTestCase):
                 self.assertNotIn('private-generated-key', str(error))
             else:
                 self.fail('failed credential binding must refuse provisioning')
-        self.assertFalse(Token.objects.filter(user__principal__grant__id=row.id).exists())
+        self.assertFalse(Token.objects.filter(user__grant_machine__id=row.id).exists())
         self.assertIsNone(access.Grant.objects.get(pk=row.id).credential_version_id)
 
     def test_bundle_read_of_revoked_descendant_is_not_a_shared_read_bypass(self):
@@ -906,7 +903,7 @@ class GrantCases(TransactionTestCase):
         self.assertEqual((binding.intent_id, binding.target_id, binding.incarnation, binding.bundle_id,
                           binding.owner_id, binding.actor_id, binding.project_id),
                          (intent.id, row.target_id, row.incarnation, self.bundle.id,
-                          self.user.pk, self.actor.principal_id, self.project.pk))
+                          self.user.pk, self.actor.user_id, self.project.pk))
         self.assertEqual(approved.validations[-1], (row.policy, binding))
 
     def test_http_auth_injection_is_explicit_and_no_request_owner_is_used(self):
@@ -1006,7 +1003,7 @@ class GrantCases(TransactionTestCase):
         provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
         self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
         self.bindings.receipts[row.id] = row.binding
-        Token.objects.filter(user__principal__grant__id=row.id).delete()
+        Token.objects.filter(user__grant_machine__id=row.id).delete()
         try:
             self.api.activate(row.id, expected_revision=provisioned.revision)
         except PermissionError:
@@ -1075,11 +1072,10 @@ class GrantCases(TransactionTestCase):
         provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
         self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
         self.bindings.receipts[row.id] = row.binding
-        principal, identity = auth._principal(self.user)
         expired = Session.objects.create(session_key='expired-other-browser', session_data='',
             expire_date=timezone.now() - timedelta(hours=1))
         access.CredentialBinding.objects.create(id=uuid.UUID(int=0), session=expired,
-            **auth._binding_values(principal, identity))
+            **auth._binding_values(self.user, auth._identity(self.user), None))
         auth.current_actor(self.actor)
         activated = self.api.activate(row.id, expected_revision=provisioned.revision)
         self.assertEqual(activated.state, 'active')

@@ -4,17 +4,21 @@ from enum import Enum
 from uuid import UUID
 
 
-class PrincipalKind(str, Enum):
+class ActorKind(str, Enum):
+    """Vocabulary самого Actor (#683): вид классифицирует, прав не даёт.
+
+    Делегирование — не вид: машины делегирования это service Actor с
+    заполненным grant_id; резолвер делегирования выбирается по grant_id.
+    """
     HUMAN = 'human'
     SERVICE = 'service'
-    GRANT = 'grant'
+    AGENT = 'agent'
 
 
 @dataclass(frozen=True)
 class ActorContext:
     user_id: int
-    principal_id: UUID
-    kind: PrincipalKind
+    kind: ActorKind
     credential_id: UUID
     human_owner_id: int | None
     node_id: UUID | None

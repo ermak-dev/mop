@@ -70,7 +70,7 @@ class AddressedCredentialCases(TransactionTestCase):
         for model, action, evidence in ((execution.IdentityApplication, 'apply_identity', 'identity-applied'),
                                         (execution.ReadinessReceipt, 'confirm_ready', 'ready')):
             attempt = execution.AssignmentAttempt.objects.create(assignment=self.assignment,
-                incarnation_id=self.assignment.current_incarnation_id, principal_id=self.machine.principal_id,
+                incarnation_id=self.assignment.current_incarnation_id, executor_user_id=self.machine.user_id,
                 request_id=uuid4(), epoch=Installation.objects.get(pk=1).epoch, operation_id=uuid4(), step_id=uuid4(),
                 executor_epoch=self.assignment.current_incarnation.executor_epoch, owner=self.user,
                 generation=self.assignment.generation, assignment_revision=self.assignment.revision,

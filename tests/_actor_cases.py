@@ -82,11 +82,11 @@ class UnifiedActorIdentity(TransactionTestCase):
         from mop.server.access import models as access
         User = get_user_model()
         user = User.objects.create_user('legacy-shape', password=None)
-        principal = access.Principal.objects.create(user=user, kind='human')
-        # Форма сохранена до #684--#689 (retarget), но это не второй identity:
+        # Форма сохранена до #689 (retarget), но это не второй identity:
         # те же права читаются из стандартного User, а не из Principal.
+        # С #684 пути выдачи больше не создают строк вовсе.
         self.assertEqual(User.objects.filter(pk=user.pk).count(), 1)
-        self.assertEqual(access.Principal.objects.filter(user=user).count(), 1)
+        self.assertEqual(access.Principal.objects.filter(user=user).count(), 0)
 
     def test_enrollment_and_grant_actors_carry_their_kind_on_the_actor(self):
         # Классификация живёт на самом Actor, дублирующий Principal —
@@ -102,7 +102,7 @@ class UnifiedActorIdentity(TransactionTestCase):
         User = get_user_model()
         service = User.objects.get(username='enrolled-service')
         self.assertEqual(service.kind, 'service')
-        self.assertTrue(access_models.Principal.objects.filter(user=service, kind='service').exists())
+        self.assertFalse(access_models.Principal.objects.filter(user=service).exists())
 
     def test_grant_reservation_stamps_service_kind_on_the_actor(self):
         # Делегированная машина получает Actor с kind='service': классификация
@@ -120,7 +120,6 @@ class UnifiedActorIdentity(TransactionTestCase):
         project = Project.objects.create(name='grant-kind', origin='https://example.invalid/g.git')
         source = access.IdentitySource.objects.create(name='local', kind='local')
         user = User.objects.create_user('grant-owner-683', password='grant-only-passphrase-683')
-        access.Principal.objects.create(user=user, kind='human')
         access.LoginIdentity.objects.create(user=user, source=source, external_subject='grant-owner')
         access.ProjectMembership.objects.create(user=user, project_id=project.pk, source=source)
         from django.contrib.auth.models import Permission
@@ -161,7 +160,7 @@ class UnifiedActorIdentity(TransactionTestCase):
                           request_id=_uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
         machine = User.objects.get(username='grant-' + row.id.hex)
         self.assertEqual(machine.kind, 'service')
-        self.assertTrue(access.Principal.objects.filter(user=machine, kind='grant').exists())
+        self.assertFalse(access.Principal.objects.filter(user=machine).exists())
 
     def test_user_admin_is_the_standard_one_and_bootstrap_still_works(self):
         from django.contrib import admin
