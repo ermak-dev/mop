@@ -484,6 +484,12 @@ def maintenance(action, *, username=None, file=None):
             call_command(command, stdout=output, stderr=output, verbosity=0, **options)
         elif action == 'initialize':
             initialize()
+        elif action == 'collectstatic':
+            # #695: штатный сбор статики в общий ролям каталог из bootstrap.
+            from django.conf import settings
+            if not settings.STATIC_ROOT:
+                raise RuntimeError('collectstatic requires static_root in the controller bootstrap')
+            call_command('collectstatic', interactive=False, clear=True, stdout=output, stderr=output, verbosity=0)
         elif action == 'check':
             call_command('check', databases=['default'], stdout=output, stderr=output, verbosity=0)
             verify_installation()

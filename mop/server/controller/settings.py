@@ -1,5 +1,6 @@
 """Настройки framework до ORM-конфигурации предметных модулей."""
 import os
+from pathlib import Path
 from .bootstrap import load, private_bytes
 
 if 'DJANGO_ALLOW_ASYNC_UNSAFE' in os.environ:
@@ -33,6 +34,8 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = 'actor.Actor'
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # #695: статика до сессий и CSRF; nosniff ставит SecurityMiddleware выше.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -67,6 +70,22 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 USE_TZ = True
 TIME_ZONE = 'UTC'
 STATIC_URL = '/static/'
+# #695: штатный collectstatic пишет в общий ролям каталог из bootstrap. Без него
+# (изолированные проверки) хранилище простое: manifest требует собранной статики.
+STATIC_ROOT = BOOTSTRAP.get('static_root')
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage'
+                    if STATIC_ROOT else 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+}
+# Ассеты дашборда раздаются из пакета (#627) тем же origin по /assets/; индекс
+# остаётся view приложения (no-store). Хеш в имени Vite -- immutable.
+WHITENOISE_ROOT = str(Path(__file__).resolve().parent / 'dist')
+# WhiteNoise ждёт здесь сами callable: строку immutable-теста он читает как
+# регулярное выражение, а строку add_headers не вызывает вовсе.
+from .dashboard import immutable as _immutable, static_headers as _static_headers  # noqa: E402
+WHITENOISE_IMMUTABLE_FILE_TEST = _immutable
+WHITENOISE_ADD_HEADERS_FUNCTION = _static_headers
 AUTHENTICATION_BACKENDS = ['mop.server.controller.authbackend.ControllerBackend']
 CSRF_FAILURE_VIEW = 'mop.server.controller.authviews.csrf_failure'
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'

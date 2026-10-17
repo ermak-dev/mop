@@ -321,6 +321,17 @@ test:py3.12:
         self.assertEqual(shlex.split(script), ['python3', 'tests/body_launch.py',
                                                '&&', 'python3', 'tests/api_body_spec.py'])
 
+    # #695: упакованный дашборд (реальный wheel + uvicorn) требует PostgreSQL
+    # фикстуры; без своего режима его не прогнать локально, только в CI.
+    def test_dashboard_gate_runs_the_packaged_controller_check(self):
+        import shlex
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, commands = self.invoke(self.source(directory), check='dashboard')
+        self.assertEqual(result, 0)
+        runner = next(command for command in commands if any(word.startswith('TESTS=') for word in command))
+        script = next(word.removeprefix('TESTS=') for word in runner if word.startswith('TESTS='))
+        self.assertEqual(shlex.split(script), ['python3', 'tests/packaged_dashboard.py'])
+
     def test_runtime_gate_can_be_selected_in_owned_postgres_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
             result, _, commands = self.invoke(self.source(directory), check='controller_runtime')

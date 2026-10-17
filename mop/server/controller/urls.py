@@ -1,6 +1,6 @@
 """Только стандартный Admin; предметные endpoints добавляют их владельцы."""
 from django.contrib import admin
-from django.urls import path, re_path
+from django.urls import path
 
 # Стандартный token admin раскрывает bearer key; общий Admin его не публикует.
 from rest_framework.authtoken.models import TokenProxy
@@ -80,8 +80,7 @@ urlpatterns = [
     path('api/v1/operations/<uuid:operation_id>', operations.OperationStatus.as_view()),
     path('api/v1/schema', SchemaView.as_view()),
     # Упакованный дашборд (#627/#644): тот же origin, что API; глубже
-    # маршрутов страница сама разбирает hash-путь. Плоское имя -- в самой
-    # отдаче, здесь только буквенно-цифровые с точкой и дефисом.
+    # маршрутов страница сама разбирает hash-путь. Ассеты /assets/* отдаёт
+    # стандартный статический сервер (#695), здесь только индекс.
     path('', dashboard.index),
-    re_path(r'^assets/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)$', dashboard.asset),
 ]

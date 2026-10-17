@@ -61,6 +61,9 @@ base = {'installation_id': 'packaged-627', 'django_key': str(root / 'django.key'
 # digest в доверие установки, случайный на каждого ребёнка ломал вторую
 # попытку. maintenance оставляет доверенный ему доступ, web получает
 # отдельного непривилегированного владельца-не-владельца схемы (#644).
+# #695: собранная статика -- отдельный каталог, общий ролям (пишет
+# maintenance штатным collectstatic, раздаёт web), путь -- в bootstrap.
+base['static_root'] = str(root / 'static')
 (root / 'maintenance.json').write_text(json.dumps({**base, 'role': 'maintenance',
     'root_key': str(root / 'root.key'), 'database': db}))
 (root / 'maintenance.json').chmod(0o600)
@@ -72,6 +75,7 @@ from mop.server.controller.runtime import configure, maintenance, close_pools
 configure()
 maintenance('migrate')
 maintenance('initialize')
+maintenance('collectstatic')
 close_pools()
 
 os.environ['MOP_CONTROLLER_BOOTSTRAP'] = str(root / 'web.json')
@@ -296,6 +300,38 @@ class PackagedDashboard(unittest.TestCase):
             self.assertEqual(len(body), 0)
             status, _, _ = request(port, 'GET', '/nonexistent-page')
             self.assertEqual(status, 404)
+
+    # #695: стандартная отдача статики вместо самописного файлового сервера.
+    # RED: bootstrap отвергал static_root, collectstatic не было, Admin CSS
+    # не раздавался; самописная view ассетов с таблицей MIME на месте.
+    # SOLUTION: WhiteNoise (WHITENOISE_ROOT = пакетный dist, явный immutable на
+    # /assets/), штатный collectstatic в общий каталог из bootstrap.
+    # RESULT: 10/10 на реальном wheel под uvicorn (настоящий ASGI-стек).
+    # STATUS: FIXED — see #695
+    def test_dashboard_responses_carry_nosniff(self):
+        _, assets = self.committed_files()
+        with self.running() as port:
+            for path in ('/', '/assets/' + assets[0]):
+                status, headers, _ = request(port, 'GET', path)
+                self.assertEqual(status, 200, path)
+                self.assertEqual(headers.get('x-content-type-options'), 'nosniff', path)
+
+    def test_admin_static_is_collected_and_served_immutable(self):
+        import re
+        with self.running() as port:
+            status, _, body = request(port, 'GET', '/admin/login/')
+            self.assertEqual(status, 200)
+            link = re.search(rb'/static/admin/css/base\.[0-9a-f]{12}\.css', body)
+            self.assertIsNotNone(link, 'admin pages must link manifest-hashed collected static')
+            status, headers, css = request(port, 'GET', link.group(0).decode())
+            self.assertEqual(status, 200)
+            self.assertTrue(css, 'collected admin stylesheet must not be empty')
+            self.assertIn('immutable', headers.get('cache-control', ''))
+
+    def test_custom_asset_file_server_is_gone(self):
+        source = (ROOT / 'mop' / 'server' / 'controller' / 'dashboard.py').read_text()
+        self.assertNotIn('CONTENT_TYPES', source, 'MIME table belongs to the static server, not the app')
+        self.assertNotIn('def asset(', source, 'hashed assets are served by the standard static server')
 
     def test_no_embedded_secrets_and_auth_endpoints_unchanged(self):
         wheel = next(zipfile.ZipFile(w) for w in self.wheelhouse.glob('mop-*.whl'))
