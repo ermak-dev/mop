@@ -7,6 +7,7 @@ Provider I/O находится до/после коротких SQL sections, �
 from datetime import timedelta
 from functools import wraps
 import json
+import secrets as _secrets
 from typing import Protocol
 import uuid
 
@@ -25,7 +26,7 @@ from . import models as m, services as auth
 from .context import ActorContext, ActorKind
 from .delegation import (ApprovedPolicy, RoleBinding, DefinitionContent, DefinitionMetadata, AgentProfileInfo,
                          GrantInfo, AddressedPolicy, MessageAuthority, PolicyBinding, RetirementReceipt,
-                         allows, allows_capabilities, allows_spawn, uuid_value)
+                         allows_spawn, uuid_value)
 
 
 class Conflict(ValueError):
@@ -115,7 +116,7 @@ class _RetentionAuthority:
 
 
 class LocalGrantAuthority:
-    """Immutable capabilities проверены при publish/approval; здесь нет secret I/O."""
+    """SQL-only резолвер делегирования; права — общий RBAC (#688), без secret I/O."""
     def __init__(self, grants):
         self._grants = grants
 
@@ -139,16 +140,8 @@ class LocalGrantAuthority:
             row = self._grants._credential(actor)
             chain = self._grants._execution_rows(self._grants._info(row).binding)
             if set(project_ids) != {row.intent.project_id} or node_ids or client_ids:
-                raise auth.Denied('grant action scope mismatch')
-            self._grants._owner_permission(row.intent.owner_id, action, row.intent.project_id)
-            for current in chain:
-                capabilities = tuple(m.DefinitionCapability.objects.filter(definition_id=current.intent.definition_id)
-                                     .values_list('scope', 'verb'))
-                caps = soul.Capabilities(tuple(verb for scope, verb in capabilities if scope == 'node'),
-                    tuple(verb for scope, verb in capabilities if scope == 'cluster'),
-                    current.intent.definition.dispatch, ())
-                if not allows_capabilities(caps, action):
-                    raise auth.Denied('action is outside pinned delegated capabilities')
+                raise auth.Denied('delegation action scope mismatch')
+            self._grants._require_delegated(tuple(self._grants._info(link) for link in chain), action)
             self._grants._credential(actor)
             self._grants._owner_permission(row.intent.owner_id, action, row.intent.project_id)
 
@@ -162,7 +155,7 @@ class Grants:
         self.secrets = RetainedSecrets(provider=provider, authority=_RetentionAuthority(self))
 
     def _row(self, grant_id):
-        row = m.Grant.objects.select_related('intent__definition', 'actor').filter(pk=grant_id).first()
+        row = m.Grant.objects.select_related('intent__definition', 'subject').filter(pk=grant_id).first()
         if row is None:
             raise auth.NotVisible('grant not found')
         return row
@@ -179,10 +172,9 @@ class Grants:
     def _owner(self, actor):
         if type(actor) is not ActorContext:
             raise auth.Denied('trusted actor context required')
-        if actor.kind in (ActorKind.HUMAN, ActorKind.AGENT):
-            auth.current_actor(actor)
-            return actor.user_id
         if actor.grant_id is not None:
+            # Делегированный субъект (agent Actor в контексте делегирования):
+            # живая строка и цепочка решают, не вид Actor (#688).
             row = self._credential(actor)
             self._check_row(row)
             info = self._info(row)
@@ -190,6 +182,9 @@ class Grants:
                 raise auth.Denied('grant runtime binding changed')
             self._check_ancestors_local(row)
             return row.intent.owner_id
+        if actor.kind in (ActorKind.HUMAN, ActorKind.AGENT):
+            auth.current_actor(actor)
+            return actor.user_id
         raise auth.Denied('node identity is not a delegated grant')
 
     def _policy(self, row):
@@ -209,7 +204,7 @@ class Grants:
 
     def _info(self, row):
         intent, definition = row.intent, row.intent.definition
-        return GrantInfo(row.id, intent.owner_id, row.actor_id, intent.project_id,
+        return GrantInfo(row.id, intent.owner_id, row.subject_id, intent.project_id,
             intent.target_id, intent.incarnation, definition.id, definition.role, definition.digest,
             intent.parent_id, row.state, row.revision, row.credential_version_id,
             self._policy(row), row.retirement)
@@ -335,22 +330,21 @@ class Grants:
             return approval.id
 
     def _credential(self, actor):
-        if type(actor) is not ActorContext or actor.grant_id is None or actor.kind is not ActorKind.SERVICE:
-            raise auth.Denied('authenticated grant context required')
+        if type(actor) is not ActorContext or actor.grant_id is None:
+            raise auth.Denied('authenticated delegation context required')
         row = self._row(actor.grant_id)
-        user = row.actor
-        if (user.kind != 'service' or not user.is_active
-                or user.is_staff or user.is_superuser or user.has_usable_password()):
-            raise auth.Denied('invalid grant service identity')
-        binding = m.CredentialBinding.objects.filter(pk=actor.credential_id, token_user=user).first()
-        token = Token.objects.filter(user=user).first()
+        subject = row.subject
+        if (subject.kind != 'agent' or not subject.is_active):
+            raise auth.Denied('invalid delegation subject identity')
+        binding = m.CredentialBinding.objects.filter(pk=actor.credential_id, token_user=subject).first()
+        token = Token.objects.filter(user=subject).first()
         if binding is None or token is None:
-            raise auth.Denied('grant credential revoked')
-        auth._check_binding(binding, user)
-        wanted = ActorContext(user.id, ActorKind(user.kind), binding.id,
+            raise auth.Denied('delegation subject credential revoked')
+        auth._check_binding(binding, subject)
+        wanted = ActorContext(subject.id, ActorKind(subject.kind), binding.id,
                               row.intent.owner_id, binding.bound_node_id, row.id)
         if actor != wanted or not constant_time_compare(binding.token_digest, auth._digest(token.key)):
-            raise auth.Denied('grant credential binding changed')
+            raise auth.Denied('delegation subject credential binding changed')
         return row
 
     def _check_row(self, row, *, state='active'):
@@ -387,11 +381,11 @@ class Grants:
             if self._policy(parent) != info.policy:
                 raise auth.Denied('delegation approved policy mismatch')
             # Отзыв/ротация credential предка тоже немедленно закрывает детей.
-            parent_user = parent.actor
-            binding = m.CredentialBinding.objects.filter(token_user_id=parent_user.id).first()
+            parent_subject = parent.subject
+            binding = m.CredentialBinding.objects.filter(token_user_id=parent_subject.id).first()
             if binding is None:
                 raise auth.Denied('ancestor credential revoked')
-            parent_actor = ActorContext(parent_user.id, ActorKind(parent_user.kind), binding.id,
+            parent_actor = ActorContext(parent_subject.id, ActorKind(parent_subject.kind), binding.id,
                 parent.intent.owner_id, binding.bound_node_id, parent.id)
             self._credential(parent_actor)
             row = parent
@@ -430,10 +424,10 @@ class Grants:
         row = self._row(binding.grant_id)
         if self._info(row).binding != binding:
             raise auth.Denied('execution role binding mismatch')
-        credential = m.CredentialBinding.objects.filter(token_user_id=row.actor_id).first()
+        credential = m.CredentialBinding.objects.filter(token_user_id=row.subject_id).first()
         if credential is None:
-            raise auth.Denied('grant credential revoked')
-        self._credential(ActorContext(row.actor_id, ActorKind(row.actor.kind), credential.id,
+            raise auth.Denied('delegation subject credential revoked')
+        self._credential(ActorContext(row.subject_id, ActorKind(row.subject.kind), credential.id,
             binding.human_owner_id, credential.bound_node_id, row.id))
         self._check_row(row)
         self._check_ancestors_local(row)
@@ -562,18 +556,27 @@ class Grants:
         token = Token.objects.select_related('user').filter(key=key).first()
         if token is None:
             raise auth.Denied('token revoked or rotated')
-        row = m.Grant.objects.filter(actor=token.user).select_related('intent').first()
-        if row is None:
-            raise auth.Denied('grant actor required')
-        binding = m.CredentialBinding.objects.filter(token_user=token.user).first()
+        subject = token.user
+        if subject.kind != 'agent':
+            raise auth.Denied('delegation subject actor required')
+        binding = m.CredentialBinding.objects.filter(token_user=subject).first()
         if binding is None:
-            raise auth.Denied('grant credential is not bound')
+            raise auth.Denied('delegation subject credential is not bound')
         # Lookup по user не доказывает generation предъявленного ключа: между
         # чтениями другая transaction могла заменить и Token, и binding UUID.
         if not constant_time_compare(binding.token_digest, auth._digest(key)):
             raise auth.Denied('token generation changed')
-        return ActorContext(token.user_id, ActorKind(token.user.kind), binding.id,
-                            row.intent.owner_id, binding.bound_node_id, row.id)
+        # Один субъект может держать несколько делегирований: действует та,
+        # чей RoleBinding совпадает с текущим runtime binding её target.
+        candidates = m.Grant.objects.select_related('intent__definition', 'subject').filter(
+            subject=subject, state='active')
+        for row in candidates:
+            info = self._info(row)
+            current = self.bindings.current(info.project_id, info.target_id)
+            if current == info.binding:
+                return ActorContext(subject.id, ActorKind(subject.kind), binding.id,
+                                    row.intent.owner_id, binding.bound_node_id, row.id)
+        raise auth.Denied('no active delegation binding is current')
 
     @storage_boundary
     @sensitive_variables('key')
@@ -583,14 +586,66 @@ class Grants:
         self.resolve_actor(actor)
         return actor
 
+    def _subject(self, info):
+        """Живой субъект звена: активный agent Actor с membership проекта."""
+        subject = get_user_model().objects.get(pk=info.subject_id)
+        if subject.kind != 'agent' or not subject.is_active:
+            raise auth.Denied('delegation subject is unavailable')
+        if not m.ProjectMembership.objects.filter(user=subject, source__enabled=True,
+                project_id=info.project_id).exists():
+            raise auth.Denied('delegation subject is outside the project')
+        return subject
+
+    def _lineage(self, row):
+        """Звенья от строки к корню, только SQL; живость проверяют вызывающие."""
+        rows, seen = [row], {row.id}
+        while row.intent.parent_id:
+            row = self._row(row.intent.parent_id)
+            if row.id in seen or len(seen) >= 32:
+                raise auth.Denied('invalid delegation ancestry')
+            seen.add(row.id)
+            rows.append(row)
+        return tuple(self._info(link) for link in rows)
+
+    def _require_delegated(self, infos, action):
+        """Эффективные права делегирования (#688): один RBAC #685 на каждом звене.
+
+        Право обязаны держать сами текущий human owner (issuer корня) и субъект
+        каждого звена — issuer ребёнка есть субъект родителя в его контексте.
+        Делегирование только сужает: ребёнок не шире родителя, никто не шире
+        owner. Второго каталога прав нет — тот же dictionary и has_perm.
+        """
+        self._owner_permission(infos[0].owner_id, action, infos[0].project_id)
+        for info in infos:
+            auth._require_permissions(self._subject(info), action, 'delegated subject permission required')
+
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
+        """Эффективные права: субъект ∩ issuer ∩ живая цепочка, тот же RBAC (#685)."""
         chain = self._chain(actor)
         source = chain[0][0]
         if set(project_ids) != {source.project_id} or node_ids or client_ids:
-            raise auth.Denied('grant action scope mismatch')
-        self._owner_permission(source.owner_id, action, source.project_id)
-        if not all(allows(content, action) for info, content in chain):
-            raise auth.Denied('action is outside pinned delegated capabilities')
+            raise auth.Denied('delegation action scope mismatch')
+        self._require_delegated(tuple(info for info, content in chain), action)
+
+    def _issuer(self, actor, project_id):
+        """Право выдать делегирование: человек — сам, делегированный субъект — цепочкой.
+
+        Субъект родителя выдаёт ребёнка только при собственных issue/create
+        правах всей своей цепочки (#688); вид Actor ветку не выбирает.
+        """
+        if actor.grant_id is None:
+            return self._human(actor, 'access.issue_grant', project_id)
+        lineage = self._lineage(self._credential(actor))
+        for action in ('access.issue_grant', 'execution.create_puppet'):
+            self._require_delegated(lineage, action)
+
+    def _registered_subject(self, owner, project_id, target_id):
+        """Субъект — agent Actor, зарегистрированный тем же owner (#686); иначе 404."""
+        profile = m.AgentProfile.objects.select_related('agent').filter(
+            project_id=project_id, target_id=target_id).first()
+        if profile is None or profile.owner_id != owner:
+            raise auth.NotVisible('delegation subject is not registered')
+        return profile.agent
 
     def _creation_actor(self, actor, row):
         intent = row.intent
@@ -599,12 +654,12 @@ class Grants:
             raise auth.Denied('creation actor or owner mismatch')
         self._owner_permission(intent.owner_id, 'execution.create_puppet', intent.project_id)
         self._owner_permission(intent.owner_id, 'access.issue_grant', intent.project_id)
-        if actor.kind in (ActorKind.HUMAN, ActorKind.AGENT):
-            self._human(actor, 'access.issue_grant', intent.project_id)
-        else:
+        if actor.grant_id is not None:
+            # Делегированный issuer (#688): живая строка родителя, не вид Actor.
             parent = self._credential(actor)
             if parent.id != intent.parent_id or parent.state != 'active' or parent.intent.expires_at <= timezone.now():
                 raise auth.Denied('creation ancestor is no longer active')
+        self._issuer(actor, intent.project_id)
 
     def _creation_chain(self, actor, row):
         self._creation_actor(actor, row)
@@ -631,21 +686,21 @@ class Grants:
             raise auth.Denied('creation requires this project and approved definition')
         chain = self._chain(actor) if actor.grant_id is not None else ()
         parent_id = chain[0][0].id if chain else None
-        if chain:
-            for info, pinned in chain:
-                if info.project_id != project_id or not allows_spawn(pinned, content):
-                    raise auth.Denied('spawn role or secrets are outside approved allowlist')
-        else:
-            self._human(actor, 'access.issue_grant', project_id)
+        for info, pinned in chain:
+            if info.project_id != project_id or not allows_spawn(pinned, content):
+                raise auth.Denied('spawn role or secrets are outside approved allowlist')
+        self._issuer(actor, project_id)
         self._owner_permission(owner, 'execution.create_puppet', project_id)
         self._owner_permission(owner, 'access.issue_grant', project_id)
+        # Субъект — agent Actor, заранее зарегистрированный тем же owner на
+        # этот target (#686); выдача не создаёт identity, отказ до записей.
+        self._registered_subject(owner, project_id, target_id)
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
             get_user_model().objects.select_for_update().get(pk=owner)
             if chain:
                 self._recheck(actor, chain)
-            else:
-                self._human(actor, 'access.issue_grant', project_id)
+            self._issuer(actor, project_id)
             self._owner_permission(owner, 'execution.create_puppet', project_id)
             self._owner_permission(owner, 'access.issue_grant', project_id)
             existing = m.CreationIntent.objects.filter(owner_id=owner, actor_id=actor.user_id,
@@ -670,12 +725,10 @@ class Grants:
                 project_id=project_id, definition=definition_row, parent_id=parent_id, request_id=request_id,
                 target_id=target_id, incarnation=incarnation, expires_at=expires_at,
                 policy_approval_id=proof.approval_id, policy_version_id=proof.version_id, policy_digest=proof.digest)
-            grant_id = uuid.uuid4()
-            user = get_user_model().objects.create_user('grant-' + grant_id.hex, password=None, is_staff=False, is_superuser=False)
-            # Машина делегирования — service Actor без параллельной identity (#684).
-            user.kind = 'service'
-            user.save(update_fields=['kind'])
-            row = m.Grant.objects.create(id=grant_id, intent=intent, actor=user)
+            # Субъект — уже существующий agent Actor профиля target (#688):
+            # выдача не создаёт ни Actor, ни его credential.
+            subject = self._registered_subject(owner, project_id, target_id)
+            row = m.Grant.objects.create(id=uuid.uuid4(), intent=intent, subject=subject)
             self._event(row, actor, 'reserve')
             return self._info(row)
 
@@ -723,8 +776,14 @@ class Grants:
             setattr(row, name, value)
 
     @storage_boundary
-    @sensitive_variables('key', 'prepared')
+    @sensitive_variables('prepared')
     def provision(self, actor, grant_id, *, expected_revision):
+        """Retained transport credential делегирования; identity субъекта не трогается.
+
+        Общий DRF Token субъекта выдаётся вне lifecycle делегирования (#688):
+        provision сохраняет только зашифрованный reference, не создавая ни
+        Actor, ни Token, ни CredentialBinding.
+        """
         outside_transaction()
         row = self._row(grant_id)
         self._expected(row, expected_revision)
@@ -732,7 +791,8 @@ class Grants:
         self._check_row(row, state='reserved')
         if row.credential_version_id:
             return self._info(row)
-        key = Token().generate_key()
+        # Случайное транспортное значение делегирования, не credential субъекта.
+        key = _secrets.token_hex(32)
         prepared = self.secrets.prepare(actor, RetentionScope(row.intent.project_id, row.intent.owner_id, row.id, 'grant'), key.encode())
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=row.intent.project_id)
@@ -743,10 +803,6 @@ class Grants:
                 self._recheck(actor, chain)
             self._check_row(row, state='reserved')
             version_id = self.secrets.commit(actor, prepared)
-            token = Token.objects.create(key=key, user_id=row.actor_id)
-            m.CredentialBinding.objects.create(token_user_id=row.actor_id, bound_node_id=None,
-                identity_id=None, identity_source_id=None, identity_digest='',
-                token_digest=auth._digest(token.key))
             self._cas(row, credential_version_id=version_id)
             self._event(row, actor, 'provision')
             return self._info(row)
@@ -756,14 +812,16 @@ class Grants:
         binding = m.CredentialBinding.objects.filter(pk=row.intent.actor_credential_id, token_user=user).first()
         if binding is None:
             raise auth.Denied('creation credential is no longer available')
+        if row.intent.parent_id:
+            # Делегированный субъект (#688): agent Actor в контексте родителя —
+            # контекстом выдачи была активная строка родителя, не plain agent.
+            return ActorContext(user.id, ActorKind(user.kind), binding.id,
+                                row.intent.owner_id, binding.bound_node_id, row.intent.parent_id)
         if user.kind in ('human', 'agent'):
             actor = auth._context(binding, user)
             auth.current_actor(actor)
             return actor
-        if user.kind == 'service' and row.intent.parent_id:
-            return ActorContext(user.id, ActorKind(user.kind), binding.id,
-                                row.intent.owner_id, binding.bound_node_id, row.intent.parent_id)
-        raise auth.Denied('creation principal is not human or delegated')
+        raise auth.Denied('creation actor is not human or delegated agent')
 
     @storage_boundary
     def activate(self, grant_id, *, expected_revision):
@@ -791,10 +849,10 @@ class Grants:
                 self._check_ancestors_local(row)
             if self.bindings.activation(grant_id) != receipt:
                 raise auth.Denied('activation receipt changed')
-            binding = m.CredentialBinding.objects.filter(token_user_id=row.actor_id).first()
+            binding = m.CredentialBinding.objects.filter(token_user_id=row.subject_id).first()
             if binding is None:
                 raise auth.Denied('activation credential revoked')
-            self._credential(ActorContext(row.actor_id, ActorKind(row.actor.kind), binding.id,
+            self._credential(ActorContext(row.subject_id, ActorKind(row.subject.kind), binding.id,
                 row.intent.owner_id, binding.bound_node_id, row.id))
             self._cas(row, state=row.next_state('activate'))
             self._event(row, None, 'activate')
@@ -812,10 +870,10 @@ class Grants:
             info = self._info(row)
             if (info.owner_id, info.project_id, info.policy) != (child.owner_id, child.project_id, child.policy):
                 raise auth.Denied('ancestor scope or approved policy changed')
-            binding = m.CredentialBinding.objects.filter(token_user_id=row.actor_id).first()
+            binding = m.CredentialBinding.objects.filter(token_user_id=row.subject_id).first()
             if binding is None:
                 raise auth.Denied('ancestor credential revoked')
-            self._credential(ActorContext(row.actor_id, ActorKind(row.actor.kind), binding.id,
+            self._credential(ActorContext(row.subject_id, ActorKind(row.subject.kind), binding.id,
                 info.owner_id, binding.bound_node_id, row.id))
             if self.bindings.current(info.project_id, info.target_id) != info.binding:
                 raise auth.Denied('ancestor binding changed')
@@ -861,9 +919,9 @@ class Grants:
             self._expected(row, expected_revision)
             if row.state not in ('revoked', 'expired'):
                 raise Conflict('logical grant must be retired first')
+            # Транспортный retirement не удаляет ни Actor, ни общий Token
+            # субъекта (#688): credential Actor — отдельное событие.
             self._cas(row, retirement=outcome)
-            if outcome == 'applied':
-                Token.objects.filter(user_id=row.actor_id).delete()
             self._event(row, None, 'retirement')
             return self._info(row)
 
@@ -876,10 +934,10 @@ class Grants:
         if type(target) is not RoleBinding or target.project_id != info.project_id:
             raise auth.Denied('message recipient binding is unavailable')
         row = self._row(target.grant_id)
-        binding = m.CredentialBinding.objects.filter(token_user_id=row.actor_id).first()
+        binding = m.CredentialBinding.objects.filter(token_user_id=row.subject_id).first()
         if binding is None:
             raise auth.Denied('message recipient credential is unavailable')
-        recipient_actor = ActorContext(row.actor_id, ActorKind(row.actor.kind), binding.id,
+        recipient_actor = ActorContext(row.subject_id, ActorKind(row.subject.kind), binding.id,
             row.intent.owner_id, binding.bound_node_id, row.id)
         recipient_chain = self._chain(recipient_actor)
         if recipient_chain[0][0].binding != target:

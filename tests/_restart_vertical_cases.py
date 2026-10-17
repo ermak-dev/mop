@@ -67,6 +67,10 @@ class RestartVertical(TransactionTestCase):
             prompt=b'fixture role', provenance='controlled fixture')
         self.grants.approve_definition(self.actor, bundle.id)
         target_id, incarnation_id = uuid4(), uuid4()
+        # #688: субъект — заранее зарегистрированный agent Actor со своим token.
+        from _grant_cases import delegation_subject
+        delegation_subject(self.grants, self.actor, project_id=self.project.pk,
+            definition_id=bundle.id, target_id=target_id)
         grant = self.grants.reserve(self.actor, project_id=self.project.pk, definition_id=bundle.id,
             target_id=target_id, incarnation=incarnation_id, request_id=uuid4(), expires_at=timezone.now()+timedelta(hours=1))
         self.grants.provision(self.actor, grant.id, expected_revision=grant.revision)

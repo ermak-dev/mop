@@ -7,8 +7,8 @@ from uuid import UUID
 class ActorKind(str, Enum):
     """Vocabulary самого Actor (#683): вид классифицирует, прав не даёт.
 
-    Делегирование — не вид: машины делегирования это service Actor с
-    заполненным grant_id; резолвер делегирования выбирается по grant_id.
+    Делегирование — не вид: субъект делегирования — существующий agent Actor
+    с заполненным grant_id (#688); резолвер делегирования выбирается по grant_id.
     """
     HUMAN = 'human'
     SERVICE = 'service'

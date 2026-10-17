@@ -423,8 +423,12 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         bundle = app.grants.publish_definition(actor, project_id=self.project.id, manifest=manifest,
             prompt=b'private', provenance='fixture')
         app.grants.approve_definition(actor, bundle.id)
+        # #688: субъект — заранее зарегистрированный agent Actor со своим token.
+        from _grant_cases import delegation_subject
+        profile, _, _ = delegation_subject(app.grants, actor, project_id=self.project.id,
+            definition_id=bundle.id)
         return app.grants.reserve(actor, project_id=self.project.id, definition_id=bundle.id,
-            target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
+            target_id=profile.target_id, incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
             expires_at=timezone.now() + timedelta(hours=1))
 
     def grant_assignment(self, reserved):
@@ -459,7 +463,9 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             self.result = result
         self.run_socket(body)
         grant = Grant.objects.get(pk=reserved.id)
-        token = Token.objects.get(user_id=grant.actor_id)
+        # #688: retained value — транспортный credential делегирования; общий
+        # token субъекта в него и в ответ не попадает.
+        token = Token.objects.get(user_id=grant.subject_id)
         version = SecretVersion.objects.get(pk=self.result.credential_version_id)
         self.assertNotIn(token.key, repr(self.result))
         self.assertNotIn(token.key.encode(), bytes(version.envelope))
@@ -469,6 +475,7 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         from mop.server.access.models import Grant
         from rest_framework.authtoken.models import Token
         reserved = self.reserved_grant()
+        subject_tokens = list(Token.objects.filter(user_id=reserved.subject_id).values_list('key', flat=True))
         assignment = self.grant_assignment(reserved)
         assignment.grant_id = uuid4()
         assignment.save(update_fields=['grant_id'])
@@ -483,7 +490,9 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         row = Grant.objects.get(pk=reserved.id)
         self.assertEqual(row.revision, reserved.revision)
         self.assertIsNone(row.credential_version_id)
-        self.assertFalse(Token.objects.filter(user_id=row.actor_id).exists())
+        # #688: provision не выдаёт token; общий token субъекта не тронут.
+        self.assertEqual(list(Token.objects.filter(user_id=row.subject_id).values_list('key', flat=True)),
+                         subject_tokens)
 
     def test_assignment_rebinding_during_crypto_prevents_retained_commit_and_token(self):
         from uuid import uuid4
@@ -493,6 +502,7 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         from mop.server.secrets.crypto import XChaCha20Provider, Keyring
         from rest_framework.authtoken.models import Token
         reserved = self.reserved_grant()
+        subject_tokens = list(Token.objects.filter(user_id=reserved.subject_id).values_list('key', flat=True))
         assignment = self.grant_assignment(reserved)
         before = SecretVersion.objects.count()
         real = XChaCha20Provider(Keyring('fixture', {'fixture': b'k' * 32}))
@@ -511,7 +521,9 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         self.assertEqual(row.revision, reserved.revision)
         self.assertIsNone(row.credential_version_id)
         self.assertEqual(SecretVersion.objects.count(), before)
-        self.assertFalse(Token.objects.filter(user_id=row.actor_id).exists())
+        # #688: provision не выдаёт token; общий token субъекта не тронут.
+        self.assertEqual(list(Token.objects.filter(user_id=row.subject_id).values_list('key', flat=True)),
+                         subject_tokens)
 
     def test_rootless_preparation_bytes_and_real_policy_backed_grant_reservation(self):
         from datetime import timedelta
@@ -535,7 +547,17 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             bundle = await asyncio.to_thread(client.publish_definition, self.auth, project_id=self.project.id,
                 manifest=manifest, prompt=b'private role prompt', provenance='fixture')
             await asyncio.to_thread(client.approve_definition, self.auth, bundle.id)
-            target_id, incarnation = uuid.uuid4(), uuid.uuid4()
+            # #688: субъект — заранее зарегистрированный тем же owner agent
+            # Actor; credential wire его не создаёт.
+            def register():
+                from _grant_cases import delegation_subject
+                from mop.server.access.grants import Grants
+                # register_agent не трогает secrets: provider здесь не нужен.
+                profile, _, _ = delegation_subject(Grants(provider=None),
+                    self.access.token_context(self.token), project_id=self.project.id,
+                    definition_id=bundle.id)
+                return profile.target_id
+            target_id, incarnation = await server.runtime.database(register), uuid.uuid4()
             reserved = await asyncio.to_thread(client.reserve_grant, self.auth, project_id=self.project.id,
                 definition_id=bundle.id, target_id=target_id, incarnation=incarnation, request_id=uuid.uuid4(),
                 expires_at=timezone.now() + timedelta(hours=1))

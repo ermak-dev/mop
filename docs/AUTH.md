@@ -45,7 +45,8 @@ subclass) is the `AUTH_USER_MODEL`, `kind` is a plain discriminator column with
 no permission semantics, and every identity FK is a swappable reference to the
 one model. Identity resolves directly from the Actor and its CredentialBinding:
 login/enrollment/bind/rotation create no Principal row, delegation is a
-`grant_id` context on a service Actor (not a third kind), and CredentialBinding
+`grant_id` context on an existing subject Actor (not a third kind; since #688
+the subject is a registered agent Actor, not a per-grant service User), and CredentialBinding
 keeps only the proven generation/subject-change/enrollment metadata standard
 Django credentials do not provide. The #686 slice lands the program side on that
 identity: the RoleBundle family is renamed to the AgentDefinition family
@@ -153,8 +154,9 @@ Actor-kind fences. `is_staff` only permits Admin login. A human superuser has
 explicit global scope, not a service/ownership bypass. Service users cannot
 be elevated by editing User flags. Since #684 kind no longer routes
 authentication: the same path resolves human, agent and service Actors from
-their credential, and a delegated machine is a service Actor whose fence is the
-Grant lifecycle behind the injected resolver — unbound means denied. Since #685
+their credential, and a delegated subject is an existing agent Actor whose
+delegation context is fenced by the Grant lifecycle behind the injected
+resolver — unbound means denied (#688). Since #685
 kind no longer routes authorization: one pipeline serves every kind, and
 delegation stays a narrowing context (`grant_id`) on existing Actors rather
 than a third branch. `access.permissions.ACTION_PERMISSIONS` is the single
@@ -190,22 +192,63 @@ action alive after revocation. Revocation still requires removing every
 remaining direct or group grant of that action;
 source-owned directory revocation removes only that source's grants.
 
-### Transaction-local delegated authority (#635 / #639; target rework #688)
+### Delegation between existing Actors (#635 / #639, reworked by #688)
 
-This subsection describes the implemented delegation path of the current slice.
-Under the target contract (#688) the same invariants — live credential checks,
-active ancestry, pinned approvals, immutable sealed bundles, narrowing-only
-child grants, after-wait revalidation and SQL-only transaction-local resolvers —
-bind existing issuer and subject Actors instead of a Grant-linked service User
-and Principal; no User, token or per-grant identity is created, and revocation
-deletes neither the Actor nor its shared token.
+Delegation keeps the ORM name `access.Grant`: `grant_id` is already the
+delegation reference in ActorContext, RoleBinding, Assignment and Operations,
+and the access quartet (`view_role`, `approve_role`, `issue_grant`,
+`revoke_grant`) is registered on it, so a rename would only add a second word
+for one relation. A Grant is a relation between existing Actors: the issuer is
+the immutable `CreationIntent.actor` (the human, or the parent's subject acting
+in the parent's delegation context), `CreationIntent.owner` is the human owner,
+and `Grant.subject` is an existing agent Actor that the same owner registered
+for the target with `register_agent` (#686). `reserve` resolves the subject on
+the server from the target's AgentProfile and refuses an unregistered or
+foreign-owner target with 404 before any write; no request carries a subject
+or holder. Reserve, retry, provision, activation, revocation, expiry and
+transport retirement create or delete no Actor and no DRF Token, and never
+change the subject's primary key; one agent Actor may hold several independent
+delegations (`Grant.subject` is a foreign key, not one-to-one). The lifecycle
+`reserved -> active -> revoked/expired`, the revision CAS, the at-most-30-day
+expiry, the immutable CreationIntent with first-intent retry, the pinned
+approved policy and parent-chain checks are unchanged.
+
+Effective rights in a delegation context are the intersection of the current
+Django permissions of the human owner and of the subject of every link of the
+live parent chain: the issuer of a child is the parent's subject, so a child is
+never wider than its parent and nobody is wider than the owner. Both the full
+and the SQL-only resolver evaluate it with the one `ACTION_PERMISSIONS`
+dictionary and `has_perm` of #685, behind `Access.authorize` with the
+delegation context; there is no delegated capability catalog. A delegated
+issuer needs `access.issue_grant` and `execution.create_puppet` through the same
+intersection, rechecked at reserve, provision and activation.
+`delegation.ACTION_CAPABILITIES` is reduced to the technical precondition of
+spawning (the parent program declared `cluster add` and lists the child role
+in its spawn allowlist, child secret names within the parent's); receiving
+dispatch (`runtime.receives_dispatch`), the secret allowlist and the approved
+definition versions stay separate domain constraints of the definition rows.
+
+The subject's DRF Token is the Actor's own credential, issued outside the
+delegation lifecycle (local identity, membership and token are events of the
+Actor). Its resolver selects the acting delegation by the target's current
+runtime binding, which names exactly one grant; there is no "latest row"
+fallback. A subject Actor has no plain context at all: `token_context`,
+`session_context` and `current_actor` refuse it without the delegation
+resolver, so revoking every delegation never reopens the Actor's own rights.
+Rotating or revoking the subject token is a credential event of the Actor, not
+a delegation revocation: stale contexts and the old key are refused, the
+delegation rows stay as they are. Revocation and expiry deny new acts in that
+delegation only — not the Actor, its shared token or independent delegations.
+`provision` retains the delegation's own encrypted transport credential
+(a random value, not the subject token) whose retirement is the separately
+recorded transport stage; the retained reference is all the new tables hold.
 
 `Grants.local_authority()` exposes the standard delegated resolver methods
 `token_context`, `resolve_actor` and `authorize` without decrypting a prompt or
 manifest. It validates live credentials, current owner/source/permissions, active
 ancestors, pinned approvals and runtime bindings. Outgoing action authorization
-uses the immutable normalized capability rows and the same pure capability policy
-as the content-reading service. Publication writes all capability, spawn and secret
+uses the same RBAC intersection across the chain as the content-reading
+service (#688). Publication writes all capability, spawn and secret
 name rows, checks their complete sets against the actual parsed definition, then
 writes an immutable `AgentDefinitionSeal` in the same transaction. Ordinary child
 inserts lock the parent definition and refuse any append after that seal, including
@@ -231,8 +274,8 @@ SQL-only and must not acquire resource locks in the reverse order. The gate does
 not authenticate the machine, authorize the initiating action, create an
 execution claim or establish effect quiescence. Machine admission and the
 Operations work port supply those independent checks. A human-authorized incoming
-restart/message does not require the receiving role to possess the corresponding
-outgoing capability.
+restart/message does not require the receiving subject to hold the corresponding
+outgoing permission.
 
 Content-reading/preparation methods on `Grants` still perform provider I/O outside
 transactions. Do not bind full `Grants.authorize` to an atomic admission callback;

@@ -129,7 +129,7 @@ class DefinitionContent:
 class GrantInfo:
     id: UUID
     owner_id: int
-    principal_id: int  # машина делегирования: Actor id (#684), не Principal
+    subject_id: int  # субъект делегирования: существующий agent Actor (#688), не User-per-Grant
     project_id: UUID
     target_id: UUID
     incarnation: UUID
@@ -165,38 +165,24 @@ class MessageAuthority:
     git_identity_owner_id: int | None
 
 
-# CONTROL принадлежит серверу. Нет общего execute, admin/write/terminal bypass
-# или вывода прав из имени роли. Неперенесённые действия закрыты по умолчанию.
-# #686: словарь остаётся техническим предусловием программы агента (какие
-# runtime facts обязаны существовать), не каталогом прав: допуск даёт только
-# штатный Django RBAC владельца. Сведение к предусловиям без словаря — #685/#688.
+# Технические предусловия программы агента (#688), не каталог прав. Допуск
+# даёт только штатный Django RBAC (#685): действие в контексте делегирования
+# требует права у субъекта каждого звена цепочки и у текущего human owner.
+# Словарь лишь называет декларацию манифеста, без которой действие технически
+# невозможно: порождать детей может только программа, объявившая cluster add
+# (и spawn allowlist). Получение dispatch (runtime.receives_dispatch), allowlist
+# секретов и approved версии программы — отдельные ограничения строк definition.
 ACTION_CAPABILITIES = {
-    'catalog.view_pool': ('cluster', 'roster'),
-    'catalog.view_project': ('cluster', 'roster'),
     'execution.create_puppet': ('cluster', 'add'),
-    'execution.update_puppet': ('cluster', 'update'),
-    'execution.restart_puppet': ('cluster', 'restart'),
-    'execution.delete_puppet': ('cluster', 'delete'),
-    'execution.stop_allocation': ('cluster', 'stop'),
-    'execution.wipe_puppet': ('node', 'wipe'),
-    'execution.send_message': ('node', 'send'),
-    'execution.send_session_command': ('node', 'type'),
-    'execution.change_session_model': ('node', 'type'),
-    'execution.view_usage': ('node', 'usage'),
-    'execution.view_landing': ('cluster', 'landing'),
-    'execution.acquire_landing': ('cluster', 'landing'),
-    'execution.release_landing': ('cluster', 'landing'),
-    'execution.dispatch_task': ('dispatch', ''),
 }
 
 
 def allows_capabilities(caps, action):
+    """Программа объявила предусловие действия; не допуск — права решает RBAC."""
     capability = ACTION_CAPABILITIES.get(action)
     if capability is None:
         return False
     scope, verb = capability
-    if scope == 'dispatch':
-        return caps.dispatch
     return verb in (caps.node_verbs if scope == 'node' else caps.cluster_verbs)
 
 

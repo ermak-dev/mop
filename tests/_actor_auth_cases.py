@@ -57,8 +57,12 @@ def _grant_scaffolding(test):
     bundle = api.publish_definition(test.actor, project_id=test.project.pk, manifest=raw,
                                 prompt=b'prompt', provenance='test')
     api.approve_definition(test.actor, bundle.id)
+    # #688: субъект — заранее зарегистрированный agent Actor со своим token.
+    from _grant_cases import delegation_subject
+    profile, agent, key = delegation_subject(api, test.actor, project_id=test.project.pk,
+                                             definition_id=bundle.id)
     return api, api.reserve(test.actor, project_id=test.project.pk, definition_id=bundle.id,
-                            target_id=uuid.uuid4(), incarnation=uuid.uuid4(),
+                            target_id=profile.target_id, incarnation=uuid.uuid4(),
                             request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
 
 
@@ -258,8 +262,8 @@ class SingleAuthenticationPathCases(TransactionTestCase):
         response = second.get('/api/v1/identity', secure=True)
         self.assertEqual(response.status_code, 200)
 
-    # RED: делегирование различается grant_id, а не видом 'grant'; машина
-    # делегирования — обычный service Actor без Principal row.
+    # RED: делегирование различается grant_id, а не видом 'grant'. С #688
+    # субъект — существующий agent Actor (не service-машина) без Principal row.
     def test_delegation_context_is_grant_id_not_an_actor_kind(self):
         api, reserved = _grant_scaffolding(self)
         provisioned = api.provision(self.actor, reserved.id, expected_revision=reserved.revision)
@@ -267,17 +271,17 @@ class SingleAuthenticationPathCases(TransactionTestCase):
         api.bindings.bindings[(self.project.pk, provisioned.target_id)] = provisioned.binding
         api.bindings.receipts[provisioned.id] = provisioned.binding
         api.activate(provisioned.id, expected_revision=provisioned.revision)
-        machine = get_user_model().objects.get(username='grant-' + reserved.id.hex)
-        self.assertEqual(machine.kind, 'service')
-        self.assertEqual(m.Principal.objects.filter(user=machine).count(), 0)
+        subject = get_user_model().objects.get(pk=reserved.subject_id)
+        self.assertEqual(subject.kind, 'agent')
+        self.assertEqual(m.Principal.objects.filter(user=subject).count(), 0)
         from rest_framework.authtoken.models import Token
-        key = Token.objects.get(user=machine).key
+        key = Token.objects.get(user=subject).key
         # Резолвер не привязан — отказ по умолчанию; привязан — grant_id контекст.
         with self.assertRaises(s.Denied):
             s.token_context(key)
         actor = s.token_context(key, grants=api.local_authority())
         self.assertEqual(actor.grant_id, provisioned.id)
-        self.assertEqual(actor.kind.value, 'service')
+        self.assertEqual(actor.kind.value, 'agent')
         with self.assertRaises(s.Denied):
             s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
 

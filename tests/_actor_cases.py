@@ -104,9 +104,10 @@ class UnifiedActorIdentity(TransactionTestCase):
         self.assertEqual(service.kind, 'service')
         self.assertFalse(access_models.Principal.objects.filter(user=service).exists())
 
-    def test_grant_reservation_stamps_service_kind_on_the_actor(self):
-        # Делегированная машина получает Actor с kind='service': классификация
-        # на самой модели, Principal.kind='grant' — deprecated metadata до #688.
+    def test_grant_reservation_binds_the_registered_agent_actor(self):
+        # #688: делегирование — отношение к уже существующему agent Actor
+        # (#686 register_agent), не grant-<hex> service User на выдачу; вид
+        # классифицирует субъекта на самой модели, Principal не появляется.
         import uuid as _uuid
         from datetime import timedelta
         from mop.server.controller.runtime import initialize
@@ -155,12 +156,17 @@ class UnifiedActorIdentity(TransactionTestCase):
         bundle = api.publish_definition(actor, project_id=project.pk, manifest=raw,
                                     prompt=b'prompt', provenance='test')
         api.approve_definition(actor, bundle.id)
+        profile = api.register_agent(actor, project_id=project.pk, target_id=_uuid.uuid4(),
+                                     definition_id=bundle.id)
+        before = User.objects.count()
         row = api.reserve(actor, project_id=project.pk, definition_id=bundle.id,
-                          target_id=_uuid.uuid4(), incarnation=_uuid.uuid4(),
+                          target_id=profile.target_id, incarnation=_uuid.uuid4(),
                           request_id=_uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
-        machine = User.objects.get(username='grant-' + row.id.hex)
-        self.assertEqual(machine.kind, 'service')
-        self.assertFalse(access.Principal.objects.filter(user=machine).exists())
+        self.assertEqual(User.objects.count(), before, 'reservation created an Actor')
+        self.assertFalse(User.objects.filter(username='grant-' + row.id.hex).exists())
+        subject = User.objects.get(pk=row.subject_id)
+        self.assertEqual((subject.pk, subject.kind), (profile.agent_id, 'agent'))
+        self.assertFalse(access.Principal.objects.filter(user=subject).exists())
 
     def test_user_admin_is_the_standard_one_and_bootstrap_still_works(self):
         from django.contrib import admin

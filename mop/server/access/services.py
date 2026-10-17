@@ -90,10 +90,17 @@ def _check_binding(binding, user):
 
 
 def _context(binding, user):
-    """Контекст только из проверенного credential: факты, не права."""
-    grant_id = m.Grant.objects.filter(actor=user).values_list('id', flat=True).first()
+    """Plain-контекст только из проверенного credential: факты, не права.
+
+    Субъекта делегирования (#688) он не строит: его credential резолвит
+    только резолвер делегирования — по текущему runtime binding, а не по
+    «последней строке». Иначе контекст, полученный до выдачи, после отзыва
+    снова действовал бы собственными правами Actor в обход делегирования.
+    """
+    if _delegated(user.pk):
+        raise Denied('delegated subject requires its delegation resolver')
     return ActorContext(user.pk, ActorKind(user.kind), binding.pk,
-        user.pk if user.kind in ('human', 'agent') else None, binding.bound_node_id, grant_id)
+        user.pk if user.kind in ('human', 'agent') else None, binding.bound_node_id)
 
 
 @sensitive_variables('key')
@@ -112,7 +119,13 @@ def _session_user(session, user):
 
 
 def _delegated(user_id):
-    return m.Grant.objects.filter(actor_id=user_id).exists()
+    """Actor — субъект делегирования (#688): хоть одна строка Grant на нём.
+
+    Любая строка (включая reserved/отозванную) направляет credential к
+    резолверу делегирования: выбранный контекст нельзя обойти fallback-
+    переходом к собственным правам Actor; unbound резолвер — отказ.
+    """
+    return m.Grant.objects.filter(subject_id=user_id).exists()
 
 
 @sensitive_variables('key')

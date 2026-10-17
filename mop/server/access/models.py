@@ -373,9 +373,18 @@ class CreationIntent(Evidence):
 
 
 class Grant(Evidence):
+    """Делегирование (#688): отношение issuer Actor → subject Actor.
+
+    Имя Grant сохранено как единственное доменное имя: grant_id уже ссылка
+    контекста делегирования в ActorContext/RoleBinding/Assignment, и квартет
+    access-прав зарегистрирован здесь. Issuer — CreationIntent.actor (человек
+    или субъект родителя в его контексте), owner — CreationIntent.owner.
+    """
     intent = models.OneToOneField(CreationIntent, on_delete=models.PROTECT)
-    # Машина делегирования — service Actor (#684); Principal-строка уходит в #688.
-    actor = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='grant_machine')
+    # Субъект делегирования — существующий agent Actor (#688): выдача не
+    # создаёт User и не владеет его credential. Один субъект может держать
+    # несколько независимых делегирований.
+    subject = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='delegations')
     state = models.CharField(max_length=8, default='reserved')
     revision = models.PositiveBigIntegerField(default=1)
     credential_version = models.OneToOneField('secrets.SecretVersion', null=True, on_delete=models.PROTECT)
@@ -383,11 +392,10 @@ class Grant(Evidence):
     created_at = models.DateTimeField(default=timezone.now)
 
     def clean(self):
-        if self.actor.kind != 'service':
-            raise ValueError('grant requires its own delegated service actor')
-        user = self.actor
-        if user.is_staff or user.is_superuser or user.has_usable_password():
-            raise ValueError('grant requires a restricted service user')
+        if self.subject.kind != 'agent':
+            raise ValueError('delegation requires a registered agent subject actor')
+        if self.subject.is_staff or self.subject.is_superuser or self.subject.has_usable_password():
+            raise ValueError('delegation requires a restricted agent actor')
 
     def next_state(self, event):
         from .delegation import next_state

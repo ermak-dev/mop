@@ -96,6 +96,59 @@ class RetainedSecretContract(TransactionTestCase):
                 store.prepare('root', scope, b'no provider inside SQL')
 
 
+# Локальная копия прежнего capability-правила (#635-#686): фикстура выдаёт
+# субъекту делегирования ровно тот набор прав, который раньше давал словарь
+# программы. Словарь больше не источник допуска (#688), поэтому его поверхность
+# воспроизводится правами субъекта, чтобы старые negative-проверки (действие
+# вне программы → отказ) оставались проверками того же invariant.
+_LEGACY_CAPABILITY_MAP = {
+    'catalog.view_pool': ('cluster', 'roster'), 'catalog.view_project': ('cluster', 'roster'),
+    'execution.create_puppet': ('cluster', 'add'), 'execution.update_puppet': ('cluster', 'update'),
+    'execution.restart_puppet': ('cluster', 'restart'), 'execution.delete_puppet': ('cluster', 'delete'),
+    'execution.stop_allocation': ('cluster', 'stop'), 'execution.wipe_puppet': ('node', 'wipe'),
+    'execution.send_message': ('node', 'send'), 'execution.send_session_command': ('node', 'type'),
+    'execution.change_session_model': ('node', 'type'), 'execution.view_usage': ('node', 'usage'),
+    'execution.view_landing': ('cluster', 'landing'), 'execution.acquire_landing': ('cluster', 'landing'),
+    'execution.release_landing': ('cluster', 'landing'), 'execution.dispatch_task': ('dispatch', ''),
+    # Выдача ребёнка делегированным issuer требует его собственного права
+    # (#688); прежде её открывал тот же 'add', что и создание пупета.
+    'access.issue_grant': ('cluster', 'add'),
+}
+
+
+def legacy_actions(caps):
+    """Права, которые прежде давал capability-манифест программы (#635-#686)."""
+    verbs = set(caps['node_verbs']) | set(caps['cluster_verbs'])
+    return tuple(action for action, (scope, verb) in _LEGACY_CAPABILITY_MAP.items()
+                 if (caps['dispatch'] if scope == 'dispatch' else verb in verbs))
+
+
+def permit_actions(user, *actions):
+    """Штатные Django permissions действия из общего dictionary (#685)."""
+    from mop.server.access.permissions import permission_names
+    for action in actions:
+        for permission in permission_names(action):
+            app, code = permission.split('.')
+            user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
+
+
+def delegation_subject(api, actor, *, project_id, definition_id, target_id=None, actions=()):
+    """#688: существующий agent Actor и его общий token, выданные вне делегирования.
+
+    Субъект регистрирует human owner (#686 register_agent, идемпотентно на
+    target); local identity, membership и DRF Token — события самого Actor,
+    не lifecycle делегирования. Возвращает (profile, agent, key).
+    """
+    profile = api.register_agent(actor, project_id=project_id,
+        target_id=target_id or uuid.uuid4(), definition_id=definition_id)
+    auth.bind_local_identity(profile.agent_id)
+    agent = get_user_model().objects.get(pk=profile.agent_id)
+    source = access.LoginIdentity.objects.get(user=agent).source
+    access.ProjectMembership.objects.get_or_create(user=agent, project_id=project_id, source=source)
+    permit_actions(agent, *actions)
+    return profile, agent, auth.issue_token(agent.pk)
+
+
 class GrantCases(TransactionTestCase):
     # Как остальные ORM cases: flush не удаляет seeds новой установки.
     serialized_rollback = True
@@ -123,44 +176,57 @@ class GrantCases(TransactionTestCase):
         self.approvals = ApprovalFixture(self.proof)
         self.bindings = BindingFixture()
         self.api = self.g.Grants(provider=self.provider, approvals=self.approvals, bindings=self.bindings)
+        # Общий credential субъекта на target (#688): выдаётся вне lifecycle.
+        self.subject_tokens = {}
+        # Прежняя capability-поверхность каждого определения (#688): publish
+        # запоминает манифест, reserve выдаёт права субъекта по нему.
+        self.caps = {}
         # Настоящие CONTROL permissions новой БД, без искусственных content types.
         for code in ('create_puppet', 'send_message', 'dispatch_task'):
             self.permit('execution.' + code)
         self.definition = self.publish()
 
-    def permit(self, *actions):
-        for action in actions:
-            from mop.server.access.permissions import permission_names
-            for permission in permission_names(action):
-                app, code = permission.split('.')
-                self.user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
+    def permit(self, *actions, user=None):
+        permit_actions(user if user is not None else self.user, *actions)
 
     def publish(self, role='worker', **options):
-        raw = ('# exact manifest bytes\n' + json.dumps(manifest(role, **options), ensure_ascii=False)).encode()
-        value = self.api.publish_definition(self.actor, project_id=self.project.pk,
+        value = manifest(role, **options)
+        raw = ('# exact manifest bytes\n' + json.dumps(value, ensure_ascii=False)).encode()
+        published = self.api.publish_definition(self.actor, project_id=self.project.pk,
             manifest=raw, prompt=b'private role prompt\r\n', provenance='test source revision')
-        self.api.approve_definition(self.actor, value.id)
-        return value
+        self.api.approve_definition(self.actor, published.id)
+        self.caps[published.id] = value['capabilities']
+        return published
 
-    def reserve(self, *, definition=None, actor=None, request_id=None, **kw):
+    def reserve(self, *, definition=None, actor=None, request_id=None, target_id=None, **kw):
+        # #688: субъект — заранее зарегистрированный agent Actor (#686) на
+        # target со своим credential; выдача identity не создаёт. Регистрирует
+        # human (для делегированного issuer — owner фикстуры). Права субъекта
+        # = прежняя capability-поверхность его определения: допуск решает RBAC,
+        # старые negative-проверки сохраняют прежнюю ширину.
+        target_id = target_id or uuid.uuid4()
+        definition_id = (definition or self.definition).id
+        registrar = actor if actor is not None and actor.grant_id is None else self.actor
+        profile, agent, key = delegation_subject(self.api, registrar, project_id=self.project.pk,
+            definition_id=definition_id, target_id=target_id,
+            actions=legacy_actions(self.caps.get(definition_id, manifest()['capabilities'])))
+        self.subject_tokens[target_id] = key
         args = dict(project_id=self.project.pk, definition_id=(definition or self.definition).id,
-                    target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=request_id or uuid.uuid4(),
+                    target_id=target_id, incarnation=uuid.uuid4(), request_id=request_id or uuid.uuid4(),
                     expires_at=timezone.now() + timedelta(hours=1))
         args.update(kw)
         return self.api.reserve(actor or self.actor, **args)
 
     def active(self, *, definition=None, actor=None):
         row = self.reserve(definition=definition, actor=actor)
+        self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
+        self.bindings.receipts[row.id] = row.binding
         self.api.provision(actor or self.actor, row.id, expected_revision=row.revision)
-        row = self.api.get(actor or self.actor, row.id)
-        binding = self.g.RoleBinding(self.project.pk, row.target_id, row.incarnation,
-                                    row.role, row.digest, row.id, self.user.pk)
-        self.bindings.bindings[(self.project.pk, row.target_id)] = binding
-        self.bindings.receipts[row.id] = binding
-        self.api.activate(row.id, expected_revision=row.revision)
+        self.api.activate(row.id, expected_revision=row.revision + 1)
         row = self.api.get(self.actor, row.id)
-        token = Token.objects.get(user__grant_machine__id=row.id).key
-        return row, auth.token_context(token, grants=self.api)
+        # Общий DRF Token субъекта, выданный вне lifecycle делегирования (#688).
+        key = Token.objects.get(user_id=row.subject_id).key
+        return row, auth.token_context(key, grants=self.api)
 
     def test_gateway_uses_sealed_local_grant_and_rechecks_current_authority(self):
         from mop.server.realtime.authority import Authority
@@ -209,7 +275,7 @@ class GrantCases(TransactionTestCase):
         from _catalog_retirement_cases import retirement_catalog
         parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         row, actor = self.active(actor=parent_actor)
-        token = Token.objects.get(user_id=row.principal_id).key
+        token = Token.objects.get(user_id=row.subject_id).key
         local = self.api.local_authority()
         self.api.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
         with transaction.atomic():
@@ -283,7 +349,7 @@ class GrantCases(TransactionTestCase):
         self.user.user_permissions.add(permission)
         with transaction.atomic():
             self.assertIsNone(query(child.binding))
-        Token.objects.filter(user_id=parent.principal_id).delete()
+        Token.objects.filter(user_id=parent.subject_id).delete()
         with transaction.atomic(), self.assertRaises(PermissionError):
             query(child.binding)
 
@@ -309,7 +375,7 @@ class GrantCases(TransactionTestCase):
             decrypt = encrypt
         self.api.secrets.provider = ForbiddenProvider()
         local = factory()
-        token = Token.objects.get(user_id=row.principal_id).key
+        token = Token.objects.get(user_id=row.subject_id).key
         self.assertEqual(auth.token_context(token, grants=local), actor)
         authority = auth.Access(grants=local)
         with transaction.atomic():
@@ -318,11 +384,11 @@ class GrantCases(TransactionTestCase):
         # Полная human authority нужна, чтобы проверять именно pinned caps,
         # а не ранний отказ owner permission (combined PG17 red, #625).
         self.permit('catalog.change_project', 'catalog.configure_project')
-        with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'capabilities'):
+        with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'permission'):
             authority.authorize(actor, 'catalog.change_project', project_ids=(self.project.pk,))
         with transaction.atomic(), self.assertRaises(PermissionError):
             authority.authorize(actor, 'execution.send_message', project_ids=(self.foreign.pk,))
-        Token.objects.filter(user_id=row.principal_id).delete()
+        Token.objects.filter(user_id=row.subject_id).delete()
         with transaction.atomic(), self.assertRaises(PermissionError):
             authority.authorize(actor, 'execution.send_message', project_ids=(self.project.pk,))
 
@@ -378,11 +444,16 @@ class GrantCases(TransactionTestCase):
                 def rotate():
                     try:
                         with transaction.atomic():
+                            # #688: субъект — agent Actor с собственной
+                            # LoginIdentity; ротация сохраняет её proven values,
+                            # как штатный rotate_token.
                             Token.objects.filter(user_id=actor.user_id).delete()
                             access.CredentialBinding.objects.filter(pk=actor.credential_id).delete()
+                            subject = get_user_model().objects.get(pk=actor.user_id)
+                            identity = auth._identity(subject)
                             token = Token.objects.create(user_id=actor.user_id)
                             binding = access.CredentialBinding.objects.create(token_user_id=actor.user_id,
-                                token_digest=auth._digest(token.key), **auth._binding_values(actor, None, None))
+                                token_digest=auth._digest(token.key), **auth._binding_values(subject, identity, None))
                             return token.key, binding.pk
                     finally:
                         connections.close_all()
@@ -591,14 +662,20 @@ class GrantCases(TransactionTestCase):
     def test_reserved_has_no_runtime_authority_and_default_ports_deny(self):
         row = self.reserve()
         self.api.provision(self.actor, row.id, expected_revision=row.revision)
-        token = Token.objects.get(user__grant_machine__id=row.id).key
+        token = self.subject_tokens[row.target_id]
+        # reserved строка не даёт runtime authority: у субъекта нет активной
+        # делегировки, общий token не выбирает контекста (#688).
         with self.assertRaises(PermissionError):
             auth.token_context(token, grants=self.api)
         with self.assertRaises(PermissionError):
             self.api.activate(row.id, expected_revision=self.api.get(self.actor, row.id).revision)
-        with self.assertRaises(PermissionError):
+        # Зарегистрированный субъект (#688): отказ обязан дать именно unbound
+        # approval port, а не отсутствие субъекта.
+        profile, _, _ = delegation_subject(self.api, self.actor, project_id=self.project.pk,
+                                           definition_id=self.definition.id)
+        with self.assertRaisesRegex(PermissionError, 'not bound'):
             self.g.Grants(provider=self.provider).reserve(self.actor, project_id=self.project.pk,
-                definition_id=self.definition.id, target_id=uuid.uuid4(), incarnation=uuid.uuid4(),
+                definition_id=self.definition.id, target_id=profile.target_id, incarnation=uuid.uuid4(),
                 request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
 
     def test_real_provider_provisions_encrypted_token_without_human_secret_management(self):
@@ -632,7 +709,9 @@ class GrantCases(TransactionTestCase):
         factory = APIRequestFactory()
         response = view(factory.get('/identity', HTTP_AUTHORIZATION='Token ' + key))
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data['kind'], 'service')
+        # #688: действующий identity — субъект делегирования (agent Actor),
+        # отдельной service-машины на выдачу больше нет.
+        self.assertEqual(response.data['kind'], 'agent')
         self.assertEqual(response.data['human_owner_id'], self.user.pk)
         self.assertEqual(response.data['grant_id'], str(row.id))
         # Никакой настройки из payload: без trusted root прежний deny обязателен.
@@ -763,9 +842,12 @@ class GrantCases(TransactionTestCase):
             def pin(self, binding):
                 return True
         api = self.g.Grants(provider=self.provider, approvals=BooleanApproval(), bindings=self.bindings)
-        with self.assertRaises(PermissionError):
+        # Зарегистрированный субъект (#688): отказ — от boolean proof, не от цели.
+        profile, _, _ = delegation_subject(self.api, self.actor, project_id=self.project.pk,
+                                           definition_id=self.definition.id)
+        with self.assertRaisesRegex(PermissionError, 'approved policy proof'):
             api.reserve(self.actor, project_id=self.project.pk, definition_id=self.definition.id,
-                target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
+                target_id=profile.target_id, incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
                 expires_at=timezone.now() + timedelta(hours=1))
 
     def test_concurrent_revoke_activate_has_terminal_revocation(self):
@@ -837,10 +919,14 @@ class GrantCases(TransactionTestCase):
     def test_prepared_credential_roundtrip_and_plaintext_free_real_pg_dump(self):
         row = self.reserve()
         provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
-        token = Token.objects.get(user__grant_machine__id=row.id).key
+        # #688: retained value — транспортный ключ делегирования, не token
+        # субъекта; сравнение через повторное чтение того же retained секрета.
         from mop.server.secrets.services import RetentionScope
-        self.assertEqual(self.api.secrets.read(self.actor, RetentionScope(self.project.pk, self.user.pk,
-            row.id, 'grant'), provisioned.credential_version_id), token.encode())
+        stored = self.api.secrets.read(self.actor, RetentionScope(self.project.pk, self.user.pk,
+            row.id, 'grant'), provisioned.credential_version_id)
+        subject_key = self.subject_tokens[row.target_id].encode()
+        self.assertNotEqual(stored, subject_key,
+            'the retained transport value is not the shared subject token')
         import tempfile
         from mop.server.controller.backup import _tool
         with tempfile.TemporaryFile() as raw:
@@ -849,9 +935,11 @@ class GrantCases(TransactionTestCase):
                   output=raw, extra=('--data-only', '--table=access_*', '--table=secrets_*'))
             raw.seek(0)
             data = raw.read()
-        self.assertNotIn(token.encode(), data)
+        self.assertNotIn(stored, data)
+        self.assertNotIn(subject_key, data)
         self.assertNotIn(b'private role prompt', data)
-        self.assertNotIn(token, serializers.serialize('json', access.GrantEvent.objects.all()))
+        self.assertNotIn(self.subject_tokens[row.target_id],
+            serializers.serialize('json', access.GrantEvent.objects.all()))
 
     def test_transport_retirement_is_separate_and_unknown_does_not_restore_access(self):
         row, actor = self.active()
@@ -869,15 +957,20 @@ class GrantCases(TransactionTestCase):
     def test_provision_database_failure_is_atomic_and_does_not_leak_key(self):
         from unittest.mock import patch
         from django.db import IntegrityError
+        from mop.server.secrets import models as secrets_models
         row = self.reserve()
-        with patch.object(access.CredentialBinding.objects, 'create', side_effect=IntegrityError('private-generated-key')):
+        # #688: provision пишет только retained transport value; точка отказа —
+        # insert версии секрета, не credential субъекта (CredentialBinding
+        # больше не создаётся выдачей).
+        with patch.object(secrets_models.SecretVersion, 'save', side_effect=IntegrityError('private-generated-key')):
             try:
                 self.api.provision(self.actor, row.id, expected_revision=row.revision)
             except Exception as error:
                 self.assertNotIn('private-generated-key', str(error))
             else:
-                self.fail('failed credential binding must refuse provisioning')
-        self.assertFalse(Token.objects.filter(user__grant_machine__id=row.id).exists())
+                self.fail('failed secret commit must refuse provisioning')
+        # #688: выдача не создаёт token; субъект сохраняет свой общий credential.
+        self.assertEqual(Token.objects.filter(user_id=row.subject_id).count(), 1)
         self.assertIsNone(access.Grant.objects.get(pk=row.id).credential_version_id)
 
     def test_bundle_read_of_revoked_descendant_is_not_a_shared_read_bypass(self):
@@ -1004,7 +1097,7 @@ class GrantCases(TransactionTestCase):
         provisioned = self.api.provision(self.actor, row.id, expected_revision=row.revision)
         self.bindings.bindings[(self.project.pk, row.target_id)] = row.binding
         self.bindings.receipts[row.id] = row.binding
-        Token.objects.filter(user__grant_machine__id=row.id).delete()
+        Token.objects.filter(user_id=row.subject_id).delete()
         try:
             self.api.activate(row.id, expected_revision=provisioned.revision)
         except PermissionError:
