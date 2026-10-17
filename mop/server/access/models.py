@@ -156,15 +156,6 @@ class DirectoryGroupRule(Identifier):
         constraints = [models.UniqueConstraint(fields=('source', 'group_dn'), name='access_directory_rule_unique')]
 
 
-class AuthAttempt(models.Model):
-    key = models.CharField(max_length=64, primary_key=True)
-    count = models.PositiveIntegerField(default=0)
-    window_started = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        default_permissions = ()
-
-
 class CredentialEvent(Identifier):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     action = models.CharField(max_length=32)

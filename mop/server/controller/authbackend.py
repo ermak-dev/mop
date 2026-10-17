@@ -1,9 +1,18 @@
 """Composition root для Django backend и LDAP secret boundary."""
-from django.core.exceptions import PermissionDenied
 from django.utils import timezone
 from mop.server.access.directory import Router, DirectoryUnavailable
 from mop.server.access.ldap import LdapDirectory
-from mop.server.access.services import consume_attempt
+
+
+def lockout_username(request, credentials):
+    """Ключ логина для axes (#694): HMAC-дайджест, не логин в открытом виде.
+
+    Блокировка ищет и пишет записи по одному и тому же значению, поэтому
+    дайджест сохраняет поведение счётчика, не храня сам логин в БД.
+    """
+    from mop.server.access.services import _digest
+    username = (credentials or {}).get('username')
+    return _digest('account:' + username) if isinstance(username, str) else None
 
 
 class AuthenticationUnavailable(RuntimeError):
@@ -14,17 +23,16 @@ class ControllerBackend(Router):
     def __init__(self):
         super().__init__(provider=LdapDirectory())
 
-    def authenticate(self, request, username=None, password=None, **kwargs):
-        address = str(request.META.get('REMOTE_ADDR', 'local')) if request is not None else str(kwargs.get('remote_address', 'local'))
+    def authenticate(self, request, username=None, password=None, *, session_login=True, **kwargs):
+        # Учёт неудач и блокировку ведёт axes первым backend'ом (#694): сюда
+        # заблокированный запрос не доходит, bind каталога не выполняется.
         if not isinstance(username, str) or not isinstance(password, str) or len(username) > 150 or len(password) > 4096:
             return None
-        if not consume_attempt(username, address):
-            raise PermissionDenied('authentication rate limit exceeded')
         try:
             user = super().authenticate(request, username=username, password=password)
         except DirectoryUnavailable as error:
             raise AuthenticationUnavailable(str(error)) from None
-        if user is not None and request is not None:
+        if user is not None and session_login and getattr(request, 'session', None) is not None:
             # Новая password authentication не возрождает старый session binding.
             request.session.flush()
             request.session['access_reauthenticated_at'] = timezone.now().timestamp()

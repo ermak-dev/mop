@@ -577,27 +577,3 @@ def note_session_logout(session_key):
         user = get_user_model().objects.select_for_update().filter(pk=user_id).first()
         if user is not None:
             m.CredentialEvent.objects.create(user=user, action='session_logged_out')
-
-
-def consume_attempt(username, remote_address='local'):
-    """Общий DB rate limit: ключи не содержат пароль, логин или адрес в plaintext."""
-    source = m.LoginIdentity.objects.filter(user__username=username).values_list('source_id', flat=True).first()
-    keys = sorted((_digest('account:' + str(source) + ':' + username), _digest('origin:' + remote_address)))
-    allowed = True
-    with transaction.atomic():
-        for key in keys:
-            m.AuthAttempt.objects.get_or_create(key=key)
-            row = m.AuthAttempt.objects.select_for_update().get(pk=key)
-            if row.window_started < timezone.now() - timedelta(minutes=5):
-                row.count, row.window_started = 0, timezone.now()
-            row.count += 1
-            row.save(update_fields=['count', 'window_started'])
-            allowed = allowed and row.count <= 10
-    return allowed
-
-
-def attempts_blocked(username, remote_address='local'):
-    source = m.LoginIdentity.objects.filter(user__username=username).values_list('source_id', flat=True).first()
-    keys = (_digest('account:' + str(source) + ':' + username), _digest('origin:' + remote_address))
-    return m.AuthAttempt.objects.filter(key__in=keys, count__gt=10,
-        window_started__gte=timezone.now() - timedelta(minutes=5)).exists()

@@ -11,6 +11,14 @@ from django.test import Client, TransactionTestCase, override_settings
 from django.utils import timezone
 
 
+def _lockout_request():
+    """Сетевые входы зовут authenticate с request (#694): axes ведёт по нему
+    учёт и блокировку. Тесты других свойств идут тем же путём."""
+    from django.test import RequestFactory
+    return RequestFactory().post('/api/v1/auth/token', REMOTE_ADDR='192.0.2.10')
+
+
+
 # FEATURE: #633 — единая identity, live credential и scope без HTTP в use case.
 # HYPOTHESIS: у foundation нет Access и auth endpoints.
 # SOLUTION: стандартный Django Auth + source provenance + единый evaluator.
@@ -259,7 +267,7 @@ class AccessContracts(TransactionTestCase):
     @override_settings(ALLOWED_HOSTS=['testserver'])
     def test_unbound_standard_session_fails_closed(self):
         client = Client()
-        self.assertTrue(client.login(username='human', password='test-password-only'))
+        self.assertTrue(client.login(request=_lockout_request(), username='human', password='test-password-only'))
         with self.assertRaises(self.s.Denied):
             self.s.session_context(client.session.session_key)
         self.assertFalse(self.m.CredentialBinding.objects.filter(session_id=client.session.session_key).exists())
@@ -470,11 +478,11 @@ class AccessContracts(TransactionTestCase):
     def test_source_binding_and_wrong_first_password_never_fall_through(self):
         from django.contrib.auth import authenticate
         self.m.IdentitySource.objects.create(name='directory', kind='ldap', priority=1)
-        self.assertIsNone(authenticate(username='human', password='wrong-password'))
-        self.assertEqual(authenticate(username='human', password='test-password-only').pk, self.user.pk)
+        self.assertIsNone(authenticate(request=_lockout_request(), username='human', password='wrong-password'))
+        self.assertEqual(authenticate(request=_lockout_request(), username='human', password='test-password-only').pk, self.user.pk)
         self.source.enabled = False
         self.source.save()
-        self.assertIsNone(authenticate(username='human', password='test-password-only'))
+        self.assertIsNone(authenticate(request=_lockout_request(), username='human', password='test-password-only'))
         with self.assertRaises(self.s.Denied):
             self.s.Access().authorize(self.actor, 'catalog.view_project')
 
@@ -932,3 +940,93 @@ class AccessContracts(TransactionTestCase):
         from rest_framework.authtoken.models import Token, TokenProxy
         self.assertFalse(admin.site.is_registered(Token))
         self.assertFalse(admin.site.is_registered(TokenProxy))
+
+
+# #694: учёт неудачных входов — django-axes вместо самописного AuthAttempt.
+# HYPOTHESIS: собственный consume_attempt дублирует стандартный механизм и
+# считает все попытки, а не неудачные; LDAP bind выполняется до блокировки.
+# SPEC: блокировка в БД (axes) переживает процесс, срабатывает ДО bind
+# каталога (токен-эндпоинт не оракул пароля), логин в записях — HMAC-дайджест,
+# одинаковый отказ для существующего и неизвестного логина, успех после окна.
+class LoginLockout(TransactionTestCase):
+    serialized_rollback = True
+    setUp = AccessContracts.setUp
+    permission = AccessContracts.permission
+
+    def burst(self, client, username, count=11):
+        response = None
+        for _ in range(count):
+            response = client.post('/api/v1/auth/token',
+                {'username': username, 'password': 'not-the-password'}, secure=True)
+        return response
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_lockout_is_stored_by_axes_with_a_digested_username(self):
+        from django.conf import settings
+        self.assertFalse(hasattr(self.m, 'AuthAttempt'), 'the custom AuthAttempt model must be gone')
+        self.assertEqual(settings.AUTHENTICATION_BACKENDS[0], 'axes.backends.AxesStandaloneBackend',
+                         'the lockout backend must run before the directory backend')
+        from axes.models import AccessAttempt
+        self.burst(Client(), 'human')
+        rows = list(AccessAttempt.objects.values_list('username', flat=True))
+        self.assertTrue(rows, 'failed attempts must be recorded by axes in the database')
+        self.assertNotIn('human', rows, 'the login must not be stored in plaintext')
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_lockout_runs_before_the_directory_bind(self):
+        from unittest.mock import patch
+        from mop.server.access.directory import Router
+        self.burst(Client(), 'human')
+        with patch.object(Router, 'authenticate', side_effect=AssertionError('bind after lockout')) as bound:
+            response = Client().post('/api/v1/auth/token',
+                {'username': 'human', 'password': 'test-password-only'}, secure=True)
+        self.assertEqual(response.status_code, 429, response.content)
+        bound.assert_not_called()
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_unknown_and_existing_logins_are_refused_alike(self):
+        known = Client().post('/api/v1/auth/token',
+            {'username': 'human', 'password': 'wrong'}, secure=True)
+        unknown = Client().post('/api/v1/auth/token',
+            {'username': 'nobody-here', 'password': 'wrong'}, secure=True)
+        self.assertEqual((known.status_code, known.content), (unknown.status_code, unknown.content))
+        locked_known = self.burst(Client(), 'human')
+        locked_unknown = self.burst(Client(REMOTE_ADDR='10.0.0.9'), 'nobody-here')
+        self.assertEqual(locked_known.status_code, 429)
+        self.assertEqual((locked_known.status_code, locked_known.content),
+                         (locked_unknown.status_code, locked_unknown.content))
+
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_success_works_again_after_the_cooloff_window(self):
+        from datetime import timedelta
+        from django.conf import settings
+        from django.utils import timezone
+        self.assertIn('axes', settings.INSTALLED_APPS, 'lockout state lives in the axes tables')
+        from axes.models import AccessAttempt
+        self.burst(Client(), 'human')
+        self.assertEqual(Client().post('/api/v1/auth/token',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True).status_code, 429)
+        AccessAttempt.objects.update(attempt_time=timezone.now() - timedelta(minutes=6))
+        response = Client().post('/api/v1/auth/token',
+            {'username': 'human', 'password': 'test-password-only'}, secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+
+    # Без request axes не ведёт учёт: каждый сетевой вход обязан его передать.
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_network_entry_points_authenticate_with_a_request(self):
+        from unittest.mock import patch
+        from django.contrib import auth as django_auth
+        seen = []
+        original = django_auth.authenticate
+
+        def spy(request=None, **credentials):
+            seen.append(request is not None)
+            return original(request=request, **credentials)
+        with patch('mop.server.controller.authviews.authenticate', side_effect=spy):
+            Client().post('/api/v1/auth/token', {'username': 'human', 'password': 'wrong'}, secure=True)
+            client = Client(enforce_csrf_checks=True, HTTP_ORIGIN='https://testserver')
+            client.get('/api/v1/auth/csrf', secure=True)
+            client.post('/api/v1/auth/login', {'username': 'human', 'password': 'wrong'}, secure=True,
+                        HTTP_X_CSRFTOKEN=client.cookies['csrftoken'].value)
+        self.assertTrue(seen, 'the views must authenticate through the patched entry')
+        self.assertTrue(all(seen), 'every network entry point must pass the request to axes')

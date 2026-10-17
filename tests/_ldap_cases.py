@@ -16,6 +16,14 @@ from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from mop.server.access.directory import Configuration, DirectoryUnavailable, Router
 from mop.server.access.ldap import LdapDirectory
 
+
+def _lockout_request():
+    """Сетевые входы зовут authenticate с request (#694): axes ведёт по нему
+    учёт и блокировку. Тесты других свойств идут тем же путём."""
+    from django.test import RequestFactory
+    return RequestFactory().post('/api/v1/auth/token', REMOTE_ADDR='192.0.2.10')
+
+
 # BUG: DN повторно используется другой записью, bind outage выглядит неверным паролем.
 # HYPOTHESIS: adapter не читает immutable attribute и игнорирует result code bind.
 # RED: DN вместо UUID; replacement принят; 51/52/53 не поднимают unavailable.
@@ -477,15 +485,15 @@ class DirectoryIdentityContracts(TransactionTestCase):
                 self.wire.code = code
                 with self.subTest(code=code):
                     with self.assertRaises(AuthenticationUnavailable) as raised:
-                        authenticate(username='person', password='test-password')
+                        authenticate(request=_lockout_request(), username='person', password='test-password')
                     self.assertNotIn('private-context', str(raised.exception))
             self.wire.failure = TimeoutError('private-context test-password')
             with self.assertRaises(AuthenticationUnavailable) as raised:
-                authenticate(username='person', password='test-password')
+                authenticate(request=_lockout_request(), username='person', password='test-password')
             self.assertNotIn('test-password', str(raised.exception))
             self.wire.failure = None
             self.wire.code = 49
-            self.assertIsNone(authenticate(username='person', password='test-password'))
+            self.assertIsNone(authenticate(request=_lockout_request(), username='person', password='test-password'))
         self.assertEqual(sum(dn == 'cn=reader' for dn in self.wire.binds), 5)
 
     def test_source_revision_and_deactivation_during_blocked_bind_reject_acceptance(self):
