@@ -95,7 +95,7 @@ class Consumers(unittest.TestCase):
     # desired revision, POST на свой маршрут с пустыми params, без force.
     def test_wipe_and_stop_cli_post_empty_params_to_their_routes(self):
         from mop.cli import _control
-        for words, route in (('wipe', 'wipe'), ('stop', 'stop-job')):
+        for words, route in (('wipe', 'wipe'), ('stop', 'stop-job'), ('delete', 'delete')):
             self.fixture.calls.clear()
             self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
             self.response(restart_operation(), 202)
@@ -606,7 +606,7 @@ class Consumers(unittest.TestCase):
 
     def test_absent_backend_refuses_before_any_io_and_never_ssh_or_nats(self):
         from mop.cli import _control
-        for words in ('add', 'update', 'recycle', 'delete', 'model',
+        for words in ('add', 'update', 'recycle', 'model',
                       'secret file', 'secret var', 'server gc', 'attach', 'master'):
             with self.subTest(words=words), _control.use(api.ServerContext('https://controller.example', TOKEN)):
                 out, err, code = run_command(lambda a: _control.invoke(words, a[0]), [[]])

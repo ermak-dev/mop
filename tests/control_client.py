@@ -159,7 +159,8 @@ class ControlClient(unittest.TestCase):
     # маршруты; ни сообщения, ни fresh/force в теле нет.
     def test_wipe_and_stop_post_empty_params_to_their_own_routes(self):
         for prepare, path in ((self.client.prepare_wipe, "/api/v1/puppets/p_123/commands/wipe"),
-                              (self.client.prepare_stop, "/api/v1/puppets/p_123/commands/stop-job")):
+                              (self.client.prepare_stop, "/api/v1/puppets/p_123/commands/stop-job"),
+                              (self.client.prepare_delete, "/api/v1/puppets/p_123/commands/delete")):
             self.fixture.calls.clear()
             command = prepare(self.target, epoch="e_1", not_after=DEADLINE, request_id=KEY)
             self.queue(202, operation=operation())
@@ -168,7 +169,7 @@ class ControlClient(unittest.TestCase):
             body = json.loads(self.fixture.calls[0][2])
             self.assertEqual(body["params"], {})
             self.assertNotIn("target_id", body)
-        for action in ("wipe", "stop"):
+        for action in ("wipe", "stop", "delete"):
             for kw in ({"fresh": True}, {"message": "x"}, {"priority": "now"}):
                 with self.assertRaises(api.ClientError):
                     api.PreparedCommand(action, self.target, "e_1", KEY, DEADLINE, **kw)
