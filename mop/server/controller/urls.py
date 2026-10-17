@@ -69,6 +69,7 @@ urlpatterns = [
     path('api/v1/nodes/<uuid:node_id>/commands/drain', operations.DrainNode.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/enable', operations.EnableNode.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/restart', operations.RestartPuppet.as_view()),
+    path('api/v1/puppets/<uuid:target_id>/commands/stop-job', operations.StopPuppetJob.as_view()),
     path('api/v1/operations', operations.RequestLookup.as_view()),
     path('api/v1/operations/<uuid:operation_id>', operations.OperationStatus.as_view()),
 ]

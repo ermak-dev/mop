@@ -8,8 +8,11 @@ class Worker:
     def __init__(self, runtime, operations, node_executor, *, image_builds=None, node_id=None):
         self.runtime, self.operations, self.node_executor = runtime, operations, node_executor
         self.image_builds, self.node_id = image_builds, node_id
+        # scheduler_stop входит в capability tuple только с bound stops портом;
+        # прочие lane конфигурируются своими портами, как в #678.
         self.handlers = tuple(name for name, port in (
-            ('node_eligibility', node_executor), ('image_build', image_builds)) if port is not None)
+            ('node_eligibility', node_executor), ('image_build', image_builds),
+            ('scheduler_stop', getattr(operations, 'stops', None) or False)) if port is not None)
 
     async def run_one(self, operation_id):
         if not self.runtime.accepting:
@@ -22,6 +25,10 @@ class Worker:
         handler = await self.runtime.database(self.operations.handler, operation_id)
         if handler not in self.handlers:
             raise RuntimeError(f'controller worker handler {handler} is not configured')
+        if handler == 'scheduler_stop':
+            if self.operations.stops is None:
+                return None
+            return await self.runtime.blocking(self._stop, operation_id)
         if handler == 'image_build':
             return await self.runtime.blocking(self._build, operation_id)
         claim = await self.runtime.database(self.operations.claim, operation_id)
@@ -39,6 +46,13 @@ class Worker:
             return await self.runtime.database(self.operations.uncertain, claim, expected_revision=claim.revision)
         return await self.runtime.database(self.operations.complete, claim,
             expected_revision=claim.revision, applied=applied)
+
+    def _stop(self, operation_id):
+        from django.db import connections
+        try:
+            return self.operations.stops.run(operation_id)
+        finally:
+            connections.close_all()
 
     def _build(self, operation_id):
         from django.db import connections

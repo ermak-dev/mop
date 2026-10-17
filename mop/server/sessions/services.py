@@ -273,6 +273,29 @@ class Assignments:
             row.save(update_fields=('current_incarnation', 'grant_id', 'revision', 'generation'))
             return snapshot(incarnation)
 
+    def confirm_job_stopped(self, *, target_id, incarnation_id, expected_revision,
+                            expected_generation, executor_epoch):
+        """SQL-only historical confirmation; не отзываем новое назначение.
+
+        Вызывается внутри caller result transaction после physical quiescence.
+        Истечение человеческого назначения не отменяет historical stop receipt.
+        """
+        if not transaction.get_connection().in_atomic_block:
+            raise Unavailable('stop confirmation requires caller transaction')
+        row = m.Assignment.objects.select_for_update().get(pk=target_id)
+        if (row.current_incarnation_id!=incarnation_id or row.revision!=expected_revision
+                or row.generation!=expected_generation):
+            return None
+        incarnation = m.ExecutionIncarnation.objects.select_for_update().get(pk=incarnation_id)
+        if incarnation.executor_epoch!=executor_epoch or incarnation.assignment_id!=row.id:
+            return None
+        incarnation.accepting = False
+        incarnation.save(update_fields=('accepting',))
+        row.revision += 1
+        row.generation += 1
+        row.save(update_fields=('revision','generation'))
+        return row.revision
+
     def release(self, actor, target_id, *, expected_revision, expected_generation=None):
         with transaction.atomic():
             # Сначала CAS: повторный rollback не приобретает права на новое поколение.

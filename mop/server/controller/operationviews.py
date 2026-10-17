@@ -67,6 +67,23 @@ class RestartPuppet(APIView):
         return _reply(operation, status=202 if operation['state']=='accepted' else 200)
 
 
+@method_decorator(never_cache, name='dispatch')
+class StopPuppetJob(APIView):
+    def post(self, request, target_id):
+        from ..operations.commands import parse_stop_job
+        try:
+            command = parse_stop_job(target_id, decode_body(request.body))
+        except InvalidCommand as error:
+            raise serializers.ValidationError(str(error)) from None
+        operation = stop_api().submit(request.actor, command)
+        return _reply(operation, status=202 if operation['state']=='accepted' else 200)
+
+
+def stop_api():
+    from .stopbinding import service
+    return service()
+
+
 def restart_api():
     from .machinebinding import operations
     return operations()
