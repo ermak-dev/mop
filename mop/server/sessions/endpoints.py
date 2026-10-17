@@ -234,6 +234,30 @@ class Endpoints:
             self._connection(context, authority)
             return context
 
+    def holder_context(self, actor, endpoint_id, nonce, *, project_id):
+        """SQL-only gate внутри чужой короткой admission transaction.
+
+        Root уже держит installation guard; здесь не создаём независимый COMMIT.
+        Holder остаётся конкретным human conversation, не User/role-флагом.
+        """
+        if not transaction.get_connection().in_atomic_block:
+            raise Unavailable('holder gate requires caller transaction')
+        uuid_value(nonce)
+        endpoint = self._endpoint(endpoint_id, lock=True)
+        row = m.ConnectionLease.objects.filter(endpoint=endpoint).first()
+        if (row is None or row.nonce != nonce or row.credential_id != actor.credential_id
+                or row.user_id != actor.user_id or endpoint.session.owner_id != actor.user_id
+                or endpoint.project_id != project_id):
+            raise Denied('holder connection does not belong to authenticated project conversation')
+        context = self._context(endpoint, row)
+        self._connection(context, self.authority(lock=False))
+        return context
+
+    def holder_address(self, actor, endpoint_id, nonce, *, project_id):
+        """Только адрес уже проверенного собственного conversation, не transport secret."""
+        self.holder_context(actor, endpoint_id, nonce, project_id=project_id)
+        return 'private:'+str(self._endpoint(endpoint_id).address_id)
+
     def validate(self, context):
         with self._transaction() as authority:
             endpoint, _ = self._connection(context, authority)

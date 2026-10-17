@@ -451,7 +451,7 @@ applied or overwrite that revision's observation; the result explicitly reports
 |---|---|
 | Production drain/enable effects | #639 NodeExecutor adapter, runtime/incarnation and physical receipt fencing; bind its managed lifecycle in the controller root |
 | Restart | The fixed identity/restart/readiness handler below uses the same Operation/Step journal. Production still denies admission without an approved physical capability/layout and exact policy binding; fresh/scheduler replacement is not this host-session effect |
-| Send | No admission handler until addressed encrypted payload retention/delivery and application ACK are bound; a digest is not recoverable message content |
+| Send / dispatch | Typed admission, encrypted bounded input and machine receipts use the common journal as described below; production still requires explicit cipher, approval, endpoint and physical-support bindings. Socket write alone is not a delivery receipt |
 | Create/update/recycle/delete/wipe, grant activation, credential rotation, terminal and maintenance operations | Finite subject-owned handlers and receipt/recovery rules; not an arbitrary callback registry and not accepted as implemented commands |
 | Project build | #648 has finite DRF admission/status and the durable build process manager below; real scheduler/body/image consumers and privileged deployment remain root bindings, not automatic-success defaults |
 | Worker process | Bounded Runtime-owned `Worker.run_one`/`run_pending` exist; root must wire the real executor, wake/poll and shutdown ownership rather than reuse the old web worker |
@@ -462,6 +462,67 @@ applied or overwrite that revision's observation; the result explicitly reports
 
 This checkpoint does not authorize an old-pool deployment or imply that those
 remaining handlers have passed transport, crash or performance acceptance.
+
+### Bounded send and dispatch vertical (#625/#635/#639/#649)
+
+`POST /api/v1/messages` and `/api/v1/dispatches` accept distinct finite commands:
+`schema_version`, `epoch`, client `request_id`, `target_id`, `incarnation`, decimal
+`expected_revision`, UTC `not_after`, and `params`. Parameters are `message`,
+optional `priority` (`next|now|later`), `wait_seconds` (0–60), and
+`notify_when_idle` (boolean). Admission limits the UTF-8 message to 16 KiB (the
+machine application's bound) and the deadline to five minutes. Waiting never
+extends the effect deadline or changes its outcome. No owner, force, role flag,
+subject, path, shell, or adapter selector is accepted.
+
+The current human or delegated source must have the exact send/dispatch action
+and actual project scope. The target's active, sealed, approved receiving grant
+is checked separately. Dispatch additionally requires the source's dispatch
+capability and target `receives_dispatch`; it cannot take another human's
+assignment. Ordinary send does not acquire/reassign human ownership. An optional
+human holder comes only from authenticated `X-Mop-Endpoint` / `X-Mop-Connection`
+binding; its live conversation is checked again in admission, claim and input.
+`notify_when_idle` requires that holder. Its endpoint is separate from Assignment's
+human owner. The private input carries the exact holder reply address and
+notification request; delivery acceptance is not an idle or task-completion
+receipt. The receiving application/report bridge remains responsible for emitting
+the separately correlated idle report through #649.
+
+Each accepted command creates one existing Operation, a typed MessageBinding,
+the common puppet assignment pin, and exactly `apply_identity` then `send_message`
+Steps. These are the existing machine WorkPort's work, not a second message
+queue. The common node/project/puppet resource claims remain held between stages.
+An active assignment and successful identity application precede delivery;
+current initiating actor, target grant, incarnation, revision and deadline gates
+run at claim and addressed input, including again after decrypt/provider waits.
+The machine's own credential and lease are also rechecked after that wait.
+Only an explicit `delivered` application evidence receipt confirms the final
+stage. An uncertain write, lost receipt, lease expiry or executor restart retains
+claims as unknown and cannot automatically redeliver the message.
+
+Message/request/operation IDs are distinct. Admission and status return the
+stable `message_id` as metadata. The canonical command is keyed-HMACed with an
+explicit protected intent key. The recoverable input is retained only as AEAD
+bytes bound to installation, operation, target and message identity; encryption
+and decryption run outside SQL transactions. Admission repeats the complete
+current gate after encryption. Unknown, confirmed terminal result and executor
+retirement purge the ciphertext in the same journal transaction. Expired queued
+input becomes inaccessible at the deadline and is purged/refused by bounded
+`MessageHandler.expire_payloads`; machine polling invokes that cleanup. The
+production worker root must also schedule it while nodes are offline. Minimal
+IDs/digest tombstones and safe receipts follow the common operation retention
+policy; audit/outbox/status never contain message text, ciphertext, connection
+nonce, or keys. An identical existing request remains readable without a working
+cipher provider or a still-live original target; it does not authorize execution.
+
+`machinebinding.operations/compose` take explicit `message_cipher`,
+`message_support`, approved `grants`, and optional `endpoints` ports. The default
+root has no cipher key or physical send capability and refuses before admission;
+it has no success adapter. The protected `/api/v1/machine/work/input` send schema
+adds message, message/request correlation IDs, priority, notification request,
+holder endpoint and private reply address to the fixed Git identity fields.
+NodeHTTP validates that finite shape. The isolated PostgreSQL/TLS checks use
+production DRF and NodeHTTP with explicitly controlled machine receipts, not a
+claim of native application's delivery/idle acceptance or deployment readiness.
 
 ### Controlled host-session restart vertical (#625/#639/#640)
 

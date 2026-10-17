@@ -88,10 +88,18 @@ class OperationWork:
     def retired(self, target_id, executor_epoch):
         self.operations.retired_machine(target_id, executor_epoch)
 
+    def message_input(self, work):
+        return self.operations.messages.input(MachineStep(**asdict(work)))
 
-def operations(*, grants=None, restart_support=None):
+
+def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None):
+    from mop.server.operations.messages import MessageHandler
+    from .messagebinding import MessageRecipients
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
-    return operations_service(grants=grants.local_authority(), targets=Targets(grants), restart_support=restart_support)
+    service = operations_service(grants=grants.local_authority(), targets=Targets(grants), restart_support=restart_support)
+    service.messages = MessageHandler(service, cipher=message_cipher, support=message_support,
+        recipients=MessageRecipients(grants), endpoints=endpoints)
+    return service
 
 
 def authority():
@@ -109,7 +117,8 @@ def authority():
         raise Unavailable(str(error)) from None
 
 
-def compose(*, grants=None, restart_support=None):
+def compose(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None):
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
-    return machine_execution_service(work=OperationWork(operations(grants=grants, restart_support=restart_support)),
+    return machine_execution_service(work=OperationWork(operations(grants=grants, restart_support=restart_support,
+        message_support=message_support, message_cipher=message_cipher, endpoints=endpoints)),
         grants=ReceivingGrant(grants), installation=authority)

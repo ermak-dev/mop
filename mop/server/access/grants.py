@@ -541,6 +541,14 @@ class Grants:
         required = tuple(sorted(('variable' if kind == 'vars' else 'file', name) for kind, name in names))
         return AddressedPolicy(required, tuple(self._info(row) for row in chain))
 
+    def authorize_recipient(self, binding, *, dispatch=False):
+        """Receiving policy — SQL-only gate; outgoing capabilities проверяет Access."""
+        if type(dispatch) is not bool:
+            raise ValueError('typed dispatch policy required')
+        rows = self._execution_rows(binding)
+        if dispatch and not rows[0].intent.definition.receives_dispatch:
+            raise auth.Denied('target does not receive dispatch')
+
     def local_authority(self):
         return LocalGrantAuthority(self)
 
