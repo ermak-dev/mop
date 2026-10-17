@@ -15,6 +15,7 @@
 SERVER = (
     "Django==5.2.18",
     "djangorestframework==3.16.1",
+    "drf-spectacular==0.28.0",  # генерация публичного OpenAPI артефакта #696
     "channels==4.3.2",
     "uvicorn[standard]==0.54.0",
     "psycopg[binary,pool]==3.3.6",

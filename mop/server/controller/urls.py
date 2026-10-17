@@ -7,6 +7,8 @@ from rest_framework.authtoken.models import TokenProxy
 if admin.site.is_registered(TokenProxy):
     admin.site.unregister(TokenProxy)
 from .views import Health
+# Публичный OpenAPI документ #696: staff-only view того же артефакта.
+from .openapi_schema import SchemaView
 
 from django.views.decorators.cache import never_cache
 from . import authviews as auth
@@ -75,4 +77,5 @@ urlpatterns = [
     path('api/v1/dispatches', operations.DispatchTask.as_view()),
     path('api/v1/operations', operations.RequestLookup.as_view()),
     path('api/v1/operations/<uuid:operation_id>', operations.OperationStatus.as_view()),
+    path('api/v1/schema', SchemaView.as_view()),
 ]

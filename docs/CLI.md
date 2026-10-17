@@ -441,6 +441,7 @@ the developer's own commands: the project's tracker, CI and checks, not the pool
   mop dev bug   project tracker: GitLab issues, one issue per unit of work
   mop dev ci    pipelines, job logs, lint and runners: GitLab CI from the terminal
   mop dev docs  regenerate docs/CLI.md, the CLI reference, from the docstrings
+  mop dev openapi  regenerate docs/API.schema.yaml, the public OpenAPI schema
   mop dev test  run the checks in tests/, all or the named ones
   mop dev controller  isolated PostgreSQL foundation checks in Docker
   mop dev web   build the dashboard (web/dist) and check the committed build
@@ -758,6 +759,24 @@ is written. A commandlet with an empty docstring is refused, named.
 
 The reference is committed: an edit to a commandlet's docstring ships with
 the regenerated docs/CLI.md in the same commit, or CI is red.
+```
+
+#### mop dev openapi
+
+```text
+mop dev openapi [--check]: regenerate the public OpenAPI artefact
+
+Runs the offline server-side generation (mop/server/controller/openapi.py)
+in a subprocess: the commandlet itself stays in the client layer and never
+imports django, like `mop dev web build` keeps npm out of Python. The
+generation needs no bootstrap, database or network -- only the tree and the
+declared server extra.
+
+Writes docs/API.schema.yaml. Silent when it lands.
+
+  --check   generate into a temporary file instead and compare it with the
+            committed docs/API.schema.yaml byte for byte; a difference is
+            listed and the exit code is 1: regenerate with `mop dev openapi`
 ```
 
 #### mop dev test

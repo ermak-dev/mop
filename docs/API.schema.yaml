@@ -1,0 +1,2465 @@
+openapi: 3.0.3
+info:
+  title: mop controller API
+  version: '1'
+  description: 'Public management contract of the mop controller: commands and queries
+    for humans and CI. Machine and private runtime protocols (node executor, credential
+    and endpoint machinery) are deliberately not part of this schema; their contract
+    is enforced by tests and docs/API.md. Every operation can refuse with the shared
+    error envelope: schema_version plus error{code, message, retryable}.'
+paths:
+  /api/v1/auth/login:
+    post:
+      operationId: api_v1_auth_login_create
+      description: 'Password login: standard session plus access binding commit together.'
+      tags:
+      - api-v1-auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      security:
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserIdReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/auth/logout:
+    post:
+      operationId: api_v1_auth_logout_create
+      description: 'Logout: notes the session and flushes it; accepts no fields.'
+      tags:
+      - api-v1-auth
+      security:
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionOnly'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/auth/token:
+    post:
+      operationId: api_v1_auth_token_create
+      description: Issues an API token for a session or an explicit password pair.
+      tags:
+      - api-v1-auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      security:
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/auth/token/revoke:
+    post:
+      operationId: api_v1_auth_token_revoke_create
+      description: Revokes the current token after password reauthentication.
+      tags:
+      - api-v1-auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionOnly'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/auth/token/rotate:
+    post:
+      operationId: api_v1_auth_token_rotate_create
+      description: Rotates the current token after password reauthentication.
+      tags:
+      - api-v1-auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/events:
+    get:
+      operationId: api_v1_events_retrieve
+      description: Durable invalidations after a cursor; the event cursor is required.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+        description: event cursor of the previous response
+        required: true
+      - in: query
+        name: page_size
+        schema:
+          type: string
+        description: event limit within 1..500
+      - in: query
+        name: project_id
+        schema:
+          type: string
+        description: narrow the events to one project
+      tags:
+      - api-v1-events
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Events'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/health:
+    get:
+      operationId: api_v1_health_retrieve
+      description: Liveness and installation identity of the controller.
+      tags:
+      - api-v1-health
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/identity:
+    get:
+      operationId: api_v1_identity_retrieve
+      description: 'Current actor identity: user, kind and delegation owner.'
+      tags:
+      - api-v1-identity
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/nodes/{node_id}/commands/drain:
+    post:
+      operationId: api_v1_nodes_node_id_commands_drain_submit
+      description: Submits a node drain command; eligible is fixed by the route.
+      parameters:
+      - in: path
+        name: node_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-nodes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/nodes/{node_id}/commands/enable:
+    post:
+      operationId: api_v1_nodes_node_id_commands_enable_submit
+      description: Submits a node enable command; eligible is fixed by the route.
+      parameters:
+      - in: path
+        name: node_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-nodes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/operations:
+    get:
+      operationId: api_v1_operations_retrieve
+      description: Idempotent operation lookup by request_id and epoch.
+      parameters:
+      - in: query
+        name: epoch
+        schema:
+          type: string
+        description: installation epoch of the command
+        required: true
+      - in: query
+        name: request_id
+        schema:
+          type: string
+        description: idempotency key of the command
+        required: true
+      tags:
+      - api-v1-operations
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: api_v1_operations_operation_id_detail
+      description: Durable operation status; optional epoch bounds a stale read.
+      parameters:
+      - in: query
+        name: epoch
+        schema:
+          type: string
+        description: bounds a stale read to an installation epoch
+      - in: path
+        name: operation_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-operations
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects:
+    get:
+      operationId: api_v1_projects_retrieve
+      description: Visible projects as a cursor page; the cursor is not a permission.
+      tags:
+      - api-v1-projects
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPage'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+    post:
+      operationId: api_v1_projects_create
+      description: Creates a project from its origin; 201 with a Location header.
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectBody'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects/{project_id}:
+    get:
+      operationId: api_v1_projects_project_id_detail
+      description: One visible project.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectBody'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+    put:
+      operationId: api_v1_projects_project_id_update_detail
+      description: Reconfigures a project; expected_revision is a compare-and-swap
+        guard.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectConfiguration'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectBody'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects/{project_id}/commands/build:
+    post:
+      operationId: api_v1_projects_project_id_commands_build_submit
+      description: Submits a finite pinned build command; accepted returns 202 with
+        a Location header.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/puppets:
+    get:
+      operationId: api_v1_puppets_retrieve
+      description: Scoped materialized pool snapshot as a cursor page.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+        description: page cursor of the previous response
+      - in: query
+        name: page_size
+        schema:
+          type: string
+        description: page size within 1..500
+      - in: query
+        name: project_id
+        schema:
+          type: string
+        description: narrow the snapshot to one project
+      tags:
+      - api-v1-puppets
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Snapshot'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/puppets/{target_id}:
+    get:
+      operationId: api_v1_puppets_target_id_detail
+      description: One materialized puppet with observations; accepts no query fields.
+      parameters:
+      - in: path
+        name: target_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-puppets
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PuppetDetailReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/puppets/{target_id}/commands/restart:
+    post:
+      operationId: api_v1_puppets_target_id_commands_restart_submit
+      description: Submits a puppet restart command; fresh requires its own credential
+        binding.
+      parameters:
+      - in: path
+        name: target_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-puppets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestartCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/snapshot:
+    get:
+      operationId: api_v1_snapshot_retrieve
+      description: Scoped materialized pool snapshot as a cursor page.
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+        description: page cursor of the previous response
+      - in: query
+        name: page_size
+        schema:
+          type: string
+        description: page size within 1..500
+      - in: query
+        name: project_id
+        schema:
+          type: string
+        description: narrow the snapshot to one project
+      tags:
+      - api-v1-snapshot
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Snapshot'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/usage:
+    get:
+      operationId: api_v1_usage_retrieve
+      description: Materialized proxy usage aggregates for a bounded ISO date period.
+      parameters:
+      - in: query
+        name: after
+        schema:
+          type: string
+        description: page cursor of the previous response
+      - in: query
+        name: end
+        schema:
+          type: string
+        description: exclusive ISO date of the period
+      - in: query
+        name: limit
+        schema:
+          type: string
+        description: page size within 1..100
+      - in: query
+        name: schema_version
+        schema:
+          type: string
+        description: wire version, always 1
+      - in: query
+        name: start
+        schema:
+          type: string
+        description: inclusive ISO date of the period
+      tags:
+      - api-v1-usage
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Usage'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+components:
+  schemas:
+    BuildCommand:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        request_id:
+          type: string
+        expected_revision:
+          type: string
+        not_after:
+          type: string
+        policy_id:
+          type: string
+        mode:
+          $ref: '#/components/schemas/ModeEnum'
+        target_nodes:
+          type: array
+          items:
+            type: string
+          maxItems: 64
+          minItems: 1
+        force_safety:
+          type: boolean
+      required:
+      - epoch
+      - expected_revision
+      - force_safety
+      - mode
+      - not_after
+      - policy_id
+      - request_id
+      - target_nodes
+    Credentials:
+      type: object
+      properties:
+        username:
+          type: string
+          maxLength: 150
+        password:
+          type: string
+          maxLength: 4096
+    Error:
+      type: object
+      description: 'Общий конверт отказа: глобальная форма, не предметный сериализатор.'
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            retryable:
+              type: boolean
+          required:
+          - code
+          - message
+          - retryable
+      required:
+      - error
+      - schema_version
+    EventEntity:
+      type: object
+      properties:
+        kind:
+          type: string
+        id:
+          type: string
+        incarnation:
+          type: string
+          nullable: true
+        revision:
+          type: string
+        deleted:
+          type: boolean
+      required:
+      - deleted
+      - id
+      - incarnation
+      - kind
+      - revision
+    Events:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        cursor:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectionEvent'
+        coverage:
+          type: array
+          items:
+            type: string
+      required:
+      - coverage
+      - cursor
+      - epoch
+      - results
+    Health:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        state:
+          type: string
+        identity:
+          type: string
+        epoch:
+          type: string
+        effects_enabled:
+          type: boolean
+      required:
+      - effects_enabled
+      - epoch
+      - identity
+      - state
+    IdentityReply:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        user_id:
+          type: integer
+        kind:
+          $ref: '#/components/schemas/KindEnum'
+        human_owner_id:
+          type: integer
+          nullable: true
+        node_id:
+          type: string
+          nullable: true
+        grant_id:
+          type: string
+          nullable: true
+      required:
+      - grant_id
+      - human_owner_id
+      - kind
+      - node_id
+      - user_id
+    KindEnum:
+      enum:
+      - human
+      - service
+      - agent
+      type: string
+      description: |-
+        * `human` - human
+        * `service` - service
+        * `agent` - agent
+    ModeEnum:
+      enum:
+      - missing
+      - update
+      - rebuild
+      type: string
+      description: |-
+        * `missing` - missing
+        * `update` - update
+        * `rebuild` - rebuild
+    NodeCommand:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        request_id:
+          type: string
+        expected_revision:
+          type: string
+        not_after:
+          type: string
+        params:
+          type: object
+          properties: {}
+          additionalProperties: false
+      required:
+      - epoch
+      - expected_revision
+      - not_after
+      - params
+      - request_id
+    Operation:
+      type: object
+      properties:
+        id:
+          type: string
+        request_id:
+          type: string
+        epoch:
+          type: string
+        state:
+          $ref: '#/components/schemas/StateEnum'
+        revision:
+          type: string
+        code:
+          type: string
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        target:
+          type: object
+          additionalProperties: true
+        steps:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        resources_held:
+          type: boolean
+        evidence:
+          nullable: true
+          type: object
+          additionalProperties: true
+      required:
+      - epoch
+      - evidence
+      - id
+      - request_id
+      - resources_held
+      - revision
+      - state
+      - target
+    OperationReply:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        operation:
+          $ref: '#/components/schemas/Operation'
+      required:
+      - epoch
+      - operation
+    ProjectBody:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        id:
+          type: string
+        name:
+          type: string
+        origin:
+          type: string
+        revision:
+          type: string
+        puppet_limit:
+          type: integer
+          nullable: true
+      required:
+      - id
+      - name
+      - origin
+      - puppet_limit
+      - revision
+    ProjectConfiguration:
+      type: object
+      properties:
+        origin:
+          type: string
+          maxLength: 2048
+        puppet_limit:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+        expected_revision:
+          type: string
+      required:
+      - expected_revision
+      - origin
+      - puppet_limit
+    ProjectCreate:
+      type: object
+      properties:
+        origin:
+          type: string
+          maxLength: 2048
+        puppet_limit:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+      required:
+      - origin
+    ProjectFields:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        origin:
+          type: string
+        revision:
+          type: string
+        puppet_limit:
+          type: integer
+          nullable: true
+      required:
+      - id
+      - name
+      - origin
+      - puppet_limit
+      - revision
+    ProjectPage:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        count:
+          type: integer
+        next_cursor:
+          type: string
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectFields'
+      required:
+      - count
+      - next_cursor
+      - results
+    ProjectionEvent:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        event_id:
+          type: string
+        epoch:
+          type: string
+        project_id:
+          type: string
+        type:
+          $ref: '#/components/schemas/TypeEnum'
+        entity:
+          $ref: '#/components/schemas/EventEntity'
+      required:
+      - entity
+      - epoch
+      - event_id
+      - project_id
+      - type
+    Puppet:
+      type: object
+      properties:
+        kind:
+          type: string
+        id:
+          type: string
+        incarnation:
+          type: string
+          nullable: true
+        revision:
+          type: string
+        deleted:
+          type: boolean
+        name:
+          type: string
+          nullable: true
+        aliases:
+          type: array
+          items:
+            type: string
+        project_id:
+          type: string
+        project_name:
+          type: string
+        node_id:
+          type: string
+        node_name:
+          type: string
+        desired:
+          type: object
+          additionalProperties: true
+        applied:
+          type: object
+          additionalProperties: true
+        observed:
+          type: object
+          additionalProperties: true
+        state:
+          $ref: '#/components/schemas/PuppetState'
+        node:
+          type: object
+          additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: true
+      required:
+      - aliases
+      - applied
+      - deleted
+      - desired
+      - id
+      - incarnation
+      - kind
+      - name
+      - node
+      - node_id
+      - node_name
+      - observed
+      - project_id
+      - project_name
+      - revision
+      - state
+      - usage
+    PuppetDetailReply:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        puppet:
+          $ref: '#/components/schemas/Puppet'
+      required:
+      - epoch
+      - puppet
+    PuppetState:
+      type: object
+      properties:
+        kind:
+          type: string
+        detail:
+          type: string
+          nullable: true
+        branch:
+          type: string
+          nullable: true
+      required:
+      - branch
+      - detail
+      - kind
+    RestartCommand:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        request_id:
+          type: string
+        incarnation:
+          type: string
+        expected_revision:
+          type: string
+        not_after:
+          type: string
+        params:
+          type: object
+          properties:
+            fresh:
+              type: boolean
+          additionalProperties: false
+      required:
+      - epoch
+      - expected_revision
+      - incarnation
+      - not_after
+      - params
+      - request_id
+    SchemaVersionEnum:
+      type: integer
+      enum:
+      - 1
+    Snapshot:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        snapshot_id:
+          type: string
+        cursor:
+          type: string
+        next_cursor:
+          type: string
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Puppet'
+        coverage:
+          type: object
+          additionalProperties:
+            type: boolean
+        handshake_complete:
+          type: boolean
+      required:
+      - coverage
+      - cursor
+      - epoch
+      - handshake_complete
+      - next_cursor
+      - results
+      - snapshot_id
+    StateEnum:
+      enum:
+      - accepted
+      - running
+      - reconciling
+      - succeeded
+      - refused
+      - failed
+      - partial
+      - unknown
+      type: string
+      description: |-
+        * `accepted` - accepted
+        * `running` - running
+        * `reconciling` - reconciling
+        * `succeeded` - succeeded
+        * `refused` - refused
+        * `failed` - failed
+        * `partial` - partial
+        * `unknown` - unknown
+    TokenReply:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        token:
+          type: string
+      required:
+      - token
+    TypeEnum:
+      enum:
+      - puppet.changed
+      - puppet.deleted
+      type: string
+      description: |-
+        * `puppet.changed` - puppet.changed
+        * `puppet.deleted` - puppet.deleted
+    Usage:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        source:
+          type: string
+        source_complete:
+          type: boolean
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+            end:
+              type: string
+            timezone:
+              type: string
+            end_exclusive:
+              type: boolean
+        attribution:
+          type: object
+          additionalProperties: true
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageSource'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageItem'
+        next:
+          type: string
+          nullable: true
+      required:
+      - attribution
+      - items
+      - next
+      - period
+      - source
+      - source_complete
+      - sources
+    UsageItem:
+      type: object
+      properties:
+        id:
+          type: string
+        source_id:
+          type: string
+        date:
+          type: string
+        key_id:
+          type: string
+          nullable: true
+        provider:
+          type: string
+        model:
+          type: string
+        alias:
+          type: string
+          nullable: true
+        requests:
+          type: integer
+        failed_requests:
+          type: integer
+        partial_events:
+          type: integer
+        counters:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              value:
+                type: string
+                nullable: true
+              known_events:
+                type: integer
+              unknown_events:
+                type: integer
+      required:
+      - alias
+      - counters
+      - date
+      - failed_requests
+      - id
+      - key_id
+      - model
+      - partial_events
+      - provider
+      - requests
+      - source_id
+    UsageSource:
+      type: object
+      properties:
+        id:
+          type: string
+        profile:
+          type: string
+        installed_version:
+          type: string
+        source_complete:
+          type: boolean
+        unresolved_reads:
+          type: integer
+        gap_reads:
+          type: integer
+        last_read_at:
+          type: string
+          nullable: true
+        status:
+          type: string
+      required:
+      - gap_reads
+      - id
+      - installed_version
+      - last_read_at
+      - profile
+      - source_complete
+      - status
+      - unresolved_reads
+    UserIdReply:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        user_id:
+          type: integer
+      required:
+      - user_id
+    VersionOnly:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: sessionid
+    tokenAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Token-based authentication with required prefix "Token"
