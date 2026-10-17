@@ -54,10 +54,10 @@ def _grant_scaffolding(test):
         'runtime': {'driver': 'any', 'receives_dispatch': True},
         'capabilities': {'node_verbs': ['send'], 'cluster_verbs': [], 'dispatch': False, 'spawn': []},
         'prompt': 'soul.md'}, ensure_ascii=False).encode()
-    bundle = api.publish_bundle(test.actor, project_id=test.project.pk, manifest=raw,
+    bundle = api.publish_definition(test.actor, project_id=test.project.pk, manifest=raw,
                                 prompt=b'prompt', provenance='test')
-    api.approve_bundle(test.actor, bundle.id)
-    return api, api.reserve(test.actor, project_id=test.project.pk, bundle_id=bundle.id,
+    api.approve_definition(test.actor, bundle.id)
+    return api, api.reserve(test.actor, project_id=test.project.pk, definition_id=bundle.id,
                             target_id=uuid.uuid4(), incarnation=uuid.uuid4(),
                             request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
 

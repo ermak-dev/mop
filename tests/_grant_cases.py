@@ -24,7 +24,7 @@ from mop.server.secrets.crypto import Keyring, XChaCha20Provider
 
 # HYPOTHESIS: файловый registry не защищает ORM request/CAS и live Django authority.
 # SOLUTION: immutable bundle + creation intent + отдельные lifecycle/approval/binding ports.
-# RED: pipeline 5467, jobs 29470/29471 — отсутствуют собственные RoleBundle/retention.
+# RED: pipeline 5467, jobs 29470/29471 — отсутствуют собственные AgentDefinitionVersion/retention.
 # Дополнительный red: отзыв target token, ciphertext activation, shared prompt read,
 # ошибка commit с key в сообщении и отзыв source во время provider wait.
 # RESULT: все 33 собственных cases проходят на изолированных PG16/17; из 131 cases
@@ -101,7 +101,7 @@ class GrantCases(TransactionTestCase):
     serialized_rollback = True
 
     def setUp(self):
-        self.assertTrue(hasattr(access, 'RoleBundle'), 'immutable ORM RoleBundle is missing')
+        self.assertTrue(hasattr(access, 'AgentDefinitionVersion'), 'immutable ORM AgentDefinitionVersion is missing')
         self.assertTrue(hasattr(access, 'Grant'), 'ORM delegated grant lifecycle is missing')
         self.g = importlib.import_module('mop.server.access.grants')
         initialize()
@@ -126,7 +126,7 @@ class GrantCases(TransactionTestCase):
         # Настоящие CONTROL permissions новой БД, без искусственных content types.
         for code in ('create_puppet', 'send_message', 'dispatch_task'):
             self.permit('sessions.' + code)
-        self.bundle = self.publish()
+        self.definition = self.publish()
 
     def permit(self, *actions):
         for action in actions:
@@ -137,20 +137,20 @@ class GrantCases(TransactionTestCase):
 
     def publish(self, role='worker', **options):
         raw = ('# exact manifest bytes\n' + json.dumps(manifest(role, **options), ensure_ascii=False)).encode()
-        value = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+        value = self.api.publish_definition(self.actor, project_id=self.project.pk,
             manifest=raw, prompt=b'private role prompt\r\n', provenance='test source revision')
-        self.api.approve_bundle(self.actor, value.id)
+        self.api.approve_definition(self.actor, value.id)
         return value
 
-    def reserve(self, *, bundle=None, actor=None, request_id=None, **kw):
-        args = dict(project_id=self.project.pk, bundle_id=(bundle or self.bundle).id,
+    def reserve(self, *, definition=None, actor=None, request_id=None, **kw):
+        args = dict(project_id=self.project.pk, definition_id=(definition or self.definition).id,
                     target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=request_id or uuid.uuid4(),
                     expires_at=timezone.now() + timedelta(hours=1))
         args.update(kw)
         return self.api.reserve(actor or self.actor, **args)
 
-    def active(self, *, bundle=None, actor=None):
-        row = self.reserve(bundle=bundle, actor=actor)
+    def active(self, *, definition=None, actor=None):
+        row = self.reserve(definition=definition, actor=actor)
         self.api.provision(actor or self.actor, row.id, expected_revision=row.revision)
         row = self.api.get(actor or self.actor, row.id)
         binding = self.g.RoleBinding(self.project.pk, row.target_id, row.incarnation,
@@ -207,7 +207,7 @@ class GrantCases(TransactionTestCase):
     # STATUS: FIXED — see #635 / #634
     def test_public_project_retirement_revokes_existing_grant_and_receiving_binding(self):
         from _catalog_retirement_cases import retirement_catalog
-        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         row, actor = self.active(actor=parent_actor)
         token = Token.objects.get(user_id=row.principal_id).key
         local = self.api.local_authority()
@@ -272,7 +272,7 @@ class GrantCases(TransactionTestCase):
 
     def test_execution_binding_rechecks_ancestor_credentials_and_current_owner(self):
         query = self.execution_query()
-        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         child, _ = self.active(actor=parent_actor)
         with transaction.atomic():
             self.assertIsNone(query(child.binding))
@@ -339,16 +339,16 @@ class GrantCases(TransactionTestCase):
     def test_published_child_sets_reject_ordinary_append_before_and_after_approval(self):
         for approved in (False, True):
             raw = json.dumps(manifest('sealed-' + str(approved).lower())).encode()
-            bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+            bundle = self.api.publish_definition(self.actor, project_id=self.project.pk,
                 manifest=raw, prompt=b'prompt', provenance='seal test')
             if approved:
-                self.api.approve_bundle(self.actor, bundle.id)
-            for model, values in ((access.RoleCapability, dict(scope='cluster', verb='restart')),
-                    (access.RoleSpawn, dict(role='unapproved')),
-                    (access.RoleSecretName, dict(kind='vars', name='UNAPPROVED'))):
+                self.api.approve_definition(self.actor, bundle.id)
+            for model, values in ((access.DefinitionCapability, dict(scope='cluster', verb='restart')),
+                    (access.DefinitionSpawn, dict(role='unapproved')),
+                    (access.DefinitionSecretName, dict(kind='vars', name='UNAPPROVED'))):
                 with self.subTest(approved=approved, model=model.__name__):
                     with self.assertRaisesRegex(ValueError, 'sealed'):
-                        model.objects.create(bundle_id=bundle.id, **values)
+                        model.objects.create(definition_id=bundle.id, **values)
 
     def test_local_and_full_authority_cannot_gain_appended_restart(self):
         row, actor = self.active()
@@ -361,7 +361,7 @@ class GrantCases(TransactionTestCase):
             with self.assertRaises(PermissionError):
                 authority.authorize(actor, 'sessions.restart_puppet', project_ids=(self.project.pk,))
         with self.assertRaisesRegex(ValueError, 'sealed'):
-            access.RoleCapability.objects.create(bundle_id=row.bundle_id, scope='cluster', verb='restart')
+            access.DefinitionCapability.objects.create(definition_id=row.definition_id, scope='cluster', verb='restart')
         for authority in (self.api, self.api.local_authority()):
             with self.assertRaises(PermissionError):
                 authority.authorize(actor, 'sessions.restart_puppet', project_ids=(self.project.pk,))
@@ -404,31 +404,31 @@ class GrantCases(TransactionTestCase):
                 self.assertNotEqual(current.credential_id, actor.credential_id)
 
     def test_verified_seal_and_children_have_no_ordinary_orm_mutation_bypass(self):
-        self.assertTrue(hasattr(access, 'RoleBundleSeal'), 'verified publication seal is missing')
+        self.assertTrue(hasattr(access, 'AgentDefinitionSeal'), 'verified publication seal is missing')
         value = manifest('all-children', spawn=('worker',))
         value['secrets'] = {'vars': ['APPROVED'], 'files': ['approved.txt']}
-        bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+        bundle = self.api.publish_definition(self.actor, project_id=self.project.pk,
             manifest=json.dumps(value).encode(), prompt=b'prompt', provenance='all child models')
-        for model in (access.RoleBundleSeal, access.RoleCapability, access.RoleSpawn, access.RoleSecretName):
-            row = model.objects.filter(bundle_id=bundle.id).first()
+        for model in (access.AgentDefinitionSeal, access.DefinitionCapability, access.DefinitionSpawn, access.DefinitionSecretName):
+            row = model.objects.filter(definition_id=bundle.id).first()
             self.assertIsNotNone(row)
             for change in (lambda: row.save(), lambda: row.delete(),
                     lambda: model.objects.filter(pk=row.pk).delete(),
-                    lambda: model.objects.filter(pk=row.pk).update(bundle_id=self.bundle.id),
-                    lambda: model.objects.bulk_update([row], ['bundle']),
+                    lambda: model.objects.filter(pk=row.pk).update(definition_id=self.definition.id),
+                    lambda: model.objects.bulk_update([row], ['definition']),
                     lambda: model.objects.bulk_create([row])):
                 with self.subTest(model=model.__name__, change=change), self.assertRaises(ValueError):
                     change()
         with self.assertRaisesRegex(ValueError, 'publication'):
-            access.RoleBundleSeal.objects.create(bundle_id=self.bundle.id)
+            access.AgentDefinitionSeal.objects.create(definition_id=self.definition.id)
 
     def test_unsealed_preexisting_data_is_not_implicitly_trusted_or_resealed(self):
-        self.assertTrue(hasattr(access, 'RoleBundleSeal'), 'verified publication seal is missing')
+        self.assertTrue(hasattr(access, 'AgentDefinitionSeal'), 'verified publication seal is missing')
         row, actor = self.active()
         # Историческая модель имитирует данные до schema migration; не штатный ORM bypass.
         from django.db.migrations.loader import MigrationLoader
         historical = MigrationLoader(connections['default']).project_state().apps
-        historical.get_model('access', 'RoleBundleSeal').objects.filter(bundle_id=row.bundle_id).delete()
+        historical.get_model('access', 'AgentDefinitionSeal').objects.filter(definition_id=row.definition_id).delete()
         local = self.api.local_authority()
         for authority in (self.api, local):
             with self.assertRaisesRegex(PermissionError, 'sealed'):
@@ -438,16 +438,16 @@ class GrantCases(TransactionTestCase):
         with transaction.atomic(), self.assertRaisesRegex(PermissionError, 'sealed'):
             self.api.authorize_execution(row.binding)
         with self.assertRaisesRegex(PermissionError, 'sealed'):
-            self.api.approve_bundle(self.actor, row.bundle_id)
+            self.api.approve_definition(self.actor, row.definition_id)
         raw = ('# exact manifest bytes\n' + json.dumps(manifest(), ensure_ascii=False)).encode()
         with self.assertRaisesRegex(PermissionError, 'sealed'):
-            self.api.publish_bundle(self.actor, project_id=self.project.pk,
+            self.api.publish_definition(self.actor, project_id=self.project.pk,
                 manifest=raw, prompt=b'private role prompt\r\n', provenance='retry cannot trust old rows')
-        self.assertFalse(access.RoleBundleSeal.objects.filter(bundle_id=row.bundle_id).exists())
+        self.assertFalse(access.AgentDefinitionSeal.objects.filter(definition_id=row.definition_id).exists())
 
     def test_approval_and_append_share_parent_lock_before_final_normalized_check(self):
         raw = json.dumps(manifest('approval-race')).encode()
-        bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+        bundle = self.api.publish_definition(self.actor, project_id=self.project.pk,
             manifest=raw, prompt=b'prompt', provenance='approval append race')
         at_check, release, at_append = Event(), Event(), Event()
         normalized = self.api._normalized
@@ -461,13 +461,13 @@ class GrantCases(TransactionTestCase):
 
         def approve():
             try:
-                return self.api.approve_bundle(self.actor, bundle.id)
+                return self.api.approve_definition(self.actor, bundle.id)
             finally:
                 connections.close_all()
 
         def append():
             def observe(execute, sql, params, many, context):
-                if ((sql.startswith('SELECT') and 'access_rolebundle' in sql and 'FOR UPDATE' in sql)
+                if ((sql.startswith('SELECT') and 'access_agentdefinitionversion' in sql and 'FOR UPDATE' in sql)
                         or (sql.startswith('INSERT') and 'access_rolecapability' in sql)):
                     at_append.set()
                 return execute(sql, params, many, context)
@@ -475,7 +475,7 @@ class GrantCases(TransactionTestCase):
                 # Событие отмечает реальный SQL конкурента, не запуск потока.
                 with connections['default'].execute_wrapper(observe):
                     with self.assertRaisesRegex(ValueError, 'sealed'):
-                        access.RoleCapability.objects.create(bundle_id=bundle.id, scope='cluster', verb='restart')
+                        access.DefinitionCapability.objects.create(definition_id=bundle.id, scope='cluster', verb='restart')
             finally:
                 connections.close_all()
 
@@ -491,10 +491,10 @@ class GrantCases(TransactionTestCase):
                 release.set()
             approval.result(timeout=15)
             appender.result(timeout=15)
-        self.api.read_bundle(self.actor, bundle.id)
+        self.api.read_definition(self.actor, bundle.id)
 
     def test_publication_checks_actual_complete_child_sets_before_recording_seal(self):
-        self.assertTrue(hasattr(access, 'RoleBundleSeal'), 'verified publication seal is missing')
+        self.assertTrue(hasattr(access, 'AgentDefinitionSeal'), 'verified publication seal is missing')
         value = manifest('seal-order', spawn=('worker',))
         value['secrets'] = {'vars': ['APPROVED'], 'files': ['approved.txt']}
         observed = []
@@ -502,51 +502,51 @@ class GrantCases(TransactionTestCase):
 
         def check(row, parsed):
             observed.append(row.pk)
-            self.assertFalse(access.RoleBundleSeal.objects.filter(bundle=row).exists())
-            self.assertEqual(set(access.RoleCapability.objects.filter(bundle=row).values_list('scope', 'verb')),
+            self.assertFalse(access.AgentDefinitionSeal.objects.filter(definition=row).exists())
+            self.assertEqual(set(access.DefinitionCapability.objects.filter(definition=row).values_list('scope', 'verb')),
                 {('node', 'send'), ('node', 'state'), ('cluster', 'add'), ('cluster', 'roster')})
-            self.assertEqual(list(access.RoleSpawn.objects.filter(bundle=row).values_list('role', flat=True)), ['worker'])
-            self.assertEqual(set(access.RoleSecretName.objects.filter(bundle=row).values_list('kind', 'name')),
+            self.assertEqual(list(access.DefinitionSpawn.objects.filter(definition=row).values_list('role', flat=True)), ['worker'])
+            self.assertEqual(set(access.DefinitionSecretName.objects.filter(definition=row).values_list('kind', 'name')),
                 {('vars', 'APPROVED'), ('files', 'approved.txt')})
             normalized(row, parsed)
 
         with patch.object(self.api, '_normalized', check):
-            bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+            bundle = self.api.publish_definition(self.actor, project_id=self.project.pk,
                 manifest=json.dumps(value).encode(), prompt=b'prompt', provenance='seal order')
         self.assertEqual(observed, [bundle.id])
-        self.assertTrue(access.RoleBundleSeal.objects.filter(bundle_id=bundle.id).exists())
-        self.assertFalse(access.RoleBundleApproval.objects.filter(bundle_id=bundle.id).exists())
+        self.assertTrue(access.AgentDefinitionSeal.objects.filter(definition_id=bundle.id).exists())
+        self.assertFalse(access.AgentDefinitionApproval.objects.filter(definition_id=bundle.id).exists())
 
     def test_publication_cannot_seal_a_mismatching_actual_child_set(self):
         normalized = self.api._normalized
 
         def append_before_verify(row, parsed):
-            access.RoleCapability.objects.create(bundle=row, scope='cluster', verb='restart')
+            access.DefinitionCapability.objects.create(definition=row, scope='cluster', verb='restart')
             return normalized(row, parsed)
 
         with patch.object(self.api, '_normalized', append_before_verify):
             with self.assertRaisesRegex(PermissionError, 'normalized capabilities mismatch'):
-                self.api.publish_bundle(self.actor, project_id=self.project.pk,
+                self.api.publish_definition(self.actor, project_id=self.project.pk,
                     manifest=json.dumps(manifest('seal-mismatch')).encode(), prompt=b'prompt', provenance='mismatch')
-        self.assertFalse(access.RoleBundle.objects.filter(role='seal-mismatch').exists())
+        self.assertFalse(access.AgentDefinitionVersion.objects.filter(role='seal-mismatch').exists())
 
     def test_exact_bytes_canonical_digest_normalized_caps_and_immutable_write_paths(self):
-        value = self.api.read_bundle(self.actor, self.bundle.id)
+        value = self.api.read_definition(self.actor, self.definition.id)
         self.assertEqual(value.prompt, b'private role prompt\r\n')
         self.assertTrue(value.manifest.startswith(b'# exact manifest bytes\n'))
         parsed = soul.parse(value.manifest.decode())
-        self.assertEqual(self.bundle.digest, soul.digest(parsed.to_dict(), value.prompt))
+        self.assertEqual(self.definition.digest, soul.digest(parsed.to_dict(), value.prompt))
         self.assertIsInstance(value.capabilities.node_verbs, tuple)
-        model = access.RoleBundle.objects.get(pk=self.bundle.id)
-        for mutate in (lambda: access.RoleBundle.objects.filter(pk=model.pk).update(digest='b' * 64),
-                       lambda: access.RoleBundle.objects.bulk_update([model], ['digest']),
-                       lambda: access.RoleBundle.objects.bulk_create([model]), lambda: model.save()):
+        model = access.AgentDefinitionVersion.objects.get(pk=self.definition.id)
+        for mutate in (lambda: access.AgentDefinitionVersion.objects.filter(pk=model.pk).update(digest='b' * 64),
+                       lambda: access.AgentDefinitionVersion.objects.bulk_update([model], ['digest']),
+                       lambda: access.AgentDefinitionVersion.objects.bulk_create([model]), lambda: model.save()):
             with self.assertRaises(ValueError):
                 mutate()
-        dump = serializers.serialize('json', access.RoleBundle.objects.all())
+        dump = serializers.serialize('json', access.AgentDefinitionVersion.objects.all())
         self.assertNotIn('private role prompt', dump)
         self.assertNotIn('private role prompt', repr(value))
-        self.assertEqual(self.api.read_bundle(self.actor, model.pk), value)
+        self.assertEqual(self.api.read_definition(self.actor, model.pk), value)
 
     def test_bundle_is_not_self_approved_and_owner_checks_every_read(self):
         other = get_user_model().objects.create_user('other', password='test')
@@ -555,10 +555,10 @@ class GrantCases(TransactionTestCase):
         access.ProjectMembership.objects.create(user=other, project=self.project, source=self.source)
         actor = auth.token_context(auth.issue_token(other.pk))
         with self.assertRaises(PermissionError):
-            self.api.read_bundle(actor, self.bundle.id)
+            self.api.read_definition(actor, self.definition.id)
         self.user.user_permissions.clear()
         with self.assertRaises(PermissionError):
-            self.api.read_bundle(self.actor, self.bundle.id)
+            self.api.read_definition(self.actor, self.definition.id)
 
     def test_role_binding_rejects_partial_or_noncanonical_triple(self):
         for values in (('', 'a' * 64, uuid.uuid4()), ('worker', '', uuid.uuid4()), ('worker', 'bad', None)):
@@ -597,7 +597,7 @@ class GrantCases(TransactionTestCase):
             self.api.activate(row.id, expected_revision=self.api.get(self.actor, row.id).revision)
         with self.assertRaises(PermissionError):
             self.g.Grants(provider=self.provider).reserve(self.actor, project_id=self.project.pk,
-                bundle_id=self.bundle.id, target_id=uuid.uuid4(), incarnation=uuid.uuid4(),
+                definition_id=self.definition.id, target_id=uuid.uuid4(), incarnation=uuid.uuid4(),
                 request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
 
     def test_real_provider_provisions_encrypted_token_without_human_secret_management(self):
@@ -685,7 +685,7 @@ class GrantCases(TransactionTestCase):
 
     def test_dispatch_requires_source_target_binding_and_current_owner_identity(self):
         dispatcher = self.publish('dispatcher', dispatch=True)
-        source, actor = self.active(bundle=dispatcher)
+        source, actor = self.active(definition=dispatcher)
         target, _ = self.active()
         decision = self.api.authorize_dispatch(actor, target_id=target.target_id)
         self.assertEqual(decision.human_owner_id, self.user.pk)
@@ -700,18 +700,18 @@ class GrantCases(TransactionTestCase):
 
     def test_spawn_allowlist_pinned_policy_and_revoked_ancestor(self):
         parent_bundle = self.publish('parent', spawn=('worker',))
-        parent, actor = self.active(bundle=parent_bundle)
+        parent, actor = self.active(definition=parent_bundle)
         child = self.reserve(actor=actor)
         self.assertEqual(child.parent_id, parent.id)
         self.assertEqual(child.policy, parent.policy)
         with self.assertRaises(PermissionError):
-            self.reserve(actor=actor, bundle=parent_bundle)
+            self.reserve(actor=actor, definition=parent_bundle)
         self.api.revoke(self.actor, parent.id, expected_revision=parent.revision)
         with self.assertRaises(PermissionError):
             self.api.provision(actor, child.id, expected_revision=child.revision)
 
     def test_policy_revocation_blocks_spawn_without_replacing_pinned_policy(self):
-        parent, actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         self.approvals.enabled = False
         with self.assertRaises(PermissionError):
             self.reserve(actor=actor)
@@ -742,20 +742,20 @@ class GrantCases(TransactionTestCase):
     def test_corrupt_normalized_bundle_and_digest_deny_all_shared_reads(self):
         row, actor = self.active()
         # DBA/raw repair не trust boundary, но чтение обязано обнаружить corruption.
-        access.RoleBundle._base_manager.filter(pk=self.bundle.id).update(digest='b' * 64)
-        for read in (lambda: self.api.read_bundle(self.actor, self.bundle.id),
+        access.AgentDefinitionVersion._base_manager.filter(pk=self.definition.id).update(digest='b' * 64)
+        for read in (lambda: self.api.read_definition(self.actor, self.definition.id),
                      lambda: self.api.get(self.actor, row.id), lambda: self.api.resolve_actor(actor)):
             with self.assertRaises(PermissionError):
                 read()
 
     def test_unapproved_bundle_cannot_reserve_and_grant_cannot_approve(self):
-        unapproved = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+        unapproved = self.api.publish_definition(self.actor, project_id=self.project.pk,
             manifest=json.dumps(manifest('unapproved')).encode(), prompt=b'new', provenance='unapproved')
         with self.assertRaises(PermissionError):
-            self.reserve(bundle=unapproved)
+            self.reserve(definition=unapproved)
         row, actor = self.active()
         with self.assertRaises(PermissionError):
-            self.api.approve_bundle(actor, self.bundle.id)
+            self.api.approve_definition(actor, self.definition.id)
 
     def test_false_boolean_is_not_an_approval_proof(self):
         class BooleanApproval:
@@ -763,7 +763,7 @@ class GrantCases(TransactionTestCase):
                 return True
         api = self.g.Grants(provider=self.provider, approvals=BooleanApproval(), bindings=self.bindings)
         with self.assertRaises(PermissionError):
-            api.reserve(self.actor, project_id=self.project.pk, bundle_id=self.bundle.id,
+            api.reserve(self.actor, project_id=self.project.pk, definition_id=self.definition.id,
                 target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
                 expires_at=timezone.now() + timedelta(hours=1))
 
@@ -801,15 +801,15 @@ class GrantCases(TransactionTestCase):
         self.assertEqual(expired.state, 'expired')
         with self.assertRaises(ValueError):
             self.api.revoke(self.actor, row.id, expected_revision=expired.revision)
-        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         child, child_actor = self.active(actor=parent_actor)
         Token.objects.filter(user_id=parent_actor.user_id).delete()
         with self.assertRaises(PermissionError):
             self.api.resolve_actor(child_actor)
 
     def test_dispatch_target_refusal_and_ancestor_revocation_apply_to_delivery(self):
-        source, actor = self.active(bundle=self.publish('dispatcher', dispatch=True))
-        target, target_actor = self.active(bundle=self.publish('no-dispatch', receives=False))
+        source, actor = self.active(definition=self.publish('dispatcher', dispatch=True))
+        target, target_actor = self.active(definition=self.publish('no-dispatch', receives=False))
         self.api.authorize_message(actor, target_id=target.target_id)
         with self.assertRaises(PermissionError):
             self.api.authorize_dispatch(actor, target_id=target.target_id)
@@ -825,7 +825,7 @@ class GrantCases(TransactionTestCase):
         self.bindings.bindings[(self.project.pk, row.target_id)] = binding
         self.bindings.receipts[row.id] = binding
         from mop.server.secrets.models import SecretVersion
-        version_id = access.RoleBundle.objects.get(pk=self.bundle.id).content_version_id
+        version_id = access.AgentDefinitionVersion.objects.get(pk=self.definition.id).content_version_id
         version = SecretVersion.objects.get(pk=version_id)
         encrypted = bytes(version.envelope)
         SecretVersion._base_manager.filter(pk=version_id).update(envelope=encrypted[:-1] + bytes([encrypted[-1] ^ 1]))
@@ -880,11 +880,11 @@ class GrantCases(TransactionTestCase):
         self.assertIsNone(access.Grant.objects.get(pk=row.id).credential_version_id)
 
     def test_bundle_read_of_revoked_descendant_is_not_a_shared_read_bypass(self):
-        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         child, child_actor = self.active(actor=parent_actor)
         self.api.revoke(self.actor, parent.id, expected_revision=parent.revision)
         with self.assertRaises(PermissionError):
-            self.api.read_bundle(child_actor, self.bundle.id)
+            self.api.read_definition(child_actor, self.definition.id)
 
     def test_approval_port_receives_exact_stored_intent_binding(self):
         class BoundApproval:
@@ -900,9 +900,9 @@ class GrantCases(TransactionTestCase):
         row = self.reserve()
         intent = access.CreationIntent.objects.get(grant__id=row.id)
         binding = approved.pins[0]
-        self.assertEqual((binding.intent_id, binding.target_id, binding.incarnation, binding.bundle_id,
+        self.assertEqual((binding.intent_id, binding.target_id, binding.incarnation, binding.definition_id,
                           binding.owner_id, binding.actor_id, binding.project_id),
-                         (intent.id, row.target_id, row.incarnation, self.bundle.id,
+                         (intent.id, row.target_id, row.incarnation, self.definition.id,
                           self.user.pk, self.actor.user_id, self.project.pk))
         self.assertEqual(approved.validations[-1], (row.policy, binding))
 
@@ -918,8 +918,8 @@ class GrantCases(TransactionTestCase):
 
     def test_revoke_during_target_provider_wait_denies_before_delivery_effect(self):
         source, actor = self.active()
-        target, _ = self.active(bundle=self.publish('target-role'))
-        target_version = access.RoleBundle.objects.get(pk=target.bundle_id).content_version_id
+        target, _ = self.active(definition=self.publish('target-role'))
+        target_version = access.AgentDefinitionVersion.objects.get(pk=target.definition_id).content_version_id
         provider = self.provider
         class RevokeDuringDecrypt:
             fired = False
@@ -945,18 +945,18 @@ class GrantCases(TransactionTestCase):
         row, actor = self.active()
         private = self.publish('not-delegated')
         with self.assertRaises(PermissionError):
-            self.api.read_bundle(actor, private.id)
-        self.assertEqual(self.api.read_bundle(actor, row.bundle_id).digest, row.digest)
+            self.api.read_definition(actor, private.id)
+        self.assertEqual(self.api.read_definition(actor, row.definition_id).digest, row.digest)
 
     def test_child_bundle_cannot_expand_parent_secret_allowlist(self):
-        parent, actor = self.active(bundle=self.publish('parent', spawn=('sensitive',)))
+        parent, actor = self.active(definition=self.publish('parent', spawn=('sensitive',)))
         doc = manifest('sensitive')
         doc['secrets'] = {'files': ['not-approved-for-parent'], 'vars': []}
-        bundle = self.api.publish_bundle(self.actor, project_id=self.project.pk,
+        bundle = self.api.publish_definition(self.actor, project_id=self.project.pk,
             manifest=json.dumps(doc).encode(), prompt=b'prompt', provenance='test')
-        self.api.approve_bundle(self.actor, bundle.id)
+        self.api.approve_definition(self.actor, bundle.id)
         with self.assertRaises(PermissionError):
-            self.reserve(actor=actor, bundle=bundle)
+            self.reserve(actor=actor, definition=bundle)
 
     # BUG: окончательное решение теряло credential предка, policy/binding и
     # точный credential создателя после provider wait.
@@ -970,10 +970,10 @@ class GrantCases(TransactionTestCase):
     # два прежних DRF transport failures #632; это не зелёный общий gate.
     # STATUS: FIXED — see #635 (семь safety regressions, не приёмка epic).
     def test_ancestor_token_revoke_during_recipient_decrypt_fences_delivery(self):
-        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         source, actor = self.active(actor=parent_actor)
-        target, _ = self.active(bundle=self.publish('target-role'))
-        target_version = access.RoleBundle.objects.get(pk=target.bundle_id).content_version_id
+        target, _ = self.active(definition=self.publish('target-role'))
+        target_version = access.AgentDefinitionVersion.objects.get(pk=target.definition_id).content_version_id
         provider = self.provider
         class RevokeDuringDecrypt:
             fired = False
@@ -1039,7 +1039,7 @@ class GrantCases(TransactionTestCase):
             self.api.secrets.read(self.actor, scope, provisioned.credential_version_id)
 
     def test_delegation_cannot_bypass_current_owner_issue_permission(self):
-        parent, parent_actor = self.active(bundle=self.publish('parent', spawn=('worker',)))
+        parent, parent_actor = self.active(definition=self.publish('parent', spawn=('worker',)))
         permission = Permission.objects.get(content_type__app_label='access', codename='issue_grant')
         self.user.user_permissions.remove(permission)
         with self.assertRaises(PermissionError):

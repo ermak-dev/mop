@@ -450,8 +450,8 @@ class OperationBackedAdmin(TransactionTestCase):
             self.assertNotIn(auth.value, entry.change_message + entry.object_repr)
 
     def test_readonly_evidence_denies_all_bulk_inline_and_model_mutations(self):
-        from mop.server.access.models import RoleBundle
-        for model in (RoleBundle, s.SecretAudit, s.CredentialRotation, o.AuditEvent, o.EffectReceipt, c.NodeImage):
+        from mop.server.access.models import AgentDefinitionVersion
+        for model in (AgentDefinitionVersion, s.SecretAudit, s.CredentialRotation, o.AuditEvent, o.EffectReceipt, c.NodeImage):
             self.assertTrue(admin.site.is_registered(model), model._meta.label)
             adapter = admin.site._registry[model]
             request = self.get('/admin/').wsgi_request

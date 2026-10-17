@@ -5,7 +5,7 @@ HYPOTHESIS: ordinary runtime не получает root, но maintenance-only f
 Проверяем не helper: приватный Unix socket, штатные Access credentials, ORM AEAD,
 отзыв во время provider wait, конечный протокол и default-deny delivery.
 SOLUTION: отдельная credential-композиция, конечный socket и rootless client;
-реальные Access/SecretStore/Grants.read_bundle, default-deny assignment boundary.
+реальные Access/SecretStore/Grants.read_definition, default-deny assignment boundary.
 RED: 11 missing-service FAIL на PG16/17; затем PermissionError not raised для
 выдачи без authorizer, installation scope и изменённого root trust; потерянная
 безопасная причина restore fence воспроизведена отдельным behavioral FAIL.
@@ -309,35 +309,35 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         self.run_socket(body)
 
     # HYPOTHESIS: rootless web не может publish exact role bytes без своего provider.
-    # SOLUTION: отдельный typed publish_bundle handler вызывает owner Grants целиком.
-    # RESULT: socket дал missing publish_bundle; затем exact bytes roundtrip green.
+    # SOLUTION: отдельный typed publish_definition handler вызывает owner Grants целиком.
+    # RESULT: socket дал missing publish_definition; затем exact bytes roundtrip green.
     # Дополнительный red: смена root оставляла bundle после отказа; local grant
     # callback входил в crypto chain под atomic. Оба исправлены, PG16 socket green.
     # STATUS: FIXED — see #669.
-    def test_rootless_publish_bundle_retains_exact_bytes_and_rechecks_authority(self):
-        from mop.server.access.models import RoleBundle
+    def test_rootless_publish_definition_retains_exact_bytes_and_rechecks_authority(self):
+        from mop.server.access.models import AgentDefinitionVersion
         for code in ('approve_role', 'view_role'):
             self.user.user_permissions.add(Permission.objects.get(content_type__app_label='access', codename=code))
         manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
         async def body(client, server):
-            result = await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+            result = await asyncio.to_thread(client.publish_definition, self.auth, project_id=self.project.id,
                 manifest=manifest, prompt=b'rootless private prompt', provenance='rootless-fixture')
             self.assertEqual(result.project_id, self.project.id)
             self.assertEqual(result.owner_id, self.user.pk)
-            content = await asyncio.to_thread(client.read_bundle, self.auth, result.id)
+            content = await asyncio.to_thread(client.read_definition, self.auth, result.id)
             self.assertEqual(content.manifest, manifest)
             self.assertEqual(content.prompt, b'rootless private prompt')
             self.assertEqual(content.digest, result.digest)
             await server.runtime.database(self.user.user_permissions.clear)
             with self.assertRaises(self.Error):
-                await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+                await asyncio.to_thread(client.publish_definition, self.auth, project_id=self.project.id,
                     manifest=manifest, prompt=b'new denied prompt', provenance='rootless-fixture')
         self.run_socket(body)
-        self.assertEqual(RoleBundle.objects.count(), 1)
+        self.assertEqual(AgentDefinitionVersion.objects.count(), 1)
 
     def test_bundle_publication_cannot_commit_after_root_changes_during_crypto(self):
         from mop.server.controller.models import Installation
-        from mop.server.access.models import RoleBundle
+        from mop.server.access.models import AgentDefinitionVersion
         from mop.server.secrets.crypto import XChaCha20Provider, Keyring
         real = XChaCha20Provider(Keyring('old', {'old': b'q' * 32}))
         for code in ('approve_role', 'view_role'):
@@ -351,10 +351,10 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
         async def body(client, server):
             with self.assertRaises(self.Error):
-                await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+                await asyncio.to_thread(client.publish_definition, self.auth, project_id=self.project.id,
                     manifest=manifest, prompt=b'must not persist', provenance='fixture')
         self.run_socket(body, provider=Rekeying())
-        self.assertFalse(RoleBundle.objects.exists(), 'root change was detected only after aggregate commit')
+        self.assertFalse(AgentDefinitionVersion.objects.exists(), 'root change was detected only after aggregate commit')
 
     # HYPOTHESIS: web без root не может сохранить exact Preparation bytes или
     # выдать intent с настоящим approval; чужой owner в JSON не является proof.
@@ -420,10 +420,10 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             document = json.loads(manifest)
             document['secrets'] = {'vars': list(secret_names), 'files': []}
             manifest = json.dumps(document).encode()
-        bundle = app.grants.publish_bundle(actor, project_id=self.project.id, manifest=manifest,
+        bundle = app.grants.publish_definition(actor, project_id=self.project.id, manifest=manifest,
             prompt=b'private', provenance='fixture')
-        app.grants.approve_bundle(actor, bundle.id)
-        return app.grants.reserve(actor, project_id=self.project.id, bundle_id=bundle.id,
+        app.grants.approve_definition(actor, bundle.id)
+        return app.grants.reserve(actor, project_id=self.project.id, definition_id=bundle.id,
             target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
             expires_at=timezone.now() + timedelta(hours=1))
 
@@ -532,12 +532,12 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             self.assertEqual(content.variables, b'private: value\n')
             self.assertNotIn('private: value', repr(content))
             approval = await asyncio.to_thread(client.approve_preparation, self.auth, revision.id)
-            bundle = await asyncio.to_thread(client.publish_bundle, self.auth, project_id=self.project.id,
+            bundle = await asyncio.to_thread(client.publish_definition, self.auth, project_id=self.project.id,
                 manifest=manifest, prompt=b'private role prompt', provenance='fixture')
-            await asyncio.to_thread(client.approve_bundle, self.auth, bundle.id)
+            await asyncio.to_thread(client.approve_definition, self.auth, bundle.id)
             target_id, incarnation = uuid.uuid4(), uuid.uuid4()
             reserved = await asyncio.to_thread(client.reserve_grant, self.auth, project_id=self.project.id,
-                bundle_id=bundle.id, target_id=target_id, incarnation=incarnation, request_id=uuid.uuid4(),
+                definition_id=bundle.id, target_id=target_id, incarnation=incarnation, request_id=uuid.uuid4(),
                 expires_at=timezone.now() + timedelta(hours=1))
             self.assertEqual((reserved.project_id, reserved.target_id, reserved.incarnation),
                 (self.project.id, target_id, incarnation))
@@ -572,15 +572,15 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
                 self.user.user_permissions.add(Permission.objects.get(content_type__app_label='access', codename=code))
             # Ровно тот же public publish/read, что использует Access, без export ciphertext.
             manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
-            bundle = app.grants.publish_bundle(actor, project_id=self.project.id, manifest=manifest,
+            bundle = app.grants.publish_definition(actor, project_id=self.project.id, manifest=manifest,
                 prompt=b'private prompt', provenance='credential-fixture')
         async def body(client, server):
-            result = await asyncio.to_thread(client.read_bundle, self.auth, bundle.id)
+            result = await asyncio.to_thread(client.read_definition, self.auth, bundle.id)
             self.assertEqual(result.prompt, b'private prompt')
             self.assertNotIn('private prompt', repr(result))
             self.assertEqual(result.digest, bundle.digest)
             with self.assertRaises(self.Error):
-                await asyncio.to_thread(client.read_bundle, self.auth, uuid.uuid4())
+                await asyncio.to_thread(client.read_definition, self.auth, uuid.uuid4())
         self.run_socket(body)
 
     def test_composition_checks_runtime_db_privileges_before_provider_construction(self):

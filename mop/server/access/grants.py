@@ -23,8 +23,9 @@ from ..secrets.services import RetainedSecrets, RetentionScope, outside_transact
 from ..secrets.crypto import SecretCryptoError
 from . import models as m, services as auth
 from .context import ActorContext, ActorKind
-from .delegation import (ApprovedPolicy, RoleBinding, BundleContent, GrantInfo, AddressedPolicy,
-                         MessageAuthority, PolicyBinding, RetirementReceipt, allows, allows_capabilities, allows_spawn, uuid_value)
+from .delegation import (ApprovedPolicy, RoleBinding, DefinitionContent, DefinitionMetadata, AgentProfileInfo,
+                         GrantInfo, AddressedPolicy, MessageAuthority, PolicyBinding, RetirementReceipt,
+                         allows, allows_capabilities, allows_spawn, uuid_value)
 
 
 class Conflict(ValueError):
@@ -90,12 +91,12 @@ class _RetentionAuthority:
         if scope.purpose == 'policy':
             owner = api._owner(actor)
             if owner != scope.owner_id:
-                raise auth.Denied('bundle owner mismatch')
-            row = m.RoleBundle.objects.filter(pk=scope.subject_id).first()
+                raise auth.Denied('definition owner mismatch')
+            row = m.AgentDefinitionVersion.objects.filter(pk=scope.subject_id).first()
             if row is None:
                 api._human(actor, 'access.approve_role', scope.project_id)
             elif (row.owner_id, row.project_id) != (owner, scope.project_id):
-                raise auth.Denied('bundle scope mismatch')
+                raise auth.Denied('definition scope mismatch')
             else:
                 api._owner_permission(owner, 'access.view_role', scope.project_id)
         elif scope.purpose == 'grant':
@@ -141,11 +142,11 @@ class LocalGrantAuthority:
                 raise auth.Denied('grant action scope mismatch')
             self._grants._owner_permission(row.intent.owner_id, action, row.intent.project_id)
             for current in chain:
-                capabilities = tuple(m.RoleCapability.objects.filter(bundle_id=current.intent.bundle_id)
+                capabilities = tuple(m.DefinitionCapability.objects.filter(definition_id=current.intent.definition_id)
                                      .values_list('scope', 'verb'))
                 caps = soul.Capabilities(tuple(verb for scope, verb in capabilities if scope == 'node'),
                     tuple(verb for scope, verb in capabilities if scope == 'cluster'),
-                    current.intent.bundle.dispatch, ())
+                    current.intent.definition.dispatch, ())
                 if not allows_capabilities(caps, action):
                     raise auth.Denied('action is outside pinned delegated capabilities')
             self._grants._credential(actor)
@@ -161,7 +162,7 @@ class Grants:
         self.secrets = RetainedSecrets(provider=provider, authority=_RetentionAuthority(self))
 
     def _row(self, grant_id):
-        row = m.Grant.objects.select_related('intent__bundle', 'actor').filter(pk=grant_id).first()
+        row = m.Grant.objects.select_related('intent__definition', 'actor').filter(pk=grant_id).first()
         if row is None:
             raise auth.NotVisible('grant not found')
         return row
@@ -198,7 +199,7 @@ class Grants:
 
     def _policy_binding(self, intent):
         return PolicyBinding(intent.id, intent.owner_id, intent.actor_id, intent.project_id,
-            intent.bundle_id, intent.bundle.role, intent.bundle.digest, intent.parent_id,
+            intent.definition_id, intent.definition.role, intent.definition.digest, intent.parent_id,
             intent.target_id, intent.incarnation)
 
     def _validate_policy(self, proof, binding):
@@ -207,131 +208,130 @@ class Grants:
         self.secrets.validate_policy_reference(proof.version_id, project_id=binding.project_id)
 
     def _info(self, row):
-        intent, bundle = row.intent, row.intent.bundle
+        intent, definition = row.intent, row.intent.definition
         return GrantInfo(row.id, intent.owner_id, row.actor_id, intent.project_id,
-            intent.target_id, intent.incarnation, bundle.id, bundle.role, bundle.digest,
+            intent.target_id, intent.incarnation, definition.id, definition.role, definition.digest,
             intent.parent_id, row.state, row.revision, row.credential_version_id,
             self._policy(row), row.retirement)
 
-    def _bundle_row(self, actor, bundle_id):
-        row = m.RoleBundle.objects.filter(pk=bundle_id).first()
+    def _definition_row(self, actor, definition_id):
+        row = m.AgentDefinitionVersion.objects.filter(pk=definition_id).first()
         if row is None or row.owner_id != self._owner(actor):
-            raise auth.NotVisible('role bundle not found')
+            raise auth.NotVisible('agent definition not found')
         self._owner_permission(row.owner_id, 'access.view_role', row.project_id)
         return row
 
     def _require_seal(self, row):
-        if not m.RoleBundleSeal.objects.filter(bundle_id=row.pk).exists():
-            raise auth.Denied('role bundle is not verified and sealed')
+        if not m.AgentDefinitionSeal.objects.filter(definition_id=row.pk).exists():
+            raise auth.Denied('agent definition is not verified and sealed')
 
     def _normalized(self, row, parsed):
         if (row.role, row.driver, row.receives_dispatch, row.dispatch, row.prompt_name) != (
                 parsed.soul, parsed.runtime.driver, parsed.runtime.receives_dispatch,
                 parsed.capabilities.dispatch, parsed.prompt):
-            raise auth.Denied('role bundle normalized identity mismatch')
-        actual = set(m.RoleCapability.objects.filter(bundle=row).values_list('scope', 'verb'))
+            raise auth.Denied('agent definition normalized identity mismatch')
+        actual = set(m.DefinitionCapability.objects.filter(definition=row).values_list('scope', 'verb'))
         wanted = {('node', v) for v in parsed.capabilities.node_verbs} | {
                   ('cluster', v) for v in parsed.capabilities.cluster_verbs}
-        if actual != wanted or set(m.RoleSpawn.objects.filter(bundle=row).values_list('role', flat=True)) != set(parsed.capabilities.spawn):
-            raise auth.Denied('role bundle normalized capabilities mismatch')
-        names = set(m.RoleSecretName.objects.filter(bundle=row).values_list('kind', 'name'))
+        if actual != wanted or set(m.DefinitionSpawn.objects.filter(definition=row).values_list('role', flat=True)) != set(parsed.capabilities.spawn):
+            raise auth.Denied('agent definition normalized capabilities mismatch')
+        names = set(m.DefinitionSecretName.objects.filter(definition=row).values_list('kind', 'name'))
         if names != {('files', v) for v in parsed.secrets.files} | {('vars', v) for v in parsed.secrets.vars}:
-            raise auth.Denied('role bundle secret allowlist mismatch')
+            raise auth.Denied('agent definition secret allowlist mismatch')
 
     @storage_boundary
-    def read_bundle(self, actor, bundle_id):
+    def read_definition(self, actor, definition_id):
         # Чтение для клиента не выдаёт промпты других ролей его human owner.
         # Внутренняя проверка ancestor/spawn читает bytes, но наружу их не отдаёт.
         if type(actor) is ActorContext and actor.grant_id is not None:
-            if self._credential(actor).intent.bundle_id != bundle_id:
-                raise auth.Denied('grant may read only its pinned role bundle')
-        return self._read_bundle(actor, bundle_id)
+            if self._credential(actor).intent.definition_id != definition_id:
+                raise auth.Denied('grant may read only its pinned agent definition')
+        return self._read_definition(actor, definition_id)
 
     @storage_boundary
-    def _read_bundle(self, actor, bundle_id):
+    def _read_definition(self, actor, definition_id):
         outside_transaction()
-        row = self._bundle_row(actor, bundle_id)
+        row = self._definition_row(actor, definition_id)
         self._require_seal(row)
         try:
             raw = self.secrets.read(actor, RetentionScope(row.project_id, row.owner_id, row.id, 'policy'), row.content_version_id)
         except SecretCryptoError:
-            raise auth.Denied('retained role bundle authentication failed') from None
+            raise auth.Denied('retained agent definition authentication failed') from None
         try:
             manifest, prompt, provenance = json.loads(raw)
             parsed = soul.parse(manifest)
             bundle = soul.from_manifest(parsed.to_dict(), prompt.encode('utf-8'))
         except (ValueError, TypeError, UnicodeError):
-            raise auth.Denied('invalid retained role bundle') from None
+            raise auth.Denied('invalid retained agent definition') from None
         if bundle.digest != row.digest or bundle.role != row.role:
-            raise auth.Denied('role bundle digest mismatch')
+            raise auth.Denied('agent definition digest mismatch')
         self._normalized(row, parsed)
-        return BundleContent(row.id, row.role, row.digest, parsed.capabilities, parsed.runtime,
+        return DefinitionContent(row.id, row.role, row.digest, parsed.capabilities, parsed.runtime,
                              parsed.secrets, manifest.encode('utf-8'), bundle.prompt, provenance)
 
     @storage_boundary
     @sensitive_variables('manifest', 'prompt', 'raw')
-    def publish_bundle(self, actor, *, project_id, manifest, prompt, provenance):
+    def publish_definition(self, actor, *, project_id, manifest, prompt, provenance):
         outside_transaction()
         owner = self._human(actor, 'access.approve_role', project_id)
         if (type(manifest) is not bytes or type(prompt) is not bytes or not isinstance(provenance, str)
                 or not provenance or len(provenance) > 4096):
-            raise ValueError('exact bundle bytes and bounded provenance required')
+            raise ValueError('exact definition bytes and bounded provenance required')
         try:
             parsed = soul.parse(manifest.decode('utf-8'))
             bundle = soul.from_manifest(parsed.to_dict(), prompt)
         except (ValueError, UnicodeError):
-            raise ValueError('invalid role bundle bytes') from None
-        existing = m.RoleBundle.objects.filter(owner_id=owner, project_id=project_id, digest=bundle.digest).first()
+            raise ValueError('invalid agent definition bytes') from None
+        existing = m.AgentDefinitionVersion.objects.filter(owner_id=owner, project_id=project_id, digest=bundle.digest).first()
         if existing:
-            self._read_bundle(actor, existing.id)
-            return self._bundle_metadata(existing)
-        bundle_id = uuid.uuid4()
+            self._read_definition(actor, existing.id)
+            return self._definition_metadata(existing)
+        definition_id = uuid.uuid4()
         raw = json.dumps([manifest.decode('utf-8'), prompt.decode('utf-8'), provenance], ensure_ascii=False).encode()
-        prepared = self.secrets.prepare(actor, RetentionScope(project_id, owner, bundle_id, 'policy'), raw)
+        prepared = self.secrets.prepare(actor, RetentionScope(project_id, owner, definition_id, 'policy'), raw)
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
             self._human(actor, 'access.approve_role', project_id)
-            existing = m.RoleBundle.objects.filter(owner_id=owner, project_id=project_id, digest=bundle.digest).first()
+            existing = m.AgentDefinitionVersion.objects.filter(owner_id=owner, project_id=project_id, digest=bundle.digest).first()
             if existing:
                 self._require_seal(existing)
                 self._normalized(existing, parsed)
-                return self._bundle_metadata(existing)
+                return self._definition_metadata(existing)
             version_id = self.secrets.commit(actor, prepared)
-            row = m.RoleBundle.objects.create(id=bundle_id, owner_id=owner, project_id=project_id,
+            row = m.AgentDefinitionVersion.objects.create(id=definition_id, owner_id=owner, project_id=project_id,
                 role=bundle.role, digest=bundle.digest, content_version_id=version_id,
                 driver=parsed.runtime.driver, receives_dispatch=parsed.runtime.receives_dispatch,
                 dispatch=parsed.capabilities.dispatch, prompt_name=parsed.prompt)
             for scope, verbs in (('node', parsed.capabilities.node_verbs), ('cluster', parsed.capabilities.cluster_verbs)):
                 for verb in verbs:
-                    m.RoleCapability.objects.create(bundle=row, scope=scope, verb=verb)
+                    m.DefinitionCapability.objects.create(definition=row, scope=scope, verb=verb)
             for role in parsed.capabilities.spawn:
-                m.RoleSpawn.objects.create(bundle=row, role=role)
+                m.DefinitionSpawn.objects.create(definition=row, role=role)
             for kind, names in (('files', parsed.secrets.files), ('vars', parsed.secrets.vars)):
                 for name in names:
-                    m.RoleSecretName.objects.create(bundle=row, kind=kind, name=name)
+                    m.DefinitionSecretName.objects.create(definition=row, kind=kind, name=name)
             # Тот же parent lock берёт обычный ORM append. Seal появляется только
-            # после проверки всех actual children; само RoleBundle evidence не меняется.
-            m.RoleBundle.objects.select_for_update().get(pk=row.pk)
+            # после проверки всех actual children; само AgentDefinitionVersion evidence не меняется.
+            m.AgentDefinitionVersion.objects.select_for_update().get(pk=row.pk)
             self._normalized(row, parsed)
-            m.RoleBundleSeal._record_verified(row)
-            return self._bundle_metadata(row)
+            m.AgentDefinitionSeal._record_verified(row)
+            return self._definition_metadata(row)
 
-    def _bundle_metadata(self, row):
-        from .delegation import BundleMetadata
-        return BundleMetadata(row.id, row.role, row.digest, row.project_id, row.owner_id)
+    def _definition_metadata(self, row):
+        return DefinitionMetadata(row.id, row.role, row.digest, row.project_id, row.owner_id)
 
-    def approve_bundle(self, actor, bundle_id):
-        value = self._read_bundle(actor, bundle_id)
-        row = self._bundle_row(actor, value.id)
+    def approve_definition(self, actor, definition_id):
+        value = self._read_definition(actor, definition_id)
+        row = self._definition_row(actor, value.id)
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=row.project_id)
-            row = m.RoleBundle.objects.select_for_update().get(pk=row.pk)
+            row = m.AgentDefinitionVersion.objects.select_for_update().get(pk=row.pk)
             self._require_seal(row)
             owner = self._human(actor, 'access.approve_role', row.project_id)
             if row.owner_id != owner:
-                raise auth.Denied('only the human bundle owner may approve')
+                raise auth.Denied('only the human definition owner may approve')
             self._normalized(row, soul.parse(value.manifest.decode()))
-            approval, _ = m.RoleBundleApproval.objects.get_or_create(bundle=row, defaults={'human_id': owner})
+            approval, _ = m.AgentDefinitionApproval.objects.get_or_create(definition=row, defaults={'human_id': owner})
             return approval.id
 
     def _credential(self, actor):
@@ -357,9 +357,9 @@ class Grants:
         if row.state != state or row.intent.expires_at <= timezone.now():
             raise auth.Denied('grant is not currently active')
         self._owner_permission(row.intent.owner_id, 'access.view_role', row.intent.project_id)
-        self._require_seal(row.intent.bundle)
-        if not m.RoleBundleApproval.objects.filter(bundle_id=row.intent.bundle_id, human_id=row.intent.owner_id).exists():
-            raise auth.Denied('role bundle is not human approved')
+        self._require_seal(row.intent.definition)
+        if not m.AgentDefinitionApproval.objects.filter(definition_id=row.intent.definition_id, human_id=row.intent.owner_id).exists():
+            raise auth.Denied('agent definition is not human approved')
         self._validate_policy(self._policy(row), self._policy_binding(row.intent))
         if row.credential_version_id:
             self.secrets.check_reference(RetentionScope(row.intent.project_id, row.intent.owner_id, row.id, 'grant'), row.credential_version_id)
@@ -377,7 +377,7 @@ class Grants:
             actual = self.bindings.current(info.project_id, info.target_id)
             if type(actual) is not RoleBinding or actual != info.binding:
                 raise auth.Denied('grant runtime binding changed')
-            content = self._read_bundle(actor, info.bundle_id)
+            content = self._read_definition(actor, info.definition_id)
             chain.append((info, content))
             if info.parent_id is None:
                 break
@@ -406,7 +406,7 @@ class Grants:
                 raise Conflict('delegation changed during preparation')
             if self.bindings.current(info.project_id, info.target_id) != info.binding:
                 raise auth.Denied('grant runtime binding changed')
-            self._normalized(row.intent.bundle, soul.parse(content.manifest.decode()))
+            self._normalized(row.intent.definition, soul.parse(content.manifest.decode()))
 
     def _execution_rows(self, binding):
         if type(binding) is not RoleBinding:
@@ -441,6 +441,85 @@ class Grants:
             raise auth.Denied('grant runtime binding changed')
         return tuple(self._row(identifier) for identifier in identifiers)
 
+
+    def _profile_row(self, actor, project_id, target_id):
+        row = m.AgentProfile.objects.select_related('agent').filter(
+            project_id=project_id, target_id=target_id).first()
+        if row is None or row.owner_id != self._owner(actor):
+            raise auth.NotVisible('agent profile not found')
+        return row
+
+    def _profile_info(self, row):
+        return AgentProfileInfo(row.target_id, row.agent_id, row.definition_id,
+                                row.revision, row.project_id, row.owner_id)
+
+    @storage_boundary
+    def register_agent(self, actor, *, project_id, target_id, definition_id):
+        """Минимальный агентский lifecycle: один стабильный agent Actor на target.
+
+        Повторная регистрация того же target идемпотентна (Actor не создаётся
+        заново); смена программы — repin_definition, не пересоздание identity.
+        Профиль не даёт прав: только сам Actor и Django RBAC (#685).
+        """
+        outside_transaction()
+        for value in (project_id, target_id, definition_id):
+            uuid_value(value)
+        owner = self._human(actor, 'sessions.create_puppet', project_id)
+        row = self._definition_row(actor, definition_id)
+        if row.project_id != project_id or not m.AgentDefinitionApproval.objects.filter(
+                definition=row, human_id=owner).exists():
+            raise auth.Denied('agent registration requires this project and approved definition')
+        with transaction.atomic():
+            Project.objects.select_for_update().get(pk=project_id)
+            get_user_model().objects.select_for_update().get(pk=owner)
+            owner = self._human(actor, 'sessions.create_puppet', project_id)
+            profile = m.AgentProfile.objects.select_for_update().filter(
+                project_id=project_id, target_id=target_id).first()
+            if profile is not None:
+                # Идемпотентный повтор: существующий Actor не пересоздаётся.
+                self._profile_info(profile)
+                return self._profile_info(profile)
+            agent = get_user_model().objects.create_user(
+                'agent-' + uuid.uuid4().hex, password=None, is_staff=False, is_superuser=False)
+            agent.kind = 'agent'
+            agent.save(update_fields=['kind'])
+            profile = m.AgentProfile.objects.create(agent=agent, owner_id=owner,
+                project_id=project_id, target_id=target_id, definition=row)
+            return self._profile_info(profile)
+
+    @storage_boundary
+    def repin_definition(self, actor, target_id, *, definition_id, expected_revision):
+        """Смена программы агента без смены его Actor; CAS по revision профиля."""
+        outside_transaction()
+        uuid_value(target_id)
+        uuid_value(definition_id)
+        with transaction.atomic():
+            profile = m.AgentProfile.objects.select_for_update().select_related('agent').filter(
+                target_id=target_id).first()
+            if profile is None:
+                raise auth.NotVisible('agent profile not found')
+            owner = self._human(actor, 'sessions.create_puppet', profile.project_id)
+            if profile.owner_id != owner:
+                raise auth.NotVisible('agent profile not found')
+            self._expected(profile, expected_revision)
+            row = self._definition_row(actor, definition_id)
+            if row.project_id != profile.project_id or not m.AgentDefinitionApproval.objects.filter(
+                    definition=row, human_id=owner).exists():
+                raise auth.Denied('agent repin requires this project and approved definition')
+            profile.definition = row
+            profile.revision += 1
+            profile.save(update_fields=('definition', 'revision'))
+            return self._profile_info(profile)
+
+    @storage_boundary
+    def agent_profile(self, actor, *, project_id, target_id):
+        """Только чтение профиля; внешние права проверяет вызывающий слой."""
+        uuid_value(project_id)
+        uuid_value(target_id)
+        row = self._profile_row(actor, project_id, target_id)
+        self._owner_permission(row.owner_id, 'access.view_role', row.project_id)
+        return self._profile_info(row)
+
     @storage_boundary
     def authorize_execution(self, binding):
         """Проверка получающего grant без provider I/O; инициатора проверяет WorkPort."""
@@ -455,7 +534,7 @@ class Grants:
         """
         chain = self._execution_rows(binding)
         self._owner_permission(binding.human_owner_id, 'secrets.deliver_secret', binding.project_id)
-        names = tuple(m.RoleSecretName.objects.filter(bundle_id=chain[0].intent.bundle_id)
+        names = tuple(m.DefinitionSecretName.objects.filter(definition_id=chain[0].intent.definition_id)
             .order_by('kind', 'name').values_list('kind', 'name')[:129])
         if not names or len(names) > 128:
             raise auth.Denied('bounded nonempty approved project secret allowlist required')
@@ -523,25 +602,25 @@ class Grants:
         self._creation_actor(actor, row)
         chain = self._chain(actor) if actor.grant_id is not None else ()
         if chain:
-            child = self._read_bundle(actor, row.intent.bundle_id)
+            child = self._read_definition(actor, row.intent.definition_id)
             for info, content in chain:
                 if not allows_spawn(content, child):
                     raise auth.Denied('spawn role or secrets are outside approved allowlist')
         return chain
 
     @storage_boundary
-    def reserve(self, actor, *, project_id, bundle_id, target_id, incarnation, request_id, expires_at):
+    def reserve(self, actor, *, project_id, definition_id, target_id, incarnation, request_id, expires_at):
         outside_transaction()
-        for value in (project_id, bundle_id, target_id, incarnation, request_id):
+        for value in (project_id, definition_id, target_id, incarnation, request_id):
             uuid_value(value)
         now = timezone.now()
         if not hasattr(expires_at, 'tzinfo') or timezone.is_naive(expires_at) or not now < expires_at <= now + timedelta(days=30):
             raise ValueError('bounded future grant expiry required')
         owner = self._owner(actor)
-        content = self._read_bundle(actor, bundle_id)
-        bundle = self._bundle_row(actor, bundle_id)
-        if bundle.project_id != project_id or not m.RoleBundleApproval.objects.filter(bundle=bundle, human_id=owner).exists():
-            raise auth.Denied('creation requires this project and approved bundle')
+        content = self._read_definition(actor, definition_id)
+        definition_row = self._definition_row(actor, definition_id)
+        if definition_row.project_id != project_id or not m.AgentDefinitionApproval.objects.filter(definition=definition_row, human_id=owner).exists():
+            raise auth.Denied('creation requires this project and approved definition')
         chain = self._chain(actor) if actor.grant_id is not None else ()
         parent_id = chain[0][0].id if chain else None
         if chain:
@@ -564,23 +643,23 @@ class Grants:
             existing = m.CreationIntent.objects.filter(owner_id=owner, actor_id=actor.user_id,
                 project_id=project_id, request_id=request_id).first()
             if existing:
-                if (existing.bundle_id, existing.target_id, existing.incarnation, existing.expires_at, existing.parent_id) != (
-                        bundle_id, target_id, incarnation, expires_at, parent_id):
+                if (existing.definition_id, existing.target_id, existing.incarnation, existing.expires_at, existing.parent_id) != (
+                        definition_id, target_id, incarnation, expires_at, parent_id):
                     raise Conflict('creation request already names a different intent')
-                row = m.Grant.objects.select_related('intent__bundle').get(intent=existing)
+                row = m.Grant.objects.select_related('intent__definition').get(intent=existing)
                 self._validate_policy(self._policy(row), self._policy_binding(existing))
                 return self._info(row)
             intent_id = uuid.uuid4()
-            policy_binding = PolicyBinding(intent_id, owner, actor.user_id, project_id, bundle_id,
+            policy_binding = PolicyBinding(intent_id, owner, actor.user_id, project_id, definition_id,
                 content.role, content.digest, parent_id, target_id, incarnation)
             proof = chain[0][0].policy if chain else self.approvals.pin(policy_binding)
             if type(proof) is not ApprovedPolicy or (proof.owner_id, proof.project_id) != (owner, project_id):
                 raise auth.Denied('trusted exact approved policy proof required')
             self._validate_policy(proof, policy_binding)
-            self._normalized(bundle, soul.parse(content.manifest.decode()))
+            self._normalized(definition_row, soul.parse(content.manifest.decode()))
             intent = m.CreationIntent.objects.create(id=intent_id, owner_id=owner, actor_id=actor.user_id,
                 actor_credential_id=actor.credential_id,
-                project_id=project_id, bundle=bundle, parent_id=parent_id, request_id=request_id,
+                project_id=project_id, definition=definition_row, parent_id=parent_id, request_id=request_id,
                 target_id=target_id, incarnation=incarnation, expires_at=expires_at,
                 policy_approval_id=proof.approval_id, policy_version_id=proof.version_id, policy_digest=proof.digest)
             grant_id = uuid.uuid4()
@@ -614,7 +693,7 @@ class Grants:
             if actor.grant_id not in (row.id, row.intent.parent_id):
                 raise auth.NotVisible('grant not found')
         self._owner_permission(row.intent.owner_id, 'access.view_role', row.intent.project_id)
-        self._read_bundle(actor, row.intent.bundle_id)
+        self._read_definition(actor, row.intent.definition_id)
         return self._info(row)
 
     def _event(self, row, actor, action):
@@ -685,7 +764,7 @@ class Grants:
         self._expected(row, expected_revision)
         actor = self._intent_actor(row)
         chain = self._creation_chain(actor, row)
-        content = self._read_bundle(actor, row.intent.bundle_id)
+        content = self._read_definition(actor, row.intent.definition_id)
         receipt = self.bindings.activation(grant_id)
         if type(receipt) is not RoleBinding or receipt != self._info(row).binding:
             raise auth.Denied('matching trusted activation receipt required')
@@ -697,7 +776,7 @@ class Grants:
             self._creation_actor(actor, row)
             if chain:
                 self._recheck(actor, chain)
-            self._normalized(row.intent.bundle, soul.parse(content.manifest.decode()))
+            self._normalized(row.intent.definition, soul.parse(content.manifest.decode()))
             if row.credential_version_id is None or self.bindings.current(receipt.project_id, receipt.target_id) != receipt:
                 raise auth.Denied('activation binding is no longer current')
             if row.intent.parent_id:

@@ -154,14 +154,14 @@ class CredentialApplication:
             result = store.issue_addressed(actor)
         elif command is p.Command.ROTATION:
             result = self.store.issue_rotation(actor, **args)
-        elif command is p.Command.PUBLISH_BUNDLE:
-            row = self.grants.publish_bundle(actor, **args)
-            result = p.BundleInfo(row.id, row.role, row.digest, row.project_id, row.owner_id)
-        elif command is p.Command.BUNDLE:
-            row = self.grants.read_bundle(actor, **args)
-            result = p.BundleBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
-        elif command is p.Command.APPROVE_BUNDLE:
-            result = self.grants.approve_bundle(actor, **args)
+        elif command is p.Command.PUBLISH_DEFINITION:
+            row = self.grants.publish_definition(actor, **args)
+            result = p.DefinitionInfo(row.id, row.role, row.digest, row.project_id, row.owner_id)
+        elif command is p.Command.DEFINITION:
+            row = self.grants.read_definition(actor, **args)
+            result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
+        elif command is p.Command.APPROVE_DEFINITION:
+            result = self.grants.approve_definition(actor, **args)
         elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT):
             row = (self.grants.reserve(actor, **args) if command is p.Command.RESERVE_GRANT
                    else self.grants.provision(actor, **args))
@@ -194,7 +194,7 @@ def _wire(value):
             raise p.CredentialError('credential result exceeds item limit')
         return [_wire(item) for item in value]
     if type(value) in (secrets.SecretMetadata, secrets.VersionMetadata, secrets.AddressedSecret,
-                       p.BundleBytes, p.BundleInfo, p.GrantReceipt, p.PreparationInfo,
+                       p.DefinitionBytes, p.DefinitionInfo, p.GrantReceipt, p.PreparationInfo,
                        p.PreparationBytes, p.ApprovalReceipt):
         return {f.name: _wire(getattr(value, f.name)) for f in fields(value)}
     if value is None or type(value) in (str, int, bool):

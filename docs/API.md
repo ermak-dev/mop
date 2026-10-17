@@ -88,7 +88,7 @@ private tables.
 | Module | Owns | Public use cases/queries | May depend on |
 |---|---|---|---|
 | Catalog | Project, Node, settings, image desired/observed metadata, client binding | configure project/node, resolve scope, list configured targets | Common values/policies |
-| Access | one Actor identity wiring (`AUTH_USER_MODEL`), membership, RoleBundle/agent definition versions, Delegation, creation intent; Django Auth adapters | authorize action, resolve actor, approve bundle/definition, issue/revoke delegation | Catalog; secret references through secrets public interface |
+| Access | one Actor identity wiring (`AUTH_USER_MODEL`), membership, AgentProfile and agent definition versions, Delegation, creation intent; Django Auth adapters | authorize action, resolve actor, approve definition, issue/revoke delegation | Catalog; secret references through secrets public interface |
 | Secrets | encrypted SecretVersion, CredentialRotation, delivery receipts | stage/activate/revoke rotation, authorize addressed delivery, read metadata | Catalog; trusted actor value and an injected access decision, not access ORM imports |
 | Preparation | bootstrap revision/approval/result, build input snapshot | pin/approve preparation, inspect build inputs and receipts | Catalog, Access, Secrets |
 | Operations | Operation, Step, claim, resource coordination, audit and outbox | admit command, claim step, record result, reconcile, query status | Catalog, Access, Secrets, Preparation; narrow external ports |
@@ -175,7 +175,6 @@ protect a concurrent update.
 | Invariant | Rule owner | Only mutation path | Transaction boundary | Required check |
 |---|---|---|---|---|
 | Project identity derives from origin via `driver.project_of` | Catalog policy | configure project | unique identity + expected revision | collision, renamed origin, forged project FK |
-| RoleBundle bytes/digest are immutable | RoleBundle policy | approve/pin bundle | create unique digest/revision; immutable after approval | changed bytes, partial role triple, concurrent approval |
 | Actor identity/auth: one `AUTH_USER_MODEL` Actor, kind classifies without granting, swappable FKs to the same model, PK survives incarnation change | Access identity policy (#683) | Actor migration/creation in the first fresh-install migration of its app | first-migration dependency ordering + swappable-user checks | duplicate User/Principal identity, kind-derived rights, PK churn on restart |
 | AgentDefinitionVersion bytes/digest are immutable; program/runtime constraints are technical preconditions, not permissions | Access agent-profile policy (#686) | publish/approve definition version | create unique digest/revision; immutable after approval | changed bytes, partial approval, capability-dictionary rebirth |
 | Delegation narrows only: issuer and subject are existing Actors, child never wider than parent, revoke preserves Actor and shared token | Access delegation policy (#688) | issue/delegate/revoke delegation | current issuer rights, bundle/incarnation, parent chain and CAS checked together | revoked ancestor/issuer, changed target, stale incarnation, disallowed spawn, widened child |
@@ -639,7 +638,7 @@ General results/audit/outbox contain only safe metadata. A digest alone cannot
 recover a message; if its required bytes are lost, reconcile/unknown, not a
 fabricated successful retry.
 
-Grant preparation reserves request identity and a pinned bundle without granting
+Grant preparation reserves request identity and a pinned definition without granting
 runtime authority: `reserved -> active` requires the matching creation/binding
 receipt, or `reserved -> revoked/expired` terminates an unactivated reservation.
 An active delegation transitions only to `revoked/expired`; issuing a delegated
@@ -647,25 +646,32 @@ child checks the active ancestor chain, issuer rights and pinned approved policy
 Logical revocation denies new acts immediately; transport-credential retirement
 is a separately recorded fallible stage, never a reason to keep logical access,
 and it never deletes the subject Actor or the shared DRF Token. Revocation never
-reactivates an old delegation. Role edits create a new immutable bundle and
-require a new approval; they do not change existing digest bytes. Activation is
+reactivates an old delegation. Role edits create a new immutable definition
+version and require a new approval; they do not change existing digest bytes or
+the agent Actor: `repin_definition` moves the pinned program of a stable agent,
+with CAS on the profile revision. Activation is
 not implied by a SQL assignment, a lease or claims in a payload: the unbound
 activation and transport-retirement executor denies, and an assignment
 projection alone is not an activation or retirement receipt.
 
-The Access ORM boundary exposes `Grants.publish_bundle`, `approve_bundle`,
-`read_bundle`, `reserve`, `reservation`, `provision`, `activate`, `revoke`,
+The Access ORM boundary exposes `Grants.publish_definition`, `approve_definition`,
+`read_definition`, `register_agent`, `repin_definition`, `agent_profile`,
+`reserve`, `reservation`, `provision`, `activate`, `revoke`,
 `expire`, `record_retirement`, `resolve_actor` and the explicit message/dispatch
 admission methods. `reserve` accepts either a credential-bound human Actor or an
 actively delegated agent Actor, never an owner/holder/force or workspace payload. CreationIntent
 retains the first approved policy SecretVersion reference; retry queries that
 intent instead of fetching the parent's latest policy or creating a second child.
 The injected approval query must validate the exact stored intent binding, not a
-boolean approval supplied by a caller. A grant's public bundle read returns only
+boolean approval supplied by a caller. A grant's public definition read returns only
 its own pinned role, not other private prompts owned by the same human. Preparation owns the approval evidence;
 Access owns only its immutable reference and the creation request identity.
+`register_agent` is the only agent-kind Actor creation path: it creates the
+stable agent Actor and its AgentProfile domain record in one transaction, or
+returns the existing profile for the same target idempotently; no grant, restart
+or assignment lifecycle creates or deletes an Actor.
 
-`RetainedSecrets` is the narrow Secrets composition port used for bundle bytes
+`RetainedSecrets` is the narrow Secrets composition port used for definition bytes
 and generated grant credentials: `prepare(actor, RetentionScope, bytes)` performs
 AEAD outside SQL; `commit(actor, PreparedRetention)` repeats target-bound authority
 and inserts those exact prepared IDs/envelope in the aggregate's transaction.
@@ -679,7 +685,7 @@ project, human owner, aggregate UUID and purpose. This authority is explicitly
 bound by Access from the stored intent; it does not grant human secret-management
 permissions merely to provision a role's own credential. The standard DRF Token
 row is the framework's credential-bearing plaintext exception described in
-STORAGE.md; RoleBundle, CreationIntent, Delegation, events and public metadata
+STORAGE.md; AgentDefinitionVersion, CreationIntent, Delegation, events and public metadata
 contain no raw token. Delegation metadata refers to the encrypted SecretVersion
 instead.
 

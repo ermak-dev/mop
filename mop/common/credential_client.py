@@ -121,22 +121,22 @@ class CredentialClient:
             raise p.CredentialError('invalid credential delivery response')
         return tuple(self._result(p.DeliveredSecret, row) for row in result)
 
-    def publish_bundle(self, auth: p.Credential, *, project_id: UUID,
-                       manifest: bytes, prompt: bytes, provenance: str) -> p.BundleInfo:
-        result = self._invoke(auth, p.Command.PUBLISH_BUNDLE, {'project_id': str(project_id),
+    def publish_definition(self, auth: p.Credential, *, project_id: UUID,
+                           manifest: bytes, prompt: bytes, provenance: str) -> p.DefinitionInfo:
+        result = self._invoke(auth, p.Command.PUBLISH_DEFINITION, {'project_id': str(project_id),
             'manifest': p.encoded(manifest), 'prompt': p.encoded(prompt), 'provenance': provenance})
-        return self._result(p.BundleInfo, result)
+        return self._result(p.DefinitionInfo, result)
 
-    def approve_bundle(self, auth: p.Credential, bundle_id: UUID) -> UUID:
-        return p.identifier(self._invoke(auth, p.Command.APPROVE_BUNDLE, {'bundle_id': str(bundle_id)}))
+    def approve_definition(self, auth: p.Credential, definition_id: UUID) -> UUID:
+        return p.identifier(self._invoke(auth, p.Command.APPROVE_DEFINITION, {'definition_id': str(definition_id)}))
 
-    def reserve_grant(self, auth: p.Credential, *, project_id: UUID, bundle_id: UUID,
+    def reserve_grant(self, auth: p.Credential, *, project_id: UUID, definition_id: UUID,
                       target_id: UUID, incarnation: UUID, request_id: UUID,
                       expires_at: datetime) -> p.GrantReceipt:
         if type(expires_at) is not datetime or expires_at.utcoffset() is None:
             raise p.CredentialError('aware grant expiry required')
         result = self._invoke(auth, p.Command.RESERVE_GRANT, {'project_id': str(project_id),
-            'bundle_id': str(bundle_id), 'target_id': str(target_id), 'incarnation': str(incarnation),
+            'definition_id': str(definition_id), 'target_id': str(target_id), 'incarnation': str(incarnation),
             'request_id': str(request_id), 'expires_at': expires_at.astimezone(timezone.utc).isoformat()})
         return self._result(p.GrantReceipt, result)
 
@@ -161,6 +161,6 @@ class CredentialClient:
         result = self._invoke(auth, p.Command.APPROVE_PREPARATION, {'revision_id': str(revision_id)})
         return self._result(p.ApprovalReceipt, result)
 
-    def read_bundle(self, auth: p.Credential, bundle_id: UUID) -> p.BundleBytes:
-        result = self._invoke(auth, p.Command.BUNDLE, {'bundle_id': str(bundle_id)})
-        return self._result(p.BundleBytes, result)
+    def read_definition(self, auth: p.Credential, definition_id: UUID) -> p.DefinitionBytes:
+        result = self._invoke(auth, p.Command.DEFINITION, {'definition_id': str(definition_id)})
+        return self._result(p.DefinitionBytes, result)

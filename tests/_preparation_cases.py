@@ -538,18 +538,18 @@ finally:
             raw = json.dumps({'soul': role, 'version': 1, 'runtime': {'driver': 'any', 'receives_dispatch': True},
                 'capabilities': {'node_verbs': ['send', 'state'], 'cluster_verbs': ['add', 'roster'],
                                  'dispatch': False, 'spawn': spawn}, 'prompt': 'soul.md'}).encode()
-            row = grants.publish_bundle(self.actor, project_id=self.project.pk, manifest=raw,
+            row = grants.publish_definition(self.actor, project_id=self.project.pk, manifest=raw,
                                         prompt=b'private prompt', provenance='test source')
-            grants.approve_bundle(self.actor, row.id)
+            grants.approve_definition(self.actor, row.id)
             return row
         parent_bundle, child_bundle = bundle('parent', ['child']), bundle('child', [])
         with self.assertRaisesRegex(PermissionError, 'current human owner permission required'):
-            grants.reserve(self.actor, project_id=self.project.pk, bundle_id=parent_bundle.id,
+            grants.reserve(self.actor, project_id=self.project.pk, definition_id=parent_bundle.id,
                 target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
                 expires_at=timezone.now() + timedelta(hours=1))
         self.user.user_permissions.add(Permission.objects.get(content_type__app_label='execution',
             content_type__model='assignment', codename='create_puppet'))
-        parent = grants.reserve(self.actor, project_id=self.project.pk, bundle_id=parent_bundle.id,
+        parent = grants.reserve(self.actor, project_id=self.project.pk, definition_id=parent_bundle.id,
             target_id=uuid.uuid4(), incarnation=uuid.uuid4(), request_id=uuid.uuid4(),
             expires_at=timezone.now() + timedelta(hours=1))
         grants.provision(self.actor, parent.id, expected_revision=parent.revision)
@@ -560,7 +560,7 @@ finally:
         key = Token.objects.get(user__grant_machine__id=parent.id).key
         delegated = auth.token_context(key, grants=grants)
         newer, _ = self.approved(tasks=b'new snapshot after first parent intent')
-        args = dict(project_id=self.project.pk, bundle_id=child_bundle.id, target_id=uuid.uuid4(),
+        args = dict(project_id=self.project.pk, definition_id=child_bundle.id, target_id=uuid.uuid4(),
             incarnation=uuid.uuid4(), request_id=uuid.uuid4(), expires_at=timezone.now() + timedelta(hours=1))
         child = grants.reserve(delegated, **args)
         retry = grants.reserve(delegated, **args)

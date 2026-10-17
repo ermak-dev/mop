@@ -120,13 +120,15 @@ register(c.ProjectPolicySnapshot, 'id project_id sequence digest source_commit c
 register(c.ImageRevision, 'id policy_id source revision', 'catalog.view_projectpolicysnapshot', project='policy__project_id')
 register(c.NodeImage, 'id node_id project_id revision available observed_at received_at',
          'catalog.view_node', project='project_id', node='node_id')
-register(a.RoleBundle, 'id project_id owner_id role digest driver receives_dispatch dispatch created_at',
+register(a.AgentDefinitionVersion, 'id project_id owner_id role digest driver receives_dispatch dispatch created_at',
          'access.view_role', project='project_id', owner='owner_id')
-register(a.RoleBundleSeal, 'id bundle_id created_at', 'access.view_role', project='bundle__project_id', owner='bundle__owner_id')
-register(a.RoleBundleApproval, 'id bundle_id human_id created_at', 'access.view_role',
-         project='bundle__project_id', owner='bundle__owner_id')
-register(a.RoleCapability, 'id bundle_id scope verb', 'access.view_role', project='bundle__project_id', owner='bundle__owner_id')
-register(a.RoleSpawn, 'id bundle_id role', 'access.view_role', project='bundle__project_id', owner='bundle__owner_id')
+register(a.AgentDefinitionSeal, 'id definition_id created_at', 'access.view_role', project='definition__project_id', owner='definition__owner_id')
+register(a.AgentDefinitionApproval, 'id definition_id human_id created_at', 'access.view_role',
+         project='definition__project_id', owner='definition__owner_id')
+register(a.DefinitionCapability, 'id definition_id scope verb', 'access.view_role', project='definition__project_id', owner='definition__owner_id')
+register(a.DefinitionSpawn, 'id definition_id role', 'access.view_role', project='definition__project_id', owner='definition__owner_id')
+register(a.AgentProfile, 'id project_id owner_id agent_id target_id definition_id revision created_at',
+         'access.view_role', project='project_id', owner='owner_id')
 register(a.Grant, 'id intent_id state revision retirement created_at', 'access.view_role',
          project='intent__project_id', owner='intent__owner_id')
 register(a.GrantEvent, 'id grant_id action revision created_at', 'access.view_role',
