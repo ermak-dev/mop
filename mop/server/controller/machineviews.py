@@ -54,12 +54,17 @@ class ActionInput(MachineView):
         values = query(request, ('schema_version', 'operation_id', 'step_id'))
         work = execution.action_work(request.actor, operation_id=p.uuid_value(values['operation_id']),
             step_id=p.uuid_value(values['step_id']))
-        if work.action not in ('apply_identity','restart_session','confirm_ready'):
-            raise Unavailable('protected action payload source is not bound')
+        payload = {}
+        if work.action == 'send_message':
+            payload = execution.work.message_input(work)
+            # Decrypt может ждать external provider: current machine/lease/identity
+            # проверяются повторно уже после получения protected bytes.
+            if execution.action_work(request.actor, operation_id=work.operation_id, step_id=work.step_id) != work:
+                raise Conflict('action input binding changed')
         from .machinebinding import owner_identity
         identity = owner_identity(work.owner_id)
         return Response({'schema_version':1, 'operation_id':str(work.operation_id),'step_id':str(work.step_id),
-            'git_name':identity.name, 'git_email':identity.email})
+            'git_name':identity.name, 'git_email':identity.email, **payload})
 
 
 class ExecutorState(MachineView):

@@ -219,7 +219,33 @@ class MachineClient:
     async def action_input(self, work):
         value = await self.transport.request('GET','work/input',params=dict(schema_version='1',
             operation_id=work.operation_id,step_id=work.step_id))
-        exact(value, ('schema_version','operation_id','step_id','git_name','git_email'))
+        names = ('schema_version','operation_id','step_id','git_name','git_email')
+        if work.action == 'send_message':
+            names += ('message', 'message_id', 'operation_request_id', 'priority', 'notify_when_idle', 'holder_endpoint', 'reply_address')
+        exact(value, names)
+        if work.action == 'send_message':
+            text = value['message']
+            valid_text = False
+            if type(text) is str and text.strip() and '\x00' not in text:
+                try:
+                    valid_text = len(text.encode('utf-8')) <= 16384
+                except UnicodeError:
+                    pass
+            if (not valid_text or type(value['priority']) is not str
+                    or value['priority'] not in ('next', 'now', 'later') or type(value['notify_when_idle']) is not bool):
+                raise Refused('invalid bounded message input')
+            uuid(value['message_id'])
+            uuid(value['operation_request_id'])
+            if value['holder_endpoint'] is not None:
+                uuid(value['holder_endpoint'])
+                address = value['reply_address']
+                if type(address) is not str or not address.startswith('private:'):
+                    raise Refused('private reply address required')
+                uuid(address.removeprefix('private:'))
+            elif value['reply_address'] is not None:
+                raise Refused('reply address requires an addressed holder')
+            if value['notify_when_idle'] and value['holder_endpoint'] is None:
+                raise Refused('idle notification requires an addressed holder')
         if value['operation_id'] != work.operation_id or value['step_id'] != work.step_id:
             raise Refused('action input address changed')
         if any(type(item) is not str or not 1 <= len(item) <= 256 or

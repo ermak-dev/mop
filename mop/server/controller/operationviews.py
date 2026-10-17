@@ -6,14 +6,26 @@ from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..operations.commands import decode_body, InvalidCommand, parse_restart
+from ..operations.commands import decode_body, InvalidCommand, parse_restart, parse_send, parse_dispatch
 from ..operations.node import parse
 from .runtime import operations_service
 
 
 def operations_api():
     # Никаких fake effects и динамического registry в production root.
-    return operations_service()
+    return operations_service(grants=operation_grants())
+
+
+def operation_grants():
+    from mop.server.access.grants import Grants
+    from .machinebinding import AssignmentBindings
+    return Grants(provider=None, bindings=AssignmentBindings()).local_authority()
+
+
+class OperationView(APIView):
+    @property
+    def grant_resolver(self):
+        return operations_api().grants
 
 
 def _reply(operation, status=200):
@@ -84,13 +96,53 @@ def stop_api():
     return service()
 
 
+def message_api():
+    from .machinebinding import operations
+    from .endpointviews import endpoints
+    return operations(endpoints=endpoints)
+
+
+@method_decorator(never_cache, name='dispatch')
+class SendMessage(OperationView):
+    parser = staticmethod(parse_send)
+
+    @property
+    def grant_resolver(self):
+        return message_api().grants
+
+    def post(self, request):
+        try:
+            command = self.parser(decode_body(request.body))
+        except InvalidCommand as error:
+            raise serializers.ValidationError(str(error)) from None
+        holder = None
+        if 'X-Mop-Endpoint' in request.headers or 'X-Mop-Connection' in request.headers:
+            from .endpointviews import endpoints, uid
+            try:
+                holder = endpoints.trusted_context(request.actor, uid(request.headers.get('X-Mop-Endpoint')),
+                    uid(request.headers.get('X-Mop-Connection')))
+            except ValueError as error:
+                raise serializers.ValidationError(str(error)) from None
+        from mop.server.secrets.crypto import SecretCryptoError
+        from mop.server.operations.service import Refused
+        try:
+            operation = message_api().submit_message(request.actor, command, holder=holder)
+        except SecretCryptoError as error:
+            raise Refused('controller_unavailable', safe_reason=str(error)) from None
+        return _reply(operation, status=202 if operation['state'] == 'accepted' else 200)
+
+
+class DispatchTask(SendMessage):
+    parser = staticmethod(parse_dispatch)
+
+
 def restart_api():
     from .machinebinding import operations
     return operations()
 
 
 @method_decorator(never_cache, name='dispatch')
-class OperationStatus(APIView):
+class OperationStatus(OperationView):
     def get(self, request, operation_id):
         epoch = request.query_params.get('epoch')
         try:
@@ -101,7 +153,7 @@ class OperationStatus(APIView):
 
 
 @method_decorator(never_cache, name='dispatch')
-class RequestLookup(APIView):
+class RequestLookup(OperationView):
     def get(self, request):
         if set(request.query_params) != {'request_id', 'epoch'}:
             raise serializers.ValidationError('request_id and epoch are required')
