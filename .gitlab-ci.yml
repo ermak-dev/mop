@@ -159,6 +159,10 @@ stages: [test, deploy]
 
 test:py3.12:
   extends: .tests
+  # #698: основной suite и два hermetic-перепрогона (clean/hostile HOME)
+  # 25-минутного controller.py не помещаются в часовой таймаут проекта;
+  # тяжёлые проверки не исключаются (#673) -- job объявляет свой бюджет.
+  timeout: 2h
   variables:
     # Оба обязательных gate исполняются в этом job даже при красном другом:
     # полный непривилегированный suite (TESTS) и узкий root-only UID gate
