@@ -20,6 +20,18 @@ if TYPE_CHECKING:
 from urllib.parse import quote, urlencode, urlsplit
 from uuid import UUID
 
+from mop.common.domain import Alloc
+
+
+def _alloc(row):
+    """Строка ответа /allocations -> domain.Alloc (#377); мусор -- None, то есть отказ."""
+    if type(row) is not dict:
+        return None
+    try:
+        return Alloc.from_dict(row)
+    except ValueError:
+        return None
+
 
 class SchedulerUnavailable(ValueError):
     def __init__(self):
@@ -263,12 +275,13 @@ class NomadStopScheduler:
             # не доказывает завершение процесса. all=true добавляется ниже.
             if status!=200 or type(rows) is not list or not rows:
                 raise SchedulerUnavailable()
-            for row in rows:
-                if (type(row) is not dict or row.get('JobID')!=ticket.job.job_id
-                        or row.get('ClientStatus') not in ('complete','failed')
-                        or row.get('DesiredStatus') not in ('stop','evict')):
+            allocs = [_alloc(row) for row in rows]
+            for alloc in allocs:
+                if (alloc is None or alloc.job!=ticket.job.job_id
+                        or alloc.client_status not in ('complete','failed')
+                        or alloc.desired_status not in ('stop','evict')):
                     raise SchedulerUnavailable()
-            allocation_ids = tuple(sorted(row['ID'] for row in rows))
+            allocation_ids = tuple(sorted(alloc.id for alloc in allocs))
             if len(set(allocation_ids))!=len(rows) or any(type(pk) is not str or not pk for pk in allocation_ids):
                 raise SchedulerUnavailable()
             # Scheduler terminal status не доказывает конец вынесенной host session.
