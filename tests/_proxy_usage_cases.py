@@ -430,3 +430,11 @@ class ProxyUsage(TransactionTestCase):
         self.assertEqual(intent.gap_code, 'transport_unknown')
         with self.assertRaises(self.s.Held):
             self.begin()
+
+    # ── #690: негативная матрица контрактов до/после перевода на strict ──
+    def test_negative_contract_matrix_usage_query(self):
+        from _strict_matrix_cases import usage_matrix, check_matrix, get_spec
+        self.finish(self.begin())
+        actor, token = self.actor(global_scope=True)
+        client = Client(HTTP_AUTHORIZATION='Token '+token)
+        check_matrix(self, usage_matrix(), get_spec(client, '/api/v1/usage'))

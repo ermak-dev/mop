@@ -1,6 +1,7 @@
 """DRF query adapter: никакого доступа к destructive proxy queue."""
 from rest_framework.response import Response
-from .machineviews import MachineView, query
+from .machineviews import MachineView
+from .strict import query_document
 from mop.server.sessions.usage_services import UsageQueries, Unavailable
 
 
@@ -12,7 +13,8 @@ class Usage(MachineView):
         return super().handle_exception(error)
 
     def get(self, request):
-        values = query(request, ('schema_version', 'start', 'end'), optional=('limit', 'after'))
+        values = query_document(request.query_params, ('schema_version', 'start', 'end'),
+                                optional=('limit', 'after'))
         limit = values.get('limit', '100')
         if not limit.isascii() or not limit.isdecimal():
             raise ValueError('invalid usage page size')

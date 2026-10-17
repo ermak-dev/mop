@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from mop.server.sessions import endpoints as s
 from .models import Installation
 from .runtime import require_restore_ready
+from .strict import StrictJSONParser, uid, strict_document
 
 
 def authority(*, lock=False):
@@ -24,24 +25,8 @@ def authority(*, lock=False):
 endpoints = s.Endpoints(authority=authority)
 
 
-def exact(value, required, optional=()):
-    if type(value) is not dict or not set(required) <= value.keys() or value.keys()-set(required)-set(optional):
-        raise ValueError('unknown or missing endpoint fields')
-    if type(value['schema_version']) is not int or value['schema_version'] != 1:
-        raise ValueError('unsupported endpoint schema version')
-
-
-def uid(value):
-    if type(value) is not str:
-        raise ValueError('canonical UUID string required')
-    try:
-        result = UUID(value)
-    except ValueError:
-        raise ValueError('canonical UUID string required') from None
-    if str(result) != value:
-        raise ValueError('canonical UUID string required')
-    return result
-
+# #690: приватные exact/uid заменены общими строгими полями strict-модуля;
+# тексты отказов и статус прежние (400 validation_error).
 
 def result(value):
     return {'id': str(value.id), 'message_id': str(value.message_id),
@@ -59,6 +44,8 @@ def presence(value):
 class EndpointView(APIView):
     # Grant resolver назначается доверенной root composition, не request JSON.
     grant_resolver = None
+    # #690: единый строгий декодер тела (no-duplicate-keys, bounded, nonfinite).
+    parser_classes = (StrictJSONParser,)
 
     def context(self, request):
         return endpoints.trusted_context(request.actor, uid(request.headers.get('X-Mop-Endpoint')),
@@ -83,9 +70,10 @@ class EndpointView(APIView):
 
 class Register(EndpointView):
     def post(self, request):
-        value = request.data
-        exact(value, ('schema_version', 'client_id', 'project_id', 'external_session_id', 'display_name'))
-        endpoint = endpoints.register(request.actor, client_id=uid(value['client_id']), project_id=uid(value['project_id']),
+        value = strict_document(request.data, ('schema_version', 'client_id', 'project_id',
+                                               'external_session_id', 'display_name'))
+        endpoint = endpoints.register(request.actor, client_id=uid(value['client_id']),
+            project_id=uid(value['project_id']),
             external_session_id=value['external_session_id'], display_name=value['display_name'])
         return Response({'schema_version': 1, 'endpoint': presence(endpoint)}, status=201)
 
@@ -111,14 +99,14 @@ class Address(EndpointView):
 
 class Renew(EndpointView):
     def post(self, request, endpoint_id):
-        exact(request.data, ('schema_version',))
+        strict_document(request.data, ('schema_version',))
         context = self.context(request)
         if context.endpoint_id != endpoint_id:
             raise s.Conflict('renew target differs from current endpoint')
         return Response({'schema_version': 1, 'endpoint': presence(endpoints.renew(context))})
 
     def delete(self, request, endpoint_id):
-        exact(request.data, ('schema_version',))
+        strict_document(request.data, ('schema_version',))
         context = self.context(request)
         if context.endpoint_id != endpoint_id:
             raise s.Conflict('retire target differs from current endpoint')
@@ -128,9 +116,9 @@ class Renew(EndpointView):
 
 class Reports(EndpointView):
     def post(self, request):
-        value = request.data
-        exact(value, ('schema_version', 'epoch', 'address', 'message_id', 'text', 'not_after'),
-            ('operation_request_id', 'notify_when_idle', 'priority'))
+        value = strict_document(request.data, ('schema_version', 'epoch', 'address', 'message_id',
+                                               'text', 'not_after'),
+                                optional=('operation_request_id', 'notify_when_idle', 'priority'))
         if type(value['not_after']) is not str:
             raise ValueError('aware delivery deadline required')
         try:
@@ -155,6 +143,6 @@ class Delivery(EndpointView):
 
 class Ack(EndpointView):
     def post(self, request, delivery_id):
-        exact(request.data, ('schema_version', 'outcome'))
-        value = endpoints.acknowledge(self.context(request), delivery_id, outcome=request.data['outcome'])
+        value = strict_document(request.data, ('schema_version', 'outcome'))
+        value = endpoints.acknowledge(self.context(request), delivery_id, outcome=value['outcome'])
         return Response({'schema_version': 1, 'delivery': result(value)})

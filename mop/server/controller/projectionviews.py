@@ -7,8 +7,10 @@ from mop.server.access.services import Access, Denied, NotVisible
 from mop.server.sessions.projections import PoolQueries, SnapshotReset, SnapshotCapacity, SourceConflict
 from mop.server.sessions.projection_writes import ProjectionWriter, ControllerRun
 from mop.server.sessions.projection_models import ProjectionRuntime
-from mop.server.sessions.protocol import uuid_value, counter, deadline, exact
+from mop.server.sessions.protocol import uuid_value, counter, deadline
 from .runtime import installation_snapshot
+from . import strict
+from .strict import StrictJSONParser
 
 
 class ReadAuthorityUnavailable(RuntimeError):
@@ -56,12 +58,13 @@ def response(function):
 
 
 def parameters(request):
+    """#690: строгие поля общего strict-модуля; тексты отказов прежние."""
     query = request.query_params
     if set(query) - {'project_id','page_size','cursor'} or any(len(query.getlist(key)) != 1 for key in query):
         raise ValueError('unknown or repeated query fields')
     result = {}
     if 'project_id' in query:
-        result['project_id'] = uuid_value(query['project_id'])
+        result['project_id'] = strict.uuid_field(query['project_id'])
     if 'page_size' in query:
         raw = query['page_size']
         if not raw.isascii() or not raw.isdecimal() or len(raw) > 3:
@@ -131,11 +134,13 @@ class ProducerStatus(APIView):
 
 
 class Producers(APIView):
+    # #690: единый строгий декодер тела (no-duplicate-keys, bounded, nonfinite).
+    parser_classes = (StrictJSONParser,)
+
     def post(self, request):
         def bind():
-            body = request.data
-            exact(body, {'schema_version','controller_run','target_id','incarnation_id','executor_epoch',
-                         'producer_epoch','kind','expected_revision'})
+            body = strict.machine_document(request.data, ('schema_version','controller_run','target_id',
+                'incarnation_id','executor_epoch','producer_epoch','kind','expected_revision'))
             epoch = UUID(read_authority()['epoch'])
             writer = ProjectionWriter(ControllerRun(epoch, uuid_value(body['controller_run'])))
             revision = writer.bind_producer(request.actor, target_id=uuid_value(body['target_id']),
@@ -147,11 +152,13 @@ class Producers(APIView):
 
 
 class Observations(APIView):
+    # #690: единый строгий декодер тела (no-duplicate-keys, bounded, nonfinite).
+    parser_classes = (StrictJSONParser,)
+
     def post(self, request):
         def ingest():
-            body = request.data
-            exact(body, {'schema_version','controller_run','target_id','incarnation_id','producer_epoch',
-                         'sequence','kind','observed_at','payload','status','reason'})
+            body = strict.machine_document(request.data, ('schema_version','controller_run','target_id',
+                'incarnation_id','producer_epoch','sequence','kind','observed_at','payload','status','reason'))
             epoch = UUID(read_authority()['epoch'])
             run = ControllerRun(epoch, uuid_value(body['controller_run']))
             changed = ProjectionWriter(run).observe(request.actor, target_id=uuid_value(body['target_id']),
