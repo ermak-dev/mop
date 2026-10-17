@@ -312,6 +312,11 @@ class ProjectionQueries(TransactionTestCase):
         self.assertEqual(self.client.get('/api/v1/puppets', secure=True).status_code, 403)
         self.assertIn(Client().get('/api/v1/puppets', secure=True).status_code, (401, 403))
 
+    # ── #690: негативная матрица контрактов до/после перевода на strict ──
+    def test_negative_contract_matrix_projection_query(self):
+        from _strict_matrix_cases import puppets_matrix, check_matrix, get_spec
+        check_matrix(self, puppets_matrix(self), get_spec(self.client, '/api/v1/puppets'))
+
     def test_real_assignment_not_user_presence_is_puppet_source(self):
         from mop.server.sessions.models import Assignment
         Assignment.objects.filter(pk=self.assignment.id).update(project_id=self.other.id)

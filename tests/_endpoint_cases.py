@@ -979,3 +979,15 @@ class Endpoints(TransactionTestCase):
             source = Path(spec.origin).read_text()
             for forbidden in ('from django', 'import django', 'mop.server', 'session.resolve', 'session.registry', 'Nomad'):
                 self.assertNotIn(forbidden, source)
+
+    # ── #690: негативная матрица контрактов до/после перевода на strict ──
+    def test_negative_contract_matrix_register_reports_and_addresses(self):
+        from _strict_matrix_cases import (endpoint_matrix, reports_matrix, addresses_matrix,
+                                          check_matrix, post_spec, get_spec)
+        http = Client(HTTP_AUTHORIZATION='Token '+self.key)
+        self.client_reg = self.client
+        check_matrix(self, endpoint_matrix(self, None), post_spec(http, '/api/v1/endpoints'))
+        # Каждая регистрация в матрице обязана создать новую presence: базовый
+        # ввод валиден, повтор external_session_id не меняет ожидания.
+        check_matrix(self, reports_matrix(self, self.installation.epoch), post_spec(http, '/api/v1/reports'))
+        check_matrix(self, addresses_matrix(self), get_spec(http, '/api/v1/addresses'))

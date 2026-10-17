@@ -606,6 +606,30 @@ class MachineExecution(TransactionTestCase):
         self.assertEqual(self.port.started, 1)
         self.assertEqual(len(self.port.completed), 1)
 
+
+    # ── #690: негативная матрица контрактов до/после перевода на strict ──
+    @override_settings(ALLOWED_HOSTS=['testserver'])
+    def test_negative_contract_matrix_claim_result_and_work_query(self):
+        from unittest.mock import patch
+        from _strict_matrix_cases import (claim_matrix, result_matrix, work_matrix,
+                                          check_matrix, post_spec, get_spec)
+        from mop.server.controller.machineviews import authority
+        self.service.installation = authority
+        client = Client(HTTP_AUTHORIZATION='Token '+self.key)
+        wire = self.p.work_to_wire(self.work)
+        with patch('mop.server.controller.machineviews.execution', self.service):
+            # Setup-claim первым: владение ресурсом одно, valid-колонка матрицы
+            # переигрывает тот же request_id (идемпотентный 200), а не создаёт
+            # второе -- иначе любой следующий claim падает в 409-конфликт.
+            request_id = uuid4()
+            attempt = self.service.claim(self.actor, self.work, request_id=request_id)
+            check_matrix(self, claim_matrix(self, wire, request_id),
+                         post_spec(client, '/api/v1/machine/work/claim'))
+            check_matrix(self, result_matrix(self, attempt.id, attempt.revision),
+                         post_spec(client, '/api/v1/machine/work/result'))
+            check_matrix(self, work_matrix(self, self.node.id, self.boot),
+                         get_spec(client, '/api/v1/machine/work'))
+
     def test_fact_read_is_bounded_and_never_turns_unavailable_into_empty(self):
         with self.assertRaises(self.s.Unavailable):
             self.service.facts(self.actor, self.node.id, kind='disk', limit=10)
