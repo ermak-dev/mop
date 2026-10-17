@@ -534,10 +534,6 @@ class Operations:
         self._require_binding()
         return m.Step.objects.get(operation_id=operation_id).name
 
-    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build'), node_id=None):
-        self._require_binding()
-        if type(limit) is not int or not 1 <= limit <= 8:
-            raise ValueError('worker batch exceeds controller safety caps')
     def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete'),
                 node_id=None):
         self._require_binding()
@@ -554,8 +550,6 @@ class Operations:
             # scope — весь pinned plan, не его storage anchor Operation.node_id.
             work &= ~Q(step__name='node_eligibility') | Q(node_id=node_id)
         # Фильтр capability до LIMIT: чужая lane не вытесняет исполнимую работу.
-        # Stale lease разрешает только inspection прежнего token, не новый apply.
-        return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
         # Stale lease разрешает только inspection прежнего token, не новый apply.
         return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
 
