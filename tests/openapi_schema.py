@@ -51,6 +51,7 @@ PUBLIC = {
     '/api/v1/puppets/{target_id}/commands/restart': {'post'},
     '/api/v1/puppets/{target_id}/commands/stop-job': {'post'},
     '/api/v1/puppets/{target_id}/commands/wipe': {'post'},
+    '/api/v1/puppets/{target_id}/commands/delete': {'post'},
     '/api/v1/messages': {'post'},
     '/api/v1/dispatches': {'post'},
     '/api/v1/operations': {'get'},

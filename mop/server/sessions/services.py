@@ -254,6 +254,8 @@ class Assignments:
             expected(row, expected_revision)
             if row.expires_at <= timezone.now():
                 raise Conflict('human assignment expired')
+            if row.deleted_at is not None:
+                raise Conflict('assignment was deleted')
             if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
                 raise Conflict('unresolved external effect holds resource')
             if row.current_incarnation_id:
@@ -292,6 +294,34 @@ class Assignments:
         row.revision += 1
         row.generation += 1
         row.save(update_fields=('revision','generation'))
+        return row.revision
+
+    def confirm_deleted(self, *, target_id, incarnation_id, expected_revision,
+                        expected_generation, executor_epoch):
+        """SQL-only закрытие назначения навсегда после подтверждённого purge (#625).
+
+        Вызывается внутри caller result transaction. Как и historical stop, не
+        трогает уже другое назначение: при сдвинутых revision/generation/
+        инкарнации ничего не меняет. Владелец и инкарнация снимаются, поэтому
+        current() его больше не видит, а activate() отказывает.
+        """
+        if not transaction.get_connection().in_atomic_block:
+            raise Unavailable('delete confirmation requires caller transaction')
+        row = m.Assignment.objects.select_for_update().get(pk=target_id)
+        if (row.current_incarnation_id != incarnation_id or row.revision != expected_revision
+                or row.generation != expected_generation):
+            return None
+        incarnation = m.ExecutionIncarnation.objects.select_for_update().get(pk=incarnation_id)
+        if incarnation.executor_epoch != executor_epoch or incarnation.assignment_id != row.id:
+            return None
+        incarnation.accepting = False
+        incarnation.save(update_fields=('accepting',))
+        row.owner = None
+        row.current_incarnation = None
+        row.deleted_at = timezone.now()
+        row.revision += 1
+        row.generation += 1
+        row.save(update_fields=('owner', 'current_incarnation', 'deleted_at', 'revision', 'generation'))
         return row.revision
 
     def release(self, actor, target_id, *, expected_revision, expected_generation=None):

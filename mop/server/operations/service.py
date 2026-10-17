@@ -101,7 +101,7 @@ def _snapshot(row):
             steps=list(m.Step.objects.filter(operation=row).order_by('ordinal').values('name','outcome','evidence')),
             evidence=({'receipt_id':str(receipt['id']), 'action':receipt['step__name'],
                 'incarnation':str(row.incarnation_id), 'confirmed':receipt['applied']} if receipt else None))
-        if row.action == 'stop_job':
+        if row.action in ('stop_job', 'delete'):
             applied_revision = row.stopbinding.applied_revision
             result['target']['revision'] = str(applied_revision or row.expected_revision)
             if result['evidence'] is not None:
@@ -114,7 +114,7 @@ def _snapshot(row):
 def _event(row):
     values = dict(operation=row, revision=row.revision, state=row.state, code=row.code,
                   target_revision=(row.projects.get().revision if row.action == 'build' else
-                      (row.stopbinding.applied_revision or row.expected_revision) if row.action == 'stop_job' else
+                      (row.stopbinding.applied_revision or row.expected_revision) if row.action in ('stop_job', 'delete') else
                       row.expected_revision if row.target_kind == 'puppet' else Node.objects.get(pk=row.node_id).revision))
     m.AuditEvent.objects.create(reason=row.reason, **values)
     m.OutboxEvent.objects.create(**values)
@@ -152,6 +152,7 @@ class Operations:
         self.targets, self.restart_support = targets, restart_support
         self.builds = None
         self.stops = None
+        self.deletes = None
         self.messages = None
         self.wipes = None
         self.queue_limit, self.project_limit, self.execution_limit = queue_limit, project_limit, execution_limit
@@ -207,12 +208,16 @@ class Operations:
         return _snapshot(row)
 
     def submit(self, actor, command):
-        from .commands import RestartCommand, StopJobCommand, SendCommand, DispatchCommand, WipeCommand
+        from .commands import RestartCommand, StopJobCommand, SendCommand, DispatchCommand, WipeCommand, DeleteCommand
         from .puppet import RestartHandler
         if type(command) is StopJobCommand:
             if self.stops is None:
                 raise Refused('controller_unavailable', safe_reason='conditional stop-job scheduler is unavailable')
             return self.stops.submit(actor, command)
+        if type(command) is DeleteCommand:
+            if self.deletes is None:
+                raise Refused('controller_unavailable', safe_reason='conditional delete scheduler is unavailable')
+            return self.deletes.submit(actor, command)
         if type(command) is WipeCommand:
             if self.wipes is None:
                 raise Refused('controller_unavailable', safe_reason='physical wipe binding is unavailable')
@@ -533,15 +538,16 @@ class Operations:
         self._require_binding()
         if type(limit) is not int or not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
-    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop'), node_id=None):
+    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete'),
+                node_id=None):
         self._require_binding()
         if type(limit) is not int or not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
-        if not handlers or not set(handlers) <= {'node_eligibility', 'image_build', 'scheduler_stop'}:
+        if not handlers or not set(handlers) <= {'node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete'}:
             raise ValueError('finite controller worker handlers required')
         # Stop lane (#625) остаётся в общем discovery: worker исполняет её только
         # с_bound stops портом, что задаёт его handlers tuple.
-        work = Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action='stop_job') | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
+        work = Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action__in=('stop_job', 'delete')) | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
         work &= Q(step__name__in=handlers)
         if node_id is not None:
             # Service enrollment касается только node-eligibility lane. Build

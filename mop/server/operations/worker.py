@@ -12,7 +12,8 @@ class Worker:
         # прочие lane конфигурируются своими портами, как в #678.
         self.handlers = tuple(name for name, port in (
             ('node_eligibility', node_executor), ('image_build', image_builds),
-            ('scheduler_stop', getattr(operations, 'stops', None) or False)) if port is not None)
+            ('scheduler_stop', getattr(operations, 'stops', None) or False),
+            ('scheduler_delete', getattr(operations, 'deletes', None) or False)) if port is not None)
 
     async def run_one(self, operation_id):
         if not self.runtime.accepting:
@@ -25,10 +26,11 @@ class Worker:
         handler = await self.runtime.database(self.operations.handler, operation_id)
         if handler not in self.handlers:
             raise RuntimeError(f'controller worker handler {handler} is not configured')
-        if handler == 'scheduler_stop':
-            if self.operations.stops is None:
+        if handler in ('scheduler_stop', 'scheduler_delete'):
+            lane = self.operations.stops if handler == 'scheduler_stop' else self.operations.deletes
+            if lane is None:
                 return None
-            return await self.runtime.blocking(self._stop, operation_id)
+            return await self.runtime.blocking(self._scheduler, lane, operation_id)
         if handler == 'image_build':
             return await self.runtime.blocking(self._build, operation_id)
         claim = await self.runtime.database(self.operations.claim, operation_id)
@@ -47,10 +49,10 @@ class Worker:
         return await self.runtime.database(self.operations.complete, claim,
             expected_revision=claim.revision, applied=applied)
 
-    def _stop(self, operation_id):
+    def _scheduler(self, lane, operation_id):
         from django.db import connections
         try:
-            return self.operations.stops.run(operation_id)
+            return lane.run(operation_id)
         finally:
             connections.close_all()
 

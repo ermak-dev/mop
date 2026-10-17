@@ -59,7 +59,7 @@ class StopProof:
 
     def __post_init__(self):
         if (self.outcome not in ('succeeded','failed','unknown') or self.evidence not in
-                ('job-quiescent','conditional-refusal','scheduler-uncertain')):
+                ('job-quiescent','job-purged','conditional-refusal','scheduler-uncertain')):
             raise ValueError('finite scheduler proof required')
 
 
@@ -86,6 +86,8 @@ class StopScheduler(Protocol):
     def observe(self, job: JobPin) -> int: ...
     def stop_job(self, ticket: StopTicket) -> StopProof: ...
     def inspect_stop(self, ticket: StopTicket) -> StopProof: ...
+    def delete_job(self, ticket: StopTicket) -> StopProof: ...
+    def inspect_delete(self, ticket: StopTicket) -> StopProof: ...
 
 
 def job_metadata(pin):
@@ -113,16 +115,18 @@ class NomadStopScheduler:
 
     @property
     def capabilities(self):
-        return (frozenset({'conditional_stop_job','inspect_stop_job'}) if self.body_inspector is not None else frozenset())
+        return (frozenset({'conditional_stop_job','inspect_stop_job','conditional_delete_job'})
+                if self.body_inspector is not None else frozenset())
 
-    def _request(self, method, path, namespace, body=None, *, all_allocations=False, deadline=None):
+    def _request(self, method, path, namespace, body=None, *, all_allocations=False, purge=False, deadline=None):
         # Без redirects/proxy/env credentials; один bounded socket на вызов.
         # Budget ПУБЛИЧНОГО вызова (#680): deadline — monotonic предел всего
         # observe/stop_job/inspect_stop, а не каждого _request. Каждый новый
         # вложенный запрос получает только остаток, drip-ответ (каждое socket
         # ожидание под timeout) прерывается Timer+shutdown, финальная
         # monotonic проверка закрывает гонку shutdown-против-возврата.
-        query = urlencode({'namespace':namespace,'consistent':'true', **({'all':'true'} if all_allocations else {})})
+        query = urlencode({'namespace':namespace,'consistent':'true', **({'all':'true'} if all_allocations else {}),
+                           **({'purge':'true'} if purge else {})})
         cls = http.client.HTTPSConnection if self.origin.scheme=='https' else http.client.HTTPConnection
         options = {'context':self._ssl} if cls is http.client.HTTPSConnection else {}
         remaining = self.timeout if deadline is None else deadline-time.monotonic()
@@ -285,3 +289,58 @@ class NomadStopScheduler:
             return StopProof('succeeded','job-quiescent')
         except Exception:
             return StopProof('unknown','scheduler-uncertain')
+
+    def _absent(self, job, *, deadline):
+        """Доказательство удаления: consistent GET того же job -- ровно 404."""
+        status, _ = self._request('GET','/v1/job/'+quote(job.job_id,safe=''),job.namespace,deadline=deadline)
+        return status == 404
+
+    def delete_job(self, ticket):
+        """#625 delete: условная остановка нашим токеном, затем purge только её.
+
+        У Nomad нет условного deregister: purge отправляется лишь после нашей
+        подтверждённой остановки и повторного consistent чтения, что job всё ещё
+        помечен нашими operation/token. Остаётся окно между этим чтением и
+        DELETE -- чужая перерегистрация в нём была бы снята; это документировано,
+        а не скрыто. Потерянный ответ -- unknown; повтор DELETE не делается.
+        """
+        if (not self.capabilities or type(ticket) is not StopTicket
+                or ticket.not_after <= datetime.now(timezone.utc)):
+            return StopProof('failed','conditional-refusal')
+        try:
+            budget = time.monotonic() + self.timeout
+            if self._absent(ticket.job, deadline=budget):
+                return StopProof('unknown','scheduler-uncertain')
+            value = self._job(ticket.job, deadline=budget)
+            ours = (value['Stop'] is True and value['Meta'].get('mop.stop_operation')==str(ticket.operation_id)
+                    and value['Meta'].get('mop.stop_token')==str(ticket.token))
+            if not ours:
+                stopped = self.stop_job(ticket)
+                if stopped.outcome != 'succeeded':
+                    return stopped
+                budget = time.monotonic() + self.timeout
+                value = self._job(ticket.job, deadline=budget)
+                if (value['Stop'] is not True or value['Meta'].get('mop.stop_operation')!=str(ticket.operation_id)
+                        or value['Meta'].get('mop.stop_token')!=str(ticket.token)):
+                    return StopProof('unknown','scheduler-uncertain')
+            if ticket.not_after <= datetime.now(timezone.utc):
+                return StopProof('failed','conditional-refusal')
+            status, _ = self._request('DELETE','/v1/job/'+quote(ticket.job.job_id,safe=''),ticket.job.namespace,
+                                      purge=True,deadline=budget)
+            if status != 200:
+                return StopProof('unknown','scheduler-uncertain')
+            return (StopProof('succeeded','job-purged') if self._absent(ticket.job, deadline=budget)
+                    else StopProof('unknown','scheduler-uncertain'))
+        except Exception:
+            # Ответ мог потеряться после внешнего purge; повтор DELETE запрещён.
+            return StopProof('unknown','scheduler-uncertain')
+
+    def inspect_delete(self, ticket):
+        """Сверка только чтением: job снят -- succeeded; иначе неизвестно."""
+        try:
+            budget = time.monotonic() + self.timeout
+            if self._absent(ticket.job, deadline=budget):
+                return StopProof('succeeded','job-purged')
+        except Exception:
+            pass
+        return StopProof('unknown','scheduler-uncertain')

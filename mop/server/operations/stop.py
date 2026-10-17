@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from mop.server.access.services import current_actor, Denied
 from . import models as m
-from .commands import StopJobCommand
+from .commands import StopJobCommand, DeleteCommand
 from .lifecycle import State
 from .puppet import RestartTarget
 from .requests import resolve_retry, RequestRefused, Retry
@@ -18,25 +18,37 @@ from .scheduler import JobPin, StopTicket, StopProof, SchedulerUnavailable
 from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
 
 
-def digest(command):
+# Конечный набор действий scheduler lane (#625): stop сохраняет тело и клон,
+# delete после той же условной остановки снимает job и закрывает назначение.
+ACTIONS = {
+    'stop_job': dict(command=StopJobCommand, permission='operations.stop_puppet_job', step='scheduler_stop',
+                     capabilities=frozenset({'conditional_stop_job','inspect_stop_job'}), label='stop job'),
+    'delete': dict(command=DeleteCommand, permission='execution.delete_puppet', step='scheduler_delete',
+                   capabilities=frozenset({'conditional_stop_job','inspect_stop_job','conditional_delete_job'}),
+                   label='delete'),
+}
+
+
+def digest(command, action='stop_job'):
     value = {key:str(item) for key,item in asdict(command.intent).items() if key!='request_id'}
-    value['action'] = 'stop_job'
+    value['action'] = action
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
 class StopJobs:
-    def __init__(self, operations, *, scheduler=None, targets=None):
+    def __init__(self, operations, *, scheduler=None, targets=None, action='stop_job'):
         self.ops, self.scheduler, self.targets = operations, scheduler, targets
+        self.action, self.spec = action, ACTIONS[action]
 
     def _ports(self):
         if (self.scheduler is None or self.targets is None or type(self.scheduler.scheduler_id) is not UUID
-                or not {'conditional_stop_job','inspect_stop_job'} <= self.scheduler.capabilities):
-            raise Refused('controller_unavailable',safe_reason='conditional stop-job scheduler is unavailable')
+                or not self.spec['capabilities'] <= self.scheduler.capabilities):
+            raise Refused('controller_unavailable',safe_reason='conditional '+self.spec['label']+' scheduler is unavailable')
 
     def _authorize(self, actor, target):
-        self.ops.access.authorize(actor,'operations.stop_puppet_job',project_ids=(target.project_id,))
+        self.ops.access.authorize(actor,self.spec['permission'],project_ids=(target.project_id,))
         if actor.human_owner_id!=target.owner_id:
-            raise Denied('stop job belongs to another human assignment')
+            raise Denied(self.spec['label']+' belongs to another human assignment')
         self.targets.authorize(target)
 
     def _target(self, target_id):
@@ -76,8 +88,8 @@ class StopJobs:
                 scheduler_id=pin.scheduler_id,job_id=job_id,namespace=namespace,modify_index=index)
 
     def submit(self, actor, command):
-        if type(command) is not StopJobCommand:
-            raise ValueError('typed stop-job command required')
+        if type(command) is not self.spec['command']:
+            raise ValueError('typed '+self.spec['label']+' command required')
         _independent()
         intent = command.intent
         with self.ops._transaction():
@@ -88,7 +100,7 @@ class StopJobs:
             old = m.Operation.objects.filter(actor_id=actor.user_id,request_id=intent.request_id).first()
             try:
                 retry = resolve_retry(expected_epoch=intent.epoch,current_epoch=installation.epoch,
-                    submitted_digest=digest(command),stored_digest=old.digest if old else None,
+                    submitted_digest=digest(command,self.action),stored_digest=old.digest if old else None,
                     result_available=not old.result_pruned if old else True)
             except RequestRefused as error:
                 raise Refused(error.code) from None
@@ -115,14 +127,14 @@ class StopJobs:
             if active.count()>=self.ops.queue_limit or active.filter(projects=target.project_id).count()>=self.ops.project_limit:
                 raise Refused('admission_limit')
             row = m.Operation.objects.create(actor_id=actor.user_id,actor_binding=_binding(actor),request_id=intent.request_id,
-                digest=digest(command),epoch=intent.epoch,restore_generation=installation.generation,action='stop_job',
+                digest=digest(command,self.action),epoch=intent.epoch,restore_generation=installation.generation,action=self.action,
                 node_id=target.node_id,target_kind='puppet',target_id=target.target_id,incarnation_id=target.incarnation_id,
                 expected_revision=target.revision,eligible=None,not_after=intent.not_after)
             row.projects.set((target.project_id,))
             values = {key:getattr(target,key) for key in ('project_id','executor_epoch','owner_id','generation','role','bundle_digest','grant_id')}
             m.StopBinding.objects.create(operation=row,**values,scheduler_id=enrollment.scheduler_id,
                 job_id=enrollment.job_id,namespace=enrollment.namespace,modify_index=enrollment.modify_index)
-            m.Step.objects.create(operation=row,name='scheduler_stop')
+            m.Step.objects.create(operation=row,name=self.spec['step'])
             _event(row)
             result = _snapshot(row)
         return result
@@ -137,9 +149,9 @@ class StopJobs:
     def _locked(self, operation_id):
         # Совпадает с machine execution: restore -> Assignment -> Operation -> Step.
         installation = self.ops._installation()
-        target_id = m.Operation.objects.values_list('target_id',flat=True).get(pk=operation_id,action='stop_job')
+        target_id = m.Operation.objects.values_list('target_id',flat=True).get(pk=operation_id,action=self.action)
         target = self.targets.locked(target_id)
-        row = m.Operation.objects.select_for_update().get(pk=operation_id,action='stop_job')
+        row = m.Operation.objects.select_for_update().get(pk=operation_id,action=self.action)
         step = m.Step.objects.select_for_update().get(operation=row)
         if row.epoch!=installation.epoch or row.restore_generation!=installation.generation:
             raise Refused('epoch_conflict')
@@ -231,7 +243,8 @@ class StopJobs:
             if applied:
                 # Не отзывать другое назначение при позднем historical receipt.
                 pin = row.stopbinding
-                pin.applied_revision = self.targets.stopped(ticket.job.target)
+                closing = self.targets.deleted if self.action == 'delete' else self.targets.stopped
+                pin.applied_revision = closing(ticket.job.target)
                 pin.save(update_fields=('applied_revision',))
             step.outcome,step.evidence,step.quiescent_at = proof.outcome,proof.evidence,timezone.now()
             step.save(update_fields=('outcome','evidence','quiescent_at'))
@@ -256,7 +269,8 @@ class StopJobs:
             return self.record(ticket,StopProof('failed','conditional-refusal'))
         if not self.prepare(ticket):
             return None
-        return self.record(ticket,self.scheduler.stop_job(ticket))
+        effect = self.scheduler.delete_job if self.action == 'delete' else self.scheduler.stop_job
+        return self.record(ticket,effect(ticket))
 
     def reconcile(self, actor, operation_id):
         """Только актуальное recovery право; expired intent не допускает новый write."""
@@ -268,4 +282,5 @@ class StopJobs:
             if row.state not in ('running','unknown','reconciling') or step.token is None:
                 raise Refused('operation_conflict')
             ticket = self._ticket(row,step)
-        return self.record(ticket,self.scheduler.inspect_stop(ticket))
+        inspect = self.scheduler.inspect_delete if self.action == 'delete' else self.scheduler.inspect_stop
+        return self.record(ticket,inspect(ticket))
