@@ -3,16 +3,13 @@ from uuid import UUID
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from mop.server.access.context import ActorKind
-from mop.server.access.services import Access, Denied, NotVisible
-from mop.server.sessions.projections import PoolQueries, SnapshotReset, SnapshotCapacity, SourceConflict
+from mop.server.access.services import Access, Denied
+from mop.server.sessions.projections import PoolQueries, SnapshotCapacity
 from mop.server.sessions.projection_writes import ProjectionWriter, ControllerRun
 from mop.server.sessions.projection_models import ProjectionRuntime
 from mop.server.sessions.protocol import uuid_value, counter, deadline, exact
+from .errors import ReadAuthorityUnavailable, ReadRefusal
 from .runtime import installation_snapshot
-
-
-class ReadAuthorityUnavailable(RuntimeError):
-    """Уже безопасный отказ foundation, не raw exception внешнего adapter."""
 
 
 def read_authority():
@@ -27,30 +24,17 @@ def queries():
 
 
 def response(function):
+    """GET/POST read-семейства: успех -- Response, доменный отказ -- ReadRefusal.
+
+    Эпоха читается до запроса и едет в отказе, когда была прочитана; конверт
+    строит глобальный handler по реестру errors, не приватный маппер (#691).
+    """
     epoch = None
     try:
         epoch = read_authority()['epoch']
-        result, status = function(), 200
+        value = Response(function())
     except (ValueError, Denied, ReadAuthorityUnavailable) as error:
-        code, status = 'validation_error', 400
-        if isinstance(error, ReadAuthorityUnavailable):
-            code, status = 'authority_unavailable', 503
-        elif isinstance(error, SnapshotReset):
-            code, status = 'reset_required', 410
-        elif isinstance(error, SnapshotCapacity):
-            code, status = 'unavailable', 503
-        elif isinstance(error, SourceConflict):
-            code, status = 'incarnation_conflict', 409
-        elif isinstance(error, NotVisible):
-            code, status = 'not_found', 404
-        elif isinstance(error, Denied):
-            code, status = 'permission_denied', 403
-        result = {'schema_version':1, 'error':{'code':code, 'message':str(error), 'retryable':status == 503}}
-        if epoch is not None:
-            result['epoch'] = epoch
-        if isinstance(error, SnapshotReset):
-            result['reset'] = {'required':True}
-    value = Response(result, status=status)
+        raise ReadRefusal(error, epoch) from error
     value['Cache-Control'] = 'no-store'
     return value
 

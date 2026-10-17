@@ -2,7 +2,7 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from mop.server.sessions import protocol as p
-from mop.server.sessions.services import Conflict, Unavailable
+from mop.server.sessions.services import Unavailable
 # #625 связывает публичные ports здесь, не в sessions import graph.
 # Несвязанный physical/approval port отказывает до admission.
 from .machinebinding import compose, authority
@@ -22,18 +22,9 @@ def query(request, names, *, optional=()):
 
 
 class MachineView(APIView):
-    def handle_exception(self, error):
-        from mop.server.operations.service import Refused
-        if isinstance(error, Refused):
-            return super().handle_exception(error)
-        if isinstance(error, (Conflict, Unavailable, ValueError)):
-            status = 503 if isinstance(error, Unavailable) else 409 if isinstance(error, Conflict) else 400
-            response = Response({'schema_version': 1, 'error': {
-                'code': 'authority_unavailable' if status == 503 else 'execution_conflict' if status == 409 else 'validation_error',
-                'message': str(error), 'retryable': status == 503}}, status=status)
-            response['Cache-Control'] = 'no-store'
-            return response
-        return super().handle_exception(error)
+    # #691: сырой ValueError конечных парсеров (query/protocol) -- клиентский
+    # 400; доменные отказы переводит глобальный handler по реестру errors.
+    value_error_is_input = True
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
