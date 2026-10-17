@@ -245,6 +245,13 @@ def check_pipeline_yaml(c):
     template = ci['.tests']
     variables = {**template.get('variables', {}), **ci['test:py3.12'].get('variables', {})}
     c.expect('#678 one test stage', template.get('stage'), 'test')
+    # HYPOTHESIS (#698): у job нет своего timeout -- действует часовой таймаут
+    # проекта, а основной прогон и два hermetic-перепрогона 25-минутного
+    # controller.py его превышают: пайплайн 5662 убит без вердикта.
+    # SOLUTION: job объявляет бюджет сам; тяжёлые проверки не исключаются.
+    # STATUS: FIXED — see #698
+    budget = {**template, **ci['test:py3.12']}.get('timeout')
+    c.expect('#698 the single test job declares its own two-hour budget', budget, '2h')
     c.expect('#678 strict mode is mandatory', variables.get('MOP_TESTS_STRICT'), '1')
     c.expect('#678 the complete suite is retained', variables.get('TESTS'), 'bin/mop dev test -v')
     c.expect('#678 only Python 3.12', variables.get('PYTHON_IMAGE'), 'python:3.12-slim-trixie')
