@@ -155,6 +155,24 @@ class ControlClient(unittest.TestCase):
             with self.assertRaises(api.ClientError):
                 self.restart(**kw)
 
+    # #642: wipe и stop-job -- те же PreparedCommand с пустыми params на свои
+    # маршруты; ни сообщения, ни fresh/force в теле нет.
+    def test_wipe_and_stop_post_empty_params_to_their_own_routes(self):
+        for prepare, path in ((self.client.prepare_wipe, "/api/v1/puppets/p_123/commands/wipe"),
+                              (self.client.prepare_stop, "/api/v1/puppets/p_123/commands/stop-job")):
+            self.fixture.calls.clear()
+            command = prepare(self.target, epoch="e_1", not_after=DEADLINE, request_id=KEY)
+            self.queue(202, operation=operation())
+            self.client.submit(command)
+            self.assertEqual(self.fixture.calls[0][1], path)
+            body = json.loads(self.fixture.calls[0][2])
+            self.assertEqual(body["params"], {})
+            self.assertNotIn("target_id", body)
+        for action in ("wipe", "stop"):
+            for kw in ({"fresh": True}, {"message": "x"}, {"priority": "now"}):
+                with self.assertRaises(api.ClientError):
+                    api.PreparedCommand(action, self.target, "e_1", KEY, DEADLINE, **kw)
+
     def test_lost_response_is_unknown_with_exact_key_and_get_recovery(self):
         command = self.send()
         self.fixture.responses.append(TimeoutError(TOKEN + MESSAGE))

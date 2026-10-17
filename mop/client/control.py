@@ -225,12 +225,14 @@ class PreparedCommand:
         _identity(self.epoch)
         _key(self.request_id)
         _deadline(self.not_after)
-        _require(self.action in ("restart", "send") and type(self.fresh) is bool and
+        _require(self.action in ("restart", "send", "wipe", "stop") and type(self.fresh) is bool and
                  type(self.notify_when_idle) is bool and self.priority in ("now", "next", "later") and
                  type(self.wait_seconds) is int and 0 <= self.wait_seconds <= 60)
-        if self.action == "restart":
+        if self.action in ("restart", "wipe", "stop"):
             _require(self.message is None and self.priority == "next" and
                      self.wait_seconds == 0 and not self.notify_when_idle)
+            # wipe и stop-job не несут параметров (#642): ни fresh, ни force.
+            _require(self.action == "restart" or not self.fresh)
         else:
             valid = False
             if not self.fresh and isinstance(self.message, str):
@@ -242,9 +244,13 @@ class PreparedCommand:
 
     @property
     def body(self) -> bytes:
-        params = {"fresh": self.fresh} if self.action == "restart" else {
-            "message": self.message, "priority": self.priority,
-            "wait_seconds": self.wait_seconds, "notify_when_idle": self.notify_when_idle}
+        if self.action == "restart":
+            params = {"fresh": self.fresh}
+        elif self.action == "send":
+            params = {"message": self.message, "priority": self.priority,
+                      "wait_seconds": self.wait_seconds, "notify_when_idle": self.notify_when_idle}
+        else:
+            params = {}
         data = {"schema_version": 1, "epoch": self.epoch, "request_id": self.request_id,
                 "incarnation": self.target.incarnation, "expected_revision": self.target.revision,
                 "not_after": self.not_after, "params": params}
@@ -729,6 +735,14 @@ class Client:
                                not_after, message=message, priority=priority,
                                wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
 
+    def prepare_wipe(self, target: Target, *, epoch: str, not_after: str,
+                     request_id: str | None = None) -> PreparedCommand:
+        return PreparedCommand("wipe", target, epoch, new_request_id(request_id), not_after)
+
+    def prepare_stop(self, target: Target, *, epoch: str, not_after: str,
+                     request_id: str | None = None) -> PreparedCommand:
+        return PreparedCommand("stop", target, epoch, new_request_id(request_id), not_after)
+
     def prepare_node_drain(self, node_id: str, *, epoch: str, expected_revision: str,
                            not_after: str, request_id: str | None = None) -> NodeCommand:
         return NodeCommand("drain", node_id, epoch, new_request_id(request_id),
@@ -835,8 +849,10 @@ class Client:
         elif type(command) is BuildCommand:
             path = f'/api/v1/projects/{command.project_id}/commands/build'
         else:
-            path = (f"/api/v1/puppets/{command.target.id}/commands/restart" if command.action == "restart"
-                    else "/api/v1/messages")
+            path = {"restart": f"/api/v1/puppets/{command.target.id}/commands/restart",
+                    "wipe": f"/api/v1/puppets/{command.target.id}/commands/wipe",
+                    "stop": f"/api/v1/puppets/{command.target.id}/commands/stop-job",
+                    "send": "/api/v1/messages"}[command.action]
         # Слишком большой локальный ввод — ещё не неизвестный admission.
         body = command.body
         _require(len(body) <= self._limits.max_request_bytes)
