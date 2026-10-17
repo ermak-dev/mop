@@ -174,3 +174,44 @@ class NodeExecutorFact(TransactionTestCase):
             machine(foreign, self.node.pk, 'poll_work')
         # Свой исполнитель своего узла проходит.
         machine(self.machine_actor, self.node.pk, 'poll_work')
+
+
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class KindIsNotARight(TransactionTestCase):
+    """Вид Actor не даёт и не отнимает прав (#683/#689): решает RBAC.
+
+    RED: терминал пускал только human, отправка сообщения -- human или
+    делегированного; агент с теми же правами и scope отказывался по виду.
+    """
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    fixture = RestartVertical.fixture
+
+    def agent_like_owner(self, *actions):
+        from _grant_cases import permit_actions
+        agent = get_user_model().objects.create_user('agent-parity-' + uuid4().hex[:6], password='p-only-fixture')
+        agent.kind = 'agent'
+        agent.save(update_fields=['kind'])
+        source = a.IdentitySource.objects.get(name='local')
+        a.LoginIdentity.objects.create(user=agent, source=source, external_subject=agent.username)
+        a.AllProjectMembership.objects.create(user=agent, source=source)
+        permit_actions(agent, *actions)
+        return auth.token_context(auth.issue_token(agent.pk))
+
+    def test_terminal_read_decision_is_the_same_for_agent_and_human(self):
+        self.fixture()
+        from mop.server.sessions.terminal_control import Terminals
+        agent = self.agent_like_owner('execution.read_terminal')
+        # human владелец -- суперпользователь фикстуры: право есть; агенту дано то же.
+        Terminals()._scope(self.actor, self.target, 'ro')
+        Terminals()._scope(agent, self.target, 'ro')
+
+    def test_message_send_decision_is_the_same_for_agent_and_human(self):
+        self.fixture()
+        from types import SimpleNamespace
+        from mop.server.controller.machinebinding import operations
+        handler = operations(grants=self.grants).messages
+        target = SimpleNamespace(project_id=self.project.pk, owner_id=self.user.pk)
+        agent = self.agent_like_owner('execution.send_message')
+        handler._authorize(self.actor, target, dispatch=False)
+        handler._authorize(agent, target, dispatch=False)

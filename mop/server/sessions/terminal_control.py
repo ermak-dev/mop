@@ -4,7 +4,6 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 from mop.server.access.services import Access, Denied, NotVisible
-from mop.server.access.context import ActorKind
 from .models import Assignment
 from .terminal_models import TerminalControl, TerminalAttachment
 
@@ -41,8 +40,8 @@ class Terminals:
         self.retirement_authority=retirement_authority
 
     def _scope(self, actor, target, mode, *, current=True):
-        if actor.kind is not ActorKind.HUMAN:
-            raise Denied('terminal requires a human principal')
+        # Вид Actor прав не даёт и не отнимает (#689): решает право и scope.
+        # Писатель терминала по-прежнему привязан к браузерной сессии.
         self.authorizer.authorize(actor,'execution.control_terminal' if mode=='rw' else 'execution.read_terminal',
                                   project_ids=(target.project_id,))
         if current and (target.expires_at <= timezone.now() or target.current_incarnation_id is None):
