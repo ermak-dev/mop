@@ -83,6 +83,12 @@ def _grant_scaffolding(test):
 class SingleAuthenticationPathCases(TransactionTestCase):
     serialized_rollback = True
 
+    def assertNoPrincipal(self):
+        """#645: параллельной identity нет ни как модели, ни как таблицы."""
+        from django.db import connection
+        self.assertFalse(hasattr(m, 'Principal'), 'Principal model must be gone')
+        self.assertNotIn('access_principal', connection.introspection.table_names())
+
     def setUp(self):
         from mop.server.controller.runtime import initialize
         initialize()
@@ -125,25 +131,22 @@ class SingleAuthenticationPathCases(TransactionTestCase):
         session_actor = s.session_context(client.session.session_key)
         self.assertEqual(session_actor.user_id, fresh.pk)
         # Выдача не создаёт параллельной identity: ни одной Principal row.
-        self.assertEqual(m.Principal.objects.filter(user_id__in=(fresh.pk, self.human.pk)).count(), 0)
+        self.assertNoPrincipal()
         # Явный maintenance hook тоже не создаёт строку.
         s.bind_local_identity(fresh.pk)
-        self.assertEqual(m.Principal.objects.filter(user=fresh).count(), 0)
+        self.assertNoPrincipal()
 
     # RED: удалённая (или никогда не существовавшая) Principal row убивает
     # живой credential, хотя Actor и binding не менялись.
     def test_identity_resolution_survives_principal_row_removal(self):
+        # #645: Principal удалена целиком -- credential держится на одном Actor.
+        self.assertNoPrincipal()
         legacy = get_user_model().objects.create_user('legacy-row', password='test-password-only')
-        m.Principal.objects.create(user=legacy, kind='human')
         m.LoginIdentity.objects.create(user=legacy, source=self.source, external_subject='legacy-row')
         m.ProjectMembership.objects.create(user=legacy, project=self.project, source=self.source)
-        self.permit('catalog.view_project')
+        legacy.user_permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='view_project'))
         key = s.issue_token(legacy.pk)
         actor = s.token_context(key)
-        # Удаление deprecated metadata не влияет на аутентификацию Actor:
-        # credential держится сам на Actor, а не на Principal row.
-        legacy.user_permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='view_project'))
-        m.Principal.objects.filter(user=legacy).delete()
         self.assertEqual(s.token_context(key).user_id, legacy.pk)
         s.Access().authorize(actor, 'catalog.view_project', project_ids=(self.project.pk,))
         self.assertIsNotNone(s.current_actor(actor))
@@ -157,7 +160,7 @@ class SingleAuthenticationPathCases(TransactionTestCase):
             all_projects=False, permissions=('catalog.view_project',)))
         user = get_user_model().objects.get(pk=user_id)
         self.assertEqual(user.kind, 'human')
-        self.assertEqual(m.Principal.objects.filter(user=user).count(), 0)
+        self.assertNoPrincipal()
         router = Router()
         self.assertEqual(router.get_user(user_id).pk, user_id)
 
@@ -190,7 +193,7 @@ class SingleAuthenticationPathCases(TransactionTestCase):
                                permissions=('catalog.observe_node',))
         service = get_user_model().objects.get(username='bare-service')
         self.assertEqual(service.kind, 'service')
-        self.assertEqual(m.Principal.objects.filter(user=service).count(), 0)
+        self.assertNoPrincipal()
         actor = s.token_context(key)
         self.assertEqual((actor.user_id, actor.node_id), (service.pk, enrolled.id))
         s.Access().authorize(actor, 'catalog.observe_node', node_ids=(enrolled.id,), project_ids=(self.project.pk,))
@@ -214,7 +217,7 @@ class SingleAuthenticationPathCases(TransactionTestCase):
         key = s.issue_token(agent.pk)
         actor = s.token_context(key)
         self.assertEqual((actor.user_id, actor.kind.value), (agent.pk, 'agent'))
-        self.assertEqual(m.Principal.objects.filter(user=agent).count(), 0)
+        self.assertNoPrincipal()
         # Права агента — вопрос общего авторизатора (#685/#686): здесь
         # аутентификация работает, а authorization по умолчанию закрыт.
         with self.assertRaises(s.Denied):
@@ -273,7 +276,7 @@ class SingleAuthenticationPathCases(TransactionTestCase):
         api.activate(provisioned.id, expected_revision=provisioned.revision)
         subject = get_user_model().objects.get(pk=reserved.subject_id)
         self.assertEqual(subject.kind, 'agent')
-        self.assertEqual(m.Principal.objects.filter(user=subject).count(), 0)
+        self.assertNoPrincipal()
         from rest_framework.authtoken.models import Token
         key = Token.objects.get(user=subject).key
         # Резолвер не привязан — отказ по умолчанию; привязан — grant_id контекст.

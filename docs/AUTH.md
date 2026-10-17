@@ -54,9 +54,8 @@ identity: the RoleBundle family is renamed to the AgentDefinition family
 and the new AgentProfile domain record links a stable agent Actor to its current
 approved definition — `Grants.register_agent` is the only agent-kind Actor
 creation path, idempotent per target, and `repin_definition` moves the program
-under CAS without touching the Actor. The remaining Principal table is deprecated
-metadata owned by the permission retarget (#685/#688); it is not a second
-identity. The paragraphs below describe the credential/scope mechanics that
+under CAS without touching the Actor. The former Principal table is gone (#645):
+there is no second identity, not even as metadata. The paragraphs below describe the credential/scope mechanics that
 #685
 (RBAC/scope/LDAP), #686 (agent profile), #687 (service enrollment), #688
 (delegation) and #689 (consumer cutover and parity) rework on top of that
@@ -175,10 +174,9 @@ Since #685 each action permission has one canonical ContentType owner:
 `controller.*` on Installation, `execution.view_usage` on UsageSource, the
 endpoint trio (`register_endpoint`, `view_delivery`, `deliver_report`) on
 Assignment, and the delegation quartet (`view_role`, `approve_role`,
-`issue_grant`, `revoke_grant`) on Grant — Principal registers nothing. The
-deprecated Principal table keeps no invariant of its own: rows stopped being
-created in #684, permission ownership moved to Grant in #685, and the table's
-deletion is prepared in #645 after the remaining consumers from #688 land.
+`issue_grant`, `revoke_grant`) on Grant. The former Principal table is
+deleted (#645): rows stopped being created in #684, permission ownership moved
+to Grant in #685, and its last consumers went with #688.
 
 There is no `sessions.*` logical namespace anymore: execution actions are
 named by their owner's app label (`execution.restart_puppet`) and

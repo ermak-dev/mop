@@ -219,8 +219,8 @@ the same pipeline — not a second RBAC, GodManager or permission map.
 
 This is the target contract. Since #683 the implemented identity is the single
 `actor.Actor` (`AUTH_USER_MODEL`, a standard `AbstractUser` subclass whose
-`kind` column only classifies); the remaining `Principal` table is deprecated
-metadata awaiting its #684 retarget; since #688 a delegation (`access.Grant`)
+`kind` column only classifies); the former `Principal` table is deleted (#645);
+since #688 a delegation (`access.Grant`)
 binds an existing issuer and an existing agent subject Actor instead of a
 Grant-linked service User, and #689 cuts the remaining consumers over; see AUTH.md.
 

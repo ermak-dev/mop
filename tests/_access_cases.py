@@ -847,7 +847,7 @@ class AccessContracts(TransactionTestCase):
         self.assertEqual(response.status_code, 302)
         user = get_user_model().objects.get(username='created-human')
         self.assertEqual(user.kind, 'human')
-        self.assertFalse(self.m.Principal.objects.filter(user=user).exists())
+        self.assertFalse(hasattr(self.m, 'Principal'))
         self.assertEqual(self.m.LoginIdentity.objects.get(user=user).source.kind, 'local')
 
     @override_settings(ALLOWED_HOSTS=['testserver'])

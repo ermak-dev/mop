@@ -14,19 +14,6 @@ class Identifier(models.Model):
         default_permissions = ()
 
 
-class Principal(Identifier):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-    kind = models.CharField(max_length=8, choices=[('human', 'Human'), ('service', 'Service'), ('grant', 'Grant')])
-    bound_node = models.ForeignKey('catalog.Node', null=True, on_delete=models.PROTECT)
-    revision = models.PositiveBigIntegerField(default=1)
-
-    class Meta(Identifier.Meta):
-        # Владение action-правами переехало на живую модель Grant (#685);
-        # Principal не регистрирует прав, строки не создаются (#684).
-        # Удаление таблицы подготовлено в #645 после потребителей #688.
-        constraints = [models.CheckConstraint(condition=Q(kind__in=('human', 'service', 'grant'), revision__gte=1), name='access_principal_valid')]
-
-
 class IdentitySource(Identifier):
     name = models.CharField(max_length=64, unique=True)
     kind = models.CharField(max_length=8, choices=[('local', 'Local'), ('ldap', 'LDAP')])
