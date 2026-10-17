@@ -724,7 +724,7 @@ fails with no jobs.
 #### mop dev controller
 
 ```text
-mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client|launch] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
+mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client|launch|dashboard] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
 
 Runs the selected check on Python 3.12 and PostgreSQL 17 with the declared server
 extra and matching client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -732,7 +732,9 @@ an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The client check runs clean-wheel HTTPS checks and
 native Django/PostgreSQL client contracts. The launch check runs the two finite
 plain-unittest body launch files (body_launch, api_body_spec) — they carry no
-Django labels, so --label cannot select them. The snapshot contains tracked and
+Django labels, so --label cannot select them. The dashboard check installs
+the built wheel into a clean venv and serves the packaged dashboard and Admin
+static through uvicorn, the real ASGI stack. The snapshot contains tracked and
 nonignored source, not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
@@ -801,15 +803,18 @@ when anything failed.
 ```text
 the dashboard's build: Vite + React in web/, the result committed in web/dist
 
-  mop dev web build            npm ci and vite build into web/dist
-  mop dev web build --check    build aside and compare with web/dist byte for byte
+  mop dev web build            npm ci and vite build into web/dist and its
+                               packaged mirror mop/server/controller/dist
+  mop dev web build --check    build aside and compare both trees byte for byte
   mop dev web test [file ...]  run the dashboard interaction tests
   mop dev web test --types     check TypeScript
   mop dev web preview         serve the built dashboard locally, without a pool API
 
 Node and npm are the developer's and CI's: the servers get the built dist
 with the package and never run node. `--check` is what CI runs on every
-push, so a dist that drifted from its sources is red, not silent.
+push, so a dist that drifted from its sources is red, not silent. The
+packaged mirror is written by the same single build and checked the same
+way: one command for every output, no second hand-edited dist.
 ```
 
 #### mop dev web build
@@ -824,6 +829,12 @@ Silent when it lands.
   --check   build into a temporary directory instead and compare it with
             web/dist byte for byte; the differing files are listed and the
             exit code is 1: rebuild with `mop dev web build`
+
+The same single build also writes the packaged mirror
+mop/server/controller/dist: the wheel ships the dashboard next to the
+controller, because servers have no node and no repository checkout.
+`--check` compares both trees; there is one command for every output and no
+hand-edited dist.
 
 Needs node and npm on this machine (the developer's or CI's), never on a
 server.
@@ -1383,6 +1394,7 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   migrate                       apply standard Django migrations
   migrations-check              refuse uncommitted model changes
   initialize                    bind the empty schema to protected trust roots
+  collectstatic                 collect Admin static into the bootstrap static_root
   admin --username NAME         create initial admin; password is read privately
   serve --host host --port N    production ASGI server (one process)
     --hostname name             allowed public hostname (repeatable)

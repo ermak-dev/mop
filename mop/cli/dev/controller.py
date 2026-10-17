@@ -1,4 +1,4 @@
-"""mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client|launch] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
+"""mop dev controller [--postgres 17] [--check controller|controller_runtime|hermetic|preparation|telemetry|credential_service|usage|fresh_postgres|client|launch|dashboard] [--label dotted.test] [--realtime] [--cross-uid] [--web]: isolated PostgreSQL checks
 
 Runs the selected check on Python 3.12 and PostgreSQL 17 with the declared server
 extra and matching client tools in fresh Docker containers, using the same setup as CI. Requires
@@ -6,7 +6,9 @@ an existing Docker installation and a mop Git working copy; installs no host
 packages and uses no pool. The client check runs clean-wheel HTTPS checks and
 native Django/PostgreSQL client contracts. The launch check runs the two finite
 plain-unittest body launch files (body_launch, api_body_spec) — they carry no
-Django labels, so --label cannot select them. The snapshot contains tracked and
+Django labels, so --label cannot select them. The dashboard check installs
+the built wheel into a clean venv and serves the packaged dashboard and Admin
+static through uvicorn, the real ASGI stack. The snapshot contains tracked and
 nonignored source, not installation inputs or .git. No host ports, installation credentials or
 Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
@@ -60,7 +62,7 @@ def _source_snapshot(top, destination):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--postgres', choices=('17',), default='17')
-    parser.add_argument('--check', choices=('controller', 'controller_runtime', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage', 'fresh_postgres', 'client', 'launch'), default='controller')
+    parser.add_argument('--check', choices=('controller', 'controller_runtime', 'hermetic', 'preparation', 'telemetry', 'credential_service', 'usage', 'fresh_postgres', 'client', 'launch', 'dashboard'), default='controller')
     parser.add_argument('--label', action='append', default=[], help='Django test label; repeat for several checks')
     parser.add_argument('--realtime', action='store_true', help='include the owned native TLS NATS fixture')
     parser.add_argument('--cross-uid', action='store_true')
@@ -72,7 +74,8 @@ def main(argv):
         parser.error('--cross-uid requires --check credential_service')
     if args.label and args.check != 'controller':
         parser.error('--label requires --check controller')
-    check_script = {'usage': 'proxy_usage_store', 'client': 'control_tls'}.get(args.check, args.check)
+    check_script = {'usage': 'proxy_usage_store', 'client': 'control_tls',
+                    'dashboard': 'packaged_dashboard'}.get(args.check, args.check)
     test_script = shlex.join(['python3', f'tests/{check_script}.py', *args.label])
     if args.check == 'client':
         test_script += ' && ' + shlex.join(['python3', 'tests/controller.py', '_control_client_cases'])

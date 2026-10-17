@@ -8,6 +8,12 @@ Silent when it lands.
             web/dist byte for byte; the differing files are listed and the
             exit code is 1: rebuild with `mop dev web build`
 
+The same single build also writes the packaged mirror
+mop/server/controller/dist: the wheel ships the dashboard next to the
+controller, because servers have no node and no repository checkout.
+`--check` compares both trees; there is one command for every output and no
+hand-edited dist.
+
 Needs node and npm on this machine (the developer's or CI's), never on a
 server.
 """
@@ -25,6 +31,8 @@ from mop.cli.term import fail, usage
 
 WEB = os.path.join(config.PROJECT, "web")
 DIST = os.path.join(WEB, "dist")
+# Упакованное зеркало (#627/#644): пакет везёт собранный дашборд с собой.
+PACKAGE = os.path.join(config.PROJECT, "mop", "server", "controller", "dist")
 
 
 def files_of(root):
@@ -64,6 +72,17 @@ def run(argv, cwd):
         sys.exit(1)
 
 
+def mirror(from_dir, to_dir):
+    """Перезаписать упакованное зеркало свежесобранным деревом."""
+    shutil.rmtree(to_dir, ignore_errors=True)
+    os.makedirs(to_dir)
+    for rel, data in files_of(from_dir).items():
+        target = os.path.join(to_dir, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(data)
+
+
 def build(out_dir):
     npm = tool("npm")
     run([npm, "ci", "--no-audit", "--no-fund", "--loglevel=error"], WEB)
@@ -76,12 +95,13 @@ def main(argv):
         usage(__doc__)
     if "--check" not in argv:
         build(DIST)
+        mirror(DIST, PACKAGE)
         return 0
     with tempfile.TemporaryDirectory(prefix="mop-web-dist-") as tmp:
         build(tmp)
-        diff = diff_trees(tmp, DIST)
+        diff = diff_trees(tmp, DIST) + diff_trees(tmp, PACKAGE)
     if diff:
-        fail("web/dist differs from a fresh build; rebuild it with mop dev web build:\n  "
-                 + "\n  ".join(diff))
+        fail("web/dist or its packaged mirror differs from a fresh build; "
+             "rebuild it with mop dev web build:\n  " + "\n  ".join(sorted(set(diff))))
         return 1
     return 0

@@ -88,7 +88,7 @@ def load(path):
         raise RuntimeError('bootstrap is not valid JSON') from exc
     required = {'installation_id', 'role', 'database'}
     if not isinstance(data, dict) or not required <= data.keys() or \
-            data.keys() - (required | {'root_key', 'django_key'}):
+            data.keys() - (required | {'root_key', 'django_key', 'static_root'}):
         raise RuntimeError('bootstrap keys are invalid')
     identity = data['installation_id']
     if not isinstance(identity, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', identity):
@@ -104,6 +104,11 @@ def load(path):
         root = private_bytes(data.get('root_key', ''))
         if len(root) < 32:
             raise RuntimeError('bootstrap root key must contain at least 32 bytes')
+    # #695: каталог собранной статики -- общий ролям абсолютный путь.
+    static_root = data.get('static_root')
+    if static_root is not None and (not isinstance(static_root, str) or not static_root.startswith('/')
+                                    or '\x00' in static_root):
+        raise RuntimeError('bootstrap static root must be an absolute path')
     if 'django_key' in data:
         signing_key = private_bytes(data['django_key'])
         if len(signing_key) < 50 or not signing_key.isascii():

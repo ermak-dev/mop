@@ -8,6 +8,7 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   migrate                       apply standard Django migrations
   migrations-check              refuse uncommitted model changes
   initialize                    bind the empty schema to protected trust roots
+  collectstatic                 collect Admin static into the bootstrap static_root
   admin --username NAME         create initial admin; password is read privately
   serve --host host --port N    production ASGI server (one process)
     --hostname name             allowed public hostname (repeatable)
@@ -34,7 +35,7 @@ import sys
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('setup', 'schema', 'check', 'migrate', 'migrations-check',
-                        'initialize', 'admin', 'serve', 'worker', 'backup', 'restore'))
+                        'initialize', 'collectstatic', 'admin', 'serve', 'worker', 'backup', 'restore'))
     parser.add_argument('--venv')
     parser.add_argument('--username')
     parser.add_argument('--file')
