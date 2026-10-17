@@ -1565,7 +1565,8 @@ def check_role_declarations_585(c):
     # добавляет spec/delete/update/bootstrap_result; stat -- cluster pool и
     # node usage; landing -- только landing.
     ANNOTATED = {
-        "wipe": (["wipe"], ["alloc"]),
+        # #642: wipe переехал на HTTP-командлет -- старых bus verbs не декларирует.
+        "wipe": None,
         "restart": None,
         "delete": (["wipe"], ["alloc", "delete"]),
         "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
@@ -3659,7 +3660,6 @@ def check_named_263(c):
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
             "recycle": line,
-            "wipe": line + "pu-mop-1: clone reset to HEAD, target wiped (/t)\n",
             "update": line + core_common.sent_line(NOFILE_334) + "\n",
         }
         for module, out_want in want.items():
@@ -3674,15 +3674,16 @@ def check_named_263(c):
                 # печатает его интерпретатор на выходе (stderr, код 1).
                 c.check(f"#263 mop {module} {bad}: must exit with its usage",
                         not ((out, err, code) != ("", "", usage)), repr((out, err, str(code)[:60])))
-        # #642: human takeover не переехал в новый restart как обычный флаг.
-        calls.clear()
-        out, err, code, usage = run('restart', ['pu-mop-1', '--force'])
-        c.check('#642 restart refuses takeover before any old RPC',
-                out == '' and code == 2 and 'unsupported' in err and calls == [], (out, err, code, calls))
-        for bad in ([], ['a', 'b']):
-            out, err, code, usage = run('restart', bad)
-            c.expect('#642 restart invalid args are a safe typed boundary refusal',
-                     (out, err, code), ('', 'invalid command arguments\n', 1))
+        # #642: human takeover не переехал в новые restart/wipe/stop как обычный флаг.
+        for module in ('restart', 'wipe', 'stop'):
+            calls.clear()
+            out, err, code, usage = run(module, ['pu-mop-1', '--force'])
+            c.check(f'#642 {module} refuses takeover before any old RPC',
+                    out == '' and code == 2 and 'unsupported' in err and calls == [], (out, err, code, calls))
+            for bad in ([], ['a', 'b']):
+                out, err, code, usage = run(module, bad)
+                c.expect(f'#642 {module} invalid args are a safe typed boundary refusal',
+                         (out, err, code), ('', 'invalid command arguments\n', 1))
 
 
 def check_body_file_270(c):
