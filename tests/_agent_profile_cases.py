@@ -112,8 +112,8 @@ class AgentProgramCases(TransactionTestCase):
         again = self.register(target_id=info.target_id)
         self.assertEqual((again.agent_id, again.target_id), (info.agent_id, info.target_id))
         self.assertEqual(User.objects.count(), before)
-        # Новая identity-таблица не появляется: Principal остался metadata.
-        self.assertEqual(access.Principal.objects.count(), 0)
+        # Новая identity-таблица не появляется; Principal удалена целиком (#645).
+        self.assertFalse(hasattr(access, 'Principal'))
 
     def test_registration_requires_human_and_approved_project_definition(self):
         raw = json.dumps(manifest('unapproved')).encode()

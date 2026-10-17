@@ -86,7 +86,8 @@ class UnifiedActorIdentity(TransactionTestCase):
         # те же права читаются из стандартного User, а не из Principal.
         # С #684 пути выдачи больше не создают строк вовсе.
         self.assertEqual(User.objects.filter(pk=user.pk).count(), 1)
-        self.assertEqual(access.Principal.objects.filter(user=user).count(), 0)
+        # #645: параллельной identity больше нет даже как модели.
+        self.assertFalse(hasattr(access, 'Principal'))
 
     def test_enrollment_and_grant_actors_carry_their_kind_on_the_actor(self):
         # Классификация живёт на самом Actor, дублирующий Principal —
@@ -102,7 +103,7 @@ class UnifiedActorIdentity(TransactionTestCase):
         User = get_user_model()
         service = User.objects.get(username='enrolled-service')
         self.assertEqual(service.kind, 'service')
-        self.assertFalse(access_models.Principal.objects.filter(user=service).exists())
+        self.assertFalse(hasattr(access_models, 'Principal'))
 
     def test_grant_reservation_binds_the_registered_agent_actor(self):
         # #688: делегирование — отношение к уже существующему agent Actor
@@ -166,7 +167,7 @@ class UnifiedActorIdentity(TransactionTestCase):
         self.assertFalse(User.objects.filter(username='grant-' + row.id.hex).exists())
         subject = User.objects.get(pk=row.subject_id)
         self.assertEqual((subject.pk, subject.kind), (profile.agent_id, 'agent'))
-        self.assertFalse(access.Principal.objects.filter(user=subject).exists())
+        self.assertFalse(hasattr(access, 'Principal'))
 
     def test_user_admin_is_the_standard_one_and_bootstrap_still_works(self):
         from django.contrib import admin
