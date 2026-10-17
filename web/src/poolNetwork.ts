@@ -346,18 +346,23 @@ class PoolNetwork {
   async command(id: string, action: string, params: Record<string, unknown>, requestId: string) {
     const row = this.puppet(id);
     if (!row || this.state.entities[entityKey(row)].invalidated) throw new Error('Refresh the target before submitting');
-    if (action !== 'restart') throw new Error(`Command ${action} is not implemented by the controller`);
+    // Конечный набор команд, которые контроллер принимает (#625/#642); прочие
+    // (add, update, recycle, model) честно отказываются до POST.
+    const route = PUPPET_COMMANDS[action];
+    if (!route) throw new Error(`Command ${action} is not implemented by the controller`);
     if (!row.incarnation) throw new Error('Target has no active incarnation');
-    if (Object.keys(params).some(key => key !== 'fresh') || (params.fresh !== undefined && params.fresh !== false)) throw new Error('Only controlled host-session restart is supported');
+    const commandParams = route.params(params);
     const desired = object(row.data.desired);
     const expected = text(desired.revision);
     if (!/^(0|[1-9][0-9]*)$/.test(expected)) throw new Error('Invalid assignment revision');
-    const body = { schema_version: 1, epoch: this.state.epoch, request_id: requestId, incarnation: row.incarnation,
-      expected_revision: expected, not_after: new Date(Date.now() + 5 * 60_000).toISOString(), params: { fresh: false } };
+    const body: Record<string, unknown> = { schema_version: 1, epoch: this.state.epoch, request_id: requestId,
+      incarnation: row.incarnation, expected_revision: expected,
+      not_after: new Date(Date.now() + 5 * 60_000).toISOString(), params: commandParams };
+    if (route.targetInBody) body.target_id = id;
     this.dispatch({ type: 'track', requestId });
     const token = this.begin({ type: 'detail' });
     try {
-      const result = this.applyOperation(await this.request(`/api/v1/puppets/${encodeURIComponent(id)}/commands/restart`, body), token);
+      const result = this.applyOperation(await this.request(route.path(id), body), token);
       if (result) operations.accepted(id, result.id);
       await this.recover(); return result?.id ?? null;
     } catch (error) {
@@ -385,6 +390,31 @@ class PoolNetwork {
       errors: [...(this.error ? [this.error] : []), `Read coverage: ${JSON.stringify(this.coverage)}; node capacity, private endpoints and proxy usage are not part of this snapshot`] };
   }
 }
+type CommandRoute = { path: (id: string) => string; params: (input: Record<string, unknown>) => Record<string, unknown>; targetInBody?: boolean };
+const empty = (action: string) => (input: Record<string, unknown>) => {
+  // Ни force, ни fresh: перехват и свежая сессия не подключены (#642).
+  if (Object.keys(input).length) throw new Error(`Command ${action} takes no parameters`);
+  return {};
+};
+const MESSAGE_KEYS = new Set(['message', 'priority', 'wait_seconds', 'notify_when_idle']);
+const message = (input: Record<string, unknown>) => {
+  if (typeof input.message !== 'string' || !input.message || Object.keys(input).some(key => !MESSAGE_KEYS.has(key)))
+    throw new Error('A message with only priority, wait and idle-notification options is required');
+  return { ...input };
+};
+const puppetPath = (verb: string) => (id: string) => `/api/v1/puppets/${encodeURIComponent(id)}/commands/${verb}`;
+export const PUPPET_COMMANDS: Record<string, CommandRoute> = {
+  restart: { path: puppetPath('restart'), params: (input) => {
+    if (Object.keys(input).some(key => key !== 'fresh') || (input.fresh !== undefined && input.fresh !== false))
+      throw new Error('Only controlled host-session restart is supported');
+    return { fresh: false };
+  } },
+  wipe: { path: puppetPath('wipe'), params: empty('wipe') },
+  delete: { path: puppetPath('delete'), params: empty('delete') },
+  stop: { path: puppetPath('stop-job'), params: empty('stop') },
+  send: { path: () => '/api/v1/messages', params: message, targetInBody: true },
+  dispatch: { path: () => '/api/v1/dispatches', params: message, targetInBody: true },
+};
 export function presentPuppet(row: Entity, now = Date.now(), invalidated = false): Puppet {
   const data = row.data as ObjectValue, desired = object(data.desired), state = object(data.state), observed = object(data.observed);
   const stateFact = object(observed.state ?? {}), clone = object(observed.clone ?? {});

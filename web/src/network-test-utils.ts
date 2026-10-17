@@ -36,7 +36,9 @@ export function networkFixture() {
     if (url === '/api/v1/projects') return reply({ schema_version: 1, results: [{ id: PROJECT }], next_cursor: null });
     if (url === '/api/v1/snapshot') return reply({ schema_version: 1, epoch: EPOCH, snapshot_id: 'snapshot', cursor: 'vector', next_cursor: null, results: [puppet()], coverage: {} });
     if (url === `/api/v1/puppets/${ID}`) return reply({ schema_version: 1, epoch: EPOCH, puppet: puppet() });
-    if (url === `/api/v1/puppets/${ID}/commands/restart` && init?.method === 'POST') {
+    // Конечный набор принимаемых контроллером команд (#625/#642): тот же ответ accepted.
+    const commands = ['restart', 'wipe', 'delete', 'stop-job'].map(verb => `/api/v1/puppets/${ID}/commands/${verb}`);
+    if ((commands.includes(url) || url === '/api/v1/messages' || url === '/api/v1/dispatches') && init?.method === 'POST') {
       requestId = JSON.parse(String(init.body)).request_id;
       return reply(operation('accepted', '1'), 202);
     }
