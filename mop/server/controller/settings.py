@@ -90,4 +90,7 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication'],
     'DEFAULT_PERMISSION_CLASSES': ['mop.server.controller.authentication.CurrentActorRequired'],
     'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+    # Публичное подмножество схем #696: машинные корни исключены, конверт
+    # Error описывает отказы каждого operation.
+    'DEFAULT_SCHEMA_CLASS': 'mop.server.controller.openapi_schema.PublicAutoSchema',
 }

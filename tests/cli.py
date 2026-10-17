@@ -3861,10 +3861,11 @@ def check_dev_help_433(c):
     # #484: проверки и локальный просмотр веба тоже идут через диспетчер.
     # #613: отдельный интерактивный probe добавляет ещё один обязательный глагол.
     # #615: локальный integration smoke -- самостоятельный обязательный глагол.
-    if not c.check("#433/#632 dev subtree: 4 groups, 27 verbs including controller fixture",
+    # #696: регенерация публичного OpenAPI артефакта -- обязательный глагол.
+    if not c.check("#433/#632 dev subtree: 4 groups, 28 verbs including controller fixture",
                    len([d for d in docs if d.endswith("__init__.py")]) == 4
                    and len([d for d in docs
-                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 27
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 28
                    and docs.get("dev/controller.py", "").startswith("mop dev controller")
                    and docs.get("dev/chat-smoke.py", "").startswith("mop dev chat-smoke")
                    and docs.get("dev/chat-probe.py", "").startswith("mop dev chat-probe")
