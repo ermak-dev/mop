@@ -86,8 +86,8 @@ class AssignmentAttempt(Record):
                                    name='attempt_admitted_counters'),
             models.CheckConstraint(condition=Q(state__in=('claimed', 'unknown', 'succeeded', 'failed')),
                                    name='attempt_known_state'),
-            models.CheckConstraint(condition=Q(action__in=('restart_session', 'apply_identity', 'send_message', 'confirm_ready')),
-                                   name='attempt_named_action'),
+            models.CheckConstraint(condition=Q(action__in=('restart_session', 'apply_identity', 'send_message', 'confirm_ready',
+                'wipe_clone')), name='attempt_named_action'),
             models.CheckConstraint(condition=Q(lease_until__lte=models.F('not_after')),
                                    name='attempt_lease_within_deadline'),
         ]

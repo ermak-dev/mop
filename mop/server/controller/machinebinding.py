@@ -92,13 +92,16 @@ class OperationWork:
         return self.operations.messages.input(MachineStep(**asdict(work)))
 
 
-def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None):
+def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,
+               wipe_support=None):
     from mop.server.operations.messages import MessageHandler
+    from mop.server.operations.puppet import WipeHandler
     from .messagebinding import MessageRecipients
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
     service = operations_service(grants=grants.local_authority(), targets=Targets(grants), restart_support=restart_support)
     service.messages = MessageHandler(service, cipher=message_cipher, support=message_support,
         recipients=MessageRecipients(grants), endpoints=endpoints)
+    service.wipes = WipeHandler(service, support=wipe_support)
     return service
 
 
@@ -117,8 +120,10 @@ def authority():
         raise Unavailable(str(error)) from None
 
 
-def compose(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None):
+def compose(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,
+            wipe_support=None):
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
     return machine_execution_service(work=OperationWork(operations(grants=grants, restart_support=restart_support,
-        message_support=message_support, message_cipher=message_cipher, endpoints=endpoints)),
+        message_support=message_support, message_cipher=message_cipher, endpoints=endpoints,
+        wipe_support=wipe_support)),
         grants=ReceivingGrant(grants), installation=authority)

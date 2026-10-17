@@ -524,6 +524,22 @@ NodeHTTP validates that finite shape. The isolated PostgreSQL/TLS checks use
 production DRF and NodeHTTP with explicitly controlled machine receipts, not a
 claim of native application's delivery/idle acceptance or deployment readiness.
 
+### Clone wipe vertical (#625)
+
+`POST /api/v1/puppets/<uuid>/commands/wipe` takes the version-1 target intent with
+empty `params`: no `force`, path or branch. Wiping destroys unsaved work, so it needs
+its own `execution.wipe_puppet` permission and, like restart, belongs only to the
+human who owns the assignment; taking over someone else's work is the separate
+`override_assignment` capability, never a payload flag. It runs on the same machine
+protocol and resource claims as restart, as one Step `wipe_clone`. The node executor
+asks the trusted body port to prove the session is quiet; anything but an explicit
+proof ends the operation `failed` with `failed-before-effect` and no destruction. It
+then rechecks the admission and lets the body port wipe: what is removed is the body
+driver's decision (the clone's accumulated state on a host body, the container on a
+container body). Only a physically confirmed wipe is `clone-wiped`; anything else is
+`unknown` and holds the target like any uncertain effect. Until the node composition
+binds a body port (#643) the production root refuses admission as unavailable.
+
 ### Controlled host-session restart vertical (#625/#639/#640)
 
 `POST /api/v1/puppets/<uuid>/commands/restart` accepts the version-1 typed restart
