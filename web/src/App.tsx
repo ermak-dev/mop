@@ -147,7 +147,7 @@ export default function App() {
           ) : <Stack gap="md">
             {snapshot && snapshot.errors.length > 0 && <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join('\n')}</Alert>}
             {page === 'main' && <>
-              <Text size="sm" c="dimmed">Creation is not yet exposed by the new controller.</Text>
+              {hasControls(session) && <Text size="sm" c="dimmed">Creation is not yet exposed by the new controller.</Text>}
               {snapshot && <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
                 masters={snapshot.masters} session={session} selected={target}
                 onOpen={hasControls(session) ? setPuppet : undefined} />}
