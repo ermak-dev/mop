@@ -1,43 +1,44 @@
 // #469: адресный send, один POST, payload не в URL/storage, честный исход.
 // #661: канал убран из рабочего окна; гарантии SendForm проверяются отдельно.
+// #627: тот же контракт через общий store контроллера -- POST /api/v1/messages
+// с привязкой к назначению (epoch/incarnation/expected_revision), исход --
+// подтверждённая Operation после WS-инвалидации, отказ -- DRF error envelope.
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { MantineProvider } from "@mantine/core";
 import { PoolTable } from "./PoolTable";
 import { SendForm, sendWord } from "./SendForm";
 import { emptySnapshot, renderUi } from "../test-utils";
+import { ADMIN, EPOCH, ID, INCARNATION, deferred, networkFixture, reply } from "../network-test-utils";
 import type { Puppet } from "../types";
 
 const notice = vi.hoisted(() => ({ show: vi.fn() }));
 vi.mock("@mantine/notifications", () => ({ notifications: { show: notice.show } }));
-const ADMIN = { login: "anton", role: "admin" as const };
 const CARD: Puppet = {
-  name: "pu-mop-1", node: "hyper", alloc_status: "running",
+  name: ID, node: "node", alloc_status: "running",
   state: "free (master)", kind: "free", bucket: "free", detail: null,
   branch: "master", owner: "-", llm: "-", origin: "git@h:g/mop.git", disk_kb: null,
 };
 const projects = emptySnapshot({ projects: [{ name: "mop", counts: {
   puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0,
 }, puppets: [CARD] }] }).projects;
-const ok202 = (id: string) =>
-  ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
-const opJson = (status: string, error?: string) =>
-  ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "send",
-    target: CARD.name, status, error }) }) as Response;
-const route = (post: () => Promise<Response>, get: () => Promise<Response>) =>
-  vi.fn(async (url: string | URL, init?: RequestInit) =>
-    init?.method === "POST" ? post() : String(url).endsWith("/tail")
-      ? ({ ok: true, json: async () => ({ lines: ["screen"] }) }) as Response : get());
-const open = () => renderUi(<SendForm session={ADMIN} target={CARD.name} />);
-const typeAndSend = async () => {
-  fireEvent.change(await screen.findByLabelText("Сообщение"), { target: { value: "привет" } });
+
+let net: ReturnType<typeof networkFixture>;
+beforeEach(() => { net = networkFixture(); notice.show.mockClear(); });
+afterEach(() => { net.stop(); vi.unstubAllGlobals(); });
+
+const open = async () => { await net.start(); return renderUi(<SendForm session={ADMIN} target={ID} />); };
+const typeAndSend = async (text = "привет") => {
+  fireEvent.change(await screen.findByLabelText("Сообщение"), { target: { value: text } });
   fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 };
-const posts = (mock: ReturnType<typeof route>) => mock.mock.calls.filter((c) => c[1]?.method === "POST");
-
-beforeEach(() => notice.show.mockClear());
-afterEach(() => vi.unstubAllGlobals());
-
+/** Подтверждённый исход приходит GET-ом после WS-инвалидации Operation. */
+const finish = async (state: string, reason = "") => {
+  const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => String(url).startsWith("/api/v1/operations")
+    ? Promise.resolve(reply(net.operation(state, "3", reason))) : base(url, init));
+  await net.invalidateOperation();
+};
 const readyForNext = async () => {
   fireEvent.change(screen.getByLabelText("Сообщение"), { target: { value: "следующее" } });
   await waitFor(() => expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled());
@@ -52,49 +53,52 @@ test("sendWord names the outcome for a human", () => {
   expect(sendWord("running")).toBe("Идёт");
 });
 
-test("#469 standalone send posts the narrow admin schema", async () => {
-  const fetchMock = route(async () => ok202("op-1"), async () => opJson("succeeded"));
-  vi.stubGlobal("fetch", fetchMock);
-  open();
+test("#469 standalone send posts the controller message command", async () => {
+  await open();
   await typeAndSend();
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
+  await finish("succeeded");
   await readyForNext();
-  const post = posts(fetchMock)[0];
-  expect(post[0]).toBe("/api/admin/ops");
-  expect(JSON.parse(post[1]!.body as string))
-    .toEqual({ action: "send", target: CARD.name, params: { message: "привет" } });
+  const [url, init] = net.posts()[0];
+  expect(url).toBe("/api/v1/messages");
+  expect(JSON.parse(String(init?.body))).toEqual({ schema_version: 1, epoch: EPOCH, request_id: net.requestId,
+    incarnation: INCARNATION, expected_revision: "7", target_id: ID, not_after: expect.any(String),
+    params: { message: "привет" } });
 });
 
 test("#469 the payload never rides the URL or storage", async () => {
-  const fetchMock = route(async () => ok202("op-1"), async () => opJson("succeeded"));
-  vi.stubGlobal("fetch", fetchMock);
-  open();
+  await open();
   await typeAndSend();
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
+  await finish("succeeded");
   await readyForNext();
-  for (const call of fetchMock.mock.calls) expect(String(call[0])).not.toContain("привет");
+  for (const call of net.http.mock.calls) expect(String(call[0])).not.toContain("привет");
   expect(JSON.stringify(window.localStorage)).not.toContain("привет");
   expect(JSON.stringify(window.sessionStorage)).not.toContain("привет");
   expect(window.location.search).toBe("");
 });
 
 test("#469 double submit is one POST", async () => {
-  let release!: (r: Response) => void;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = route(() => slow, async () => opJson("running"));
-  vi.stubGlobal("fetch", fetchMock);
-  open();
+  await open();
+  const slow = deferred(), base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => {
+    if (init?.method === "POST") { net.capture(init); return slow.promise; }
+    return base(url, init);
+  });
   fireEvent.change(await screen.findByLabelText("Сообщение"), { target: { value: "раз" } });
   const button = screen.getByRole("button", { name: "Отправить" });
   fireEvent.click(button);
   fireEvent.click(button);
-  await act(async () => { release(ok202("op-1")); });
-  expect(posts(fetchMock)).toHaveLength(1);
+  await act(async () => { slow.resolve(reply(net.operation("accepted", "1"), 202)); });
+  expect(net.posts()).toHaveLength(1);
 });
 
 test.each([["refused", "Отказано"], ["unknown", "Исход неизвестен"]])(
   "#469 %s verdict is shown with the server reason", async (status, word) => {
-    vi.stubGlobal("fetch", route(async () => ok202("op-1"), async () => opJson(status, "held by ermak")));
-    open();
+    await open();
     await typeAndSend();
+    await waitFor(() => expect(net.posts()).toHaveLength(1));
+    await finish(status, "held by ermak");
     await waitFor(() => expect(notice.show).toHaveBeenCalledTimes(1));
     expect(notice.show.mock.calls[0][0].message).toContain(word);
     expect(notice.show.mock.calls[0][0].message).toContain("held by ermak");
@@ -102,9 +106,11 @@ test.each([["refused", "Отказано"], ["unknown", "Исход неизве
   });
 
 test("#469 a submit refusal names the phrase without fake success", async () => {
-  vi.stubGlobal("fetch", route(async () => ({ ok: false, status: 403,
-    json: async () => ({ error: "admin only" }) }) as Response, async () => opJson("running")));
-  open();
+  await open();
+  const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => init?.method === "POST"
+    ? Promise.resolve(reply({ schema_version: 1, error: { code: "access_denied", message: "admin only",
+      retryable: false } }, 403)) : base(url, init));
   await typeAndSend();
   await waitFor(() => expect(notice.show).toHaveBeenCalledTimes(1));
   expect(notice.show.mock.calls[0][0].message).toContain("admin only");
@@ -121,33 +127,33 @@ test("#469 a guest sees no send form or icon", () => {
 });
 
 test("#469 an empty message posts nothing", async () => {
-  const fetchMock = route(async () => ok202("op-1"), async () => opJson("succeeded"));
-  vi.stubGlobal("fetch", fetchMock);
-  open();
+  await open();
   fireEvent.click(await screen.findByRole("button", { name: "Отправить" }));
-  expect(posts(fetchMock)).toHaveLength(0);
+  expect(net.posts()).toHaveLength(0);
 });
 
 test.each(["logout", "target"])("#469 late verdict after %s lands nowhere", async (change) => {
-  let release!: (r: Response) => void;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = route(() => slow, async () => opJson("succeeded"));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = open();
+  const view = await open();
+  const slow = deferred(), base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => {
+    if (init?.method === "POST") { net.capture(init); return slow.promise; }
+    return base(url, init);
+  });
   await typeAndSend();
   // #661: смена контекста проверяется без удалённой панели канала.
-  view.rerender(<MantineProvider><SendForm target={change === "target" ? "pu-mop-2" : CARD.name}
+  view.rerender(<MantineProvider><SendForm target={change === "target" ? "00000000-0000-4000-8000-000000000009" : ID}
     session={change === "logout" ? { login: null, role: null } : ADMIN} /></MantineProvider>);
-  await act(async () => { release(ok202("op-1")); });
+  await act(async () => { slow.resolve(reply(net.operation("succeeded", "1"), 200)); });
   expect(screen.queryByTestId("send-verdict")).toBeNull();
   expect(notice.show).not.toHaveBeenCalled();
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(posts(fetchMock)).toHaveLength(1);
+  expect(net.posts()).toHaveLength(1);
 });
 
 test("#469 the bare form works standalone", async () => {
-  vi.stubGlobal("fetch", route(async () => ok202("op-1"), async () => opJson("succeeded")));
-  renderUi(<SendForm session={ADMIN} target={CARD.name} />);
+  await open();
   await typeAndSend();
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
+  await finish("succeeded");
   await readyForNext();
 });

@@ -1,6 +1,6 @@
 // HYPOTHESIS: прежние проверки обходили общий store и подтверждали только старый wire.
 // SOLUTION: HTTP/WS проходят production runtime; неизвестность не выдаётся за отказ/успех.
-// RESULT: отсутствующие send/add остаются отдельными красными проверками ниже.
+// RESULT: send подключён к /api/v1/messages; add честно отказывается до POST.
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { useAdminOp } from './useAdminOp';
@@ -96,8 +96,12 @@ test('#469 send passes its message through the controller command adapter', asyn
   expect(net.posts()).toHaveLength(1);
   expect(JSON.parse(String(net.posts()[0][1]?.body)).params).toEqual({ message: 'hello' });
 });
-test('#472 add without target reaches the controller command adapter', async () => {
-  await net.start(); const view = renderHook(() => useAdminOp(ADMIN, null));
+// #627: создания папета контроллер ещё не принимает (#625 create ждёт #643) --
+// add честно отказывается до любого POST, а не уходит в несуществующий маршрут.
+test('#472 add is refused before any POST until the controller admits creation', async () => {
+  await net.start(); const view = renderHook(() => useAdminOp(ADMIN, ID));
   await act(async () => { await view.result.current.submit('add', { origin: 'git@h:g/mop.git' }); });
-  expect(net.posts()).toHaveLength(1);
+  expect(net.posts()).toHaveLength(0);
+  expect(view.result.current.op.status).toBe('refused');
+  expect(view.result.current.op.error).toContain('not implemented by the controller');
 });

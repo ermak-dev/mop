@@ -1,6 +1,6 @@
 // Хук хранит выбор request_id и локальный отказ отправки, не копию Operation.
 // Подтверждённый статус читается из того же reducer, что REST/WS и таблица.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from './useSession';
 import { HybridHttpError, reasonOf } from './hybridApi';
 import { poolNetwork, sessionKey, usePoolState } from './poolNetwork';
@@ -15,9 +15,13 @@ export function useAdminOp(session: Session, target: string | null) {
   const currentSource = useRef(source); currentSource.current = source;
   const selected = selection?.source === source ? selection : null;
   const confirmed = selected && poolNetwork.matches(session) ? poolNetwork.operation(selected.requestId) : undefined;
-  const op: AdminOpState = confirmed ? { status: confirmed.operation!.status, id: confirmed.id,
+  const fresh: AdminOpState = confirmed ? { status: confirmed.operation!.status, id: confirmed.id,
     error: typeof confirmed.data.reason === 'string' && confirmed.data.reason ? confirmed.data.reason : null, lost: false }
     : selected?.local ?? idle;
+  // Один снимок исхода -- один объект: потребители (балуны) различают попытки
+  // по идентичности, и перерисовка не должна выглядеть новым исходом.
+  const op = useMemo(() => fresh,
+    [selected?.requestId, fresh.status, fresh.id, fresh.error, fresh.lost]);  // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (selected && poolNetwork.matches(session) && (selected.local.status === 'submitted' || selected.local.lost)) {
       poolNetwork.track(selected.requestId);
