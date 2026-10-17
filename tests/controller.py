@@ -11,6 +11,7 @@ if __name__ == '__main__':
         '_catalog_cases', '_catalog_http_cases.CatalogHTTP', '_catalog_retirement_cases',
         '_secret_cases', '_secret_recovery_cases.SecretRecovery', '_grant_cases',
         '_operation_cases', '_worker_root_cases', '_execution_cases',
+        '_service_enrollment_cases',
         '_restart_vertical_cases', '_restart_live_cases', '_telemetry_cases',
         '_realtime_cases', '_endpoint_cases', '_endpoint_grant_cases', '_credential_cases',
         '_credential_binding_cases', '_preparation_cases', '_admin_cases',

@@ -38,6 +38,19 @@ class Deny:
         raise PermissionError('catalogue authorizer is not bound')
 
 
+def readmission(recheck, *args, reason='readmission'):
+    """Общий повторный допуск после I/O и перед эффектом/выдачей (#687).
+
+    Один контракт для scheduler/worker/приватных конвейеров: короткая
+    SQL-only секция под locks, сеть и crypto остались снаружи. Вход из
+    активной транзакции — ошибка состава, а не вложенный savepoint.
+    """
+    if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
+        raise PermissionError(reason + ' requires an outer transaction-free boundary')
+    with transaction.atomic():
+        return recheck(*args)
+
+
 @dataclass(frozen=True)
 class Snapshot:
     """Только скалярные значения, ни одной ленивой ORM-ссылки."""

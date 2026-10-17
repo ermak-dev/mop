@@ -22,6 +22,7 @@ from django.utils import timezone
 from django.db import DatabaseError, IntegrityError, connections, transaction
 from django.db.models import Q
 
+from ..catalog.services import readmission
 from . import models as m
 from .crypto import CryptoProvider, Envelope, SecretContext, SecretCryptoError, MAX_PLAINTEXT_BYTES
 
@@ -691,15 +692,20 @@ class SecretStore:
             secret, version = binding.secret, binding.secret.active_version
             value = self._decrypt(secret, version)
             result.append(AddressedSecret(binding.id, version.id, secret.name, secret.kind, value))
-        # После любого provider wait заново gate + current refs. Только ORM/local
-        # auth в этой короткой транзакции; root/provider I/O уже закончился.
+        # После любого provider wait заново gate + current refs. Общая
+        # короткая SQL-only секция под locks (#687); root/provider I/O уже
+        # закончился и в неё не входит.
+        readmission(self._after_crypto_selection, actor, selected, pins, bindings,
+                    reason='addressed delivery')
+        return tuple(result)
+
+    def _after_crypto_selection(self, actor, selected, pins, bindings):
         with transaction.atomic():
             tuple(m.Secret.objects.select_for_update().filter(pk__in=[b.secret_id for b in bindings]).order_by('id'))
             current, current_bindings = self._selection(actor)
             current_pins = tuple((b.id, b.secret.revision, b.secret.active_version_id) for b in current_bindings)
             if current != selected or current_pins != pins:
                 raise Conflict('addressed secret assignment or version changed')
-        return tuple(result)
 
     def _decrypt(self, secret, version):
         envelope = Envelope.from_bytes(bytes(version.envelope))

@@ -39,8 +39,10 @@ def _identity(user, node_id=None):
             raise Denied('invalid service identity')
         if node_id is None:
             # Машина делегирования не привязана к узлу: её закрытый жизненный
-            # цикл проверяет резолвер делегирования, не enrollment fence.
-            if not _delegated(user.pk):
+            # цикл проверяет резолвер делегирования. Безузловые контексты
+            # enrollment (#687) живут своей строкой отношения.
+            if (not _delegated(user.pk) and not m.ServiceEnrollment.objects.filter(
+                    actor=user, node_id=None).exists()):
                 raise Denied('invalid service identity')
         elif not Catalog.node_is_current(node_id):
             raise Denied('service node is unavailable')
@@ -79,6 +81,12 @@ def _binding_values(user, identity, node_id):
 
 def _check_binding(binding, user):
     identity = _identity(user, binding.bound_node_id)
+    if user.kind == 'service' and binding.bound_node_id is not None:
+        # Enrollment — отношение контекста (#687), не признак kind: узловой
+        # сервис жив, пока жива его строка enrollment с тем же узлом.
+        # Подделка binding под чужой узел credential не усыновляет.
+        if not m.ServiceEnrollment.objects.filter(actor=user, node_id=binding.bound_node_id).exists():
+            raise Denied('credential enrollment is unavailable')
     if any(getattr(binding, key) != value for key, value in _binding_values(user, identity, binding.bound_node_id).items()):
         raise Denied('credential identity binding changed')
 
@@ -380,35 +388,94 @@ def revoke_token(actor):
 
 
 @sensitive_variables('token')
-def enroll_service(username, node_id, *, project_ids, permissions):
-    """Привилегированный local enrollment hook; root проверяет maintenance principal."""
+def enroll_service(username, node_id, *, project_ids, permissions, use_case='node-executor', renew=False):
+    """Привилегированный local enrollment hook; root проверяет maintenance principal.
+
+    Enrollment — минимальное отношение технического контекста (#687): use
+    case и, для узловых сервисов, узел. Переоформление (renew) переиспользует
+    того же Actor: credential ротируется, identity не плодится, старый ключ
+    и сохранённый контекст не переживают смену контекста.
+    """
+    if use_case not in m.SERVICE_USE_CASES:
+        raise ValueError('service use case is not registered')
+    node_bound = use_case in m.NODE_ENROLLMENT_USE_CASES
+    if node_bound != (node_id is not None):
+        raise ValueError('service use case requires its declared node context')
+    if not node_bound and project_ids:
+        raise ValueError('node-free enrollment carries no project scope')
     if not permissions or not set(permissions) <= SERVICE_ACTIONS:
         raise ValueError('service permissions exceed enrollment allowlist')
+    if not node_bound and any(not action.startswith('catalog.') for action in permissions):
+        # Безузловые контексты — только installation catalog receipts.
+        raise ValueError('node-free enrollment admits only installation catalog receipts')
     with transaction.atomic():
         projects = set(catalog.Project.objects.select_for_update().filter(pk__in=project_ids)
                        .order_by('pk').values_list('pk', flat=True))
-        catalog.Node.objects.select_for_update().get(pk=node_id)
-        if not Catalog.node_is_current(node_id):
-            raise Denied('service node is unavailable')
-        assigned = set(catalog.NodeProject.objects.filter(node_id=node_id).values_list('project_id', flat=True))
-        if projects != set(project_ids) or projects != set(Catalog.current_project_ids(projects)) or not projects <= assigned:
-            raise ValueError('service projects must be assigned to its node')
-        source, _ = m.IdentitySource.objects.get_or_create(name='local', defaults={'kind': 'local'})
-        if get_user_model().objects.filter(username=username).exists():
+        if node_id is not None:
+            catalog.Node.objects.select_for_update().get(pk=node_id)
+            if not Catalog.node_is_current(node_id):
+                raise Denied('service node is unavailable')
+            assigned = set(catalog.NodeProject.objects.filter(node_id=node_id).values_list('project_id', flat=True))
+            if projects != set(project_ids) or projects != set(Catalog.current_project_ids(projects)) or not projects <= assigned:
+                raise ValueError('service projects must be assigned to its node')
+        elif projects:
+            # Безузловой контекст проектной области не несёт.
+            raise ValueError('node-free enrollment carries no project scope')
+        existing = get_user_model().objects.filter(username=username).first()
+        if existing is not None and not renew:
             raise ValueError('service username already exists')
+        if existing is None and renew:
+            # Переоформление касается только уже существующего enrollment.
+            raise ValueError('service username already exists')
+        if existing is not None:
+            # Переоформляется только собственный сервисный Actor enrollment.
+            if (existing.kind != 'service' or existing.has_usable_password()
+                    or existing.is_staff or existing.is_superuser
+                    or not m.ServiceEnrollment.objects.filter(actor=existing).exists()):
+                raise ValueError('service username already exists')
+            user = get_user_model().objects.select_for_update().get(pk=existing.pk)
+            current = m.ServiceEnrollment.objects.filter(actor=user).first()
+            user.user_permissions.set(_service_permissions(permissions))
+            m.ProjectMembership.objects.filter(user=user).delete()
+            if projects:
+                source, _ = m.IdentitySource.objects.get_or_create(name='local', defaults={'kind': 'local'})
+                for project_id in projects:
+                    m.ProjectMembership.objects.create(user=user, project_id=project_id, source=source)
+            if current.use_case != use_case or current.node_id != node_id:
+                # Смена контекста убивает прежний credential: старый ключ и
+                # сохранённый контекст не усыновляют другой узел/purpose.
+                m.ServiceEnrollment.objects.filter(actor=user).delete()
+                Token.objects.filter(user=user).delete()
+                m.CredentialBinding.objects.filter(token_user=user).delete()
+                m.ServiceEnrollment.objects.create(actor=user, use_case=use_case, node_id=node_id)
+                token = Token.objects.create(user=user)
+                _bind_token(token, None, node_id)
+            else:
+                # Тот же контекст: identity и ключ стабильны, переоформление
+                # не плодит credential на каждый claim.
+                token = Token.objects.get(user=user)
+            m.CredentialEvent.objects.create(user=user, action='service_reenrolled')
+            return token.key
         user = get_user_model().objects.create_user(username, password=None, is_staff=False, is_superuser=False)
-        # Классификация живёт на самом Actor; узел enrollment — факт credential.
+        # Классификация живёт на самом Actor; контекст enrollment — факт отношения.
         user.kind = 'service'
         user.save(update_fields=['kind'])
-        for action in permissions:
-            app, code = action.split('.')
-            user.user_permissions.add(Permission.objects.get(content_type__app_label=app, codename=code))
-        for project_id in projects:
-            m.ProjectMembership.objects.create(user=user, project_id=project_id, source=source)
+        user.user_permissions.set(_service_permissions(permissions))
+        if projects:
+            source, _ = m.IdentitySource.objects.get_or_create(name='local', defaults={'kind': 'local'})
+            for project_id in projects:
+                m.ProjectMembership.objects.create(user=user, project_id=project_id, source=source)
+        m.ServiceEnrollment.objects.create(actor=user, use_case=use_case, node_id=node_id)
         token = Token.objects.create(user=user)
         _bind_token(token, None, node_id)
         m.CredentialEvent.objects.create(user=user, action='service_enrolled')
         return token.key
+
+
+def _service_permissions(permissions):
+    """Строки Permission по allowlist; без second dictionary (#685)."""
+    return [Permission.objects.get(content_type__app_label=action.split('.', 1)[0], codename=action.split('.', 1)[1])
+            for action in permissions]
 
 
 def note_session_logout(session_key):
