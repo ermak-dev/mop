@@ -15,6 +15,7 @@ from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from _restart_vertical_cases import RestartVertical
+from mop.server.access import services as auth
 from mop.server.controller import operationviews, machineviews
 from mop.server.controller.machinebinding import compose, operations
 from mop.server.operations import models as m
@@ -165,9 +166,16 @@ class SendDispatch(TransactionTestCase):
 
     def test_delegated_send_and_dispatch_use_current_capabilities_and_private_result(self):
         self.prepare(dispatch_capability=True)
-        from rest_framework.authtoken.models import Token
         from django.test import Client
-        key = Token.objects.get(user__grant_machine__id=self.target.grant_id).key
+        from _grant_cases import permit_actions
+        from mop.server.access.models import Grant
+        # #688: допуск решает RBAC субъекта, не выдача — права даём самому
+        # agent Actor, token у него уже свой.
+        subject_id = Grant.objects.get(pk=self.target.grant_id).subject_id
+        from django.contrib.auth import get_user_model
+        permit_actions(get_user_model().objects.get(pk=subject_id),
+            'execution.send_message', 'execution.dispatch_task', 'operations.view_operation')
+        key = auth.issue_token(subject_id)
         self.client = Client(HTTP_AUTHORIZATION='Token '+key)
         for dispatch in (False, True):
             response = self.post(dispatch=dispatch)
@@ -329,9 +337,15 @@ class SendDispatch(TransactionTestCase):
 
     def test_delegated_send_without_dispatch_capability_cannot_dispatch(self):
         self.prepare(dispatch_capability=False)
-        from rest_framework.authtoken.models import Token
         from django.test import Client
-        key = Token.objects.get(user__grant_machine__id=self.target.grant_id).key
+        from _grant_cases import permit_actions
+        from mop.server.access.models import Grant
+        # Только send: dispatch не даём — отсутствие права и есть ожидаемый отказ.
+        subject_id = Grant.objects.get(pk=self.target.grant_id).subject_id
+        from django.contrib.auth import get_user_model
+        permit_actions(get_user_model().objects.get(pk=subject_id),
+            'execution.send_message', 'operations.view_operation')
+        key = auth.issue_token(subject_id)
         self.client = Client(HTTP_AUTHORIZATION='Token '+key)
         self.admit()
         response = self.post(dispatch=True)
