@@ -43,7 +43,6 @@ class OperationBackedAdmin(TransactionTestCase):
         self.installation = Installation.objects.get(pk=1)
         self.source = a.IdentitySource.objects.create(name='local', kind='local')
         self.user = get_user_model().objects.create_user('operator', password='test-only-password', is_staff=True)
-        a.Principal.objects.create(user=self.user, kind='human')
         a.LoginIdentity.objects.create(user=self.user, source=self.source, external_subject='operator')
         self.project = c.Project.objects.create(name='owned', origin='https://example.invalid/owned.git')
         self.foreign = c.Project.objects.create(name='foreign', origin='https://example.invalid/foreign.git')

@@ -35,7 +35,7 @@ class NativePtyResolver:
 
     async def preflight(self, context):
         from mop.server.realtime.terminal import TerminalUnavailable
-        for key in ('id','target_id','incarnation_id','credential_id','principal_id','executor_epoch','generation','mode'):
+        for key in ('id','target_id','incarnation_id','credential_id','user_id','executor_epoch','generation','mode'):
             if context[key]!=self.expected[key]:
                 raise TerminalUnavailable('fixture physical binding changed')
         if not os.isatty(self.fd) or os.get_blocking(self.fd):

@@ -81,7 +81,6 @@ class Endpoints(TransactionTestCase):
 
     def human(self, name):
         user = get_user_model().objects.create_user(name)
-        self.a.Principal.objects.create(user=user, kind='human')
         self.a.LoginIdentity.objects.create(user=user, source=self.source, external_subject=name)
         self.a.ProjectMembership.objects.create(user=user, project=self.project, source=self.source)
         for code in ('register_endpoint', 'view_delivery', 'deliver_report'):
@@ -121,13 +120,13 @@ class Endpoints(TransactionTestCase):
 
     def test_client_project_and_grant_payload_cannot_choose_human_owner(self):
         from dataclasses import replace
-        from mop.server.access.context import PrincipalKind
+        from mop.server.access.context import ActorKind
         with self.assertRaises(PermissionError):
             self.register(client_id=self.other_client.pk)
         with self.assertRaises(PermissionError):
             self.register(project_id=self.other_project.pk)
         with self.assertRaises(PermissionError):
-            self.api.register(replace(self.actor, kind=PrincipalKind.GRANT), client_id=self.client.pk,
+            self.api.register(replace(self.actor, kind=ActorKind.SERVICE), client_id=self.client.pk,
                 project_id=self.project.pk, external_session_id='forged', display_name='same')
         response = Client().post('/api/v1/endpoints', {'schema_version': 1, 'owner': self.other_user.pk},
             HTTP_AUTHORIZATION='Token '+self.key, content_type='application/json', secure=True)

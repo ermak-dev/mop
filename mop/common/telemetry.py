@@ -83,22 +83,20 @@ class SessionScope:
 class SourceRef:
     """Неизменяемый инициатор конкретного хода, не нынешний владелец clone.
 
-    None целиком означает unknown. Известная ссылка содержит principal, user
-    (если есть), endpoint/session и operation/message correlation. Resolver
-    создаёт её из trusted delivery/auth, никогда из hook JSON.
+    None целиком означает unknown. Известная ссылка называет Actor по его id
+    (#684: без параллельного principal UUID) и endpoint/session с
+    operation/message correlation. Resolver создаёт её из trusted
+    delivery/auth, никогда из hook JSON.
     """
-    user_id: int | None
-    principal_id: UUID
+    user_id: int
     endpoint_id: UUID | None
     session_id: UUID | None
     operation_id: UUID | None
     message_id: UUID | None
 
     def __post_init__(self):
-        if self.user_id is not None:
-            positive(self.user_id)
-        if (type(self.principal_id) is not UUID
-                or any(value is not None and type(value) is not UUID for value in
+        positive(self.user_id)
+        if (any(value is not None and type(value) is not UUID for value in
                        (self.endpoint_id, self.session_id, self.operation_id, self.message_id))
                 or self.endpoint_id is None and self.session_id is None
                 or self.operation_id is None and self.message_id is None):

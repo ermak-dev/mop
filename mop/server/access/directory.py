@@ -11,7 +11,7 @@ from django.views.decorators.debug import sensitive_variables
 from . import models as m
 from .permissions import ACTIONS
 from .policy import directory_dn_key as _norm
-from .services import Denied, _principal
+from .services import Denied, _identity
 
 
 class DirectoryUnavailable(PermissionDenied):
@@ -120,11 +120,10 @@ def apply_directory(source_id, revision, result, *, configuration=None, expected
             if get_user_model().objects.filter(username=result.username).exists():
                 raise PermissionDenied('username belongs to another identity')
             user = get_user_model().objects.create_user(result.username, password=None)
-            m.Principal.objects.create(user=user, kind='human')
             identity = m.LoginIdentity.objects.create(user=user, source=source, external_subject=result.subject)
         user = get_user_model().objects.select_for_update().get(pk=identity.user_id)
-        principal = m.Principal.objects.filter(user=user, kind='human', bound_node__isnull=True).first()
-        if principal is None:
+        # Вид Actor читается напрямую; human без привязки узла (#684).
+        if user.kind not in ('human', 'agent'):
             raise PermissionDenied('directory account is not a human principal')
         if user.username != result.username:
             if get_user_model().objects.exclude(pk=user.pk).filter(username=result.username).exists():
@@ -187,7 +186,7 @@ class Router(ModelBackend):
                     continue
                 user = bound.user
                 try:
-                    _principal(user)
+                    _identity(user)
                 except Denied as error:
                     raise PermissionDenied(str(error)) from None
                 if not user.check_password(password):
@@ -231,7 +230,7 @@ class Router(ModelBackend):
         if user is None:
             return None
         try:
-            principal, _ = _principal(user)
+            _identity(user)
         except Denied:
             return None
-        return user if principal.kind == 'human' else None
+        return user if user.kind == 'human' else None

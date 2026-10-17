@@ -14,6 +14,6 @@ if __name__ == '__main__':
         '_restart_vertical_cases', '_restart_live_cases', '_telemetry_cases',
         '_realtime_cases', '_endpoint_cases', '_endpoint_grant_cases', '_credential_cases',
         '_credential_binding_cases', '_preparation_cases', '_admin_cases',
-        '_actor_cases', '_build_cases.ImageBuilds',
+        '_actor_cases', '_actor_auth_cases', '_build_cases.ImageBuilds',
         '_projection_cases', '_proxy_usage_cases', '_control_client_cases', '_gateway_cases',
     ]))

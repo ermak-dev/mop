@@ -4,7 +4,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 from mop.server.access.services import Access, Denied, NotVisible
-from mop.server.access.context import PrincipalKind
+from mop.server.access.context import ActorKind
 from .models import Assignment
 from .terminal_models import TerminalControl, TerminalAttachment
 
@@ -22,7 +22,7 @@ def size(cols, rows):
         raise ValueError('terminal size must be within 20..500 by 5..200')
 
 
-BINDING = ('id','target_id','incarnation_id','credential_id','principal_id',
+BINDING = ('id','target_id','incarnation_id','credential_id','user_id',
            'gateway_id','connection_id','generation','mode')
 
 
@@ -41,7 +41,7 @@ class Terminals:
         self.retirement_authority=retirement_authority
 
     def _scope(self, actor, target, mode, *, current=True):
-        if actor.kind is not PrincipalKind.HUMAN:
+        if actor.kind is not ActorKind.HUMAN:
             raise Denied('terminal requires a human principal')
         self.authorizer.authorize(actor,'sessions.control_terminal' if mode=='rw' else 'sessions.read_terminal',
                                   project_ids=(target.project_id,))
@@ -77,7 +77,7 @@ class Terminals:
             control.generation+=1
             control.save(update_fields=['generation'])
             row=TerminalAttachment.objects.create(target=target,incarnation_id=incarnation_id,
-                credential_id=actor.credential_id,principal_id=actor.principal_id,mode=mode,
+                credential_id=actor.credential_id,user_id=actor.user_id,mode=mode,
                 generation=control.generation,cols=cols,rows=rows,expires_at=now+timedelta(seconds=30))
             return _dto(row)
 
@@ -92,7 +92,7 @@ class Terminals:
 
     def _row(self, actor, attachment_id):
         target,row=self._locked(attachment_id)
-        if row.credential_id != actor.credential_id or row.principal_id != actor.principal_id:
+        if row.credential_id != actor.credential_id or row.user_id != actor.user_id:
             raise Denied('terminal attachment belongs to another credential or browser')
         self._scope(actor,target,row.mode)
         if (row.expires_at <= timezone.now() or target.current_incarnation_id != row.incarnation_id or
@@ -158,7 +158,7 @@ class Terminals:
         # объявить физический эффект завершённым. Нет доказательства — unknown.
         with transaction.atomic():
             _,row=self._locked(UUID(context['id']))
-            if (row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id or
+            if (row.credential_id!=actor.credential_id or row.user_id!=actor.user_id or
                     any(_dto(row)[key]!=context[key] for key in BINDING)):
                 raise Denied('terminal cleanup binding changed')
             if row.state=='active':
@@ -185,7 +185,7 @@ class Terminals:
         with transaction.atomic():
             target,row=self._locked(UUID(context['id']))
             self._scope(actor,target,row.mode,current=False)
-            if row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id:
+            if row.credential_id!=actor.credential_id or row.user_id!=actor.user_id:
                 raise Denied('terminal reconciliation belongs to another credential or browser')
             self.retire(context,proof)
 
@@ -194,7 +194,7 @@ class Terminals:
         with transaction.atomic():
             target,row=self._locked(attachment_id)
             self._scope(actor,target,row.mode,current=False)
-            if row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id:
+            if row.credential_id!=actor.credential_id or row.user_id!=actor.user_id:
                 raise Denied('terminal attachment belongs to another credential or browser')
             return {**_dto(row),'state':row.state}
 
@@ -205,7 +205,7 @@ class Terminals:
             except NotVisible:
                 return
             self._scope(actor,target,row.mode,current=False)
-            if row.credential_id!=actor.credential_id or row.principal_id!=actor.principal_id:
+            if row.credential_id!=actor.credential_id or row.user_id!=actor.user_id:
                 raise Denied('terminal attachment belongs to another credential or browser')
             if row.state in ('reserved','active'):
                 row.state='closed' if row.connection_id is None else 'unknown'

@@ -18,7 +18,7 @@ from django.utils import timezone
 
 from mop.common.endpoint import (TrustedEndpointContext, EndpointPresence, DeliveryFrame,
                                  DeliveryResult, SealedPayload)
-from mop.server.access.context import ActorContext, PrincipalKind
+from mop.server.access.context import ActorContext, ActorKind
 from mop.server.access.services import Access, Denied, NotVisible, current_actor
 from mop.server.catalog.models import ClientRegistration
 from . import endpoint_models as m
@@ -83,7 +83,7 @@ class Endpoints:
             yield self.authority(lock=True)
 
     def _human(self, actor, action, project_id, client_id):
-        if type(actor) is not ActorContext or actor.kind is not PrincipalKind.HUMAN:
+        if type(actor) is not ActorContext or actor.kind is not ActorKind.HUMAN:
             raise Denied('human endpoint requires a current human credential')
         current_actor(actor)
         self.access.authorize(actor, 'catalog.view_project', project_ids=(project_id,), client_ids=(client_id,))
@@ -98,11 +98,11 @@ class Endpoints:
     def _sender(self, actor, project_id):
         if type(actor) is not ActorContext:
             raise Denied('trusted actor required')
-        if actor.kind is PrincipalKind.GRANT:
+        if actor.grant_id is not None:
             # Существующая конечная send capability; grant не приобретает human endpoint.
             self.access.authorize(actor, 'sessions.send_message', project_ids=(project_id,))
         else:
-            if actor.kind is not PrincipalKind.HUMAN:
+            if actor.kind is not ActorKind.HUMAN:
                 raise Denied('service cannot send human reports')
             self.access.authorize(actor, 'catalog.view_project', project_ids=(project_id,))
             self._permission(actor, 'deliver_report')
@@ -152,7 +152,7 @@ class Endpoints:
     def addresses(self, actor, project_id, *, limit=100):
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError('presence limit must be within 1..500')
-        if type(actor) is not ActorContext or actor.kind is not PrincipalKind.HUMAN:
+        if type(actor) is not ActorContext or actor.kind is not ActorKind.HUMAN:
             raise Denied('private presence requires a human credential')
         self.authority()
         self.access.authorize(actor, 'catalog.view_project', project_ids=(uuid_value(project_id),))
@@ -190,7 +190,7 @@ class Endpoints:
             self._abandon(endpoint.pk)
             values = dict(epoch=authority.epoch, gateway_id=gateway_id, nonce=uuid4(),
                 generation=(row.generation+1 if row else 1), credential_id=actor.credential_id,
-                principal_id=actor.principal_id, connected=True,
+                user_id=actor.user_id, connected=True,
                 expires_at=timezone.now()+timedelta(seconds=15))
             if row:
                 for name, value in values.items():
@@ -203,7 +203,9 @@ class Endpoints:
 
     @staticmethod
     def _context(endpoint, row):
-        return TrustedEndpointContext(endpoint.session.owner_id, row.principal_id, row.credential_id,
+        # Holder user id равен владельцу сессии (trusted_context проверяет);
+        # отдельного principal id у connection больше нет (#684).
+        return TrustedEndpointContext(endpoint.session.owner_id, row.credential_id,
             endpoint.session_id, endpoint.pk, row.gateway_id, row.generation, row.nonce)
 
     def _connection(self, context, authority):
@@ -215,7 +217,7 @@ class Endpoints:
                 or row.epoch != authority.epoch or row.expires_at <= timezone.now()
                 or endpoint.retired or endpoint.expires_at <= timezone.now()):
             raise Denied('endpoint connection is no longer current')
-        actor = ActorContext(context.user_id, context.principal_id, PrincipalKind.HUMAN,
+        actor = ActorContext(context.user_id, ActorKind.HUMAN,
             context.credential_id, context.user_id, None)
         self._human(actor, 'register_endpoint', endpoint.project_id, endpoint.session.client_id)
         return endpoint, row
@@ -226,7 +228,7 @@ class Endpoints:
             endpoint = self._endpoint(endpoint_id, lock=True)
             row = m.ConnectionLease.objects.filter(endpoint=endpoint).first()
             if (row is None or row.nonce != nonce or row.credential_id != actor.credential_id
-                    or row.principal_id != actor.principal_id or endpoint.session.owner_id != actor.user_id):
+                    or row.user_id != actor.user_id or endpoint.session.owner_id != actor.user_id):
                 raise Denied('connection does not belong to authenticated client')
             context = self._context(endpoint, row)
             self._connection(context, authority)
@@ -315,7 +317,7 @@ class Endpoints:
         fingerprint = hashlib.sha256(json.dumps([str(authority.epoch), address, text, priority,
             notify_when_idle, not_after.isoformat(), str(operation_request_id),
             str(sender.endpoint_id) if sender else None], ensure_ascii=False).encode()).hexdigest()
-        old = m.MessageDelivery.objects.filter(sender_principal_id=actor.principal_id, message_id=message_id).first()
+        old = m.MessageDelivery.objects.filter(sender_user_id=actor.user_id, message_id=message_id).first()
         if old:
             if old.fingerprint != fingerprint:
                 raise Conflict('message identity has conflicting content or recipient')
@@ -334,11 +336,11 @@ class Endpoints:
             reply = None
             if sender is not None:
                 source, _ = self._connection(sender, current)
-                if (sender.user_id, sender.principal_id, sender.credential_id) != (
-                        actor.user_id, actor.principal_id, actor.credential_id) or source.project_id != endpoint.project_id:
+                if (sender.user_id, sender.credential_id) != (
+                        actor.user_id, actor.credential_id) or source.project_id != endpoint.project_id:
                     raise Denied('sender endpoint does not match authenticated conversation')
                 reply = source.pk
-            old = m.MessageDelivery.objects.filter(sender_principal_id=actor.principal_id, message_id=message_id).first()
+            old = m.MessageDelivery.objects.filter(sender_user_id=actor.user_id, message_id=message_id).first()
             if old:
                 if old.fingerprint != fingerprint:
                     raise Conflict('message identity has conflicting content or recipient')
@@ -360,7 +362,7 @@ class Endpoints:
             available = lease is not None and not endpoint.retired and endpoint.expires_at > timezone.now()
             row = m.MessageDelivery.objects.create(id=delivery_id, endpoint=endpoint, epoch=current.epoch,
                 message_id=message_id, operation_request_id=operation_request_id,
-                sender_user_id=actor.user_id, sender_principal_id=actor.principal_id,
+                sender_user_id=actor.user_id,
                 sender_credential_id=actor.credential_id, sender_kind=actor.kind.value,
                 sender_owner_id=actor.human_owner_id, sender_node_id=actor.node_id, sender_grant_id=actor.grant_id,
                 reply_endpoint_id=reply, fingerprint=fingerprint, priority=priority,
@@ -375,7 +377,7 @@ class Endpoints:
 
     @staticmethod
     def _original_actor(row):
-        return ActorContext(row.sender_user_id, row.sender_principal_id, PrincipalKind(row.sender_kind),
+        return ActorContext(row.sender_user_id, ActorKind(row.sender_kind),
             row.sender_credential_id, row.sender_owner_id, row.sender_node_id, row.sender_grant_id)
 
     def _sending_authority(self, row):
@@ -392,10 +394,10 @@ class Endpoints:
         row = m.MessageDelivery.objects.select_related('endpoint__session').filter(pk=uuid_value(delivery_id)).first()
         if row is None:
             raise NotVisible('resource not found')
-        if actor.principal_id == row.sender_principal_id:
+        if actor.user_id == row.sender_user_id:
             self._sender(actor, row.endpoint.project_id)
             self._permission(actor, 'view_delivery')
-        elif actor.kind is PrincipalKind.HUMAN and actor.user_id == row.endpoint.session.owner_id:
+        elif actor.kind is ActorKind.HUMAN and actor.user_id == row.endpoint.session.owner_id:
             self._human(actor, 'view_delivery', row.endpoint.project_id, row.endpoint.session.client_id)
         else:
             raise NotVisible('resource not found')

@@ -74,9 +74,10 @@ class ClientOwnership(Identifier):
 
 
 class CredentialBinding(Identifier):
-    principal = models.ForeignKey(Principal, on_delete=models.PROTECT)
-    principal_revision = models.PositiveBigIntegerField()
-    principal_kind = models.CharField(max_length=8)
+    """Только proven metadata, которых нет в стандартных Django credentials.
+
+    Атрибуты Actor (kind) не дублируются: credential не вторая identity (#684).
+    """
     bound_node = models.ForeignKey('catalog.Node', null=True, on_delete=models.PROTECT)
     identity = models.ForeignKey(LoginIdentity, null=True, on_delete=models.PROTECT)
     identity_source = models.ForeignKey(IdentitySource, null=True, on_delete=models.PROTECT)
@@ -286,7 +287,8 @@ class RoleBundleApproval(Evidence):
 
 class CreationIntent(Evidence):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-    actor = models.ForeignKey(Principal, on_delete=models.PROTECT)
+    # Actor сам credential-holder #684:Principal больше не альтернативная identity.
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
     # UUID, не FK: logout удаляет credential, но не immutable намерение.
     actor_credential_id = models.UUIDField()
     project = models.ForeignKey('catalog.Project', on_delete=models.PROTECT)
@@ -316,7 +318,8 @@ class CreationIntent(Evidence):
 
 class Grant(Evidence):
     intent = models.OneToOneField(CreationIntent, on_delete=models.PROTECT)
-    principal = models.OneToOneField(Principal, on_delete=models.PROTECT)
+    # Машина делегирования — service Actor (#684); Principal-строка уходит в #688.
+    actor = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='grant_machine')
     state = models.CharField(max_length=8, default='reserved')
     revision = models.PositiveBigIntegerField(default=1)
     credential_version = models.OneToOneField('secrets.SecretVersion', null=True, on_delete=models.PROTECT)
@@ -324,9 +327,9 @@ class Grant(Evidence):
     created_at = models.DateTimeField(default=timezone.now)
 
     def clean(self):
-        if self.principal.kind != 'grant' or self.principal.bound_node_id is not None:
-            raise ValueError('grant requires its own delegated principal')
-        user = self.principal.user
+        if self.actor.kind != 'service':
+            raise ValueError('grant requires its own delegated service actor')
+        user = self.actor
         if user.is_staff or user.is_superuser or user.has_usable_password():
             raise ValueError('grant requires a restricted service user')
 
@@ -342,7 +345,7 @@ class Grant(Evidence):
 
 class GrantEvent(Evidence):
     grant = models.ForeignKey(Grant, on_delete=models.PROTECT)
-    actor = models.ForeignKey(Principal, null=True, on_delete=models.PROTECT)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT, related_name='+')
     action = models.CharField(max_length=16)
     revision = models.PositiveBigIntegerField()
     created_at = models.DateTimeField(default=timezone.now)

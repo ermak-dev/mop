@@ -39,13 +39,18 @@ singleton `current_actor` and never a transferable capability; every consumer
 reauthorizes before execution/retry/delivery and after a wait.
 
 This is the target contract of #624, not a claim that the frozen slice
-implements it. The current slice implements the Actor identity (#683):
-`mop.server.actor.Actor` (a standard `AbstractUser` subclass) is the
-`AUTH_USER_MODEL`, `kind` is a plain discriminator column with no permission
-semantics, and every identity FK is a swappable reference to the one model.
-The remaining Principal table is deprecated metadata whose retarget belongs
-to #684; it is not a second identity. The paragraphs below describe the
-credential/scope mechanics that #684 (credentials/context), #685
+implements it. The slice implements the Actor identity (#683) and its single
+authentication path (#684): `mop.server.actor.Actor` (a standard `AbstractUser`
+subclass) is the `AUTH_USER_MODEL`, `kind` is a plain discriminator column with
+no permission semantics, and every identity FK is a swappable reference to the
+one model. Identity resolves directly from the Actor and its CredentialBinding:
+login/enrollment/bind/rotation create no Principal row, delegation is a
+`grant_id` context on a service Actor (not a third kind), and CredentialBinding
+keeps only the proven generation/subject-change/enrollment metadata standard
+Django credentials do not provide. The remaining Principal table is deprecated
+metadata owned by the permission retarget (#685/#688); it is not a second
+identity. The paragraphs below describe the credential/scope mechanics that
+#685
 (RBAC/scope/LDAP), #686 (agent profile), #687 (service enrollment), #688
 (delegation) and #689 (consumer cutover and parity) rework on top of that
 single identity. The proven scope/fencing/after-wait/crypto guarantees in
@@ -88,9 +93,10 @@ references require protected DB/backup access and are not registered in Admin.
 CredentialBinding stores a token HMAC generation check or a reference to the actual
 Django Session, never an additional plaintext token store. ActorContext contains
 only immutable ID, kind, owner/node/delegation references, never token/session
-keys or ORM grant objects. #684 keeps only the proven metadata of CredentialBinding
-that standard Django credentials do not already provide, and removes Principal as
-an alternative identity without losing the HMAC/generation/identity-change fences.
+keys or ORM grant objects. CredentialBinding keeps only the proven metadata
+that standard Django credentials do not already provide — token generation HMAC,
+identity subject-change digest and node enrollment — and Principal is no longer
+an alternative identity (#684): the fences survive on the Actor itself.
 
 `token_context`, `session_context`, `current_actor` and `Access.authorize` reload
 current User, identity source/subject fingerprint, credential generation, session
@@ -118,12 +124,15 @@ issuance independently validates the current execution and approved role proofs.
 
 `Access.authorize` implements Catalog's existing authorizer port. It separates
 ordinary Django action permission, actual Catalog FK scope, client ownership and
-principal-kind fences. `is_staff` only permits Admin login. A human superuser has
-explicit global scope, not a service/grant/ownership bypass. Service users cannot
-be elevated by editing User flags. Grant-kind principals fail closed until #635
-binds its resolver. Under the target contract both fences disappear into the one
-authorizer: kind stops routing authorization, and delegation is a narrowing
-context on existing Actors rather than a third principal branch. Catalog's
+Actor-kind fences. `is_staff` only permits Admin login. A human superuser has
+explicit global scope, not a service/ownership bypass. Service users cannot
+be elevated by editing User flags. Since #684 kind no longer routes
+authentication: the same path resolves human, agent and service Actors from
+their credential, and a delegated machine is a service Actor whose fence is the
+Grant lifecycle behind the injected resolver — unbound means denied. Under the
+target contract the remaining kind fences disappear into the one authorizer
+(#685): kind stops routing authorization, and delegation stays a narrowing
+context (`grant_id`) on existing Actors rather than a third branch. Catalog's
 immutable `permissions.ACTION_PERMISSIONS` is the
 canonical conjunction of ordinary model and domain permissions; Access consumes
 that map rather than treating its entries as alternatives. `set_project_limit`
@@ -132,7 +141,8 @@ InstallationConfiguration and ProjectPolicySnapshot; `record_settings_applicatio
 belongs only to InstallationConfiguration, including node-setting receipts.
 Standard `view_project`/`view_node` are not declared twice. The fresh-install
 catalog migration graph has one permissions leaf, `0002_action_permissions`.
-Access's role/grant actions live on Principal in the current slice; #685 fixes one
+Access's role/grant actions still declare their Permission ownership through the
+legacy Principal-shaped tables in the current slice; #685 fixes one
 permission-codename dictionary with a named registration owner per action and
 removes the sessions→execution alias and capability matrices of operational
 rights. Later owning apps register their CONTROL actions before the evaluator

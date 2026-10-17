@@ -4,7 +4,7 @@ from uuid import UUID
 from django.db import IntegrityError, transaction
 from django.db.models import Q, F
 from django.utils import timezone
-from mop.server.access.context import PrincipalKind
+from mop.server.access.context import ActorKind
 from mop.server.access.services import Access, Denied, current_actor
 from mop.server.catalog.models import Project, NodeProject
 from mop.server.catalog.services import snapshot
@@ -67,13 +67,13 @@ def expected(row, revision, generation=None):
 
 def human(actor):
     current_actor(actor)
-    if actor.kind != PrincipalKind.HUMAN:
+    if actor.kind != ActorKind.HUMAN:
         raise Denied('human ownership action required')
 
 
 def machine(actor, node_id, action, project_ids=()):
     current_actor(actor)
-    if actor.kind != PrincipalKind.SERVICE or actor.node_id != node_id:
+    if actor.kind != ActorKind.SERVICE or actor.node_id != node_id:
         raise Denied('enrolled node service required')
     Access().authorize(actor, 'execution.' + action, project_ids=project_ids, node_ids=(node_id,))
 
@@ -151,7 +151,7 @@ class Assignments:
         не отменяет подтверждённый эффект и ничего не говорит о transport revoke.
         """
         current_actor(actor)
-        if actor.kind is not PrincipalKind.SERVICE:
+        if actor.kind is not ActorKind.SERVICE:
             raise Denied('enrolled node service required for addressed credentials')
         if type(target_id) is not UUID or type(epoch) is not UUID:
             raise Denied('current assignment target and installation epoch required')
@@ -441,7 +441,7 @@ class MachineExecution:
                 if self.work.current(work.operation_id, work.step_id) != work:
                     raise Conflict('admitted operation step changed')
                 self._admit(row, work)
-                previous = m.AssignmentAttempt.objects.filter(principal_id=actor.principal_id,
+                previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
                                                                request_id=request_id).first()
                 if previous:
                     if (self._work(previous) != work or previous.state != 'claimed'
@@ -453,14 +453,14 @@ class MachineExecution:
                 values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
                     'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
                 attempt = m.AssignmentAttempt.objects.create(assignment=row,
-                    incarnation_id=work.incarnation_id, principal_id=actor.principal_id,
+                    incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
                     request_id=request_id, assignment_revision=work.revision,
                     lease_until=min(work.not_after, timezone.now()+timedelta(seconds=self.lease_seconds)), **values)
                 self.work.claimed(work, attempt.id)
                 return snapshot(attempt)
         except IntegrityError:
             collision = m.AssignmentAttempt.objects.filter(
-                Q(principal_id=actor.principal_id, request_id=request_id)
+                Q(executor_user_id=actor.user_id, request_id=request_id)
                 | Q(operation_id=work.operation_id, step_id=work.step_id)
                 | Q(assignment_id=work.target_id, state__in=('claimed', 'unknown'))).exists()
             if collision:
@@ -500,8 +500,8 @@ class MachineExecution:
             row = m.Assignment.objects.select_for_update().get(pk=target_id)
             machine(actor, row.node_id, 'report_result', (row.project_id,))
             attempt = m.AssignmentAttempt.objects.select_for_update().get(pk=attempt_id)
-            if attempt.principal_id != actor.principal_id:
-                raise Denied('attempt belongs to another executor principal')
+            if attempt.executor_user_id != actor.user_id:
+                raise Denied('attempt belongs to another executor actor')
             previous = m.ResultReceipt.objects.filter(pk=receipt_id).first()
             if previous:
                 if (previous.attempt_id != attempt.id or previous.expected_revision != expected_revision
@@ -611,7 +611,7 @@ class MachineExecution:
         with transaction.atomic():
             self._installation_state()
             source = m.AssignmentAttempt.objects.select_related('incarnation').get(
-                operation_id=operation_id, step_id=step_id, principal_id=actor.principal_id)
+                operation_id=operation_id, step_id=step_id, executor_user_id=actor.user_id)
             work = self._work(source)
             self._authority(work)
             row = self._assignment(actor, work, 'claim_work')

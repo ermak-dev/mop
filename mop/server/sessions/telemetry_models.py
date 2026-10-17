@@ -53,7 +53,6 @@ class TurnOutcome(models.Model):
     event = models.CharField(max_length=32)
     error = models.CharField(max_length=64, null=True)
     initiator_user_id = models.PositiveBigIntegerField(null=True)
-    initiator_principal_id = models.UUIDField(null=True)
     initiator_endpoint_id = models.UUIDField(null=True)
     initiator_session_id = models.UUIDField(null=True)
     operation_id = models.UUIDField(null=True)
@@ -82,7 +81,6 @@ class ModelObservation(models.Model):
 
 class PrivateHistoryCursor(Record):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    principal_id = models.UUIDField()
     observation = models.ForeignKey(SessionObservation, on_delete=models.CASCADE)
     cursor = models.CharField(max_length=8192, default='')
     source_epoch = models.CharField(max_length=128, default='')
@@ -91,4 +89,4 @@ class PrivateHistoryCursor(Record):
     class Meta(Record.Meta):
         app_label = 'execution'
         constraints = Record.Meta.constraints + [models.UniqueConstraint(
-            fields=('principal_id', 'observation'), name='history_private_cursor_scope')]
+            fields=('user', 'observation'), name='history_private_cursor_scope')]

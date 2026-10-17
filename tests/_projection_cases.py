@@ -38,7 +38,6 @@ class ProjectionQueries(TransactionTestCase):
         NodeProject.objects.create(node=self.node, project=self.other)
         self.user = get_user_model().objects.create_user('reader')
         source = a.IdentitySource.objects.create(name='local', kind='local')
-        a.Principal.objects.create(user=self.user, kind='human')
         a.LoginIdentity.objects.create(user=self.user, source=source, external_subject='reader')
         a.ProjectMembership.objects.create(user=self.user, project=self.project, source=source)
         self.user.user_permissions.add(*Permission.objects.filter(

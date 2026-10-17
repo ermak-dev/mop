@@ -23,11 +23,13 @@ from mop.client import control as api
 
 
 class Profiles(unittest.TestCase):
-    def test_actual_server_principal_not_local_branch_or_role_bundle(self):
-        for kind, grant_id in (('human', None), ('grant', OP)):
+    def test_actual_server_actor_not_local_branch_or_role_bundle(self):
+        # #684: вид Actor из vocabulary human/agent/service; parallel
+        # principal_id в ответе больше нет.
+        for kind, grant_id in (('human', None), ('service', OP)):
             with self.subTest(kind=kind):
                 fixture = Fixture(Response(200, {'schema_version': 1, 'user_id': 2,
-                    'principal_id': NODE, 'kind': kind, 'human_owner_id': 2,
+                    'kind': kind, 'human_owner_id': 2 if kind == 'human' else None,
                     'node_id': None, 'grant_id': grant_id}))
                 with patch.object(api, '_DeadlineHTTPSConnection', fixture.factory), \
                      _control.use(api.ServerContext('https://controller.example', TOKEN)):
@@ -35,7 +37,6 @@ class Profiles(unittest.TestCase):
                 self.assertEqual(code, 0)
                 value = json.loads(out)
                 self.assertEqual(value['kind'], kind)
-                self.assertEqual(value['principal_id'], NODE)
                 self.assertEqual(value['grant_id'], grant_id)
                 self.assertIsNone(value['action_permissions'])
                 self.assertFalse({'token', 'address', 'role', 'branch'} & value.keys())

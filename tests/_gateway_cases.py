@@ -676,12 +676,19 @@ class GatewayExecution(TransactionTestCase):
                 await runtime.aclose()
         asyncio.run(run())
 
-    def test_service_and_grant_never_proxy_even_with_staff_superuser_flags(self):
-        from mop.server.access.models import Principal
-        for kind in ('service', 'grant'):
-            Principal.objects.filter(user=self.user).update(kind=kind)
-            get_user_model().objects.filter(pk=self.user.pk).update(is_staff=True, is_superuser=True)
-            self.assertEqual(management_get('/llm/management.html', cookies=self.client.cookies).status_code, 403)
+    def test_service_and_delegated_never_proxy_even_with_staff_superuser_flags(self):
+        # #684: вид Actor и делегирование (grant_id) закрывают proxy-панель
+        # даже с флагами staff/superuser; human остаётся единственным входом.
+        get_user_model().objects.filter(pk=self.user.pk).update(kind='service',
+            is_staff=True, is_superuser=True)
+        self.assertEqual(management_get('/llm/management.html', cookies=self.client.cookies).status_code, 403)
+        get_user_model().objects.filter(pk=self.user.pk).update(kind='agent',
+            is_staff=False, is_superuser=False)
+        # Агент аутентифицируется тем же путём (#684): вид сам не является
+        # запретом, панель проверяет permission живого Actor.
+        self.assertEqual(management_get('/llm/management.html', cookies=self.client.cookies).status_code, 200)
+        get_user_model().objects.filter(pk=self.user.pk).update(kind='human')
+        self.assertEqual(management_get('/llm/management.html', cookies=self.client.cookies).status_code, 200)
 
     def test_slow_upstream_leaves_rest_loop_heartbeat_and_ws_transport_available(self):
         import time

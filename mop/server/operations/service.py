@@ -9,7 +9,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from ..access.context import ActorContext, PrincipalKind
+from ..access.context import ActorContext, ActorKind
 from ..access.services import Access, Denied, NotVisible, current_actor
 from ..catalog.models import Node, NodeProject, Project
 from . import models as m
@@ -56,7 +56,7 @@ class Claim:
 
 
 def _binding(actor):
-    return dict(user_id=actor.user_id, principal_id=str(actor.principal_id), kind=actor.kind.value,
+    return dict(user_id=actor.user_id, kind=actor.kind.value,
         credential_id=str(actor.credential_id), human_owner_id=actor.human_owner_id,
         node_id=str(actor.node_id) if actor.node_id else None,
         grant_id=str(actor.grant_id) if actor.grant_id else None)
@@ -64,7 +64,7 @@ def _binding(actor):
 
 def _actor(row):
     value = row.actor_binding
-    return ActorContext(value['user_id'], UUID(value['principal_id']), PrincipalKind(value['kind']),
+    return ActorContext(value['user_id'], ActorKind(value['kind']),
         UUID(value['credential_id']), value['human_owner_id'],
         UUID(value['node_id']) if value['node_id'] else None, UUID(value['grant_id']) if value['grant_id'] else None)
 
@@ -346,7 +346,7 @@ class Operations:
             projects, code, reason = self._scope(row), None, None
             try:
                 self._authorize(_actor(row), 'catalog.' + row.action + '_node', row.node_id, projects)
-                if self.executor is None or self.executor.kind is not PrincipalKind.SERVICE:
+                if self.executor is None or self.executor.kind is not ActorKind.SERVICE:
                     raise Denied('enrolled node executor required for effect dispatch')
                 self._authorize(self.executor, 'catalog.record_node_application', row.node_id, projects)
                 self._authorize(self.executor, 'catalog.observe_node', row.node_id, projects)
@@ -414,7 +414,7 @@ class Operations:
             # Подтверждённый факт записывается даже после revoke, без новых effects.
             # Catalog остаётся владельцем согласованной записи intent/application.
             from ..catalog.services import Catalog
-            if self.executor is None or self.executor.kind is not PrincipalKind.SERVICE:
+            if self.executor is None or self.executor.kind is not ActorKind.SERVICE:
                 raise Denied('enrolled node executor required for effect confirmation')
             catalog = Catalog(authorizer=self.access)
             projection_updated = False

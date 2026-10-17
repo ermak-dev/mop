@@ -319,7 +319,6 @@ class BuildCommand:
 @dataclass(frozen=True)
 class Identity:
     user_id: int
-    principal_id: str
     kind: str
     human_owner_id: int | None
     node_id: str | None
@@ -909,9 +908,8 @@ class Client:
         data = self._get("/api/v1/identity")
         failed = False
         try:
-            _key(data["principal_id"])
             _require(type(data["user_id"]) is int and data["user_id"] > 0)
-            _require(data["kind"] in ("human", "grant", "service"))
+            _require(data["kind"] in ("human", "agent", "service"))
             for name in ("node_id", "grant_id"):
                 if data[name] is not None:
                     _key(data[name])
@@ -921,7 +919,7 @@ class Client:
             _require(actions is None or isinstance(actions, tuple) and all(
                 isinstance(action, str) and re.fullmatch(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", action)
                 for action in actions))
-            result = Identity(data["user_id"], data["principal_id"], data["kind"], owner,
+            result = Identity(data["user_id"], data["kind"], owner,
                 data["node_id"], data["grant_id"], None if actions is None else frozenset(actions))
         except (KeyError, TypeError, ClientError):
             failed = True

@@ -6,7 +6,7 @@ from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied
 
 from mop.server.access import services as access
-from mop.server.access.models import LoginIdentity, Principal
+from mop.server.access.models import LoginIdentity
 from .admincommon import GuardedAdmin, IdentifierFreeSuccess, allowed, safe_view
 from mop.server.catalog.models import Project
 from mop.server.sessions.models import Assignment
@@ -74,11 +74,12 @@ class GlobalAuthAdmin(IdentifierFreeSuccess):
 
 class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
     def get_queryset(self, request):
-        # Машина/делегат не может получить human password/staff через Auth UI.
-        return super().get_queryset(request).exclude(principal__kind__in=('service', 'grant'))
+        # Машина/делегат не может получить human password/staff через Auth UI:
+        # вид читается с самого Actor (#684), не с deprecated Principal rows.
+        return super().get_queryset(request).exclude(kind__in=('service', 'agent'))
 
     def save_model(self, request, obj, form, change):
-        if change and Principal.objects.filter(user=obj).exclude(kind='human').exists():
+        if change and obj.kind != 'human':
             raise PermissionDenied('nonhuman identity requires its named lifecycle')
         permitted = self.has_change_permission(request) if change else self.has_add_permission(request)
         if not permitted:
@@ -91,7 +92,7 @@ class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
         if not self.has_change_permission(request):
             raise PermissionDenied('user administration permission required')
         if (LoginIdentity.objects.filter(user_id=id, source__kind='ldap').exists()
-                or Principal.objects.filter(user_id=id).exclude(kind='human').exists()):
+                or get_user_model().objects.filter(pk=id).exclude(kind='human').exists()):
             raise PermissionDenied('password is managed by the enrolled identity source')
         return super().user_change_password(request, id, form_url)
 

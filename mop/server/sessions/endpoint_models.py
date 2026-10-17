@@ -40,7 +40,7 @@ class ConnectionLease(Record):
     nonce = models.UUIDField(default=uuid.uuid4)
     generation = models.PositiveBigIntegerField(default=1)
     credential_id = models.UUIDField()
-    principal_id = models.UUIDField()
+    user_id = models.PositiveBigIntegerField()
     expires_at = models.DateTimeField()
     connected = models.BooleanField(default=True)
 
@@ -55,7 +55,6 @@ class MessageDelivery(Record):
     message_id = models.UUIDField()
     operation_request_id = models.UUIDField(null=True)
     sender_user_id = models.PositiveBigIntegerField()
-    sender_principal_id = models.UUIDField()
     sender_credential_id = models.UUIDField()
     sender_kind = models.CharField(max_length=16)
     sender_owner_id = models.PositiveBigIntegerField(null=True)
@@ -76,7 +75,7 @@ class MessageDelivery(Record):
 
     class Meta(Record.Meta):
         constraints = Record.Meta.constraints + [
-            models.UniqueConstraint(fields=('sender_principal_id', 'message_id'), name='endpoint_message_identity'),
+            models.UniqueConstraint(fields=('sender_user_id', 'message_id'), name='endpoint_message_identity'),
             models.UniqueConstraint(fields=('payload_key_id', 'payload_nonce'), name='endpoint_payload_nonce'),
             models.CheckConstraint(condition=Q(state__in=('queued', 'attempting', 'accepted', 'unknown', 'unavailable')),
                                    name='endpoint_delivery_known_state'),

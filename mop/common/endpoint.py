@@ -13,7 +13,6 @@ class TrustedEndpointContext:
     Каждый use case проверяет credential, ownership и generation заново.
     """
     user_id: int
-    principal_id: UUID
     credential_id: UUID
     session_id: UUID
     endpoint_id: UUID

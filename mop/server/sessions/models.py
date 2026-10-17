@@ -50,7 +50,8 @@ class ExecutionIncarnation(Record):
 class AssignmentAttempt(Record):
     assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT)
     incarnation = models.ForeignKey(ExecutionIncarnation, on_delete=models.PROTECT)
-    principal_id = models.UUIDField()
+    # Исполнитель — сам Actor (#684): id исполнителя, не параллельный Principal.
+    executor_user_id = models.PositiveBigIntegerField()
     request_id = models.UUIDField()
     epoch = models.UUIDField()
     operation_id = models.UUIDField()
@@ -75,7 +76,7 @@ class AssignmentAttempt(Record):
             ('read_facts', 'Can read enrolled machine facts'),
             ('reconcile_work', 'Can reconcile unknown machine work')]
         constraints = Record.Meta.constraints + [
-            models.UniqueConstraint(fields=('principal_id', 'request_id'), name='attempt_request_identity'),
+            models.UniqueConstraint(fields=('executor_user_id', 'request_id'), name='attempt_request_identity'),
             models.UniqueConstraint(fields=('operation_id', 'step_id'), name='attempt_operation_step'),
             models.UniqueConstraint(fields=('assignment',), condition=Q(state__in=('claimed', 'unknown')),
                                     name='attempt_one_unresolved_resource'),

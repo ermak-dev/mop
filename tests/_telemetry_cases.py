@@ -38,7 +38,7 @@ class Telemetry(TransactionTestCase):
         self.source = CurrentSession('session-one', uuid4())
         self.scope = SessionScope(self.epoch, self.target.pk, self.inc.id, self.node.pk,
             self.boot, self.source.session_id, self.source.producer_epoch)
-        self.initiator = SourceRef(user_id=self.human.pk, principal_id=self.owner.principal_id,
+        self.initiator = SourceRef(user_id=self.human.pk,
             endpoint_id=uuid4(), session_id=uuid4(), operation_id=uuid4(), message_id=uuid4())
         self.turn = uuid4()
         test = self
@@ -146,12 +146,12 @@ class Telemetry(TransactionTestCase):
     def test_source_is_immutable_actual_initiator_not_current_owner(self):
         self.service.ingest(self.actor, self.event())
         row = self.m.TurnOutcome.objects.get()
-        self.assertEqual(row.initiator_principal_id, self.initiator.principal_id)
+        self.assertEqual(row.initiator_user_id, self.initiator.user_id)
         self.assertEqual(row.initiator_endpoint_id, self.initiator.endpoint_id)
         self.assertEqual(row.operation_id, self.initiator.operation_id)
         self.assertEqual(row.message_id, self.initiator.message_id)
         self.service.ingest(self.actor, replace(self.event(2), turn_id=uuid4()))
-        self.assertIsNone(self.m.TurnOutcome.objects.order_by('-sequence').first().initiator_principal_id)
+        self.assertIsNone(self.m.TurnOutcome.objects.order_by('-sequence').first().initiator_user_id)
 
     def test_active_turn_source_survives_bounded_model_record_retention(self):
         self.service.retained_records = 1
@@ -159,10 +159,10 @@ class Telemetry(TransactionTestCase):
         first = self.initiator
         self.service.ingest(self.actor, self.event(2, 'Statusline', model='a'))
         self.service.ingest(self.actor, self.event(3, 'Statusline', model='a'))
-        self.initiator = replace(first, principal_id=uuid4(), operation_id=uuid4())
+        self.initiator = replace(first, operation_id=uuid4())
         self.service.ingest(self.actor, self.event(4))
         row = self.m.TurnOutcome.objects.order_by('-sequence').first()
-        self.assertEqual(row.initiator_principal_id, first.principal_id)
+        self.assertEqual(row.initiator_user_id, first.user_id)
         self.assertLessEqual(self.m.TurnOutcome.objects.count(), 2)
         self.assertLessEqual(self.m.ModelObservation.objects.count(), 1)
 
@@ -177,10 +177,10 @@ class Telemetry(TransactionTestCase):
     def test_one_turn_cannot_be_reattributed_after_a_later_owner_or_resolver_change(self):
         self.service.ingest(self.actor, self.event(event='UserPromptSubmit'))
         first = self.initiator
-        self.initiator = replace(first, principal_id=uuid4(), operation_id=uuid4())
+        self.initiator = replace(first, operation_id=uuid4())
         self.service.ingest(self.actor, self.event(2))
         row = self.m.TurnOutcome.objects.order_by('-sequence').first()
-        self.assertEqual(row.initiator_principal_id, first.principal_id)
+        self.assertEqual(row.initiator_user_id, first.user_id)
         self.assertEqual(row.operation_id, first.operation_id)
 
     def test_http_authenticated_body_is_strict_and_private(self):

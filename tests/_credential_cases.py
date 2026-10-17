@@ -50,7 +50,6 @@ class CredentialSocketCases(TransactionTestCase):
         self.access = access
         self.user = get_user_model().objects.create_user('credential-user', password='test-password-only')
         source = m.IdentitySource.objects.create(name='local', kind='local', priority=0)
-        m.Principal.objects.create(user=self.user, kind='human')
         m.LoginIdentity.objects.create(user=self.user, source=source, external_subject='credential-user')
         self.project = Project.objects.create(name='socket-project', origin='https://example.invalid/socket-project.git')
         m.ProjectMembership.objects.create(user=self.user, source=source, project=self.project)
@@ -245,9 +244,10 @@ class CredentialSocketCases(TransactionTestCase):
         from dataclasses import replace
         import uuid
         from django.db import transaction
-        from mop.server.access.context import PrincipalKind
-        actor = replace(self.access.token_context(self.token), kind=PrincipalKind.GRANT,
-            grant_id=uuid.uuid4(), human_owner_id=self.user.pk)
+        # #684: делегирование -- grant_id при живом human credential;
+        # подделка вида у чужого credential закрыта по умолчанию.
+        actor = replace(self.access.token_context(self.token),
+            kind=type(self.access.token_context(self.token).kind).SERVICE, grant_id=uuid.uuid4())
         with override_settings(BOOTSTRAP=self.bootstrap):
             app = self.service.application()
         with transaction.atomic():
@@ -459,7 +459,7 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             self.result = result
         self.run_socket(body)
         grant = Grant.objects.get(pk=reserved.id)
-        token = Token.objects.get(user_id=grant.principal.user_id)
+        token = Token.objects.get(user_id=grant.actor_id)
         version = SecretVersion.objects.get(pk=self.result.credential_version_id)
         self.assertNotIn(token.key, repr(self.result))
         self.assertNotIn(token.key.encode(), bytes(version.envelope))
@@ -483,7 +483,7 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         row = Grant.objects.get(pk=reserved.id)
         self.assertEqual(row.revision, reserved.revision)
         self.assertIsNone(row.credential_version_id)
-        self.assertFalse(Token.objects.filter(user_id=row.principal.user_id).exists())
+        self.assertFalse(Token.objects.filter(user_id=row.actor_id).exists())
 
     def test_assignment_rebinding_during_crypto_prevents_retained_commit_and_token(self):
         from uuid import uuid4
@@ -511,7 +511,7 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         self.assertEqual(row.revision, reserved.revision)
         self.assertIsNone(row.credential_version_id)
         self.assertEqual(SecretVersion.objects.count(), before)
-        self.assertFalse(Token.objects.filter(user_id=row.principal.user_id).exists())
+        self.assertFalse(Token.objects.filter(user_id=row.actor_id).exists())
 
     def test_rootless_preparation_bytes_and_real_policy_backed_grant_reservation(self):
         from datetime import timedelta

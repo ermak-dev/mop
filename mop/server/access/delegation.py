@@ -47,9 +47,10 @@ class ApprovedPolicy:
 
 @dataclass(frozen=True)
 class PolicyBinding:
+    """Pinned намерение: actor — сам Actor (#684), int id, не Principal UUID."""
     intent_id: UUID
     owner_id: int
-    actor_id: UUID
+    actor_id: int
     project_id: UUID
     bundle_id: UUID
     role: str
@@ -59,11 +60,13 @@ class PolicyBinding:
     incarnation: UUID
 
     def __post_init__(self):
-        for value in (self.intent_id, self.actor_id, self.project_id, self.bundle_id,
+        for value in (self.intent_id, self.project_id, self.bundle_id,
                       self.target_id, self.incarnation):
             uuid_value(value)
         if self.parent_id is not None:
             uuid_value(self.parent_id)
+        if type(self.actor_id) is not int or self.actor_id < 1:
+            raise ValueError('complete creation actor identity required')
         RoleBinding(self.project_id, self.target_id, self.incarnation, self.role,
                     self.digest, self.intent_id, self.owner_id)
 
@@ -106,7 +109,7 @@ class BundleContent:
 class GrantInfo:
     id: UUID
     owner_id: int
-    principal_id: UUID
+    principal_id: int  # машина делегирования: Actor id (#684), не Principal
     project_id: UUID
     target_id: UUID
     incarnation: UUID

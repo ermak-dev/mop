@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from mop.common.telemetry import (Ack, CurrentSession, Observation, PrivateHistoryReader,
     SessionAuthority, SessionScope, SourceAttributedTurn, TurnAttribution, canonical, text)
-from mop.server.access.context import PrincipalKind
+from mop.server.access.context import ActorKind
 from mop.server.access.services import Access, current_actor
 from . import telemetry_models as m
 from .models import Assignment, ExecutionIncarnation
@@ -149,7 +149,7 @@ class Telemetry:
                 if source is not None and source.turn_id == observation.turn_id:
                     # Источник уже зафиксирован. Даже unknown не заменяется новым
                     # owner/endpoint при продолжении того же хода или retention.
-                    names = ('initiator_user_id', 'initiator_principal_id', 'initiator_endpoint_id',
+                    names = ('initiator_user_id', 'initiator_endpoint_id',
                              'initiator_session_id', 'operation_id', 'message_id')
                     values = {name: getattr(source, name) for name in names}
                 else:
@@ -161,7 +161,7 @@ class Telemetry:
                                 raise Unavailable('invalid source-attributed turn projection')
                             initiator = attributed.initiator
                     values = {} if initiator is None else dict(initiator_user_id=initiator.user_id,
-                        initiator_principal_id=initiator.principal_id, initiator_endpoint_id=initiator.endpoint_id,
+                        initiator_endpoint_id=initiator.endpoint_id,
                         initiator_session_id=initiator.session_id, operation_id=initiator.operation_id,
                         message_id=initiator.message_id)
                 outcome = m.TurnOutcome.objects.create(observation=row, sequence=observation.sequence,
@@ -187,7 +187,7 @@ class Telemetry:
 
     def latest(self, actor, scope):
         with transaction.atomic():
-            self._scope(actor, scope, private=actor.kind != PrincipalKind.SERVICE)
+            self._scope(actor, scope, private=actor.kind != ActorKind.SERVICE)
             row = self._observation(scope)
             fresh = row.model_received_at is not None and timezone.now()-row.model_received_at <= timedelta(seconds=self.freshness_seconds)
             return Latest(row.confirmed_model if fresh and row.model_proven else None,
@@ -197,7 +197,7 @@ class Telemetry:
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError('nonnegative cursor revision required')
         cursor = m.PrivateHistoryCursor.objects.select_for_update().filter(
-            principal_id=actor.principal_id, observation=row).first()
+            user_id=actor.user_id, observation=row).first()
         if (cursor.revision if cursor is not None else 0) != expected_revision:
             raise Conflict('private history cursor revision changed')
         return cursor
@@ -217,7 +217,7 @@ class Telemetry:
             row = self._observation(scope)
             cursor = self._cursor(actor, row, expected_revision)
             if cursor is None:
-                cursor = m.PrivateHistoryCursor(user_id=actor.user_id, principal_id=actor.principal_id, observation=row)
+                cursor = m.PrivateHistoryCursor(user_id=actor.user_id, observation=row)
             else:
                 cursor.revision += 1
             cursor.cursor, cursor.source_epoch = page['cursor'], page['epoch']

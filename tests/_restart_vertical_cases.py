@@ -43,7 +43,6 @@ class RestartVertical(TransactionTestCase):
         self.user.first_name, self.user.last_name = 'Fixture', 'Owner'
         self.user.save()
         source = a.IdentitySource.objects.create(name='local', kind='local')
-        a.Principal.objects.create(user=self.user, kind='human')
         a.LoginIdentity.objects.create(user=self.user, source=source, external_subject='owner')
         self.key = auth.issue_token(self.user.pk)
         self.actor = auth.token_context(self.key)
