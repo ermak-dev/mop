@@ -245,6 +245,18 @@ def check_pipeline_yaml(c):
     template = ci['.tests']
     variables = {**template.get('variables', {}), **ci['test:py3.12'].get('variables', {})}
     c.expect('#678 one test stage', template.get('stage'), 'test')
+    # HYPOTHESIS (#699): владельца checkout возвращает только after_script; у
+    # убитого job он не выполнился, и следующий job упал на git clean раньше
+    # своего script (пайплайн 5674, Permission denied на root-овых __pycache__).
+    # SOLUTION: тот же chown и до получения исходников -- только для уже
+    # существующего каталога, иначе docker -v создал бы его от root.
+    # STATUS: FIXED — see #699
+    chown = 'docker run --rm -v "$CI_PROJECT_DIR:/io" alpine chown -R "$(id -u):$(id -g)" /io'
+    c.check('#699 after_script still returns the checkout to the runner user',
+            chown in template.get('after_script', []))
+    hook = (template.get('hooks') or {}).get('pre_get_sources_script') or []
+    c.check('#699 a killed predecessor cannot leave the checkout to root',
+            any(chown in line and '[ -d "$CI_PROJECT_DIR" ]' in line for line in hook), hook)
     # HYPOTHESIS (#698): у job нет своего timeout -- действует часовой таймаут
     # проекта, а основной прогон и два hermetic-перепрогона 25-минутного
     # controller.py его превышают: пайплайн 5662 убит без вердикта.
