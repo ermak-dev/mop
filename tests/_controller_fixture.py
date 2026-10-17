@@ -17,6 +17,18 @@ import _lib  # noqa: F401,E402 — lifetime всех временных файл
 import hermetic  # noqa: E402 — сначала отделить настройки старой машины
 
 
+def run_exit_code(failures, *, strict, skipped):
+    """Код выхода gate по числу провалов и (в strict) пропусков #697.
+
+    DiscoverRunner.run_tests возвращает целое число провалов, а не объект
+    результата: strict_failure_count над ним всегда видит ноль, и gate
+    выходил 0 даже при FAILED. Пропуски считаются отдельно, только в strict.
+    """
+    if type(failures) is not int or type(skipped) is not int:
+        raise ValueError('integer failure and skip counts required')
+    return int(bool(failures + (skipped if strict else 0)))
+
+
 def strict_failure_count(result, *, strict):
     """Число провалов прогона. Контракт #229 для Django runner (#674).
 
@@ -138,7 +150,14 @@ def main(labels=None):
                 # ожиданий перед DROP и не заявляем server quiescence.
                 with patch.object(psycopg.Cursor, 'execute', diagnostic_execute):
                     return super().teardown_databases(old_config, **kwargs)
-        runner = DiagnosticRunner(verbosity=2, interactive=False)
+        class ResultCapturingRunner(DiagnosticRunner):
+            # run_tests возвращает ЦЕЛОЕ (failures+errors+unexpectedSuccesses),
+            # объекта результата в нём нет. Пропуски видит только сам runner:
+            # перехватываем run_suite, чтобы strict-режим (#674) снова считал их.
+            def run_suite(self, suite, **kwargs):
+                self.captured_result = super().run_suite(suite, **kwargs)
+                return self.captured_result
+        runner = ResultCapturingRunner(verbosity=2, interactive=False)
         from django.db import connection
         from unittest.mock import patch
         creation = connection.creation
@@ -146,4 +165,5 @@ def main(labels=None):
         with patch.object(creation, 'deserialize_db_from_string',
                           new=lambda data: restore_snapshot(creation, data, original)):
             suite_result = runner.run_tests(labels or ['_controller_cases'])
-            return int(bool(strict_failure_count(suite_result, strict=hermetic.STRICT)))
+            skipped = getattr(getattr(runner, 'captured_result', None), 'skipped', ()) or ()
+            return run_exit_code(suite_result, strict=hermetic.STRICT, skipped=len(skipped))
