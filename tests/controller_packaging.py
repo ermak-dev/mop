@@ -30,6 +30,19 @@ class Packaging(unittest.TestCase):
         self.assertEqual(module.requirements('server'), list(server))
         self.assertEqual(module.requirements(), list(deps.PIP))
 
+    # BUG (#693): механика LDAP жила на собственном ldap3-стеке, а стандартный
+    # django-auth-ldap backend не был зависимостью сервера.
+    # HYPOTHESIS: адаптер опирается на внутренности backend (_LDAPUser) и
+    # напрямую на python-ldap, поэтому оба -- точные пины только в SERVER:
+    # новая установка получает проверенную пару, клиент её не получает.
+    # RED: пунктов в SERVER нет.
+    def test_directory_mechanism_is_a_pinned_server_dependency(self):
+        for name in ('django-auth-ldap', 'python-ldap'):
+            pinned = [item for item in deps.SERVER if item.lower().startswith(name + '==')]
+            self.assertEqual(len(pinned), 1, 'exactly one pinned ' + name + ' in SERVER')
+            self.assertFalse(any(item.lower().replace('_', '-').startswith(name) for item in deps.PIP),
+                             'client must not carry ' + name)
+
     def test_pool_worker_ownership_uses_the_explicitly_selected_pool_release(self):
         # BUG: psycopg[pool]==3.3.6 не фиксирует отдельно выпускаемый psycopg_pool.
         # HYPOTHESIS: shutdown читает private _workers/_sched_runner, поэтому

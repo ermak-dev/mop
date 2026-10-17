@@ -305,11 +305,25 @@ Only LDAP invalidCredentials is a password refusal; availability and cleanup
 failures propagate as sanitized unavailable errors without backend fall-through.
 This validation freshness limit is not DRF token expiry.
 
-The real ldap3 adapter accepts explicit ORM configuration and a protected bind/CA
-secret-reader port. Its default reader refuses before network I/O: #637 must bind
-the concrete protected secret resolver. It never consults `.env`, an old bind file
-or the legacy identity provider. Fake-provider contract tests do not establish a
-real LDAP deployment; real-directory acceptance and secret binding remain separate.
+LDAP mechanics — connection, STARTTLS and certificate checking, bind, user search
+and group types — run on django-auth-ldap (#693); `mop/server/access/ldap.py` is a
+thin adapter. Per call it turns the ORM directory configuration into the
+backend's settings object, setting every name explicitly, so static `AUTH_LDAP_*`
+Django settings are never read and no second copy of the configuration exists.
+Direct membership is `member`, `uniqueMember` or `memberUid`; with nested AD the
+`member` side uses the library's nested Active Directory group type. The library
+backend is not an authentication backend of its own and never writes users:
+`MIRROR_GROUPS` and `FIND_GROUP_PERMS` stay off, because mirroring sets
+`user.groups` by group name and would erase manual Groups; the projection stays
+the shared rule Groups above. A user-search error is an outage, not an absent
+login, and an ambiguous login is refused. The adapter takes a protected bind/CA
+secret-reader port (the CA reaches python-ldap as a per-call temporary file).
+Its default reader refuses before network I/O: #637 must bind the concrete
+protected secret resolver. It never consults `.env`, an old bind file or the
+legacy identity provider. The legacy bus-side ldap3 provider
+(`mop/server/ldapauth.py`) is a separate stack that #645 removes. Fake-wire
+contract tests do not establish a real LDAP deployment; real-directory
+acceptance and secret binding remain separate.
 
 Legacy `identity`, `operators`, `websession`, callout/bootstrap and `server web`
 consumers still belong to the deployed old release. CLI/node/gateway replacement,
