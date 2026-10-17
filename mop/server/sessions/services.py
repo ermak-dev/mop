@@ -5,7 +5,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q, F
 from django.utils import timezone
 from mop.server.access.context import ActorKind
-from mop.server.access.services import Access, Denied, current_actor
+from mop.server.access.services import Access, Denied, current_actor, node_executor
 from mop.server.catalog.services import snapshot, readmission
 from mop.server.catalog.models import Project, NodeProject
 from . import models as m
@@ -73,8 +73,7 @@ def human(actor):
 
 def machine(actor, node_id, action, project_ids=()):
     current_actor(actor)
-    if actor.kind != ActorKind.SERVICE or actor.node_id != node_id:
-        raise Denied('enrolled node service required')
+    node_executor(actor, node_id, reason='enrolled node service required')
     Access().authorize(actor, 'execution.' + action, project_ids=project_ids, node_ids=(node_id,))
 
 
@@ -151,8 +150,7 @@ class Assignments:
         не отменяет подтверждённый эффект и ничего не говорит о transport revoke.
         """
         current_actor(actor)
-        if actor.kind is not ActorKind.SERVICE:
-            raise Denied('enrolled node service required for addressed credentials')
+        node_executor(actor, reason='enrolled node service required for addressed credentials')
         if type(target_id) is not UUID or type(epoch) is not UUID:
             raise Denied('current assignment target and installation epoch required')
         binding = self.target(target_id, lock=True)

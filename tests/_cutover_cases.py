@@ -136,3 +136,41 @@ class GatewayCutover(TransactionTestCase):
             with self.assertRaises(Denied):
                 HumanAuthority().authorize(actor)
         self.assertEqual(calls, ['controller.manage_proxy'], 'gateway must ask the single authorizer')
+
+
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class NodeExecutorFact(TransactionTestCase):
+    """Машинные входы требуют факт enrollment, а не вид Actor (#687/#689)."""
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    fixture = RestartVertical.fixture
+
+    MODULES = ('mop/server/sessions/services.py', 'mop/server/operations/service.py',
+               'mop/server/controller/projectionviews.py', 'mop/server/sessions/telemetry.py')
+
+    def test_machine_modules_compare_no_actor_kind_for_the_executor(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        for name in self.MODULES:
+            source = (root / name).read_text()
+            self.assertFalse('ActorKind.SERVICE' in source,
+                             f'{name}: the node executor is an enrollment fact, not a kind branch')
+
+    def test_privileged_human_and_foreign_node_service_cannot_take_machine_work(self):
+        self.fixture()
+        from mop.server.access.services import Denied
+        from mop.server.catalog.models import Node, NodeProject
+        from mop.server.sessions.services import machine
+        # Суперпользователь со всеми правами — не исполнитель узла.
+        with self.assertRaises(Denied):
+            machine(self.actor, self.node.pk, 'poll_work')
+        other = Node.objects.create(name='other', driver='host', ssh_host='other.invalid',
+            control_origin='https://other.invalid', lan_address='other.invalid', bootstrap_address='other.invalid')
+        NodeProject.objects.create(node=other, project=self.project)
+        key = auth.enroll_service('foreign-executor', other.pk, project_ids=(self.project.pk,),
+            permissions=('execution.poll_work',))
+        foreign = auth.token_context(key)
+        with self.assertRaises(Denied):
+            machine(foreign, self.node.pk, 'poll_work')
+        # Свой исполнитель своего узла проходит.
+        machine(self.machine_actor, self.node.pk, 'poll_work')
