@@ -191,6 +191,11 @@ rendered = render_catalog(actor)
 assert len(rendered['definition_keys']) == 83
 assert rendered['desired_revision'] == 2 and rendered['applied'] is False
 assert rendered['receipt'] is None and rendered['nodes'] == []
+# #644/#695: prepare собрал статику Admin в общий каталог из bootstrap.
+from django.conf import settings as django_settings
+from pathlib import Path
+assert Path(django_settings.STATIC_ROOT, 'staticfiles.json').is_file(), 'collectstatic manifest missing'
+assert any(Path(django_settings.STATIC_ROOT, 'admin', 'css').glob('base.*.css')), 'admin static not collected'
 close_pools()
 '''
         venv = self.base / 'clean-server-venv'

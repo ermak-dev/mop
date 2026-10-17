@@ -158,6 +158,23 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'database bootstrap'):
                 module.bootstrap_document(spec, role, password='secret-password-marker')
 
+    # #695/#644: собранная статика -- общий каталог state/static: пишет
+    # maintenance (collectstatic), раздаёт web; остальным ролям он не нужен.
+    def test_collected_static_root_is_shared_only_by_maintenance_and_web(self):
+        module = self.library()
+        spec = module.specification(self.spec)
+        expected = self.spec['paths']['state'] + '/static'
+        for role in ('maintenance', 'web'):
+            self.assertEqual(module.bootstrap_document(spec, role, password='p')['static_root'], expected)
+        for role in ('worker', 'gateway'):
+            self.assertNotIn('static_root', module.bootstrap_document(spec, role, password='p'))
+        artifact = module.provisioning_artifact(spec)
+        self.assertEqual(artifact['shared_directories'], [{'path': expected,
+            'owner': self.spec['identities']['maintenance'], 'group': self.spec['identities']['web'],
+            'mode': '0750'}])
+        tasks = artifact['playbook'][0]['tasks']
+        self.assertTrue(any(task.get('ansible.builtin.file', {}).get('mode') == '0750' for task in tasks))
+
     def test_node_delivery_allowlist_addressing_and_desired_not_applied(self):
         module = self.library()
         self.assertTrue(callable(getattr(module, 'node_artifact', None)),

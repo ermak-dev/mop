@@ -155,6 +155,11 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         for role in document['identities']:
             for base in ('configuration', 'state'):
                 self.assertEqual((Path(paths[base]) / role).stat().st_mode & 0o777, 0o700)
+        # #644/#695: общий каталог собранной статики -- maintenance пишет, web читает.
+        shared = Path(paths['state']) / 'static'
+        self.assertEqual(shared.stat().st_mode & 0o777, 0o750)
+        identities = document['identities']
+        self.assertIn(['chown', identities['maintenance'] + ':' + identities['web'], str(shared)], calls)
         root = Path(paths['root_trust']) / 'root.key'
         self.assertEqual(len(root.read_bytes()), 32)
         self.assertEqual(root.stat().st_mode & 0o777, 0o600)

@@ -132,6 +132,8 @@ def provisioning_artifact(spec):
             directories.append({'path': paths[base] + '/' + role, 'owner': user, 'mode': '0700'})
     for base in ('backup', 'root_trust'):
         directories.append({'path': paths[base], 'owner': users['maintenance'], 'mode': '0700'})
+    # Единственный не приватный каталог: maintenance пишет, группа web читает.
+    shared = [{'path': static_root(spec), 'owner': users['maintenance'], 'group': users['web'], 'mode': '0750'}]
     managed = db['topology'] == 'provisioned'
     playbook = [{'name': 'Prepare a separate fresh controller without starting services',
         'hosts': 'localhost', 'connection': 'local', 'gather_facts': False, 'become': True,
@@ -148,6 +150,9 @@ def provisioning_artifact(spec):
             {'name': 'Prepare purpose-owned private directories', 'ansible.builtin.file':
                 {'path': '{{ item.path }}', 'state': 'directory', 'owner': '{{ item.owner }}',
                  'group': '{{ item.owner }}', 'mode': '0700'}, 'loop': directories},
+            {'name': 'Prepare the shared collected-static directory', 'ansible.builtin.file':
+                {'path': '{{ item.path }}', 'state': 'directory', 'owner': '{{ item.owner }}',
+                 'group': '{{ item.group }}', 'mode': '0750'}, 'loop': shared},
             {'name': 'Install matching native PostgreSQL client tools', 'ansible.builtin.apt':
                 {'name': 'postgresql-client-' + str(db['major']), 'state': 'present'}},
         ]}]
@@ -155,6 +160,7 @@ def provisioning_artifact(spec):
             'accounts': [{'name': user, 'system': True, 'shell': '/usr/sbin/nologin',
                           'create_home': False} for user in users.values()],
             'directories': directories,
+            'shared_directories': shared,
             'postgresql': {'host': db['host'], 'port': db['port'], 'major': db['major'],
                 'package': ('postgresql-' if managed else 'postgresql-client-') + str(db['major']),
                 'manage_service': managed, 'max_connections': 35,
@@ -163,6 +169,15 @@ def provisioning_artifact(spec):
                 'network_access': 'operator must restrict to controller identities and backup hosts'},
             'unresolved': ['OS package repository and TLS server key provisioning are operator-owned',
                            'no runtime units until executor and realtime lifecycle contracts are bound']}
+
+
+def static_root(spec):
+    """Собранная статика (#644/#695): общий каталог state/static.
+
+    Пишет только maintenance (collectstatic), читает только web; остальным ролям
+    он не нужен. Схема спецификации не расширяется -- путь выводится из state.
+    """
+    return dict(spec.paths)['state'] + '/static'
 
 
 def bootstrap_document(spec, role, *, password):
@@ -180,6 +195,8 @@ def bootstrap_document(spec, role, *, password):
                   'PASSWORD': password, 'OPTIONS': {'sslmode': 'verify-full', 'sslrootcert': db['tls_ca']}})
     if role == 'maintenance':
         result['root_key'] = paths['root_trust'] + '/root.key'
+    if role in ('maintenance', 'web'):
+        result['static_root'] = static_root(spec)
     return result
 
 
@@ -228,6 +245,8 @@ def prepare_database():
     from .controller.runtime import maintenance, installation_snapshot
     maintenance('migrate')
     maintenance('initialize')
+    # #644/#695: статика Admin собирается тем же maintenance в общий каталог.
+    maintenance('collectstatic')
     maintenance('check')
     return installation_snapshot()
 

@@ -106,6 +106,10 @@ def prepare(data, *, execute=subprocess.run):
             path.mkdir(mode=0o700)
             command(['chown', user + ':' + user, str(path)])
         Path(paths[base]).chmod(0o755)
+    # Собранная статика (#644/#695): пишет maintenance, читает только группа web.
+    shared = Path(paths['state']) / 'static'
+    shared.mkdir(mode=0o750)
+    command(['chown', users['maintenance'] + ':' + users['web'], str(shared)])
     signing = secrets.token_hex(32).encode('ascii')
     for role in ('maintenance', 'web', 'worker', 'gateway'):
         path = Path(paths['configuration']) / role / 'django.key'
