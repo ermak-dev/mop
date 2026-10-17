@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop addresses`, `mop build`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop addresses`, `mop build`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop delete`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop stop`, `mop tail`, `mop update`, `mop wipe`.
+Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop delete`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -338,12 +338,20 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 #### mop stop
 
 ```text
-stop a puppet job: mop stop <name>
+mop stop <id> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-Operator only. Stops initialization, the current session and automatic
-restarts. The container, clone and bootstrap workspace are kept.
-Use mop update <name> to start the job again. This is not Escape for
-interrupting a Claude turn, and it does not delete the puppet.
+Submit the conditional scheduler stop of a puppet job: initialization, the
+current session and automatic restarts stop; the clone and workspace are kept.
+The stop is a single conditional scheduler write with physical readback; a lost
+or uncertain reply stays unknown and is never reposted. This is not Escape for
+interrupting a Claude turn and it does not delete the puppet.
+
+With no explicit binding, first read authorized detail and use desired.revision.
+The request key and absolute UTC --not-after (default two minutes) are fixed
+before that query. Outstanding/unknown operations return exit 3; recover
+through mop operation with the original key/epoch. --force takeover is
+explicitly unsupported before I/O. MCP requires the full explicit binding.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop tail
@@ -378,14 +386,21 @@ keeps its own approved snapshot, and the wire carries no workspace text.
 #### mop wipe
 
 ```text
-wipe a puppet's working copy: mop wipe <name> [--force]
+mop wipe <id> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-The clone is reset to HEAD (unsaved and untracked changes are gone), the
-target directory is removed entirely. The agent refuses if the tmux session
-is alive: a bare wipe is for a stopped puppet — the full cycle is mop recycle.
+Submit the durable clone wipe: unsaved and untracked work in the puppet's clone
+is gone, what exactly the body driver removes (the clone's state on a host body,
+the container on a container body). The node executor refuses while the
+session is alive; anything but a confirmed wipe stays unknown and holds the
+target. Wipe needs its own permission and belongs only to the human who owns
+the assignment; --force takeover is explicitly unsupported before I/O.
 
-Another master's puppet (work in its clone, or dispatched minutes ago) is
-refused with that master's name; --force acts anyway and says whose it was.
+With no explicit binding, first read authorized detail and use desired.revision.
+The request key and absolute UTC --not-after (default two minutes) are fixed
+before that query. accepted is not wiped: outstanding/unknown operations return
+exit 3; recover through mop operation with the original key/epoch, never by
+reposting. MCP requires the full explicit binding. The explicit HTTPS origin/CA
+and transient Django token follow mop health.
 ```
 
 ### pool: administration

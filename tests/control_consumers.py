@@ -91,6 +91,26 @@ class Consumers(unittest.TestCase):
         self.assertEqual(body['request_id'], KEY)
         self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
 
+    # #642: wipe и stop-job -- тот же путь, что restart: detail-чтение даёт
+    # desired revision, POST на свой маршрут с пустыми params, без force.
+    def test_wipe_and_stop_cli_post_empty_params_to_their_routes(self):
+        from mop.cli import _control
+        for words, route in (('wipe', 'wipe'), ('stop', 'stop-job')):
+            self.fixture.calls.clear()
+            self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
+            self.response(restart_operation(), 202)
+            with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+                out, err, code = run_command(cli.main, [words, PUPPET, '--request-id', KEY,
+                                                        '--not-after', DEADLINE])
+            self.assertEqual(code, 3, err)
+            self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'POST'])
+            self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/puppets/{PUPPET}/commands/{route}')
+            body = json.loads(self.fixture.calls[-1][2])
+            self.assertEqual(body['params'], {})
+            self.assertEqual(body['expected_revision'], '7')
+            self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
+            self.assertEqual(run_command(cli.main, [words, PUPPET, '--force'])[2], 2)
+
     def test_restart_explicit_binding_needs_no_roster_read_and_never_enables_override(self):
         from mop.cli import _control
         self.response(restart_operation('succeeded'))
@@ -586,7 +606,7 @@ class Consumers(unittest.TestCase):
 
     def test_absent_backend_refuses_before_any_io_and_never_ssh_or_nats(self):
         from mop.cli import _control
-        for words in ('add', 'update', 'recycle', 'delete', 'wipe', 'stop', 'model',
+        for words in ('add', 'update', 'recycle', 'delete', 'model',
                       'secret file', 'secret var', 'server gc', 'attach', 'master'):
             with self.subTest(words=words), _control.use(api.ServerContext('https://controller.example', TOKEN)):
                 out, err, code = run_command(lambda a: _control.invoke(words, a[0]), [[]])

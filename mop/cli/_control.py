@@ -31,7 +31,8 @@ SURFACES = dict.fromkeys((
     'server disk', 'server proxykey', 'server user', 'server user add', 'server user delete',
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
-                              'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart'), 'bound'))
+                              'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
+                              'wipe', 'stop'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -39,8 +40,7 @@ GAPS = {
     'agents': 'live address aggregation and private endpoint inbox binding',
     'add': 'role creation admission and readiness',
     'update': 'update admission', 'delete': 'delete admission',
-    'recycle': 'recycle admission', 'wipe': 'wipe admission',
-    'stop': 'stop-job admission', 'send': 'message admission/receipts',
+    'recycle': 'recycle admission', 'send': 'message admission/receipts',
     'dispatch': 'dispatch admission and scoped target selection',
     'model': 'session model action', 'models': 'inference model query',
     'attach': 'private terminal physical resolver/capability discovery',
@@ -318,15 +318,18 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
             args = p.parse_args(argv)
-        elif words == 'restart':
+        elif words in ('restart', 'wipe', 'stop'):
             p.add_argument('puppet_id')
             p.add_argument('--incarnation')
-            p.add_argument('--fresh', action='store_true')
+            if words == 'restart':
+                p.add_argument('--fresh', action='store_true')
             p.add_argument('--force', action='store_true')
             _operation_options(p, binding_required=False)
             args = p.parse_args(argv)
-            if args.fresh or args.force:
-                print('unsupported: fresh restart and privileged assignment takeover are not bound', file=sys.stderr)
+            if getattr(args, 'fresh', False) or args.force:
+                print('unsupported: fresh restart and privileged assignment takeover are not bound'
+                      if words == 'restart' else 'unsupported: privileged assignment takeover is not bound',
+                      file=sys.stderr)
                 return 2
             args.request_id = api.new_request_id(args.request_id)
             if args.not_after is None:
@@ -336,7 +339,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             if any(value is not None for value in values) and not args.explicit_binding:
                 raise api.ClientError('provide epoch, incarnation and expected-revision together')
             if args.explicit_binding:
-                prepare = api.PreparedCommand('restart', api.Target(args.puppet_id, args.incarnation,
+                prepare = api.PreparedCommand(words, api.Target(args.puppet_id, args.incarnation,
                     args.expected_revision), args.epoch, args.request_id, args.not_after)
         elif words == 'build':
             p.add_argument('project_id')
@@ -384,10 +387,11 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                   'network_observed': False}, credential=selected.token)
             return 0
         client = api.Client(selected)
-        if words == 'restart' and not args.explicit_binding:
+        if words in ('restart', 'wipe', 'stop') and not args.explicit_binding:
             view = client.read_puppet(args.puppet_id)
-            prepare = client.prepare_restart(view.target, epoch=view.epoch, not_after=args.not_after,
-                                             request_id=args.request_id)
+            prepare = {'restart': client.prepare_restart, 'wipe': client.prepare_wipe,
+                       'stop': client.prepare_stop}[words](view.target, epoch=view.epoch,
+                                                           not_after=args.not_after, request_id=args.request_id)
         if words == 'health':
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
         elif words in ('profile', 'mcp'):
