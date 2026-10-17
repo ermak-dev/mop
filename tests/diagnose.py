@@ -70,11 +70,6 @@ def client_report():
     return diagnose.report()
 
 
-def client_main(argv):
-    from mop.cli.core import diagnose
-    return diagnose.main(argv)
-
-
 def server_main(argv):
     from mop.cli.server import diagnose
     return diagnose.main(argv)
@@ -231,44 +226,9 @@ def check_status_and_hygiene_536(c):
 
 
 # ── клиентский CLI: rc и информационные статусы ─────────────────────────
-def check_client_cli_536(c):
-    root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-cli-"), "servers")
-    put_connection(os.path.join(root, "ok.test"), ALICE)
-    put_legacy(os.path.join(root, "old.test"), ALICE)
-    creds.make_dir(os.path.join(root, "mt.test"))
-    creds.write_operator(os.path.join(root, "mt.test"), creds.SERVICE, "service-secret")
-    put_connection(os.path.join(root, "bad.test"), ALICE, version=2)
-    for host, want_rc in (("ok.test", 0), ("old.test", 0), ("mt.test", 0), ("bad.test", 1)):
-        with patched(creds, ROOT=root), patched(sys, stderr=io.StringIO(),
-                                                 stdout=io.StringIO()), \
-                context.use(context.resolve({"server": host}, {}, {})):
-            rc = client_main([])
-        c.check(f"#536 {host}: exit {want_rc}",
-                rc == want_rc, rc)
-    # Информационный 0 machine -- явный not-ready, не «вход состоялся».
-    with patched(creds, ROOT=root), patched(sys, stderr=io.StringIO(),
-                                             stdout=io.StringIO()), \
-            context.use(context.resolve({"server": "mt.test"}, {}, {})):
-        rc = client_main([])
-        text = sys.stdout.getvalue()
-    c.check("#536 a machine status is explicitly not-ready",
-            rc == 0 and "machine" in text and "not-ready" in text, text)
-    # #662: прежняя пара -- не вход (empty), формат назван, схема не
-    # claimed.
-    with patched(creds, ROOT=root), patched(sys, stdout=io.StringIO()), \
-            context.use(context.resolve({"server": "old.test"}, {}, {})):
-        rc = client_main([])
-        text = sys.stdout.getvalue()
-    c.check("#662 a legacy pair prints its format, not a schema claim",
-            rc == 0 and "legacy pair" in text and "schema version 1" not in text, text)
-    # --json: стабильная форма без секретов.
-    with patched(creds, ROOT=root), patched(sys, stdout=io.StringIO()), \
-            context.use(context.resolve({"server": "ok.test"}, {}, {})):
-        client_main(["--json"])
-        payload = json.loads(sys.stdout.getvalue())
-    c.check("#536 --json is stable and secret-free",
-            payload["status"] == "complete" and
-            not any(s in json.dumps(payload) for s in SECRETS), payload)
+# #642: `mop diagnose` проверяет HTTPS-контекст контроллера
+# (tests/control_consumers.py); печать прежней сводки connection.json снята
+# вместе с командлетом. Библиотека mop/client/diagnose.py уходит с #645.
 
 
 # ── клиент: подписи форматов половин и служебного каталога ──────────────
@@ -361,13 +321,14 @@ def check_dispatcher_policy_536(c):
 
     Ловушка .env -- КАТАЛОГ: чтение даёт EISDIR -> ReadError #535 при
     любом uid (chmod 0 не останавливает root). Три запуска:
-      * `diagnose` (core, политика положена): .env не читается вовсе,
-        сервер -- единственный joined;
+      * `diagnose` (#642: HTTPS-маршрут выбирается до context/.env): .env
+        не читается вовсе, без контекста -- not-ready с rc 0;
       * `server diagnose` (политики нет): диспетчер открывает .env
         установки и натыкается на ловушку -- rc 1, cannot read settings;
-      * точный контроль: в КОПИИ префикс mop.cli.core. выключен из
-        client_command -- тот же запуск ведёт себя как серверный, так
-        положительный исход объясняется именно политикой.
+      * точный контроль: в КОПИИ diagnose снят с HTTPS-маршрута и префикс
+        mop.cli.core. выключен из client_command -- тот же запуск ведёт
+        себя как серверный, так положительный исход объясняется именно
+        этими барьерами.
     """
     repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     with tempfile.TemporaryDirectory(prefix="mop-diag-disp-") as box:
@@ -393,26 +354,33 @@ def check_dispatcher_policy_536(c):
         r = run(["diagnose"])
         c.check("#536 the dispatcher keeps the installation .env away from "
                 "mop diagnose",
-                r.returncode == 0 and "joined.test" in r.stdout and
+                r.returncode == 0 and '"ready":false' in r.stdout and
                 "cannot read" not in r.stdout + r.stderr,
                 (r.returncode, r.stdout, r.stderr))
         r = run(["server", "diagnose"])
         c.check("#536 a server verb hits the ReadError trap in the .env",
                 r.returncode != 0 and "cannot read settings" in r.stderr, r.stderr)
-        # Точный контроль: политика для core выключена В КОПИИ.
+        # Точный контроль: оба барьера выключены В КОПИИ -- HTTPS-маршрут
+        # diagnose (#642) и политика client_command для core.
         init = os.path.join(root, "mop", "cli", "__init__.py")
-        with open(init, encoding="utf-8") as f:
-            body = f.read()
-        disabled = body.replace('"mop.cli.core.", "mop.cli.pool.",',
-                                '"mop.cli.core.disabled.", "mop.cli.pool.",')
-        c.check("#536 the control patch took", disabled != body, "")
-        with open(init, "w", encoding="utf-8") as f:
-            f.write(disabled)
+        control = os.path.join(root, "mop", "cli", "_control.py")
+        patches = ((init, '"mop.cli.core.", "mop.cli.pool.",',
+                    '"mop.cli.core.disabled.", "mop.cli.pool.",'),
+                   (control, "'health', 'profile', 'diagnose',", "'health', 'profile',"))
+        bodies = {}
+        for path, old, new in patches:
+            with open(path, encoding="utf-8") as f:
+                bodies[path] = f.read()
+            c.check("#536 the control patch took: " + os.path.basename(path),
+                    bodies[path].replace(old, new) != bodies[path], "")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(bodies[path].replace(old, new))
         try:
             r = run(["diagnose"])
         finally:
-            with open(init, "w", encoding="utf-8") as f:
-                f.write(body)
+            for path, body in bodies.items():
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(body)
         c.check("#536 with the policy disabled the same run hits the trap",
                 r.returncode != 0 and "cannot read settings" in r.stderr, r.stderr)
 
@@ -495,7 +463,6 @@ def main():
     c = Checks()
     check_client_side_536(c)
     check_status_and_hygiene_536(c)
-    check_client_cli_536(c)
     check_format_labels_536(c)
     check_server_side_536(c)
     check_race_guard_536(c)

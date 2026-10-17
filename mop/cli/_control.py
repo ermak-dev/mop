@@ -140,12 +140,25 @@ def use(context):
         _CONTEXT.reset(token)
 
 
+def missing(origin=None):
+    """Каких частей transient-контекста нет; при выбранном контексте -- ничего."""
+    if _CONTEXT.get() is not None:
+        return []
+    return [name for name, value in (('MOP_API_ORIGIN', origin or os.environ.get('MOP_API_ORIGIN')),
+                                     ('MOP_API_TOKEN', os.environ.get('MOP_API_TOKEN'))) if not value]
+
+
 def context(origin=None, ca_file=None):
     selected = _CONTEXT.get()
     if selected is not None:
         if origin is not None or ca_file is not None:
             raise api.ClientError('server context is already selected')
         return selected
+    # Причина отказа -- имя недостающей переменной, не общее «invalid input».
+    absent = missing(origin)
+    if absent:
+        raise api.ClientError('no HTTPS server context: set ' + ' and '.join(absent) +
+                              ' (the origin may also come from --api-origin)')
     # Это явный transient input, не config.get: .env и профили не читаются.
     return api.ServerContext(origin or os.environ.get('MOP_API_ORIGIN', ''),
         os.environ.get('MOP_API_TOKEN', ''), ca_file or os.environ.get('MOP_API_CA') or None)
@@ -380,9 +393,14 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         if hasattr(args, 'wait') and args.wait is not None:
             if not 0 < args.wait <= api.Limits().wait_timeout:
                 raise api.ClientError('wait must be within the client wait limit')
+        if words == 'diagnose' and missing(origin):
+            # Как empty у прежней сводки (#536): not-ready -- информация, не отказ.
+            emit({'schema_version': 1, 'ready': False, 'missing': missing(origin),
+                  'network_observed': False}, credential=None)
+            return 0
         selected = context(origin, ca_file)
         if words == 'diagnose':
-            emit({'schema_version': 1, 'origin': selected.origin, 'credential_source': 'transient context',
+            emit({'schema_version': 1, 'ready': True, 'origin': selected.origin, 'credential_source': 'transient context',
                   'trust': 'explicit CA (unverified)' if selected.ca_file else 'system CA (unverified)',
                   'network_observed': False}, credential=selected.token)
             return 0

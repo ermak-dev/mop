@@ -362,6 +362,32 @@ class Consumers(unittest.TestCase):
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET'])
         self.assertNotIn(TOKEN, out+err+err2)
 
+    # HYPOTHESIS: без MOP_API_ORIGIN/MOP_API_TOKEN любая удалённая команда, в
+    # том числе mop diagnose, отвечает глухим «invalid control client input» --
+    # причина (чего нет) теряется, а diagnose падает ровно там, где должен
+    # объяснять.
+    # SOLUTION: контекст называет недостающие переменные; diagnose без контекста
+    # -- информационный not-ready с rc 0, как empty у прежней сводки (#536).
+    def test_missing_context_is_named_and_diagnose_reports_not_ready(self):
+        clean = {k: v for k, v in os.environ.items() if not k.startswith('MOP_API_')}
+        with patch.dict(os.environ, clean, clear=True):
+            out, err, code = run_command(cli.main, ['diagnose'])
+            self.assertEqual(code, 0, err)
+            got = json.loads(out)
+            self.assertIs(got['ready'], False)
+            self.assertEqual(got['missing'], ['MOP_API_ORIGIN', 'MOP_API_TOKEN'])
+            self.assertIs(got['network_observed'], False)
+            _, err, code = run_command(cli.main, ['health'])
+            self.assertEqual(code, 1)
+            self.assertIn('MOP_API_ORIGIN', err)
+            self.assertIn('MOP_API_TOKEN', err)
+            self.assertNotIn('invalid control client input', err)
+            with patch.dict(os.environ, {'MOP_API_TOKEN': TOKEN}):
+                out, err, code = run_command(cli.main, ['diagnose'])
+                self.assertEqual(json.loads(out)['missing'], ['MOP_API_ORIGIN'])
+                self.assertNotIn(TOKEN, out + err)
+        self.assertEqual(self.fixture.calls, [])
+
     def test_role_launcher_cannot_fall_back_to_legacy_context_or_ssh(self):
         from mop.common import context
         with patch.object(context, 'here', side_effect=AssertionError('legacy role launch')):

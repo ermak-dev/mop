@@ -129,23 +129,13 @@ def main():
             result.get("status") == "succeeded"
             and http_calls == [("job_stop", bus.ADMIN,
                                 {"name": "pu-mop-1", "owner": "anton"})])
+    # #642: CLI stop идёт в контроллер; пустые params и отказ --force до I/O
+    # проверяет tests/control_consumers.py. Прежний CLI-путь job_stop через
+    # шину снят вместе с командлетом -- проверять здесь нечего, кроме сути
+    # #608: у MCP-объявления нет силы.
     from mop.cli.core import stop as command
-    from _lib import run_command
-    cli_calls = []
-    with patched(command.lib.config, require=lambda *a: None), \
-            patched(bus, login=lambda: "anton", call_cluster=lambda verb, **fields:
-                    cli_calls.append((verb, fields)) or {"stopped": True}):
-        out, err, code = run_command(command.main, ["pu-mop-1"])
-        c.check("#608 CLI uses the operator stop-job workflow silently",
-                code == 0 and not out and not err
-                and cli_calls == [("job_stop", {"project": bus.ADMIN,
-                                               "name": "pu-mop-1", "owner": "anton"})])
-        before = len(cli_calls)
-        _, _, code = run_command(command.main, ["pu-mop-1", "--force"])
-        c.check("#608 CLI rejects implicit force without any RPC",
-                code != 0 and len(cli_calls) == before)
     c.check("#608 MCP is declared by the stop commandlet without force",
-            [a["name"] for a in command.MCP["args"]] == ["name"])
+            not any("force" in a["name"] for a in command.MCP["args"]))
     def call(verb, **fields):
         return {"verb": verb, **fields}
     with patched(opworker.bus, call_cluster=call):
