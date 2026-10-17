@@ -53,6 +53,19 @@ class ExecutionIncarnation(Record):
             name='incarnation_accepting_not_replaced')]
 
 
+class NodeExecutor(models.Model):
+    """Эпоха процесса executor узла, заявленная последним restarted (#643).
+
+    Источник эпохи для новой инкарнации, в том числе на узле без назначений;
+    инкарнации по-прежнему несут свою эпоху -- реестр их не заменяет."""
+    node = models.OneToOneField('catalog.Node', primary_key=True, on_delete=models.PROTECT)
+    executor_epoch = models.UUIDField()
+    registered_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        default_permissions = ()
+
+
 class AssignmentAttempt(Record):
     assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT)
     incarnation = models.ForeignKey(ExecutionIncarnation, on_delete=models.PROTECT)

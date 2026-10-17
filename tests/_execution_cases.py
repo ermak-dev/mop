@@ -236,6 +236,45 @@ class MachineExecution(TransactionTestCase):
             assignments_service().activate(self.owner, self.target.id,
                 expected_revision=self.target.revision, executor_epoch=uuid4())
 
+    # HYPOTHESIS (#643): эпоха executor узла живёт только в его инкарнациях: на
+    # узле без назначений executor не может заявить себя (state -- Unavailable),
+    # и create не знает, какой эпохой связать первую инкарнацию.
+    # SOLUTION: NodeExecutor -- эпоха, заявленная последним restarted; state и
+    # current_epoch читают её, чужая предыдущая эпоха -- конфликт.
+    # STATUS: FIXED — see #643
+    def _empty_node(self):
+        from mop.server.catalog.models import Node, NodeProject
+        empty = Node.objects.create(name='empty', driver='host', ssh_host='example.invalid',
+            control_origin='https://example.invalid', lan_address='example.invalid', bootstrap_address='example.invalid')
+        NodeProject.objects.create(node=empty, project=self.project)
+        key = self.auth.enroll_service('executor-empty', empty.pk, project_ids=[self.project.pk],
+            permissions=['execution.poll_work', 'execution.claim_work', 'execution.report_result', 'execution.read_facts'])
+        return empty, self.auth.token_context(key)
+
+    def test_empty_node_executor_registers_its_epoch(self):
+        empty, actor = self._empty_node()
+        with self.assertRaises(self.s.Unavailable):
+            self.service.executor_state(actor, empty.pk)
+        self.assertIsNone(self.service.current_epoch(empty.pk))
+        first = uuid4()
+        self.assertEqual(self.service.executor_restarted(actor, empty.pk, previous_epoch=uuid4(), new_epoch=first), first)
+        self.assertEqual(self.service.executor_state(actor, empty.pk), first)
+        self.assertEqual(self.service.current_epoch(empty.pk), first)
+        # Потерянный ответ: повтор того же заявления идемпотентен.
+        self.assertEqual(self.service.executor_restarted(actor, empty.pk, previous_epoch=uuid4(), new_epoch=first), first)
+        second = uuid4()
+        with self.assertRaises(self.s.Conflict):
+            self.service.executor_restarted(actor, empty.pk, previous_epoch=uuid4(), new_epoch=second)
+        self.assertEqual(self.service.executor_restarted(actor, empty.pk, previous_epoch=first, new_epoch=second), second)
+        self.assertEqual(self.service.current_epoch(empty.pk), second)
+
+    def test_node_restart_records_the_executor_epoch_for_new_incarnations(self):
+        self.assertEqual(self.service.current_epoch(self.node.id), self.boot)
+        new = uuid4()
+        self.service.executor_restarted(self.actor, self.node.id, previous_epoch=self.boot, new_epoch=new)
+        self.assertEqual(self.service.current_epoch(self.node.id), new)
+        self.assertEqual(self.service.executor_state(self.actor, self.node.id), new)
+
     def test_node_restart_requires_reconciliation_not_old_claim_replay(self):
         attempt = self.claim()
         self.service.executor_restarted(self.actor, self.node.id, previous_epoch=self.boot, new_epoch=uuid4())

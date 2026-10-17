@@ -689,6 +689,11 @@ class MachineExecution:
                 incarnation = m.ExecutionIncarnation.objects.filter(pk=row.current_incarnation_id).first()
                 if incarnation is not None:
                     epochs.add(incarnation.replaced_by_epoch or incarnation.executor_epoch)
+            # Заявленная эпоха (#643) обязана совпасть с инкарнациями, а на
+            # пустом узле она -- единственный источник.
+            registered = m.NodeExecutor.objects.filter(node_id=node_id).values_list('executor_epoch', flat=True).first()
+            if registered is not None:
+                epochs.add(registered)
             if len(epochs) != 1:
                 raise Unavailable('executor epoch requires explicit installation registration or reconciliation')
             return epochs.pop()
@@ -731,7 +736,29 @@ class MachineExecution:
                     attempt.revision += 1
                     attempt.save(update_fields=('state', 'revision'))
                 self.work.retired(row.id, previous_epoch)
+            # #643: заявление процесса фиксируется и на узле без назначений;
+            # повтор того же заявления идемпотентен, чужая предыдущая эпоха --
+            # конфликт, как у инкарнаций выше.
+            current = m.NodeExecutor.objects.select_for_update().filter(node_id=node_id).first()
+            if current is None:
+                m.NodeExecutor.objects.create(node_id=node_id, executor_epoch=new_epoch)
+            elif current.executor_epoch != new_epoch:
+                if current.executor_epoch != previous_epoch:
+                    raise Conflict('executor process epoch changed')
+                current.executor_epoch, current.registered_at = new_epoch, timezone.now()
+                current.save(update_fields=('executor_epoch', 'registered_at'))
         return new_epoch
+
+    def current_epoch(self, node_id):
+        """Эпоха executor для новой инкарнации (#643): заявленная узлом, иначе
+        общая у его текущих инкарнаций; неизвестна -- None, не догадка."""
+        registered = m.NodeExecutor.objects.filter(node_id=node_id).values_list('executor_epoch', flat=True).first()
+        if registered is not None:
+            return registered
+        current = m.Assignment.objects.filter(node_id=node_id).values('current_incarnation_id')
+        epochs = {row.replaced_by_epoch or row.executor_epoch
+                  for row in m.ExecutionIncarnation.objects.filter(pk__in=current)}
+        return epochs.pop() if len(epochs) == 1 else None
 
     def facts(self, actor, node_id, *, kind, limit=100):
         machine(actor, node_id, 'read_facts')
