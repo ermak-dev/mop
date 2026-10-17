@@ -286,8 +286,12 @@ class Access:
         if user.kind == 'service':
             # Узловой enrollment — именованное доменное предусловие сервиса,
             # не второй RBAC: права проверяет общий has_perm ниже.
-            node_id = m.CredentialBinding.objects.filter(token_user=user).values_list('bound_node_id', flat=True).first()
-            if node_id is None or nodes != {node_id} or clients:
+            # Факт узла — авторитетное отношение enrollment (#687/#689), не
+            # денормализованная копия в binding: удаление отношения закрывает
+            # допуск, даже если binding и token живы.
+            enrollment = m.ServiceEnrollment.objects.filter(actor=user).first()
+            node_id = enrollment.node_id if enrollment is not None else None
+            if enrollment is None or node_id is None or nodes != {node_id} or clients:
                 raise Denied('service action or node is outside enrollment')
             node_projects = set(catalog.NodeProject.objects.filter(node_id=node_id).values_list('project_id', flat=True))
             allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
