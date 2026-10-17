@@ -262,9 +262,13 @@ class PackagedDashboard(unittest.TestCase):
                 self.assertIn('immutable', control, name)
 
     def test_asset_mime_types_match_the_served_suffix(self):
+        # Имена берутся из собранного dist: хеш в имени меняется с каждой
+        # сборкой, захардкоженное имя молча ломает проверку на resync.
+        mime = {'.js': 'text/javascript', '.css': 'text/css'}
+        names = {name.suffix: name.name for name in self.committed('assets').iterdir()}
         with self.running() as port:
-            for path, expected in (('index-BNo5kAFU.js', 'text/javascript'),
-                                   ('index-N7aBNmCs.css', 'text/css')):
+            for suffix, expected in mime.items():
+                path = names[suffix]
                 status, headers, _ = request(port, 'GET', '/assets/' + path)
                 self.assertEqual(status, 200, path)
                 self.assertTrue((headers.get('content-type') or '').startswith(expected), path)
