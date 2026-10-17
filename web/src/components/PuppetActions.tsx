@@ -14,7 +14,7 @@ import { useEffect, useState } from "react";
 import { Group } from "@mantine/core";
 import { IconSettings } from "@tabler/icons-react";
 import type { Puppet } from "../types";
-import type { Session } from "../useSession";
+import { hasControls, type Session } from "../useSession";
 import { IconButton } from "./IconButton";
 import { ModelBox } from "./ModelBox";
 import { RestartBox } from "./RestartBox";
@@ -46,7 +46,7 @@ export function PuppetActions({ row, session, active = true }: { row: Puppet; se
   const engineOf = (act: string) => (op: EngineState) =>
     setEngineState((m) => (m[act]?.status === op.status
       && m[act]?.error === op.error && m[act]?.lost === op.lost ? m : { ...m, [act]: op }));
-  if (session.role !== "admin") return null;
+  if (!hasControls(session)) return null;
   return <Group gap={4} wrap="nowrap" role="group" aria-label={`действия ${row.name}`}
     style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
     <IconButton label={LABELS.edit} variant="subtle" size="lg"

@@ -1,45 +1,43 @@
-// Сессия дашборда (#416, контракт #415): кто смотрит страницу -- гость или
-// оператор с ролью. Backend ещё нет, форма запросов закреплена здесь: все
-// запросы same-origin (cookie сессии), POST -- JSON. Пароль дальше тела
-// запроса не уходит и нигде не хранится.
-export interface Session { login: string | null; role: "admin" | "user" | null }
-
+// Django session общая с Admin; пароль/токен не сохраняются клиентом.
+import { hybridRequest, HybridHttpError } from './hybridApi';
+export interface Session { login: string | null; role: 'admin' | 'user' | null; generation?: string; authenticated?: boolean }
 export const GUEST: Session = { login: null, role: null };
-
-/** Отказ входа: сервер назвал причину (401) или лимит (429). */
+// Контролы лишь предлагают команду. Текущие права и ownership решает DRF;
+// identity не публикует is_staff/permissions, поэтому admin не выдумывается.
+export const hasControls = (session: Session) => session.authenticated === true || session.role === 'admin';
 export class LoginRefused extends Error {
-  constructor(public status: number, public reason: string) {
-    super(reason);
+  constructor(public status: number, public reason: string) { super(reason); }
+}
+let generation = 0;
+let lastCSRF = '';
+function currentGeneration() {
+  const csrf = document.cookie.split(';').find(item => item.trim().startsWith('csrftoken=')) ?? '';
+  if (csrf !== lastCSRF) { lastCSRF = csrf; generation++; }
+  return String(generation);
+}
+export async function fetchSession(): Promise<Session> {
+  try {
+    const value = await hybridRequest<{ schema_version: number; user_id: number; principal_id: string; kind: string }>('/api/v1/identity');
+    if (value.schema_version !== 1 || !Number.isSafeInteger(value.user_id) || value.kind !== 'human') throw new Error('Unsupported browser identity');
+    return { login: String(value.user_id), role: 'user', authenticated: true, generation: currentGeneration() };
+  } catch (error) {
+    if (error instanceof HybridHttpError && [401, 403].includes(error.status) && ['not_authenticated', 'authentication_failed'].includes(error.code ?? '')) return GUEST;
+    throw error;
   }
 }
-
-const post = (url: string, body: unknown): Promise<Response> =>
-  fetch(url, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-/** Кто открыл страницу. 5xx -- ошибка панели, не «гость». */
-export async function fetchSession(): Promise<Session> {
-  const r = await fetch("/api/session", { credentials: "same-origin" });
-  if (!r.ok) throw new Error(`session: HTTP ${r.status}`);
-  return r.json();
-}
-
-/** Вход логином/паролем mop. -> Session; LoginRefused при 401/429. */
 export async function postLogin(login: string, password: string): Promise<Session> {
-  const r = await post("/api/login", { login, password });
-  if (r.status === 401) throw new LoginRefused(401, (await r.json()).error);
-  if (r.status === 429) throw new LoginRefused(429, "слишком много попыток — подождите");
-  if (!r.ok) throw new LoginRefused(r.status, `HTTP ${r.status}`);
-  return r.json();
+  try {
+    await hybridRequest('/api/v1/auth/csrf');
+    await hybridRequest('/api/v1/auth/login', { username: login, password });
+    generation++;
+    return await fetchSession();
+  } catch (error) {
+    if (error instanceof HybridHttpError) throw new LoginRefused(error.status, error.message);
+    throw error;
+  }
 }
-
-/** Выход: сервер гасит cookie, ответ -- гость. */
 export async function postLogout(): Promise<Session> {
-  const r = await post("/api/logout", {});
-  if (!r.ok) throw new Error(`logout: HTTP ${r.status}`);
-  return r.json();
+  await hybridRequest('/api/v1/auth/logout', {});
+  generation++;
+  return GUEST;
 }

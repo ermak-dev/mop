@@ -4,7 +4,7 @@
 // попытки и после неё очищается -- ни в storage, ни в props.
 import { useState } from "react";
 import { Alert, Anchor, Button, Group, Modal, PasswordInput, TextInput } from "@mantine/core";
-import { GUEST, type Session } from "../useSession";
+import { GUEST, hasControls, type Session } from "../useSession";
 import { LABELS } from "./labels";
 
 type Props = {
@@ -38,7 +38,7 @@ export function SessionBox({ session, onLogin, onLogout, failed }: Props) {
     return (
       <Group gap="sm">
         {/* Только admin видит ссылку: панель прокси -- управление установки */}
-        {session.role === "admin" && (
+        {hasControls(session) && (
           <Anchor href="/llm/management.html" target="_blank" rel="noopener"
                   aria-label="LLM Proxy">LLM Proxy</Anchor>
         )}

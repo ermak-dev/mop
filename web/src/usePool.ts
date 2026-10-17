@@ -1,40 +1,13 @@
-// Снимок пула: первый -- запросом /api/pool, дальше -- событиями /events
-// (SSE, кадр `snapshot`). Тот же протокол, что у прежней страницы: EventSource
-// сам переподключается, но пока сервер лежит, страница обязана хоть что-то
-// показывать -- на обрыве потока включается опрос раз в десять секунд, а с
-// первым кадром потока опрос выключается.
-// Кадры `operation` (#504) идут тем же потоком: этот хук -- единственный
-// владелец соединения, и разбор кадров -- здесь, второй поток не заводится.
-import { useEffect, useState } from "react";
-import type { Snapshot } from "./types";
-import { onOperationEvent } from "./useOperationFeed";
-
-export const POLL_MS = 10_000;
-
-export interface Pool { snapshot: Snapshot | null }
-
-export function usePool(): Pool {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-
-  useEffect(() => {
-    let polling: ReturnType<typeof setInterval> | null = null;
-    let closed = false;
-    const load = () => fetch("/api/pool").then((r) => r.json()).then((s: Snapshot) => { if (!closed) setSnapshot(s); }).catch(() => {});
-    const poll = () => { if (!polling) polling = setInterval(load, POLL_MS); };
-    const stopPolling = () => { if (polling) { clearInterval(polling); polling = null; } };
-
-    load();
-    const es = new EventSource("/events");
-    es.addEventListener("snapshot", (e) => {
-      if (closed) return;
-      setSnapshot(JSON.parse((e as MessageEvent).data) as Snapshot);
-      stopPolling();
-    });
-    // Терминалы операций (#504) -- тем же потоком: канал вердиктов.
-    es.addEventListener("operation", onOperationEvent);
-    es.onerror = () => poll();
-    return () => { closed = true; es.close(); stopPolling(); };
-  }, []);
-
-  return { snapshot };
+// Один lifecycle REST/WS на страницу; useSyncExternalStore не копирует entities.
+import { useEffect } from 'react';
+import type { Snapshot } from './types';
+import { GUEST, type Session } from './useSession';
+import { poolNetwork, sessionKey, usePoolState } from './poolNetwork';
+export { POLL_MS } from './poolNetwork';
+export interface Pool { snapshot: Snapshot | null; stale: boolean; error: string | null }
+export function usePool(session: Session = GUEST): Pool {
+  const state = usePoolState();
+  const key = sessionKey(session);
+  useEffect(() => poolNetwork.start(session), [key]);
+  return { snapshot: poolNetwork.view(session), stale: state.connection.stale, error: poolNetwork.problem(session) };
 }
