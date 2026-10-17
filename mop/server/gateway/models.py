@@ -27,8 +27,9 @@ class Circuit(models.Model):
     write = models.BooleanField(default=False, editable=False)
 
     class Meta:
+        # Право управления прокси одно на установку -- controller.manage_proxy
+        # единого словаря (#685/#689); своего дубля у gateway нет.
         default_permissions = ()
-        permissions = (('manage_proxy', 'Manage proxy management gateway'),)
         constraints = [models.CheckConstraint(condition=Q(id=1), name='gateway_single_circuit'),
             models.CheckConstraint(condition=Q(state__in=('idle', 'running', 'unknown')), name='gateway_circuit_state'),
             models.CheckConstraint(condition=(Q(state='idle', claim_id__isnull=True, deadline__isnull=True)

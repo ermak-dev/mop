@@ -97,3 +97,42 @@ class CutoverParity(TransactionTestCase):
         from mop.server.access.services import Access, Denied
         with self.assertRaises(Denied):
             Access().authorize(actor, 'catalog.observe_node', node_ids=(self.node.pk,))
+
+
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class GatewayCutover(TransactionTestCase):
+    """Панель прокси решает тот же авторизатор, что и остальные входы (#689).
+
+    RED: gateway держал собственное право gateway.manage_proxy и читал его
+    напрямую через has_perm мимо Access.authorize и пересечения делегирования;
+    в словаре #685 то же понятие зарегистрировано как controller.manage_proxy.
+    """
+    serialized_rollback = True
+
+    def test_proxy_management_has_one_registered_permission(self):
+        from django.contrib.auth.models import Permission
+        owners = sorted(Permission.objects.filter(codename='manage_proxy')
+                        .values_list('content_type__app_label', flat=True))
+        self.assertEqual(owners, ['controller'], 'one owner per action (#685): no gateway duplicate')
+
+    def test_gateway_authority_decides_through_the_single_authorizer(self):
+        from unittest.mock import patch
+        from mop.server.access.services import Access, Denied
+        from mop.server.gateway.authority import HumanAuthority
+        from mop.server.controller.runtime import initialize
+        initialize()
+        user = get_user_model().objects.create_user('panel-cutover', password='fixture-only')
+        source = a.IdentitySource.objects.create(name='local', kind='local')
+        a.LoginIdentity.objects.create(user=user, source=source, external_subject='panel-cutover')
+        a.AllProjectMembership.objects.create(user=user, source=source)
+        actor = auth.token_context(auth.issue_token(user.pk))
+        calls = []
+        original = Access.authorize
+
+        def spy(self, actor, action, **scope):
+            calls.append(action)
+            return original(self, actor, action, **scope)
+        with patch.object(Access, 'authorize', spy):
+            with self.assertRaises(Denied):
+                HumanAuthority().authorize(actor)
+        self.assertEqual(calls, ['controller.manage_proxy'], 'gateway must ask the single authorizer')

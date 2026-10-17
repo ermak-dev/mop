@@ -1,20 +1,16 @@
 """Current human/session authority и узкий controller SecretStore consumer."""
-from django.contrib.auth import get_user_model
-from mop.server.access.context import ActorKind
-from mop.server.access.services import current_actor, session_context, Denied
+from mop.server.access.services import Access, session_context
 from mop.server.secrets.services import Refused
 from .values import Credential
 
 
 class HumanAuthority:
     def authorize(self, actor):
-        current_actor(actor)
-        if actor.kind not in (ActorKind.HUMAN, ActorKind.AGENT) or actor.grant_id is not None:
-            raise Denied('proxy management requires a current human principal')
-        # Никаких cached request.user permissions после await.
-        user = get_user_model().objects.get(pk=actor.user_id)
-        if not user.has_perm('gateway.manage_proxy'):
-            raise Denied('proxy management permission required')
+        # Один авторизатор (#689): право controller.manage_proxy и
+        # установочный scope читаются заново после каждого await. Сервис не
+        # может его держать (allowlist enrollment), делегирование без
+        # проектного scope отказано пересечением -- отдельной видовой ветки нет.
+        Access().authorize(actor, 'controller.manage_proxy')
         return actor
 
     def session(self, session_key):
