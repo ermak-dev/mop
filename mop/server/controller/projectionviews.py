@@ -2,8 +2,7 @@
 from uuid import UUID
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from mop.server.access.context import ActorKind
-from mop.server.access.services import Access, Denied
+from mop.server.access.services import Access, Denied, node_executor
 from mop.server.sessions.projections import PoolQueries, SnapshotCapacity
 from mop.server.sessions.projection_writes import ProjectionWriter, ControllerRun
 from mop.server.sessions.projection_models import ProjectionRuntime
@@ -88,9 +87,9 @@ class ObservationContext(APIView):
     def get(self, request):
         def read():
             actor = request.actor
-            if actor.kind is not ActorKind.SERVICE:
-                raise Denied('node observation context requires a service credential')
-            Access().authorize(actor, 'execution.ingest_observations', node_ids=(actor.node_id,))
+            # Узел -- из живого enrollment исполнителя, не копия в контексте.
+            node_id = node_executor(actor, reason='node observation context requires a service credential')
+            Access().authorize(actor, 'execution.ingest_observations', node_ids=(node_id,))
             runtime = ProjectionRuntime.objects.filter(pk=1, epoch=UUID(read_authority()['epoch'])).first()
             if runtime is None:
                 raise SnapshotCapacity('observation startup is unavailable')

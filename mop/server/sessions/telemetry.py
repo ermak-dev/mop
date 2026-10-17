@@ -11,8 +11,7 @@ from django.utils import timezone
 
 from mop.common.telemetry import (Ack, CurrentSession, Observation, PrivateHistoryReader,
     SessionAuthority, SessionScope, SourceAttributedTurn, TurnAttribution, canonical, text)
-from mop.server.access.context import ActorKind
-from mop.server.access.services import Access, current_actor
+from mop.server.access.services import Access, current_actor, is_node_executor
 from . import telemetry_models as m
 from .models import Assignment, ExecutionIncarnation
 from .protocol import AuthorityV1, InstallationQuery
@@ -187,7 +186,7 @@ class Telemetry:
 
     def latest(self, actor, scope):
         with transaction.atomic():
-            self._scope(actor, scope, private=actor.kind != ActorKind.SERVICE)
+            self._scope(actor, scope, private=not is_node_executor(actor))
             row = self._observation(scope)
             fresh = row.model_received_at is not None and timezone.now()-row.model_received_at <= timedelta(seconds=self.freshness_seconds)
             return Latest(row.confirmed_model if fresh and row.model_proven else None,

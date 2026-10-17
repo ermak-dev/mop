@@ -10,7 +10,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from ..access.context import ActorContext, ActorKind
-from ..access.services import Access, Denied, NotVisible, current_actor
+from ..access.services import Access, Denied, NotVisible, current_actor, node_executor
 from ..catalog.models import Node, NodeProject, Project
 from . import models as m
 from .lifecycle import State, transition
@@ -391,8 +391,9 @@ class Operations:
             projects, code, reason = self._scope(row), None, None
             try:
                 self._authorize(_actor(row), 'catalog.' + row.action + '_node', row.node_id, projects)
-                if self.executor is None or self.executor.kind is not ActorKind.SERVICE:
+                if self.executor is None:
                     raise Denied('enrolled node executor required for effect dispatch')
+                node_executor(self.executor, row.node_id, reason='enrolled node executor required for effect dispatch')
                 self._authorize(self.executor, 'catalog.record_node_application', row.node_id, projects)
                 self._authorize(self.executor, 'catalog.observe_node', row.node_id, projects)
             except Denied as error:
@@ -459,8 +460,9 @@ class Operations:
             # Подтверждённый факт записывается даже после revoke, без новых effects.
             # Catalog остаётся владельцем согласованной записи intent/application.
             from ..catalog.services import Catalog
-            if self.executor is None or self.executor.kind is not ActorKind.SERVICE:
+            if self.executor is None:
                 raise Denied('enrolled node executor required for effect confirmation')
+            node_executor(self.executor, row.node_id, reason='enrolled node executor required for effect confirmation')
             catalog = Catalog(authorizer=self.access)
             projection_updated = False
             if applied:

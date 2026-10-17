@@ -97,3 +97,121 @@ class CutoverParity(TransactionTestCase):
         from mop.server.access.services import Access, Denied
         with self.assertRaises(Denied):
             Access().authorize(actor, 'catalog.observe_node', node_ids=(self.node.pk,))
+
+
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class GatewayCutover(TransactionTestCase):
+    """Панель прокси решает тот же авторизатор, что и остальные входы (#689).
+
+    RED: gateway держал собственное право gateway.manage_proxy и читал его
+    напрямую через has_perm мимо Access.authorize и пересечения делегирования;
+    в словаре #685 то же понятие зарегистрировано как controller.manage_proxy.
+    """
+    serialized_rollback = True
+
+    def test_proxy_management_has_one_registered_permission(self):
+        from django.contrib.auth.models import Permission
+        owners = sorted(Permission.objects.filter(codename='manage_proxy')
+                        .values_list('content_type__app_label', flat=True))
+        self.assertEqual(owners, ['controller'], 'one owner per action (#685): no gateway duplicate')
+
+    def test_gateway_authority_decides_through_the_single_authorizer(self):
+        from unittest.mock import patch
+        from mop.server.access.services import Access, Denied
+        from mop.server.gateway.authority import HumanAuthority
+        from mop.server.controller.runtime import initialize
+        initialize()
+        user = get_user_model().objects.create_user('panel-cutover', password='fixture-only')
+        source = a.IdentitySource.objects.create(name='local', kind='local')
+        a.LoginIdentity.objects.create(user=user, source=source, external_subject='panel-cutover')
+        a.AllProjectMembership.objects.create(user=user, source=source)
+        actor = auth.token_context(auth.issue_token(user.pk))
+        calls = []
+        original = Access.authorize
+
+        def spy(self, actor, action, **scope):
+            calls.append(action)
+            return original(self, actor, action, **scope)
+        with patch.object(Access, 'authorize', spy):
+            with self.assertRaises(Denied):
+                HumanAuthority().authorize(actor)
+        self.assertEqual(calls, ['controller.manage_proxy'], 'gateway must ask the single authorizer')
+
+
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class NodeExecutorFact(TransactionTestCase):
+    """Машинные входы требуют факт enrollment, а не вид Actor (#687/#689)."""
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    fixture = RestartVertical.fixture
+
+    MODULES = ('mop/server/sessions/services.py', 'mop/server/operations/service.py',
+               'mop/server/controller/projectionviews.py', 'mop/server/sessions/telemetry.py')
+
+    def test_machine_modules_compare_no_actor_kind_for_the_executor(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        for name in self.MODULES:
+            source = (root / name).read_text()
+            self.assertFalse('ActorKind.SERVICE' in source,
+                             f'{name}: the node executor is an enrollment fact, not a kind branch')
+
+    def test_privileged_human_and_foreign_node_service_cannot_take_machine_work(self):
+        self.fixture()
+        from mop.server.access.services import Denied
+        from mop.server.catalog.models import Node, NodeProject
+        from mop.server.sessions.services import machine
+        # Суперпользователь со всеми правами — не исполнитель узла.
+        with self.assertRaises(Denied):
+            machine(self.actor, self.node.pk, 'poll_work')
+        other = Node.objects.create(name='other', driver='host', ssh_host='other.invalid',
+            control_origin='https://other.invalid', lan_address='other.invalid', bootstrap_address='other.invalid')
+        NodeProject.objects.create(node=other, project=self.project)
+        key = auth.enroll_service('foreign-executor', other.pk, project_ids=(self.project.pk,),
+            permissions=('execution.poll_work',))
+        foreign = auth.token_context(key)
+        with self.assertRaises(Denied):
+            machine(foreign, self.node.pk, 'poll_work')
+        # Свой исполнитель своего узла проходит.
+        machine(self.machine_actor, self.node.pk, 'poll_work')
+
+
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class KindIsNotARight(TransactionTestCase):
+    """Вид Actor не даёт и не отнимает прав (#683/#689): решает RBAC.
+
+    RED: терминал пускал только human, отправка сообщения -- human или
+    делегированного; агент с теми же правами и scope отказывался по виду.
+    """
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    fixture = RestartVertical.fixture
+
+    def agent_like_owner(self, *actions):
+        from _grant_cases import permit_actions
+        agent = get_user_model().objects.create_user('agent-parity-' + uuid4().hex[:6], password='p-only-fixture')
+        agent.kind = 'agent'
+        agent.save(update_fields=['kind'])
+        source = a.IdentitySource.objects.get(name='local')
+        a.LoginIdentity.objects.create(user=agent, source=source, external_subject=agent.username)
+        a.AllProjectMembership.objects.create(user=agent, source=source)
+        permit_actions(agent, *actions)
+        return auth.token_context(auth.issue_token(agent.pk))
+
+    def test_terminal_read_decision_is_the_same_for_agent_and_human(self):
+        self.fixture()
+        from mop.server.sessions.terminal_control import Terminals
+        agent = self.agent_like_owner('execution.read_terminal')
+        # human владелец -- суперпользователь фикстуры: право есть; агенту дано то же.
+        Terminals()._scope(self.actor, self.target, 'ro')
+        Terminals()._scope(agent, self.target, 'ro')
+
+    def test_message_send_decision_is_the_same_for_agent_and_human(self):
+        self.fixture()
+        from types import SimpleNamespace
+        from mop.server.controller.machinebinding import operations
+        handler = operations(grants=self.grants).messages
+        target = SimpleNamespace(project_id=self.project.pk, owner_id=self.user.pk)
+        agent = self.agent_like_owner('execution.send_message')
+        handler._authorize(self.actor, target, dispatch=False)
+        handler._authorize(agent, target, dispatch=False)

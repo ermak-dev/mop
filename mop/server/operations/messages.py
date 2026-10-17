@@ -9,7 +9,6 @@ from uuid import uuid4
 from django.utils import timezone
 
 from mop.common.endpoint import TrustedEndpointContext
-from mop.server.access.context import ActorKind
 from mop.server.access.services import Denied, current_actor
 from . import models as m
 from .commands import SendCommand, DispatchCommand, InvalidCommand
@@ -37,9 +36,8 @@ class MessageHandler:
 
     def _authorize(self, actor, target, row=None, *, dispatch=None):
         dispatch = row.action == 'dispatch' if row is not None else dispatch
-        # Делегирование после #684 — grant_id в контексте, а не отдельный вид Actor.
-        if actor.kind is not ActorKind.HUMAN and actor.grant_id is None:
-            raise Denied('message requires a human or delegated actor')
+        # Вид Actor прав не даёт (#689): send/dispatch решает общий авторизатор,
+        # делегирование -- пересечением цепочки; сервис права не получит.
         action = 'execution.dispatch_task' if dispatch else 'execution.send_message'
         self.ops.access.authorize(actor, action, project_ids=(target.project_id,))
         if dispatch and actor.human_owner_id != target.owner_id:

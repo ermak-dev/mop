@@ -235,6 +235,30 @@ def _require_permissions(user, action, reason):
             raise Denied(reason)
 
 
+def node_executor(actor, node_id=None, *, reason='enrolled node executor required'):
+    """Технический факт #687/#689: вызывающий -- зарегистрированный исполнитель узла.
+
+    Не вид Actor и не право: живая строка ServiceEnrollment node-executor (на
+    этот узел, если он задан). Человек с любыми правами исполнителем не
+    становится. Возвращает узел enrollment.
+    """
+    if type(actor) is not ActorContext:
+        raise Denied('trusted actor context required')
+    row = m.ServiceEnrollment.objects.filter(actor_id=actor.user_id, use_case='node-executor').first()
+    # Текст отказа -- контракт входа: каждое место сохраняет свою формулировку.
+    if row is None or row.node_id is None or (node_id is not None and row.node_id != node_id):
+        raise Denied(reason)
+    return row.node_id
+
+
+def is_node_executor(actor):
+    try:
+        node_executor(actor)
+    except Denied:
+        return False
+    return True
+
+
 def visible_project_ids(actor):
     # Вид Actor не выбирает систему проверок (#685): проектная область для
     # человека, агента и сервиса — одна и та же membership-таблица.

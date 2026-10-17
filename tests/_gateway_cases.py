@@ -99,7 +99,7 @@ class GatewayBoundary(TransactionTestCase):
         client = login_browser(self, user)
         response = management_get('/llm/management.html', cookies=client.cookies)
         self.assertEqual(response.status_code, 403)
-        permission = Permission.objects.get(content_type__app_label='gateway', codename='manage_proxy')
+        permission = Permission.objects.get(content_type__app_label='controller', codename='manage_proxy')
         user.user_permissions.add(permission)
         # Даже полный scope/permission не усыновляет session мимо trusted login.
         unbound = Client()
@@ -184,7 +184,7 @@ class GatewayExecution(TransactionTestCase):
         AllProjectMembership.objects.create(user=self.user,
             source=LoginIdentity.objects.get(user=self.user).source)
         self.user.user_permissions.add(Permission.objects.get(
-            content_type__app_label='gateway', codename='manage_proxy'))
+            content_type__app_label='controller', codename='manage_proxy'))
         self.client = login_browser(self, self.user)
         self.actor = session_context(self.client.session.session_key)
         self.key_id = uuid.uuid4()
@@ -405,7 +405,7 @@ class GatewayExecution(TransactionTestCase):
             connections.close_all()
             return Reply(200, b'private-body', ())
         self.assertEqual(self.run_gateway(upstream=demote).status, 403)
-        self.user.user_permissions.add(Permission.objects.get(content_type__app_label='gateway', codename='manage_proxy'))
+        self.user.user_permissions.add(Permission.objects.get(content_type__app_label='controller', codename='manage_proxy'))
         key = Credential(self.key_id, 'fixture-private-management-key')
         class Source:
             valid = True
