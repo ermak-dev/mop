@@ -5,7 +5,7 @@
   "description": "mop dashboard: the pool in the browser (docs/WEB.md)",
   "type": "module",
   "scripts": {
-    "test:store": "vitest run poolStore.test.ts hybridApi.test.ts && tsc --noEmit -p tsconfig.store.json",
+    "test:store": "vitest run poolStore.test.ts hybridApi.test.ts usePool.test.ts useSession.test.ts App.network.test.tsx && tsc --noEmit -p tsconfig.store.json",
     "build:dist": "vite build",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "dev": "vite",

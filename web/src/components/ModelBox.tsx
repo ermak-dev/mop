@@ -5,7 +5,8 @@
 // балун (#488, слово оператора): succeeded приезжает только после
 // телеметрии сервера (та же сессия, свежая запись, та же модель) --
 // «диалог закрылся» подтверждением не считается. Ход операции --
-// общий useAdminOp; результат в памяти страницы.
+// общий useAdminOp; результат в памяти страницы, снимок обновляет
+// WS-инвалидация общего store (#627).
 import { useOperationNotice } from "../useOperationNotice";
 import { useOrder, type Signal } from "./ControlWindow";
 import { opWord } from "./RestartBox";
@@ -26,7 +27,6 @@ export function ModelBox({ session, row, order = null }: {
     title: `Смена модели: ${row.name}`,
     word: op.status === "succeeded" ? "Модель изменена" : opWord(op.status),
     enabled: session.role === "admin",
-    onSettled: () => { void fetch("/api/pool", { credentials: "same-origin" }).catch(() => {}); },
   });
   if (session.role !== "admin") return null;
   // Вход (#520): приказ визарда; замыкание свежего рендера держит сам

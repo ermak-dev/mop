@@ -1,27 +1,29 @@
 // #664: операции живут в заголовке панели, не в строке таблицы.
 // Удаление цели/смена авторизации уничтожают открытую операцию;
 // обычное переключение панели не должно терять поздний вердикт.
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { ID, deferred, networkFixture, reply } from '../network-test-utils';
+let net: ReturnType<typeof networkFixture>;
+beforeEach(async () => { net = networkFixture(); await net.start(ADMIN); });
 import { MantineProvider } from "@mantine/core";
 import { PuppetActions } from "./PuppetActions";
 import { PuppetCard } from "./PuppetCard";
 import { renderUi } from "../test-utils";
 import type { Puppet } from "../types";
 
-const ADMIN = { login: "anton", role: "admin" as const };
+const ADMIN = { login: '42', role: 'user' as const, authenticated: true };
 const CARD: Puppet = {
-  name: "pu-mop-1", node: "hyper", alloc_status: "running",
+  name: ID, node: "hyper", alloc_status: "running",
   state: "free (master)", kind: "free", bucket: "free", detail: null,
   branch: "master", owner: "-", llm: "-", origin: "git@h:g/mop.git", disk_kb: null,
 };
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); net.stop(); vi.unstubAllGlobals(); });
 
 test("#513 the restart click posts from the final screen", async () => {
-  const fetchMock = vi.fn(async () => ({ ok: true, status: 202,
-    json: async () => ({ id: "op-1", status: "accepted" }) }) as Response);
-  vi.stubGlobal("fetch", fetchMock);
+  const fetchMock = net.http;
+  const before = fetchMock.mock.calls.length;
   renderUi(<PuppetActions row={CARD} session={ADMIN} />);
   // вход #522: строка -> визард правки -> финальный экран рестарта ->
   // «Завершить» = согласие (единое правило подтверждения)
@@ -30,44 +32,45 @@ test("#513 the restart click posts from the final screen", async () => {
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   // до согласия POST нет: финальный экран сам и есть подтверждение
   expect(win.textContent).toMatch(/Контекст диалога с Claude теряется/);
-  expect(fetchMock).not.toHaveBeenCalled();
+  expect(fetchMock.mock.calls).toHaveLength(before);
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/v1/puppets/${ID}/commands/restart`, expect.objectContaining({
     method: "POST", credentials: "same-origin" })));
 });
 
 test.each(["target", "role", "login"])("stale restart op after %s change rides nowhere", async (change) => {
-  const fetchMock = vi.fn(async () => new Promise<Response>(() => {}));
-  vi.stubGlobal("fetch", fetchMock);
+  const slow = deferred(), base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => { if (init?.method === 'POST') { net.capture(init); return slow.promise; } return base(url, init); });
   const view = renderUi(<PuppetCard rows={[CARD]} target={CARD.name} session={ADMIN} onClose={() => {}} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
   view.rerender(<MantineProvider><PuppetCard rows={change === "target" ? [] : [CARD]}
     target={CARD.name} onClose={() => {}}
     session={change === "role" ? { login: null, role: null }
       : change === "login" ? { ...ADMIN, login: "other" } : ADMIN} /></MantineProvider>);
   // смена источника стирает ход: экран хода исчез вместе с окном цели
   await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
+  await act(async () => slow.resolve(reply(net.operation('accepted', '1'), 202)));
+  expect(screen.queryByTestId('control-window')).toBeNull();
+  expect(net.posts()).toHaveLength(1);
 });
 
-test("the row offers update with explicit fresh modes", () => {
+// #627: режимы обновления (#527) проверяет визард в изоляции; через строку
+// пункт виден, но закрыт, пока контроллер не принимает обновление.
+test("#627 the row offers update closed with the reason until the controller admits it", () => {
   vi.stubGlobal("fetch", vi.fn());
   renderUi(<PuppetActions row={CARD} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = screen.getByTestId("control-window");
-  // #527: пункт update ведёт на СВОЙ шаг выбора режима -- три радио,
-  // не смешанные с кнопками чужих операций
-  fireEvent.click(within(win).getByRole("button", { name: "Обновление" }));
-  const dialog = screen.getByRole("dialog");
-  for (const m of ["Продолжить работу", "Пересобрать чистый клон",
-                   "Переключить на другой проект"]) {
-    expect(within(dialog).getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
-  }
-  expect(within(dialog).getAllByRole("radio")
-    .filter((r) => (r as HTMLInputElement).checked)).toHaveLength(0);
+  const update = within(win).getByRole("button", { name: /^Обновление/ });
+  expect(update).toBeDisabled();
+  expect(update).toHaveAccessibleName(expect.stringContaining("контроллер эту команду ещё не принимает"));
+  fireEvent.click(update);
+  expect(within(win).queryAllByRole("radio")).toHaveLength(0);
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
 test("a guest never sees restart or update", () => {

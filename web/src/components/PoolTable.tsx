@@ -8,7 +8,7 @@ import { Badge, Box, Code, Group, NativeSelect, Stack, Table, Text, Tooltip } fr
 import { useState } from "react";
 import type { Counts, LocalSession, Master, Project, Puppet, RosterSession } from "../types";
 import { roster } from "../roster";
-import type { Session } from "../useSession";
+import { hasControls, type Session } from "../useSession";
 import { gb, KIND_WORD, presentKinds, verdictColor, verdictWord } from "./format";
 import { EmptyNote, SectionTitle } from "./Section";
 import { align, TableHead } from "./TableHead";
@@ -143,7 +143,7 @@ export function PoolTable({ projects, sessions, masters, onOpen, session, select
     group.push(entry);
     groups.set(entry.project, group);
   }
-  const admin = session?.role === "admin";
+  const admin = !!session && hasControls(session);
   return (
     <Stack gap="md" data-testid="pool">
       <Group justify="space-between" align="end">

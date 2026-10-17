@@ -39,6 +39,7 @@ import { Button, Code, Group, Loader, Modal, Radio, Stack, Stepper, Text, TextIn
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { useModels } from "../useModels";
+import { admits as controllerAdmits } from "../poolNetwork";
 import { restartReason, opWord, RESTART_EFFECTS } from "./RestartBox";
 import { MODES, UPDATE_WARNING } from "./UpdateBox";
 import { PREVIEW } from "./DestructiveBox";
@@ -96,6 +97,9 @@ const ENTRY_WORD: Record<string, string> = {
   recycle: LABELS.recycle, delete: LABELS.delete, wipe: LABELS.wipe,
 };
 
+/** Причина выключенного пункта (#627): команды нет у контроллера. */
+const UNADMITTED = "контроллер эту команду ещё не принимает";
+
 /** Движок, отвечающий за действие (#487/#522): status живёт в
  * engineState по ключу движка. */
 const ENGINE_OF: Record<string, string> = {
@@ -114,7 +118,7 @@ const verdictWord = (act: string, op: EngineState): string =>
 
 export function ControlWindow({ opened, onClose, onOrder, row, session,
                                initialEntry = null, engineState = {},
-                               onForget }: {
+                               onForget, admits = controllerAdmits }: {
   opened: boolean;
   onClose: () => void;
   /** Приказ движку: «Завершить» с финального экрана. */
@@ -130,6 +134,8 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   /** Забыть показанный вердикт (#522): «новая команда» из футера хода --
    * иначе pick того же пункта навсегда diverted бы на старый терминал. */
   onForget?: () => void;
+  /** Допуск пункта (#627): по умолчанию -- таблица команд общего store. */
+  admits?: (action: string) => boolean;
 }) {
   // Фаза визарда (#522 -> #527): шаги -- номера ЭКРАНОВ, у потоков их
   // разное число. Выбор действия всегда 0. Обновление (#527) -- свой
@@ -192,6 +198,18 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   }
   if (!opened) return null;
   const blocked = session.role === "admin" ? restartReason(row) : null;
+  // #627: пункт без команды контроллера виден, но выключен с причиной --
+  // тот же приём, что у рестарта незапущенного папета (#508): отказ после
+  // «Завершить» и шаг модели без каталога были бы тупиком.
+  const reasonOf = (e: ControlEntry) => (e === "restart" ? blocked : null)
+    ?? (admits(e) ? null : `${ENTRY_WORD[e]}: ${UNADMITTED}`);
+  const item = (e: ControlEntry) => {
+    const reason = reasonOf(e);
+    return <Tooltip key={e} label={reason ?? ""} disabled={!reason}>
+      <Button variant="light" disabled={!!reason} aria-label={reason ?? ENTRY_WORD[e]}
+              onClick={() => pick(e)}>{ENTRY_WORD[e]}</Button>
+    </Tooltip>;
+  };
   // Готовность к финалу: обновление -- режим (и origin для пересадки),
   // модель -- выбор из каталога, рестарт и разрушительные -- всегда.
   const ready = entry === "update"
@@ -310,21 +328,13 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
               {/* #527: обновление ведёт на СВОЙ шаг режима -- радио на
                   первом экране больше не живёт, смешения радио с
                   кнопками чужих операций нет */}
-              <Button variant="light" onClick={() => pick("update")}>{LABELS.update}</Button>
-              <Button variant="light" onClick={() => pick("model")}>{LABELS.model}</Button>
-              <Tooltip label={blocked ?? ""} disabled={!blocked}>
-                <Button variant="light" disabled={!!blocked}
-                        aria-label={blocked ?? LABELS.restart}
-                        onClick={() => pick("restart")}>{LABELS.restart}</Button>
-              </Tooltip>
-              <Button variant="light" onClick={() => pick("stop")}>{LABELS.stop}</Button>
+              {item("update")}
+              {item("model")}
+              {item("restart")}
+              {item("stop")}
               {/* разрушительные -- пункты первого экрана (#512/#473),
                   однотонные: опасность говорит текстом финального экрана */}
-              {RUIN.map((a) => (
-                <Button key={a} variant="light" onClick={() => pick(a)}>
-                  {a === "recycle" ? LABELS.recycle : a === "delete" ? LABELS.delete : LABELS.wipe}
-                </Button>
-              ))}
+              {RUIN.map(item)}
             </Stack>
             {/* первый экран не ведёт дальше -- ни «Назад», ни
                 «Продолжить»: выбор пункта и есть переход */}

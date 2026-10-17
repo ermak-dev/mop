@@ -1,4 +1,7 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src/poolStore.ts", "src/poolStore.test.ts", "src/hybridApi.ts", "src/hybridApi.test.ts"]
+  "compilerOptions": { "types": ["vitest/globals", "@testing-library/jest-dom/vitest"] },
+  "include": ["src/poolStore.ts", "src/poolStore.test.ts", "src/hybridApi.ts", "src/hybridApi.test.ts",
+    "src/poolNetwork.ts", "src/usePool.ts", "src/usePool.test.ts", "src/useAdminOp.ts", "src/usePuppetCard.ts",
+    "src/useSession.ts", "src/useSession.test.ts", "src/App.network.test.tsx"]
 }

@@ -14,7 +14,7 @@
 import { useEffect } from "react";
 import { useOrder, useSignal, type Signal, type EngineState } from "./ControlWindow";
 import type { Puppet } from "../types";
-import type { Session } from "../useSession";
+import { hasControls, type Session } from "../useSession";
 import { useAdminOp } from "../useAdminOp";
 
 /** Слово вердикта для человека: #476, своего перечня здесь нет. */
@@ -59,7 +59,7 @@ export function RestartBox({ session, row, order = null, forget = null, onState 
    * причина и потерянный ответ едут одним объектом. */
   onState?: (op: EngineState) => void;
 }) {
-  const { op, submit, forget: settle } = useAdminOp(session, session.role === "admin" ? row.name : null);
+  const { op, submit, forget: settle } = useAdminOp(session, hasControls(session) ? row.name : null);
   useEffect(() => { onState?.(op); }, [op, onState]);
   // Вход (#522): приказ -- всегда новая команда с финального экрана
   // визарда; повторный вход при живом ходе визард пускает экраном хода

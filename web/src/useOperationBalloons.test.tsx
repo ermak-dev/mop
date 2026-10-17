@@ -13,7 +13,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useOperationBalloons } from "./useOperationBalloons";
-import { operations, VERDICT_FALLBACK_MS, type OperationFrame } from "./useOperationFeed";
+import { operations, type OperationFrame } from "./useOperationFeed";
 
 // Шпион балунов: фабрика vi.mock выполняется лениво, держатель -- const.
 const shown: { title?: unknown; message?: unknown; color?: unknown;
@@ -90,8 +90,8 @@ test("#509 a lost verdict of my operation stays with the box, no balloon", async
   renderHook(() => useOperationBalloons());
   act(() => { operations.accepted("pu-mop-1", "op-mine"); });
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(VERDICT_FALLBACK_MS + 1000);
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
   });
-  // таймер канала -- тот же свой id: unknown покажет бокс, не балун
+  // Прошедшее время само не создаёт verdict: ни fake unknown, ни балуна.
   expect(shown).toHaveLength(0);
 });

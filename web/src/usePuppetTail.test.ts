@@ -77,7 +77,7 @@ test("a target change drops the former tail at once", async () => {
   const fetchMock = vi.fn(async () => tailOk(["old screen"]));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(({ target }: { target: string | null }) =>
-    usePuppetTail(ADMIN, target), { initialProps: { target: "pu-mop-1" } });
+    usePuppetTail(ADMIN, target), { initialProps: { target: "pu-mop-1" as string | null } });
   await act(async () => { await view.result.current.load(); });
   expect(view.result.current.lines).toEqual(["old screen"]);
   await act(async () => { view.rerender({ target: "pu-mop-2" }); });
@@ -90,7 +90,7 @@ test("role loss drops the tail at once, a late answer does not bring it back", a
   let release: ((r: Response) => void) | null = null;
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = vi.fn(async () => slow);
-  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal('fetch', fetchMock);
   const view = renderHook(({ session }: { session: Session }) =>
     usePuppetTail(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
   let pending: Promise<void> | null = null;

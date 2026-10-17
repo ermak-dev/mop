@@ -4,14 +4,13 @@ import { Alert, Group, Stack, Tabs, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { usePool } from "./usePool";
 import { useOperationBalloons } from "./useOperationBalloons";
-import { fetchSession, GUEST, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
+import { fetchSession, GUEST, hasControls, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
 import { useJournal } from "./useJournal";
 import { useHashPage } from "./useHashPage";
 import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
 import { DashboardSplit } from "./components/DashboardSplit";
 import { PuppetCard } from "./components/PuppetCard";
-import { AddBox } from "./components/AddBox";
 import { NodesPanel } from "./components/NodesPanel";
 import { roster } from "./roster";
 import { JournalPage } from "./components/JournalPage";
@@ -26,16 +25,13 @@ import './dashboard.css';
 // сервера (#378): components/PoolLoad.tsx.
 
 export default function App() {
-  const { snapshot } = usePool();
-  // Терминальные кадры операций -- балунами (#509): кадры `operation`
-  // разбирает usePool (тот же поток /events), чужой терминал показывается
-  // балуном с именем цели (useOperationBalloons); свои операции получают
-  // вердикт по id в своих боксах (useAdminOp + useOperationNotice).
+  const [session, setSession] = useState<Session>(GUEST);
+  const { snapshot, stale, error: poolError } = usePool(session);
+  // Балун — уведомление после применения Operation в общем store, не
+  // второй канал статуса. Неизвестный результат восстанавливается через GET.
   useOperationBalloons();
   const { page, go } = useHashPage();
-  // Сессия (#416): до ответа -- гость, 401/сбой панели не рвут публичные
-  // таблицы; истёкшая cookie -- тот же гость.
-  const [session, setSession] = useState<Session>(GUEST);
+  // До подтверждённой Django identity приватный ростер не читается.
   const [failed, setFailed] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
   // Журнал (#422): закрытый источник, тянет только admin и только пока
@@ -93,7 +89,7 @@ export default function App() {
   // Карточка папета (#463): цель держит App, не таблица -- закрытие и смена
   // роли/логина гасят её отсюда одним setState, а опоздавший ответ прежней
   // цели отбрасывает сам хук (поколение). Гостю и не-admin опенера нет.
-  const identity = `${session.login ?? ''}\0${session.role ?? ''}`;
+  const identity = JSON.stringify([session.login, session.role, session.generation]);
   const [selection, setSelection] = useState<{ name: string; identity: string } | null>(null);
   const puppet = selection?.identity === identity ? selection.name : null;
   const setPuppet = (name: string | null) => setSelection(name ? { name, identity } : null);
@@ -114,7 +110,7 @@ export default function App() {
   const managed = snapshot ? roster(snapshot.projects, snapshot.sessions, snapshot.masters)
     .filter(entry => entry.source === 'managed') : [];
   const selected = managed.find(entry => entry.name === puppet);
-  const target = page === 'main' && session.role === 'admin' && selected ? selected.name : null;
+  const target = page === 'main' && hasControls(session) && selected ? selected.name : null;
   const screenRows = managed.map(entry => ({ ...entry, owner: entry.user || '', origin: entry.origin || '?' }));
   return (
     <div className="dashboard" data-testid="dashboard">
@@ -126,7 +122,7 @@ export default function App() {
             <Tabs.Tab value="main">Пул</Tabs.Tab>
             <Tabs.Tab value="nodes">Узлы</Tabs.Tab>
             <Tabs.Tab value="tokens">Токены</Tabs.Tab>
-            {session.role === 'admin' && <Tabs.Tab value="journal">Журнал</Tabs.Tab>}
+            {hasControls(session) && <Tabs.Tab value="journal">Журнал</Tabs.Tab>}
           </Tabs.List>
         </Tabs>
         <Group gap="md">
@@ -136,6 +132,8 @@ export default function App() {
         </Group>
       </Group>
       <Group gap="sm">
+        {stale && <Text size="sm" c="dimmed">Realtime is stale; REST reconciliation is active</Text>}
+        {poolError && <Text role="alert" size="sm" c="red">{poolError}</Text>}
         <img src="/logo.png" alt="" width={28} height={28} />
         {snapshot ? <LoadBadges load={snapshot.load} counts={snapshot.counts} />
           : <Text c="dimmed">снимок ещё не пришёл</Text>}
@@ -149,10 +147,10 @@ export default function App() {
           ) : <Stack gap="md">
             {snapshot && snapshot.errors.length > 0 && <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join('\n')}</Alert>}
             {page === 'main' && <>
-              <AddBox session={session} />
+              {hasControls(session) && <Text size="sm" c="dimmed">Creation is not yet exposed by the new controller.</Text>}
               {snapshot && <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
                 masters={snapshot.masters} session={session} selected={target}
-                onOpen={session.role === 'admin' ? setPuppet : undefined} />}
+                onOpen={hasControls(session) ? setPuppet : undefined} />}
             </>}
             {page === 'nodes' && snapshot && <NodesPanel nodes={snapshot.nodes} />}
             {page === 'tokens' && snapshot && <>

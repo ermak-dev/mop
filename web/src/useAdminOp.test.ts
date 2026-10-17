@@ -1,322 +1,107 @@
-// Хук операции админа (#465): POST /api/admin/ops {action,target,params}
-// -> 202 {id} -> опрос GET /api/admin/ops/<id> до терминала. Контракт
-// #461/#476: unknown -- НЕ failed, автоповтора нет; двойной под -- тот же
-// id; потерянный первый ответ -- unknown; смена источника (роль, цель)
-// стирает операцию в тот же рендер, опоздавший 202 не воскресит её.
-// Результат живёт в памяти страницы: перезагрузка начинает заново -- id
-// хранить негде (storage запрещён #463, списка своих операций в контракте
-// нет); это первый выпуск, названо в отчёте.
-//
-// HYPOTHESIS (#465): в карточке нет кнопки restart, а отметка running в
-// публичном ростере не подтверждает операцию.
-// RESULT: тесты написаны до реализации (RED).
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
-import { useAdminOp } from "./useAdminOp";
-import { operations } from "./useOperationFeed";
-import type { Session } from "./useSession";
+// HYPOTHESIS: прежние проверки обходили общий store и подтверждали только старый wire.
+// SOLUTION: HTTP/WS проходят production runtime; неизвестность не выдаётся за отказ/успех.
+// RESULT: send подключён к /api/v1/messages; add честно отказывается до POST.
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { useAdminOp } from './useAdminOp';
+import { ADMIN, ID, EPOCH, INCARNATION, OP, deferred, networkFixture, reply } from './network-test-utils';
+let net: ReturnType<typeof networkFixture>;
+beforeEach(() => { net = networkFixture(); });
+afterEach(() => { net.stop(); vi.unstubAllGlobals(); });
+const mount = () => renderHook(() => useAdminOp(ADMIN, ID));
 
-const ADMIN: Session = { login: "anton", role: "admin" };
-const GUEST_SESS: Session = { login: null, role: null };
-
-const ok202 = (id: string) =>
-  ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
-const opJson = (status: string) =>
-  ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "restart",
-     target: "pu-mop-1", status }) }) as Response;
-const pause = (ms = 5) => new Promise((r) => setTimeout(r, ms));
-
-/** POST -- первый вызов, GET результата -- остальные. */
-const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
-  vi.fn(async (_url: string | URL, init?: { method?: string }) =>
-    (init?.method ?? "GET") === "POST" ? post() : get());
-
-afterEach(() => { vi.unstubAllGlobals(); operations.resetForTest(); });
-
-test("no request rides until submit", async () => {
-  const fetchMock = vi.fn();
-  vi.stubGlobal("fetch", fetchMock);
-  renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await pause();
-  expect(fetchMock).not.toHaveBeenCalled();
+test('no command rides until submit', async () => {
+  await net.start(); mount(); expect(net.posts()).toHaveLength(0);
 });
-
-test("submit posts the narrow schema; the single GET shows running, the frame settles", async () => {
-  let gets = 0;
-  const fetchMock = postGet(
-    () => Promise.resolve(ok202("op-1")),
-    () => { gets += 1; return Promise.resolve(opJson("running")); });
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
+test('restart uses assignment CAS and WS invalidation fetches the confirmed verdict', async () => {
+  await net.start(); const view = mount();
   await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("running"));
-  expect(view.result.current.op.id).toBe("op-1");
-  expect(view.result.current.op.error).toBeNull();
-  // узкая схема: ни subject/verb/shell, ни лишних полей
-  expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
-    method: "POST", credentials: "same-origin",
-  }));
-  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
-  expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
-  expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops/op-1",
-    expect.objectContaining({ credentials: "same-origin" }));
-  // терминал -- кадром (#504), после него -- тишина
-  await act(async () => { operations.frame({ id: "op-1", action: "restart",
-    target: "pu-mop-1", status: "succeeded" }); });
-  expect(view.result.current.op.status).toBe("succeeded");
-  expect(gets).toBe(1);
-  const after = fetchMock.mock.calls.length;
-  await pause(15);
-  expect(fetchMock.mock.calls.length).toBe(after);
+  expect(view.result.current.op).toMatchObject({ status: 'running', id: OP, error: null });
+  expect(net.posts()).toHaveLength(1);
+  const [url, init] = net.posts()[0];
+  expect(url).toBe(`/api/v1/puppets/${ID}/commands/restart`);
+  expect(init).toMatchObject({ credentials: 'same-origin' });
+  expect(JSON.parse(String(init?.body))).toEqual({ schema_version: 1, epoch: EPOCH, incarnation: INCARNATION,
+    expected_revision: '7', request_id: net.requestId, not_after: expect.any(String), params: { fresh: false } });
+  const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? Promise.resolve(reply(net.operation('succeeded', '3'))) : base(url, init));
+  await net.invalidateOperation();
+  await waitFor(() => expect(view.result.current.op.status).toBe('succeeded'));
+  expect(net.posts()).toHaveLength(1);
 });
-
-test("double submit rides once and yields the same id", async () => {
-  let release: ((r: Response) => void) | null = null;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("queued")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  let p1: Promise<string | null> | null = null, p2: Promise<string | null> | null = null;
-  await act(async () => { p1 = view.result.current.submit(); });
-  await act(async () => { p2 = view.result.current.submit(); });
-  await act(async () => { release?.(ok202("op-9")); });
-  expect(await p1).toBe("op-9");
-  expect(await p2).toBe("op-9");
-  expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
-    .toHaveLength(1);
-  // и когда задача уже принята (queued), повтор -- тот же id без нового POST
-  const id3 = await act(async () => await view.result.current.submit());
-  expect(id3).toBe("op-9");
-  expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
-    .toHaveLength(1);
+test('double submit while POST is outstanding and after accepted never repeats the effect', async () => {
+  await net.start(); const slow = deferred(), base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => { if (init?.method === 'POST') { net.capture(init); return slow.promise; } return base(url, init); });
+  const view = mount(); let first!: Promise<string | null>, second!: Promise<string | null>;
+  act(() => { first = view.result.current.submit(); second = view.result.current.submit(); });
+  await act(async () => slow.resolve(reply(net.operation('accepted', '1'), 202)));
+  expect(await first).toBe(OP); expect(await second).toBe(OP);
+  await act(async () => { expect(await view.result.current.submit()).toBe(OP); });
+  expect(net.posts()).toHaveLength(1);
 });
-
-test("a late 202 of a former target does not start its poll", async () => {
-  let release: ((r: Response) => void) | null = null;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ target }: { target: string | null }) =>
-    useAdminOp(ADMIN, target), { initialProps: { target: "pu-mop-1" } });
-  await act(async () => { view.result.current.submit(); });
-  await act(async () => { view.rerender({ target: "pu-mop-2" }); });
-  await act(async () => { release?.(ok202("op-old")); });
-  await pause();
-  // новая цель -- idle, опрос прежнего id не начался
-  expect(view.result.current.op.status).toBe("idle");
-  expect(fetchMock).not.toHaveBeenCalledWith("/api/admin/ops/op-old", expect.anything());
+test.each(['unknown', 'failed', 'refused', 'partial', 'expired'])('server %s is preserved with its reason', async status => {
+  await net.start(); const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? Promise.resolve(reply(net.operation(status, '2', 'server reason'))) : base(url, init));
+  const view = mount(); await act(async () => { await view.result.current.submit(); });
+  expect(view.result.current.op).toMatchObject({ status, error: 'server reason', lost: false });
 });
-
-test("role loss clears the operation; a late 202 does not resurrect it", async () => {
-  let release: ((r: Response) => void) | null = null;
-  const slow = new Promise<Response>((resolve) => { release = resolve; });
-  const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ session }: { session: Session }) =>
-    useAdminOp(session, "pu-mop-1"), { initialProps: { session: ADMIN } });
-  await act(async () => { view.result.current.submit(); });
-  await act(async () => { view.rerender({ session: GUEST_SESS }); });
-  expect(view.result.current.op.status).toBe("idle");
-  await act(async () => { release?.(ok202("op-2")); });
-  await pause();
-  expect(view.result.current.op.status).toBe("idle");
+test('missing or unreachable result does not turn accepted into failure or fabricated unknown', async () => {
+  await net.start(); const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => url.startsWith('/api/v1/operations') ? Promise.resolve(reply({ error: { code: 'not_found', message: 'not visible' } }, 404)) : base(url, init));
+  const view = mount(); await act(async () => { await view.result.current.submit(); });
+  expect(view.result.current.op.status).toBe('accepted');
+  expect(net.posts()).toHaveLength(1);
 });
-
-test("unknown from the server is terminal and kept as unknown", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("unknown")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("unknown"));
-  const after = fetchMock.mock.calls.length;
-  await pause(15);
-  expect(fetchMock.mock.calls.length).toBe(after);
-});
-
-test("a purged result (not found) reads as unknown", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-    () => Promise.resolve({ ok: true, status: 200,
-      json: async () => ({ status: "not found" }) } as Response));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("unknown"));
-});
-
-// #504: прежний цикл опроса (три промаха подряд -- unknown) ушёл с
-// механизмом: терминал приезжает кадром, потерю покрывает таймер канала.
-// Новый контракт мёртвой сети: единственный GET промолчал -- операция
-// ОСТАЁТСЯ принятой (никакого своего unknown в петле), вердикт ждут
-// кадром; своего браузерного таймаута страница не строит (#504).
-test("#504 a dead network on the single GET keeps the op accepted, verdict waits for the frame", async () => {
-  let gets = 0;
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-    () => { gets += 1; return Promise.reject(new Error("down")); });
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(gets).toBe(1));
-  await pause(30);
-  // Ни второго GET, ни самодельного unknown: правда -- кадр или таймер
-  // канала (проверен в useOperationFeed.test.ts).
-  expect(gets).toBe(1);
-  expect(view.result.current.op.status).toBe("accepted");
-});
-
-test("a lost POST answer is unknown, and nothing retries it", async () => {
-  const fetchMock = postGet(() => Promise.reject(new Error("connection reset")),
-                            () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("unknown"));
-  expect(view.result.current.op.lost).toBe(true);
-  expect(view.result.current.op.id).toBeNull();
-  const after = fetchMock.mock.calls.length;
-  await pause(20);
-  // автоповтора нет: ни повторного POST, ни опроса без id
-  expect(fetchMock.mock.calls.length).toBe(after);
-});
-
-test("a 202 without an id is a lost answer too", async () => {
-  const fetchMock = postGet(() => Promise.resolve({ ok: true, status: 202,
-    json: async () => ({}) } as Response), () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  expect(view.result.current.op.status).toBe("unknown");
-  expect(view.result.current.op.lost).toBe(true);
-});
-
-test("a POST refusal names the phrase and a manual retry posts again", async () => {
-  const fetchMock = postGet(() => Promise.resolve({ ok: false, status: 409,
-    json: async () => ({ error: "another operation is queued for this target" }) } as Response),
-    () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  expect(view.result.current.op.status).toBe("refused");
-  expect(view.result.current.op.error).toContain("queued");
-  // повтор -- решение админа: второй POST уходит
-  await act(async () => { await view.result.current.submit(); });
-  expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
-    .toHaveLength(2);
-});
-
-test("an unregistered operation (404) reads as refused with the phrase", async () => {
-  const fetchMock = postGet(() => Promise.resolve({ ok: false, status: 404,
-    json: async () => ({ error: "unsupported operation" }) } as Response),
-    () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  expect(view.result.current.op.status).toBe("refused");
-  expect(view.result.current.op.error).toContain("unsupported");
-});
-
-test("a non-admin submit asks nothing", async () => {
-  const fetchMock = vi.fn();
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(GUEST_SESS, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  expect(view.result.current.op.status).toBe("refused");
-  expect(view.result.current.op.error).toBeTruthy();
-  expect(fetchMock).not.toHaveBeenCalled();
-});
-
-test("no storage: nothing lands in localStorage or sessionStorage", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("succeeded")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("succeeded"));
-  expect(window.localStorage.length).toBe(0);
-  expect(window.sessionStorage.length).toBe(0);
-});
-
-// #469: send -- та же операция админа, но с параметрами: submit несёт
-// {message}. Restart зовёт submit() без аргументов -- params: {} как был.
-test("#469 send passes its params: submit carries the message", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("succeeded")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit("send", { message: "привет" }); });
-  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
-  expect(body).toEqual({ action: "send", target: "pu-mop-1", params: { message: "привет" } });
-});
-
-// #472: add едет без цели -- ключа target в теле нет вовсе, контракт
-// {action, params}. Хук допускает null-цель у админа; не-admin и так
-// отказан ролью.
-test("#472 add rides without a target: the body omits it", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("succeeded")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, null));
-  await act(async () => {
-    await view.result.current.submit("add", { origin: "git@h:g/mop.git" });
+test.each(['dropped', 'malformed'])('lost %s first response is unknown; repeat click recovers only by request_id GET', async mode => {
+  await net.start(); const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation(async (url, init) => {
+    if (init?.method === 'POST') { net.capture(init); if (mode === 'dropped') throw new Error('connection reset'); return reply({ schema_version: 1, epoch: EPOCH }, 202); }
+    if (url.startsWith('/api/v1/operations')) return reply({ error: { code: 'not_found', message: 'not visible' } }, 404);
+    return base(url, init);
   });
-  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
-  expect(body).toEqual({ action: "add", params: { origin: "git@h:g/mop.git" } });
-  expect("target" in body).toBe(false);
-  await waitFor(() => expect(view.result.current.op.status).toBe("succeeded"));
-});
-
-test("#472 a guest add asks nothing", async () => {
-  const fetchMock = vi.fn();
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(GUEST_SESS, null));
-  await act(async () => { await view.result.current.submit("add", { origin: "x" }); });
-  expect(view.result.current.op.status).toBe("refused");
-  expect(view.result.current.op.error).toBeTruthy();
-  expect(fetchMock).not.toHaveBeenCalled();
-});
-
-// ── #504: терминал -- кадром SSE, опрос уходит ──────────────────────────
-// Ровно один GET сразу после 202 (мгновенные refused, waiting/running на
-// момент подачи), дальше терминал ждут кадром канала (#504 useOperationFeed),
-// потерю покрывает таймер канала. Цикла опроса больше нет: непрерывное
-// обновление waiting -- не этот тикет (названо в остатке).
-test("#504 after 202 exactly one GET rides, then silence until the frame", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
+  const view = mount(); await act(async () => { await view.result.current.submit(); });
+  expect(view.result.current.op).toMatchObject({ status: 'unknown', lost: true, id: null });
   await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("running"));
-  const after = fetchMock.mock.calls.length;
-  // Пауза больше двух тиков прежнего цикла (1 с): живой цикл успел бы
-  // сходить дважды -- тишина и есть отсутствие цикла.
-  await pause(2500);
-  expect(fetchMock.mock.calls.length).toBe(after);   // цикла нет: один GET
+  expect(net.posts()).toHaveLength(1);
+  expect(net.http.mock.calls.some(([url]) => url === `/api/v1/operations?request_id=${net.requestId}&epoch=${EPOCH}`)).toBe(true);
 });
-
-test("#504 the single GET carries a terminal straight to the verdict", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("refused")));
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("refused"));
-  const after = fetchMock.mock.calls.length;
-  await pause(20);
-  expect(fetchMock.mock.calls.length).toBe(after);
+test.each([403, 409])('POST %s preserves safe refusal reason; explicit retry is a new attempt', async status => {
+  await net.start(); const base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => init?.method === 'POST' ? Promise.resolve(reply({ error: { code: 'conflict', message: 'another operation queued' } }, status))
+    : url.startsWith('/api/v1/operations') ? Promise.resolve(reply({ error: { code: 'not_found', message: 'not found' } }, 404)) : base(url, init));
+  const view = mount(); await act(async () => { await view.result.current.submit(); });
+  expect(view.result.current.op).toMatchObject({ status: 'refused', error: `HTTP ${status}: another operation queued`, lost: false });
+  await act(async () => { await view.result.current.submit(); }); expect(net.posts()).toHaveLength(2);
 });
-
-test("#504 a terminal frame for the pending id settles the op without any GET", async () => {
-  let gets = 0;
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-    () => { gets += 1; return Promise.resolve(opJson("running")); });
-  vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
-  await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("running"));
-  // Кадр приходит из канала (#504): слушатель -- операция по id.
-  await act(async () => { operations.frame({ id: "op-1", action: "restart",
-    target: "pu-mop-1", status: "succeeded" }); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("succeeded"));
-  expect(gets).toBe(1);
+test.each(['target', 'logout'])('late acceptance after %s never resurrects the selected operation', async change => {
+  await net.start(); const slow = deferred(), base = net.http.getMockImplementation()!;
+  net.http.mockImplementation((url, init) => { if (init?.method === 'POST') { net.capture(init); return slow.promise; } return base(url, init); });
+  const view = renderHook(({ session, target }) => useAdminOp(session, target), { initialProps: { session: ADMIN, target: ID } });
+  act(() => { void view.result.current.submit(); });
+  view.rerender({ session: change === 'logout' ? { login: null, role: null } : ADMIN, target: change === 'target' ? 'other' : ID });
+  expect(view.result.current.op.status).toBe('idle');
+  await act(async () => slow.resolve(reply(net.operation('accepted', '1'), 202)));
+  expect(view.result.current.op.status).toBe('idle');
+});
+test('guest cannot POST and command data never enters browser storage', async () => {
+  const guest = renderHook(() => useAdminOp({ login: null, role: null }, ID));
+  await act(async () => { await guest.result.current.submit(); }); expect(net.http).not.toHaveBeenCalled();
+  await net.start(); const view = mount(); await act(async () => { await view.result.current.submit(); });
+  expect(localStorage.length).toBe(0); expect(sessionStorage.length).toBe(0);
+});
+// Пробелы адаптеров не маскируются fake endpoints: эти пользовательские действия
+// должны работать после настоящего контракта #625, а не считаться unavailable-as-correct.
+test('#469 send passes its message through the controller command adapter', async () => {
+  await net.start(); const view = mount(); await act(async () => { await view.result.current.submit('send', { message: 'hello' }); });
+  expect(net.posts()).toHaveLength(1);
+  expect(JSON.parse(String(net.posts()[0][1]?.body)).params).toEqual({ message: 'hello' });
+});
+// #627: создания папета контроллер ещё не принимает (#625 create ждёт #643) --
+// add честно отказывается до любого POST, а не уходит в несуществующий маршрут.
+test('#472 add is refused before any POST until the controller admits creation', async () => {
+  await net.start(); const view = renderHook(() => useAdminOp(ADMIN, ID));
+  await act(async () => { await view.result.current.submit('add', { origin: 'git@h:g/mop.git' }); });
+  expect(net.posts()).toHaveLength(0);
+  expect(view.result.current.op.status).toBe('refused');
+  expect(view.result.current.op.error).toContain('not implemented by the controller');
 });

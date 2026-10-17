@@ -1,63 +1,47 @@
-// Сессия дашборда (#416): контракт #415 -- GET /api/session, POST /api/login,
-// POST /api/logout. Формы запросов и разбор ответов, fetch подменён.
-import { afterEach, expect, test, vi } from "vitest";
-import { fetchSession, GUEST, LoginRefused, postLogin, postLogout } from "./useSession";
-
-const json = (status: number, body: unknown) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-
+// HYPOTHESIS: legacy auth routes bypass Django's shared session and rotated CSRF.
+// SOLUTION: identity + Django login/logout, using the current cookie for every POST.
+// STATUS: FIXED — see #627
+import { afterEach, expect, test, vi } from 'vitest';
+import { fetchSession, GUEST, LoginRefused, postLogin, postLogout } from './useSession';
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 afterEach(() => vi.unstubAllGlobals());
-
-test("#416 GET /api/session: guest and a logged-in operator", async () => {
-  const fetchMock = vi.fn()
-    .mockResolvedValueOnce(json(200, { login: null, role: null }))
-    .mockResolvedValueOnce(json(200, { login: "anton", role: "admin" }));
-  vi.stubGlobal("fetch", fetchMock);
+test('uses the authenticated identity and treats only auth codes as guest', async () => {
+  const mock = vi.fn().mockResolvedValueOnce(json({ schema_version: 1, user_id: 42, principal_id: 'principal', kind: 'human' }))
+    .mockResolvedValueOnce(json({ error: { code: 'not_authenticated', message: 'Authentication required' } }, 403))
+    .mockResolvedValueOnce(json({ error: { code: 'authority_unavailable', message: 'Database unavailable' } }, 503));
+  vi.stubGlobal('fetch', mock);
+  expect(await fetchSession()).toMatchObject({ login: '42', role: 'user', authenticated: true });
+  expect(mock.mock.calls[0][0]).toBe('/api/v1/identity');
   expect(await fetchSession()).toEqual(GUEST);
-  expect(await fetchSession()).toEqual({ login: "anton", role: "admin" });
-  const [url, init] = fetchMock.mock.calls[0];
-  expect(url).toBe("/api/session");
-  expect(init.credentials).toBe("same-origin");
-  expect(init.method).toBeUndefined(); // GET без тела -- без Content-Type
-  expect(init.headers).toBeUndefined();
+  await expect(fetchSession()).rejects.toThrow('503');
 });
-
-test("#416 GET /api/session 5xx is the panel's error, not a guest", async () => {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("boom", { status: 502 })));
-  await expect(fetchSession()).rejects.toThrow();
-});
-
-test("#416 POST /api/login: JSON body, same-origin cookies; 200 -> session", async () => {
-  const fetchMock = vi.fn().mockResolvedValue(json(200, { login: "anton", role: "user" }));
-  vi.stubGlobal("fetch", fetchMock);
-  expect(await postLogin("anton", "secret")).toEqual({ login: "anton", role: "user" });
-  const [url, init] = fetchMock.mock.calls[0];
-  expect(url).toBe("/api/login");
-  expect(init.method).toBe("POST");
-  expect(init.credentials).toBe("same-origin");
-  expect(init.headers).toEqual({ "Content-Type": "application/json" });
-  expect(JSON.parse(init.body)).toEqual({ login: "anton", password: "secret" });
-});
-
-test("#416 POST /api/login 401 carries the server's reason, 429 its own", async () => {
-  vi.stubGlobal("fetch", vi.fn()
-    .mockResolvedValueOnce(json(401, { error: "invalid login or password" }))
-    .mockResolvedValueOnce(new Response(null, { status: 429 })));
-  const asRefused = async (login: string, password: string): Promise<LoginRefused> => {
-    try { await postLogin(login, password); throw new Error("expected a refusal"); }
-    catch (e) { expect(e).toBeInstanceOf(LoginRefused); return e as LoginRefused; }
-  };
-  expect((await asRefused("x", "y")).status).toBe(401);
-  expect((await asRefused("x", "y")).status).toBe(429);
-});
-
-test("#416 POST /api/logout: guest object back", async () => {
-  const fetchMock = vi.fn().mockResolvedValue(json(200, { login: null, role: null }));
-  vi.stubGlobal("fetch", fetchMock);
+test('bootstraps CSRF before login, accepts rotation, and logs out of the same Django session', async () => {
+  document.cookie = 'csrftoken=beforeLogin; path=/';
+  const mock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === '/api/v1/auth/csrf') return json({ schema_version: 1 });
+    if (url === '/api/v1/auth/login') {
+      expect(JSON.parse(String(init?.body))).toEqual({ username: 'operator', password: 'private' });
+      expect(init?.headers).toMatchObject({ 'X-CSRFToken': 'beforeLogin' });
+      document.cookie = 'csrftoken=afterLogin; path=/';
+      return json({ schema_version: 1, user_id: 42 });
+    }
+    if (url === '/api/v1/identity') return json({ schema_version: 1, user_id: 42, principal_id: 'principal', kind: 'human' });
+    if (url === '/api/v1/auth/logout') {
+      expect(init?.headers).toMatchObject({ 'X-CSRFToken': 'afterLogin' });
+      return json({ schema_version: 1 });
+    }
+    throw new Error(`Unexpected ${url}`);
+  });
+  vi.stubGlobal('fetch', mock);
+  const first = await postLogin('operator', 'private');
+  expect(first.authenticated).toBe(true);
   expect(await postLogout()).toEqual(GUEST);
-  const [url, init] = fetchMock.mock.calls[0];
-  expect(url).toBe("/api/logout");
-  expect(init.method).toBe("POST");
-  expect(init.credentials).toBe("same-origin");
-  expect(init.headers).toEqual({ "Content-Type": "application/json" });
+  document.cookie = 'csrftoken=beforeLogin; path=/';
+  const second = await postLogin('operator', 'private');
+  expect(second.generation).not.toBe(first.generation);
+});
+test('Django login refusal preserves the safe server reason', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => url.endsWith('/csrf') ? json({ schema_version: 1 })
+    : json({ schema_version: 1, error: { code: 'permission_denied', message: 'authentication refused' } }, 403)));
+  await expect(postLogin('operator', 'wrong')).rejects.toBeInstanceOf(LoginRefused);
 });
