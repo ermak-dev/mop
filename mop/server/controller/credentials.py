@@ -80,6 +80,8 @@ class CurrentBindings:
         epoch = Installation.objects.values_list('epoch', flat=True).get()
         if self.assignments.readiness(binding, epoch=UUID(str(epoch))) is None:
             return None
+        from .initialselection import require_initial_rbac_activation
+        require_initial_rbac_activation(grant_id)
         return RoleBinding(binding.project_id, binding.target_id, binding.incarnation_id,
             binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id)
 

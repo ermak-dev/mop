@@ -37,6 +37,8 @@ class SelectedLaunch:
     consumers: tuple
     git_name: str
     git_email: str
+    rbac_profile_id: UUID
+    rbac_profile_digest: str
 
     def public(self):
         """Только пины; version refs не являются API для чтения секретов по UUID."""
@@ -54,7 +56,7 @@ def fingerprint(values, refs):
 def policy_values(row):
     return {name: str(getattr(row, name)) for name in ('project_id', 'owner_id', 'definition_id',
         'bootstrap_revision', 'image_id', 'source_origin', 'source_commit', 'source_ref',
-        'desired_model', 'model_config_digest')}
+        'desired_model', 'model_config_digest', 'rbac_profile_id', 'rbac_profile_digest')}
 
 
 def validate_references(policy, refs):
@@ -86,6 +88,9 @@ def validate_references(policy, refs):
 
 class LaunchSelections:
     """Реальный production reader каталога; отсутствие настроенного выбора -- отказ."""
+    def rbac_authority(self, actor, reservation_id):
+        return InitialRBACAuthority(actor, reservation_id)
+
     def resolve(self, actor, command, reservation=None):
         from mop.server.catalog.models import InitialCreateSelection
         if reservation is not None:
@@ -122,7 +127,7 @@ class LaunchSelections:
                  proof.approval_id, proof.version_id, proof.digest)):
             raise Denied('initial grant and selected bootstrap proof differ')
 
-    def read(self, policy_id, *, git_name=None, git_email=None):
+    def read(self, policy_id, *, git_name=None, git_email=None, check_rbac=True):
         from mop.server.catalog.models import InitialCreatePolicy, InitialCreateConsumer
         policy = InitialCreatePolicy.objects.select_related('project', 'image__policy').filter(pk=policy_id).first()
         if policy is None:
@@ -137,6 +142,12 @@ class LaunchSelections:
                 or any(ord(c) < 33 or ord(c) == 127 for c in policy.desired_model)
                 or not re.fullmatch('[0-9a-f]{64}', policy.model_config_digest)):
             raise Denied('immutable initial launch selection changed')
+        if policy.rbac_profile_id is None:
+            raise Denied('explicit approved initial agent RBAC profile required')
+        if check_rbac:
+            from mop.server.access.rbac import require_profile
+            require_profile(policy.rbac_profile_id, policy.rbac_profile_digest, definition_id=policy.definition_id,
+                project_id=policy.project_id, owner_id=policy.owner_id)
         validate_references(policy, refs)
         identity = owner_identity(policy.owner_id)
         if (git_name is not None or git_email is not None) and (git_name, git_email) != (identity.name, identity.email):
@@ -153,7 +164,81 @@ class LaunchSelections:
             approval.human_id, approval.revision.project_id)
         return SelectedLaunch(policy.id, policy.digest, policy.project_id, policy.owner_id, policy.definition_id,
             policy.bootstrap_revision, proof, policy.image_id, policy.source_origin, policy.source_commit, policy.source_ref,
-            policy.desired_model, policy.model_config_digest, refs, identity.name, identity.email)
+            policy.desired_model, policy.model_config_digest, refs, identity.name, identity.email,
+            policy.rbac_profile_id, policy.rbac_profile_digest)
+
+
+class InitialRBACAuthority:
+    """Контроллер связывает exact committed reservation и Grant; Access не знает Ops."""
+    def __init__(self, actor, reservation_id):
+        self.actor, self.reservation_id = actor, reservation_id
+
+    def resolve(self, actor, grant_id):
+        from mop.server.access.context import ActorKind
+        from mop.server.access.services import current_actor
+        from mop.server.access.models import Grant
+        from mop.server.access.rbac import InitialRBACSelection
+        from mop.server.controller.models import Installation
+        from mop.server.operations.models import CreateReservation
+        from mop.server.operations.launch import identities
+        current_actor(actor)
+        if actor != self.actor or actor.kind is not ActorKind.HUMAN or actor.grant_id is not None:
+            raise Denied('initial RBAC requires its current human creator')
+        reservation = CreateReservation.objects.filter(pk=self.reservation_id, actor_id=actor.user_id).first()
+        installation = Installation.objects.get(pk=1)
+        if reservation is None or reservation.epoch != installation.epoch or not installation.effects_enabled:
+            raise Denied('current initial RBAC reservation is unavailable')
+        selections = LaunchSelections()
+        # Receipt retry читает immutable pins, не actual memberships/live recipe.
+        selected = selections.read(reservation.policy_id, git_name=reservation.git_name,
+            git_email=reservation.git_email, check_rbac=False)
+        selections.require_reservation(selected, reservation)
+        selections.require_grant(selected, grant_id)
+        target, incarnation = identities(actor, reservation.request_id)
+        grant = Grant.objects.select_related('intent').get(pk=grant_id)
+        intent = grant.intent
+        if ((intent.actor_id, intent.actor_credential_id, intent.parent_id, intent.target_id,
+                intent.incarnation, intent.request_id, intent.expires_at) !=
+                (actor.user_id, actor.credential_id, None, target, incarnation,
+                 reservation.request_id, reservation.expires_at)):
+            raise Denied('initial RBAC grant origin differs from its committed reservation')
+        return InitialRBACSelection(selected.rbac_profile_id, selected.rbac_profile_digest,
+            selected.policy_id, selected.digest, reservation.id)
+
+
+def require_initial_rbac_activation(grant_id):
+    """Только pending INITIAL activation: lock profile до Grant COMMIT.
+
+    Replacement/обычная active delegation сюда не приходят. Recipe revocation
+    не переопределяет Django Groups после состоявшейся активации.
+    """
+    from mop.server.operations.models import CreateBinding
+    from mop.server.access.models import AgentRBACProvisioning, Grant
+    from mop.server.access.rbac import require_profile
+    binding = CreateBinding.objects.select_related('reservation', 'operation__restartbinding').filter(
+        operation__restartbinding__grant_id=grant_id).first()
+    if binding is None:
+        if AgentRBACProvisioning.objects.filter(grant_id=grant_id, grant__state='reserved').exists():
+            raise Denied('initial RBAC activation create binding is unavailable')
+        return
+    grant = Grant.objects.select_related('intent').get(pk=grant_id)
+    if grant.state == 'active':
+        return
+    if binding.reservation_id is None:
+        raise Denied('initial RBAC activation reservation is unavailable')
+    selections = LaunchSelections()
+    selected = selections.read(binding.reservation.policy_id, git_name=binding.reservation.git_name,
+        git_email=binding.reservation.git_email, check_rbac=False)
+    selections.require_reservation(selected, binding.reservation)
+    selections.require_grant(selected, grant_id)
+    if not AgentRBACProvisioning.objects.filter(subject_id=grant.subject_id, grant_id=grant_id,
+            profile_id=selected.rbac_profile_id, profile_digest=selected.rbac_profile_digest,
+            policy_id=selected.policy_id, policy_digest=selected.digest,
+            reservation_id=binding.reservation_id).exists():
+        raise Denied('exact initial RBAC provisioning receipt required for activation')
+    require_profile(selected.rbac_profile_id, selected.rbac_profile_digest,
+        definition_id=selected.definition_id, owner_id=selected.owner_id, project_id=selected.project_id,
+        lock=transaction.get_connection().in_atomic_block)
 
 
 class InitialReservationApprovals:
@@ -208,7 +293,7 @@ class InitialReservationApprovals:
 
 
 def configure(actor, *, project_id, definition_id, bootstrap_revision, image_id,
-              source_origin, source_commit, source_ref, desired_model, model_config_digest, consumers):
+              source_origin, source_commit, source_ref, desired_model, model_config_digest, consumers, rbac_profile_id):
     """Явный trusted SQL application port, не node wire и не включение physical caps."""
     from mop.server.catalog.models import InitialCreatePolicy, InitialCreateConsumer, InitialCreateSelection, Project
     if (type(consumers) is not tuple or any(type(item) is not tuple or len(item) != 2
@@ -217,10 +302,17 @@ def configure(actor, *, project_id, definition_id, bootstrap_revision, image_id,
     with transaction.atomic():
         Access().authorize(actor, 'catalog.configure_project', project_ids=(project_id,))
         Project.objects.select_for_update().get(pk=project_id)
+        from mop.server.access.models import AgentRBACProfile
+        from mop.server.access.rbac import require_profile
+        profile = AgentRBACProfile.objects.filter(pk=rbac_profile_id).first()
+        if profile is None:
+            raise Denied('explicit approved initial agent RBAC profile required')
+        require_profile(profile.id, profile.digest, definition_id=definition_id, project_id=project_id,
+            owner_id=actor.human_owner_id)
         values = dict(project_id=project_id, owner_id=actor.human_owner_id, definition_id=definition_id,
             bootstrap_revision=bootstrap_revision, image_id=image_id, source_origin=source_origin,
             source_commit=source_commit, source_ref=source_ref, desired_model=desired_model,
-            model_config_digest=model_config_digest)
+            model_config_digest=model_config_digest, rbac_profile_id=profile.id, rbac_profile_digest=profile.digest)
         row = InitialCreatePolicy(**values)
         refs = tuple(sorted(consumers, key=lambda item: (item[0], str(item[1]))))
         row.digest = fingerprint(policy_values(row), refs)
