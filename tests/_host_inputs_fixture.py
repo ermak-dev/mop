@@ -2,8 +2,10 @@
 
 HYPOTHESIS: совпадение synthetic stat/UID не проверяет kernel permission boundary.
 SOLUTION: реальные fork/setgroups/setgid/setuid, node-private input и root copy.
-RESULT: pending actual probe; это не root backend/phase runner acceptance.
-STATUS: pending — see #746
+RESULT: actual Python 3.12 root=0/node=21071/body=21072: 19 checks GREEN.
+Отдельные RED для mutable receipt/large reader, failed cleanup, stale release и
+world-readable foreign quarantine. Это не root backend/phase runner acceptance.
+STATUS: FIXED — see #746
 """
 import copy
 from dataclasses import replace
@@ -313,14 +315,181 @@ class ActualPrivateInputTests(unittest.TestCase):
                 path.rename(self.private/'original-retained')
                 path.write_bytes(b'foreign cleanup race')
                 os.chown(path, NODE, NODE)
-                path.chmod(0o600)
+                path.chmod(0o444)
                 replacement_inode = path.stat().st_ino
             return real_rename(src, dst, **kwargs)
         with patch('os.rename', side_effect=racing), self.assertRaises(Refused):
             self.owner.cleanup_input(receipt)
-        candidates = [p for directory in (self.ingress, self.snapshots) for p in directory.iterdir()]
-        self.assertTrue(any(p.stat().st_ino == replacement_inode and p.read_bytes() == b'foreign cleanup race'
-                            for p in candidates), 'foreign raced inode must not be deleted')
+        candidates = [p for directory in (self.ingress, self.snapshots) for p in directory.rglob('*')
+                      if p.is_file()]
+        captured = [p for p in candidates if p.stat().st_ino == replacement_inode]
+        self.assertTrue(captured, 'foreign raced inode must not be deleted')
+        self.assertTrue(all(p.read_bytes() == b'foreign cleanup race' for p in captured))
+        for path in captured:
+            denied = as_uid(BODY, lambda: path.read_bytes().decode())
+            self.assertFalse(denied['ok'], 'quarantine must not expose even world-readable private input')
+            self.assertEqual(denied['error'], 'PermissionError')
+
+    def test_receipt_is_immutable_and_retained_slots_need_explicit_completed_release(self):
+        from dataclasses import FrozenInstanceError
+        descriptor = self.write()
+        size = len((self.ingress/descriptor.filename).read_bytes())
+        owner = self.store(limits=self.m.Limits(max_files=1, max_bytes=size*2, max_file_bytes=size))
+        with owner:
+            receipt = owner.snapshot(NODE, descriptor, self.a)
+            with self.assertRaises((FrozenInstanceError, AttributeError)):
+                receipt.descriptor = replace(descriptor, sha256='0'*64)
+            with self.assertRaises(Refused):
+                owner.forget(receipt)
+            # Cleanup перемещает уже выделенный ingress inode, не новый file/bytes.
+            self.assertTrue(owner.cleanup_input(receipt))
+            self.assertTrue((self.snapshots/descriptor.filename).exists())
+            self.assertTrue(owner.cleanup_snapshot(receipt))
+            owner.forget(receipt)
+            self.assertEqual(owner.retained, ())
+            with self.assertRaises(Refused):
+                owner.cleanup_snapshot(receipt)
+
+    def test_body_accepts_large_but_bounded_snapshot_and_refuses_substituted_snapshot(self):
+        import base64
+        value = copy.deepcopy(self.value)
+        value['consumers'][0]['value'] = base64.b64encode(b'x'*200000).decode()
+        raw = self.m.pack(self.a, self.s, value).raw
+        self.assertGreater(len(raw), self.m.Limits().max_file_bytes)
+        def produce():
+            with self.f.NodeWriter(self.ingress, node_uid=NODE,
+                    limits=self.m.Limits(max_file_bytes=1048576)) as writer:
+                return writer.write(self.a, self.s, value).wire()
+        produced = as_uid(NODE, produce)
+        self.assertTrue(produced['ok'], produced)
+        descriptor = self.m.Descriptor.parse(produced['value'])
+        with self.store(limits=self.m.Limits(max_file_bytes=1048576)) as owner:
+            owner.snapshot(NODE, descriptor, self.a)
+            read = self.read(descriptor)
+            self.assertTrue(read['ok'], read)
+            self.assertEqual(read['value']['value'], value)
+        path = self.snapshots/descriptor.filename
+        path.unlink()
+        path.symlink_to(self.bearer)
+        read = self.read(descriptor)
+        self.assertFalse(read['ok'])
+        self.assertEqual(read['error'], 'Refused')
+
+    def test_partial_write_keeps_exact_cleanup_receipt_and_never_publishes_body_bytes(self):
+        descriptor = self.write()
+        real_write = os.write
+        calls = 0
+        def failing(fd, raw):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(fd, raw[:100])
+            raise OSError('raw-secret-must-not-leak')
+        with patch('os.write', side_effect=failing), self.assertRaises(Refused) as caught:
+            self.owner.snapshot(NODE, descriptor, self.a)
+        self.assertNotIn('raw-secret-must-not-leak', str(caught.exception))
+        receipt, = self.owner.retained
+        self.assertFalse(self.read(descriptor)['ok'])
+        with self.assertRaises(Refused):
+            self.owner.snapshot(NODE, descriptor, self.a)
+        self.assertTrue(self.owner.cleanup_snapshot(receipt))
+        self.assertTrue(self.owner.cleanup_input(receipt))
+        self.assertEqual(list(self.snapshots.iterdir()), [])
+
+    def test_cleanup_failure_retains_captured_inode_for_expired_retry_without_foreign_deletion(self):
+        descriptor = self.write()
+        receipt = self.owner.snapshot(NODE, descriptor, self.a)
+        real_unlink = os.unlink
+        failed = False
+        def failing(name, **kwargs):
+            nonlocal failed
+            if not failed and name == descriptor.filename+'.cleanup':
+                failed = True
+                raise OSError('raw-cleanup-secret')
+            return real_unlink(name, **kwargs)
+        with patch('os.unlink', side_effect=failing), self.assertRaises(Refused) as caught:
+            self.owner.cleanup_input(receipt)
+        self.assertNotIn('raw-cleanup-secret', str(caught.exception))
+        source = self.ingress/descriptor.filename
+        self.assertFalse(source.exists())
+        source.write_bytes(b'new foreign input after capture')
+        source.chmod(0o600)
+        os.chown(source, NODE, NODE)
+        from mop.node import host_inputs
+        with patch.object(host_inputs, 'now', return_value=self.a.work.not_after+timedelta(seconds=1)):
+            self.assertTrue(self.owner.cleanup_input(receipt))
+        self.assertEqual(source.read_bytes(), b'new foreign input after capture')
+        self.assertTrue((self.snapshots/descriptor.filename).exists())
+        self.assertFalse((self.snapshots/(descriptor.filename+'.cleanup')).exists())
+
+    def test_source_mutation_during_copy_keeps_own_snapshot_cleanup_but_no_success_ack(self):
+        descriptor = self.write()
+        source = self.ingress/descriptor.filename
+        real_write = os.write
+        changed = False
+        def racing(fd, raw):
+            nonlocal changed
+            if not changed:
+                changed = True
+                source.write_bytes(b'foreign modified source')
+            return real_write(fd, raw)
+        with patch('os.write', side_effect=racing), self.assertRaises(Refused):
+            self.owner.snapshot(NODE, descriptor, self.a)
+        receipt, = self.owner.retained
+        with self.assertRaises(Refused):
+            self.owner.cleanup_input(receipt)
+        self.assertTrue(self.owner.cleanup_snapshot(receipt))
+        self.assertEqual(source.read_bytes(), b'foreign modified source')
+
+    def test_stale_forget_cannot_discard_new_ownership_after_lock_acquisition(self):
+        from contextlib import contextmanager
+        descriptor = self.write()
+        old = self.owner.snapshot(NODE, descriptor, self.a)
+        self.owner.cleanup_input(old)
+        self.owner.cleanup_snapshot(old)
+        original_lock = self.owner.ingress.lock
+        triggered = False
+        replacement = None
+        @contextmanager
+        def racing_lock():
+            nonlocal triggered, replacement
+            if not triggered:
+                triggered = True
+                self.owner.forget(old)
+                self.write()
+                replacement = self.owner.snapshot(NODE, descriptor, self.a)
+            with original_lock():
+                yield
+        with patch.object(self.owner.ingress, 'lock', side_effect=racing_lock), self.assertRaises(Refused):
+            self.owner.forget(old)
+        self.assertIn(replacement, self.owner.retained)
+        self.assertTrue(self.owner.cleanup_input(replacement))
+        self.assertTrue(self.owner.cleanup_snapshot(replacement))
+
+    def test_actual_node_processes_cannot_race_file_or_byte_cap(self):
+        limit = self.m.Limits(max_files=1, max_bytes=262144, max_file_bytes=262144)
+        children = []
+        for _ in range(4):
+            a, s, value = selected()
+            pid = os.fork()
+            if pid == 0:
+                os.setgroups([])
+                os.setgid(NODE)
+                os.setuid(NODE)
+                try:
+                    with self.f.NodeWriter(self.ingress, node_uid=NODE, limits=limit) as writer:
+                        writer.write(a, s, value)
+                    os._exit(0)
+                except Refused:
+                    os._exit(2)
+                except BaseException:
+                    os._exit(3)
+            children.append(pid)
+        codes = [os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) for pid in children]
+        self.assertEqual(codes.count(0), 1, codes)
+        self.assertEqual(codes.count(2), 3, codes)
+        self.assertEqual(len(list(self.ingress.iterdir())), 1)
+        self.assertLessEqual(sum(p.stat().st_size for p in self.ingress.iterdir()), limit.max_bytes)
 
     def test_root_file_and_byte_capacity_stays_bounded_with_concurrent_calls(self):
         first = self.write()

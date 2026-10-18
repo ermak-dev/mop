@@ -3,8 +3,12 @@
 SPEC: typed Admission + exact initial delivery -> private derived input ->
 root-only immutable copy -> strict body reader; hash не machine authority.
 SOLUTION: отдельный transport port, без native bindings и privileged exec.
-RESULT: ожидается RED до реализации; actual UID acceptance отдельным probe.
-STATUS: pending — see #746
+RESULT: 14 RED для отсутствующего transport, затем RED bounded retention и
+safe diagnostics (probe, delivery и duplicate JSON); 19 pure/filesystem checks GREEN.
+Actual Python 3.12 UID probe: 19 checks GREEN после отдельных RED large reader,
+mutable receipt, failed cleanup, stale release и world-readable foreign quarantine.
+Runner/backend не проверены.
+STATUS: FIXED — see #746
 """
 import copy
 from dataclasses import replace
@@ -90,6 +94,11 @@ class EnvelopeTests(unittest.TestCase):
             with self.assertRaises(Refused):
                 self.pack(a=a, value=value)
 
+    def test_safe_delivery_refusal_reason_survives_without_reflecting_raw_values(self):
+        value = {**self.value, 'consumers': []}
+        with self.assertRaisesRegex(Refused, 'phase consumer delivery is incomplete'):
+            self.pack(value=value)
+
     def test_scope_work_attempt_and_trusted_backend_are_all_pinned(self):
         envelope = self.pack()
         for name in self.s.__dataclass_fields__:
@@ -124,7 +133,7 @@ class EnvelopeTests(unittest.TestCase):
         outer = json.loads(envelope.raw)
         self.assertEqual(type(outer['payload']), str, 'root must not decode nested delivery/YAML')
         with patch('mop.common.initialcreate.parse_delivery', side_effect=AssertionError('root parsed project data')):
-            parsed = self.parse(envelope.raw)
+            parsed = self.parse(envelope.raw, envelope.descriptor)
         self.assertEqual(parsed.payload, envelope.payload)
         outer['payload'] = 'this is deliberately not JSON or YAML'
         outer['payload_digest'] = hashlib.sha256(outer['payload'].encode()).hexdigest()
@@ -152,6 +161,13 @@ class EnvelopeTests(unittest.TestCase):
         for changes in ({'path': '/private/secret'}, {'sha256': '../secret'}, {'attempt_id': '../secret'}):
             with self.assertRaises(Refused):
                 self.m.Descriptor.parse({**envelope.descriptor.wire(), **changes})
+
+    def test_outer_duplicate_field_refusal_keeps_safe_parser_reason(self):
+        envelope = self.pack()
+        raw = b'{"schema_version":1,"schema_version":1}'
+        descriptor = replace(envelope.descriptor, sha256=hashlib.sha256(raw).hexdigest())
+        with self.assertRaisesRegex(Refused, 'duplicate HOST JSON field'):
+            self.parse(raw, descriptor)
 
     def test_body_reparses_actual_delivery_and_preserves_exact_bytes(self):
         envelope = self.pack()
@@ -282,6 +298,28 @@ class NodeWriterTests(unittest.TestCase):
             self.write()
         self.assertEqual(len(list(self.path.iterdir())), 1)
 
+    def test_retained_ownership_is_bounded_and_forget_never_deletes_files(self):
+        limited = self.f.NodeWriter(self.path, node_uid=os.geteuid(),
+            limits=self.m.Limits(max_files=1, max_bytes=262144, max_file_bytes=262144))
+        self.addCleanup(limited.close)
+        descriptor = limited.write(self.a, self.s, self.value)
+        path = self.path/descriptor.filename
+        with self.assertRaises(Refused):
+            limited.forget(descriptor)
+        path.unlink()
+        a, s, value = selected()
+        with self.assertRaisesRegex(Refused, 'retained|capacity'):
+            limited.write(a, s, value)
+        limited.forget(descriptor)
+        limited.write(a, s, value)
+        self.assertEqual(len(limited.retained), 1)
+
+    def test_limits_refuse_unbounded_or_bool_configuration(self):
+        for changes in ({'max_files': True}, {'max_files': 257}, {'max_bytes': 16777217},
+                        {'max_file_bytes': 1048577}, {'max_file_bytes': 0}, {'max_bytes': 1}):
+            with self.subTest(changes=changes), self.assertRaises(Refused):
+                self.m.Limits(**changes)
+
     def test_no_trusted_root_store_or_body_reader_in_node_uid(self):
         params = dict(node_uid=os.geteuid(), body_uid=os.geteuid()+1, body_gid=os.getgid()+1,
             backend_epoch=self.s.epoch, node_id=self.s.node_id, executor_epoch=self.s.executor_epoch)
@@ -293,6 +331,17 @@ class NodeWriterTests(unittest.TestCase):
 
 
 class ProbeContractTests(unittest.TestCase):
+    def test_probe_failure_reports_finite_test_names_not_raw_secret_exception(self):
+        api()
+        from mop.node import host_input_probe
+        report = getattr(host_input_probe, 'safe_failure', None)
+        self.assertTrue(callable(report), 'probe must report failed checks without raw diagnostics')
+        message = report(b'FAIL: test_fixed_permission (__main__.Fixture.test_fixed_permission)\n'
+                         b'AssertionError: raw-secret-sentinel\nFAILED (failures=1)\n')
+        self.assertIn('test_fixed_permission', message)
+        self.assertNotIn('raw-secret-sentinel', message)
+        self.assertNotIn('raw-secret-sentinel', report(b'raw-secret-sentinel'))
+
     def test_fixed_source_closure_imports_without_installation_or_other_node_modules(self):
         api()
         assert importlib.util.find_spec('mop.node.host_input_probe') is not None, 'owned actual-UID probe missing'
