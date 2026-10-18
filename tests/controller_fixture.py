@@ -266,6 +266,15 @@ test:py3.12:
         self.assertEqual(missing_original(suite_ids | gate_ids), set())
         self.assertEqual(suite_ids & gate_ids, set())
 
+    # #668: selectable helper не должен остаться вне обязательного CI gate.
+    # RED: entry отсутствовал; отдельный check исполняется и в hermetic HOME.
+    def test_owned_management_regression_is_selected_by_the_normal_gate(self):
+        from mop.cli.dev.test import plan
+        entry = Path(__file__).with_name('controller_lifecycle.py')
+        self.assertTrue(entry.is_file(), 'owned lifecycle regression needs a mandatory check-file entry')
+        self.assertEqual(plan([], [entry.name, '_controller_lifecycle_cases.py']), [entry.name])
+        self.assertIn("'_controller_lifecycle_cases.OwnedLifecycle'", entry.read_text())
+
     # HYPOTHESIS (#711): exact count66 падал после добавления новых случаев;
     # замена на >=66 скрыла бы удаление исходной проверки новой с другим ID.
     # SOLUTION: baseline точных ID из4f60fb0a, проверяется его сохранность.
