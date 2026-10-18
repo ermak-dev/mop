@@ -515,6 +515,25 @@ class Grants:
         return self._profile_info(row)
 
     @storage_boundary
+    def authorize_launch(self, binding):
+        """Узловые шаги запуска новой цели (#643): идентичность и готовность.
+
+        Грант выдан (reserved с retained credential), но ещё не активен: агент
+        получит свой token только после готовности, а активация ждёт её
+        квитанций. Только тот же owner/project/target/incarnation/role/digest
+        и актуальное право владельца создавать; исполнение -- authorize_execution."""
+        if type(binding) is not RoleBinding:
+            raise ValueError('complete launch role binding required')
+        if not transaction.get_connection().in_atomic_block:
+            raise ValueError('launch authority requires a caller transaction')
+        row = m.Grant.objects.select_for_update().select_related('intent__definition').filter(
+            pk=binding.grant_id).first()
+        if (row is None or row.state != 'reserved' or row.credential_version_id is None
+                or self._info(row).binding != binding):
+            raise auth.Denied('reserved provisioned launch grant required')
+        self._owner_permission(binding.human_owner_id, 'execution.create_puppet', binding.project_id)
+
+    @storage_boundary
     def authorize_execution(self, binding):
         """Проверка получающего grant без provider I/O; инициатора проверяет WorkPort."""
         self._execution_rows(binding)

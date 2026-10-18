@@ -82,7 +82,7 @@ class RestartHandler:
             raise Refused('controller_unavailable', safe_reason='current target binding is unavailable')
         messages, wipes = self.ops.messages, self.ops.wipes
         if (self.ops.restart_support is None and (messages is None or messages.support is None)
-                and (wipes is None or wipes.support is None) and getattr(self.ops, 'launches', None) is None):
+                and (wipes is None or wipes.support is None) and getattr(self.ops, 'launch_machine', None) is None):
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
 
     def _valid(self, command):
@@ -184,7 +184,8 @@ class RestartHandler:
             raise Refused('transaction_boundary')
         self._ports()
         installation = self.ops._installation()
-        row = m.Operation.objects.select_for_update().get(pk=operation_id, action__in=('restart', 'send', 'dispatch', 'wipe'), target_kind='puppet')
+        row = m.Operation.objects.select_for_update().get(pk=operation_id,
+            action__in=('restart', 'send', 'dispatch', 'wipe', 'create'), target_kind='puppet')
         step = m.Step.objects.select_for_update().get(pk=step_id, operation=row)
         value = self._value(row, step)
         expected = RestartTarget(value.target_id, row.restartbinding.project_id, value.node_id, value.incarnation_id,

@@ -243,6 +243,8 @@ class Operations:
             return self.messages
         if action == 'wipe' and self.wipes is not None:
             return self.wipes
+        if action == 'create' and getattr(self, 'launch_machine', None) is not None:
+            return self.launch_machine
         raise Refused('controller_unavailable', safe_reason='named puppet handler is unavailable')
 
     def submit_node(self, actor, command):

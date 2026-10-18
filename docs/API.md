@@ -572,6 +572,17 @@ steps to the node; the node never receives a server step as machine work. A lost
 is `unknown`; reconciliation reads only, and like restart it does not resume the
 remaining steps automatically. An existing job is never overwritten.
 
+The node then runs `apply_identity` and `confirm_ready` of the same Operation on the
+common machine protocol. They run under the target's provisioned but not yet active
+grant (`authorize_launch`: reserved with its retained credential, the same owner,
+project, target, incarnation, role and digest, and the owner's current
+`execution.create_puppet`): activation waits for exactly these receipts and the agent's
+token comes after readiness, so execution authority here would be a circle. Any other
+action -- send, restart, wipe -- still needs the active grant. The create machine
+handler is bound only with a launch support (the target's job is registered for this
+incarnation); without it the machine route keeps refusing as unavailable. The last node
+step is not terminal: `activate_grant` follows on the server.
+
 ### Puppet delete vertical (#625)
 
 `POST /api/v1/puppets/<uuid>/commands/delete` takes the version-1 target intent with

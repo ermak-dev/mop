@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from .machinebinding import AssignmentBindings, Targets
 from .runtime import assignments_service, machine_execution_service, operations_service
 from mop.server.access.grants import Grants
-from mop.server.operations.launch import CreatePuppets, LaunchJobs
+from mop.server.operations.launch import CreateMachine, CreatePuppets, LaunchJobs
 
 
 class LaunchTargets:
@@ -128,6 +128,17 @@ class LaunchSpecs:
             restore_generation=restore_generation, capabilities=frozenset(enrolled.capabilities))
 
 
+class LaunchSupport:
+    """Привязка узловых шагов create (#643): job цели уже зарегистрирован этой
+    инкарнацией -- узлу нечего подтверждать у тела, которого планировщик не знает."""
+    def require(self, target):
+        from mop.server.operations.models import ScheduledPuppet
+        from mop.server.operations.service import Refused
+        if not ScheduledPuppet.objects.filter(target_id=target.target_id,
+                                              incarnation_id=target.incarnation_id).exists():
+            raise Refused('controller_unavailable', safe_reason='the job of the new target is not registered')
+
+
 def service(*, grants=None, issuer=None, scheduler=None):
     from .adminservices import credential_client
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
@@ -139,4 +150,5 @@ def service(*, grants=None, issuer=None, scheduler=None):
     # общему порту целей.
     operations.targets = targets
     operations.launches = LaunchJobs(operations, scheduler=scheduler, targets=targets, specs=LaunchSpecs())
+    operations.launch_machine = CreateMachine(operations, support=LaunchSupport())
     return operations

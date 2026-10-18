@@ -20,6 +20,7 @@ from . import models as m
 from .commands import CreateCommand
 from .requests import resolve_retry, RequestRefused, Retry
 from .lifecycle import State
+from .puppet import RestartHandler
 from .scheduler import RegisterProof, RegisterTicket
 from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
 
@@ -219,6 +220,41 @@ class CreatePuppets:
             return _snapshot(operation)
 
 
+def require_reserved_grant(target):
+    """Грант новой цели всё ещё выдан ей: reserved, с retained credential, та
+    же инкарнация. Авторизация исполнения до готовности была бы ложным отказом:
+    token агента приходит после неё."""
+    from mop.server.access.models import Grant
+    grant = Grant.objects.select_related('intent').filter(pk=target.grant_id).first()
+    if (grant is None or grant.state != 'reserved' or grant.credential_version_id is None
+            or (grant.intent.target_id, grant.intent.incarnation) != (target.target_id, target.incarnation_id)):
+        raise Denied('reserved grant of the new target is no longer current')
+
+
+class CreateMachine(RestartHandler):
+    """Узловые шаги create (#643): apply_identity и confirm_ready общего протокола.
+
+    Принимается только create-admission'ом, не машинным submit; стадии те же,
+    что у Operation create, -- последний узловой шаг не терминален, дальше
+    серверная activate_grant."""
+    stages = STAGES
+    action = 'create'
+    permission = 'execution.create_puppet'
+
+    def __init__(self, operations, *, support=None):
+        super().__init__(operations)
+        self.support = support
+
+    def _valid(self, command):
+        raise ValueError('create is admitted by its own command, not by the machine handler')
+
+    def require(self, target, row=None):
+        if self.support is None:
+            raise Refused('controller_unavailable', safe_reason='launch binding is unavailable')
+        self.support.require(target)
+        require_reserved_grant(target)
+
+
 class LaunchJobs:
     """Полоса scheduler_register (#643): одна условная запись спеки тела.
 
@@ -265,14 +301,7 @@ class LaunchJobs:
         self.ops.access.authorize(actor, 'execution.create_puppet', project_ids=(target.project_id,))
         if actor.human_owner_id != target.owner_id:
             raise Denied('create belongs to another human assignment')
-        # Исполнения ещё нет: грант этой цели зарезервирован и выдан, токен
-        # агента придёт адресной доставкой после готовности (#669) -- проверка
-        # авторизации исполнения здесь была бы ложным отказом.
-        from mop.server.access.models import Grant
-        grant = Grant.objects.select_related('intent').filter(pk=target.grant_id).first()
-        if (grant is None or grant.state != 'reserved' or grant.credential_version_id is None
-                or (grant.intent.target_id, grant.intent.incarnation) != (target.target_id, target.incarnation_id)):
-            raise Denied('reserved grant of the new target is no longer current')
+        require_reserved_grant(target)
         binding = row.createbinding
         if (binding.scheduler_id != self.scheduler.scheduler_id or not m.ScheduledNode.objects.filter(
                 node_id=row.node_id, scheduler_id=binding.scheduler_id).exists()):

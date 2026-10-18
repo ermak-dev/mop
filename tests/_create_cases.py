@@ -333,3 +333,65 @@ class CreateRegistration(TransactionTestCase):
         self.assertEqual(self.peer.posts, [])
         self.assertEqual(self.peer.jobs[target]['Meta'], {'owner': 'someone else'})
         self.assertFalse(ScheduledPuppet.objects.filter(target_id=target).exists())
+
+
+# HYPOTHESIS (#643): после регистрации узел не может исполнить шаги create:
+# машинная полоса не знает действия create, а claim требует авторизации
+# исполнения -- активного гранта с credential агента, которого до готовности
+# нет. Активация же ждёт квитанций готовности: круг.
+# SOLUTION: идентичность и готовность новой цели исполняются по выданному, но
+# ещё не активному гранту (authorize_launch); всё прочее -- только по активному.
+# STATUS: FIXED — see #643 (узловые шаги; активация гранта -- далее)
+class CreateMachineSteps(TransactionTestCase):
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    ready, body, submit = CreateVertical.ready, CreateVertical.body, CreateVertical.submit
+    launch, step = CreateRegistration.launch, CreateRegistration.step
+
+    def machine(self):
+        from mop.server.access import services as auth
+        from mop.server.controller.createbinding import LaunchSupport
+        from mop.server.controller.machinebinding import compose
+        key = auth.enroll_service('create-executor', self.node.pk, project_ids=(self.project.pk,),
+            permissions=('execution.poll_work', 'execution.claim_work', 'execution.report_result', 'execution.read_facts'))
+        return compose(grants=self.grants, launch_support=LaunchSupport()), auth.token_context(key)
+
+    def test_node_confirms_identity_and_readiness_under_the_provisioned_grant(self):
+        operation, target, _ = self.launch()
+        service, actor = self.machine()
+        # До регистрации job у узла нет работы этой цели.
+        self.assertEqual(service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2), ())
+        self.ops.launches.run(operation)
+        for action, evidence in (('apply_identity', 'identity-applied'), ('confirm_ready', 'ready')):
+            work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+            self.assertEqual((work.operation_id, work.action), (operation, action))
+            attempt = service.claim(actor, work, request_id=uuid4())
+            service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                           outcome='succeeded', evidence=evidence)
+        from mop.server.operations.models import Operation, Step
+        self.assertEqual(service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2), ())
+        steps = dict(Step.objects.filter(operation_id=operation).values_list('name', 'outcome'))
+        self.assertEqual(steps, {'scheduler_register': 'succeeded', 'apply_identity': 'succeeded',
+                                 'confirm_ready': 'succeeded', 'activate_grant': ''})
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'running')
+
+    def test_a_provisioned_grant_authorizes_launch_steps_only(self):
+        operation, target, incarnation = self.launch()
+        from django.db import transaction
+        from mop.server.access.delegation import RoleBinding
+        from mop.server.access.services import Denied
+        from mop.server.controller.machinebinding import ReceivingGrant
+        from mop.server.sessions.models import Assignment
+        row = Assignment.objects.get(pk=target)
+        values = dict(owner_id=row.owner_id, project_id=row.project_id, target_id=row.id, grant_id=row.grant_id,
+                      role=row.role, bundle_digest=row.bundle_digest, incarnation_id=row.current_incarnation_id)
+        receiving = ReceivingGrant(self.grants)
+        for action in ('apply_identity', 'confirm_ready'):
+            with transaction.atomic():
+                receiving.authorize(**values, action=action)
+        for action in ('send_message', 'restart_session', 'wipe_clone'):
+            with self.subTest(action=action), self.assertRaises(Denied), transaction.atomic():
+                receiving.authorize(**values, action=action)
+        with self.assertRaises(Denied), transaction.atomic():
+            self.grants.authorize_launch(RoleBinding(row.project_id, row.id, uuid4(), row.role,
+                                                     row.bundle_digest, row.grant_id, row.owner_id))
