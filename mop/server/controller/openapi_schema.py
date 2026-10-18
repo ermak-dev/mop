@@ -85,6 +85,16 @@ class RestartCommand(serializers.Serializer):
                    'additionalProperties': False})
 
 
+class CreateCommand(serializers.Serializer):
+    schema_version = serializers.IntegerField(default=1)
+    epoch = serializers.CharField()
+    request_id = serializers.CharField()
+    not_after = serializers.CharField()
+    params = free({'type': 'object', 'properties': {'node_id': {'type': 'string', 'format': 'uuid'},
+                                                    'definition_id': {'type': 'string', 'format': 'uuid'}},
+                   'required': ['node_id', 'definition_id'], 'additionalProperties': False})
+
+
 class BuildCommand(serializers.Serializer):
     schema_version = serializers.IntegerField(default=1)
     epoch = serializers.CharField()
@@ -348,6 +358,9 @@ def annotations():
                     'Reconfigures a project; expected_revision is a compare-and-swap guard.')},
         buildviews.BuildProject: {'post': (BuildCommand, OperationReply, 202,
             'Submits a finite pinned build command; accepted returns 202 with a Location header.')},
+        operationviews.CreatePuppet: {'post': (CreateCommand, OperationReply, 202,
+            'Submits a new puppet on a project node from an approved role definition; '
+            'the server assigns the target, incarnation and name.')},
         operationviews.DrainNode: {'post': (NodeCommand, OperationReply, 202,
             'Submits a node drain command; eligible is fixed by the route.')},
         operationviews.EnableNode: {'post': (NodeCommand, OperationReply, 202,

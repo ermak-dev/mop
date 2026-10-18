@@ -41,11 +41,11 @@ class Operation(models.Model):
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch', 'wipe', 'delete')),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create')),
                 name='operation_finite_action'),
             models.CheckConstraint(condition=(Q(target_kind='node', action__in=('drain','enable','build'), eligible__isnull=False,
                 target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet',
-                action__in=('restart', 'stop_job', 'send', 'dispatch', 'wipe', 'delete'),
+                action__in=('restart', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create'),
                 eligible__isnull=True, target_id__isnull=False, incarnation_id__isnull=False)), name='operation_typed_target'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
@@ -70,7 +70,7 @@ class Step(models.Model):
         default_permissions = ()
         constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
             'restart_session', 'confirm_ready', 'image_build', 'scheduler_stop', 'send_message', 'wipe_clone',
-            'scheduler_delete')),
+            'scheduler_delete', 'scheduler_register', 'activate_grant')),
             name='step_finite_handler'),
             models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
             models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
@@ -122,6 +122,22 @@ class StopBinding(models.Model):
     job_id = models.CharField(max_length=128)
     namespace = models.CharField(max_length=128)
     modify_index = models.PositiveBigIntegerField()
+
+    class Meta:
+        default_permissions = ()
+
+
+class CreateBinding(models.Model):
+    """Снимок допуска create (#643): одобренное определение и адрес будущего job.
+
+    Узловые шаги идут по RestartBinding той же Operation; здесь -- то, что
+    нужно серверным шагам регистрации и активации гранта."""
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    definition_id = models.UUIDField()
+    scheduler_id = models.UUIDField()
+    job_id = models.CharField(max_length=128)
+    namespace = models.CharField(max_length=128)
+    applied_index = models.PositiveBigIntegerField(null=True)
 
     class Meta:
         default_permissions = ()

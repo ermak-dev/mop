@@ -532,6 +532,32 @@ NodeHTTP validates that finite shape. The isolated PostgreSQL/TLS checks use
 production DRF and NodeHTTP with explicitly controlled machine receipts, not a
 claim of native application's delivery/idle acceptance or deployment readiness.
 
+### Puppet create admission (#643)
+
+`POST /api/v1/projects/<uuid>/commands/create-puppet` takes `schema_version`, `epoch`,
+`request_id`, `not_after` and `params` with exactly `node_id` and `definition_id`; the
+target, its incarnation, owner and name are the server's to assign, never the body's.
+It needs a human with `execution.create_puppet`, `execution.assign_work` and
+`operations.view_operation` in the project, a node of that project, an approved role
+definition, the owner's latest approved unrevoked bootstrap revision, an available node
+image whose observed revision is the desired one, and an executor epoch the node has
+declared through `executor/restarted` (an empty node declares its first epoch there;
+`NodeExecutor` keeps it). Missing pins refuse with no rows written.
+
+Admission first checks everything without writing, then registers the target's agent
+Actor and reserves and provisions its grant through the credential service under the
+same human's credential -- the worker never holds it -- and finally, in one transaction,
+creates the assignment named `pu-<project>-<n>`, activates the incarnation on the
+declared epoch, records its launch pins (`IncarnationLaunch`: bootstrap revision and
+digest, and a pin of the image revision) and the Operation `create` with the steps
+`scheduler_register`, `apply_identity`, `confirm_ready`, `activate_grant`. Target and
+incarnation ids derive from the actor and request key, so a repeated request finds the
+same agent, grant and operation. The job is registered under the same addressed
+metadata stop and delete read (`addressed_metadata`), by one conditional write
+(`EnforceIndex` on 0) with a readback of the exact Meta. Until the installation binds
+the credential service and a registering scheduler (#644) the production root refuses
+admission as unavailable.
+
 ### Puppet delete vertical (#625)
 
 `POST /api/v1/puppets/<uuid>/commands/delete` takes the version-1 target intent with
