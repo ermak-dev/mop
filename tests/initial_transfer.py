@@ -3,6 +3,10 @@
 Один pure profile считает ASCII JSON/base64, credential framing и private
 outer framing; scalar upper bounds выведены из wire validators, не guessed
 constant overhead. Metadata/consumer bytes учитываются агрегатом каждой фазы.
+SOLUTION: один shared profile считает exact framing и retained binary sizes;
+bootstrap-only allowance не меняет explicit caps и остальные phase budgets.
+RESULT: exact HTTP/socket/private размеры и absolute canonical maximum проверены.
+STATUS: FIXED — see #751 (byte profile; maximum-ref deadline остаётся отдельным RED).
 """
 import base64
 import hashlib
