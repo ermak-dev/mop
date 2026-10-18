@@ -5,7 +5,10 @@
 непривилегированный CI никогда не замечал, что root-only UID граница не
 проверена: 1 skipped читался зелёным итогом.
 """
+from contextlib import contextmanager
 import json
+import time
+import uuid
 import os
 from pathlib import Path
 import sys
@@ -55,6 +58,127 @@ def _drop_backend_state(config, pid):
         return observer.execute(
             'SELECT pid, datname, state, wait_event_type, wait_event FROM pg_stat_activity WHERE pid = %s OR datname = %s',
             (pid, config['NAME'])).fetchall()
+
+
+@contextmanager
+def maintenance_cursor(config):
+    """Native postgres-only соединение для lifecycle собственной test DB.
+
+    30 s — конечный общий бюджет операции, не runtime setting/исключение для
+    SQL приложения. Connect остаётся 5 s, lock 2 s; никаких retry/cancel waits.
+    """
+    import psycopg
+    expires = time.monotonic() + 30
+
+    class MaintenanceConnection(psycopg.Connection):
+        def wait(self, gen, interval=.1, timeout=None):
+            remaining = expires - time.monotonic()
+            if timeout is not None:
+                remaining = min(remaining, timeout)
+            if remaining > 0:
+                try:
+                    return super().wait(gen, interval=interval, timeout=remaining)
+                except psycopg.errors._WaitTimeout:
+                    pass
+            self.pgconn.finish()
+            raise TimeoutError('owned test database maintenance deadline exceeded; connection fenced; outcome requires reconciliation') from None
+
+    connection = MaintenanceConnection.connect(
+        host=config['HOST'], port=config['PORT'], user=config['USER'],
+        password=config['PASSWORD'], dbname='postgres', autocommit=True,
+        connect_timeout=5, options='-c statement_timeout=30000 -c lock_timeout=2000 '
+                                   '-c idle_in_transaction_session_timeout=10000',
+        **{key: value for key, value in config.get('OPTIONS', {}).items()
+           if key.startswith('ssl')})
+    try:
+        with connection.cursor() as cursor:
+            yield cursor
+    finally:
+        connection.close()
+
+
+class OwnedTestDatabase:
+    """Единственные два management-действия fixture, не общий SQL adapter.
+
+    Django autoclobber/retry не получает права удалить collision: владение
+    появляется только после нашего CREATE и фиксируется OID/owner/nonce.
+    """
+    def __init__(self, creation, name):
+        self.creation, self.name = creation, name
+        self.identity = None
+        self.marker = 'mop-test-owner-' + uuid.uuid4().hex
+        self._validate(name)
+
+    def _validate(self, name):
+        import re
+        config = self.creation.connection.settings_dict
+        if (type(name) is not str or name != self.name
+                or re.fullmatch(r'test_mop_[0-9a-f]{32}', name) is None
+                or config.get('TEST', {}).get('NAME') != name):
+            raise ValueError('management requires the exact owned test database name')
+        return config
+
+    @contextmanager
+    def _cursor(self, action):
+        config = self._validate(self.name)
+        started, pid = time.monotonic(), None
+        try:
+            with maintenance_cursor(config) as cursor:
+                observed_pid = cursor.connection.info.backend_pid
+                pid = observed_pid if type(observed_pid) is int and observed_pid > 0 else None
+                yield cursor
+        except Exception as error:
+            # Без connect inputs/пароля: исходное исключение не маскируется,
+            # metadata только нашего имени и известного management PID.
+            diagnostic = {'database': self.name, 'action': action, 'management_pid': pid,
+                          'elapsed': round(time.monotonic() - started, 3),
+                          'error_type': type(error).__name__, 'sqlstate': getattr(error, 'sqlstate', None)}
+            if type(pid) is int and pid > 0:
+                try:
+                    diagnostic['activity'] = _drop_backend_state({**config, 'NAME': self.name}, pid)
+                except Exception as observation:
+                    diagnostic['diagnostic_error'] = type(observation).__name__
+            print('test database management failure:', json.dumps(diagnostic), flush=True)
+            raise
+
+    def _metadata(self, cursor):
+        cursor.execute('SELECT oid, datdba, shobj_description(oid, \'pg_database\') '
+                       'FROM pg_database WHERE datname = %s', (self.name,))
+        return cursor.fetchone()
+
+    def create(self, verbosity, autoclobber, keepdb=False):
+        self._validate(self.creation._get_test_db_name())
+        if keepdb or self.identity is not None:
+            raise ValueError('owned test database must be created once, without keepdb')
+        if self.creation.sql_table_creation_suffix():
+            raise ValueError('owned test database requires the default creation template')
+        with self._cursor('create') as cursor:
+            cursor.execute('CREATE DATABASE "' + self.name + '"')
+            from psycopg import sql
+            cursor.execute(sql.SQL('COMMENT ON DATABASE {} IS {}').format(
+                sql.Identifier(self.name), sql.Literal(self.marker)))
+            self.identity = self._metadata(cursor)
+            if self.identity is None or self.identity[2] != self.marker:
+                raise RuntimeError('test database ownership metadata was not established')
+        return self.name
+
+    def destroy(self, test_database_name, verbosity):
+        self._validate(test_database_name)
+        if self.identity is None:
+            raise ValueError('test database was not created by this owner')
+        # Django destroy_test_db уже закрыл wrapper; его PostgreSQL hook до
+        # DROP закрывает и joins pool. Не обходим этот порядок сменой purpose.
+        self.creation.connection.close_pool()
+        with self._cursor('drop') as cursor:
+            if self._metadata(cursor) != self.identity:
+                raise RuntimeError('test database ownership metadata changed; refusing DROP')
+            cursor.execute('SELECT pid, state, wait_event_type, wait_event '
+                           'FROM pg_stat_activity WHERE datname = %s', (self.name,))
+            activity = cursor.fetchall()
+            if activity:
+                raise RuntimeError('owned test database is not quiescent: ' + json.dumps(activity))
+            cursor.execute('DROP DATABASE "' + self.name + '"')
+        self.identity = None
 
 
 def restore_snapshot(creation, data, original):
@@ -113,7 +237,6 @@ def main(labels=None):
         configure()
         from django.test.runner import DiscoverRunner
         from django.conf import settings
-        import uuid
         # hermetic гоняет clean/hostile одновременно: у каждого своя БД.
         name = 'test_mop_' + uuid.uuid4().hex
         settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = name
@@ -162,8 +285,11 @@ def main(labels=None):
         from unittest.mock import patch
         creation = connection.creation
         original = creation.deserialize_db_from_string
-        with patch.object(creation, 'deserialize_db_from_string',
-                          new=lambda data: restore_snapshot(creation, data, original)):
+        owned = OwnedTestDatabase(creation, name)
+        with patch.object(creation, '_create_test_db', new=owned.create), \
+                patch.object(creation, '_destroy_test_db', new=owned.destroy), \
+                patch.object(creation, 'deserialize_db_from_string',
+                             new=lambda data: restore_snapshot(creation, data, original)):
             suite_result = runner.run_tests(labels or ['_controller_cases'])
             skipped = getattr(getattr(runner, 'captured_result', None), 'skipped', ()) or ()
             return run_exit_code(suite_result, strict=hermetic.STRICT, skipped=len(skipped))
