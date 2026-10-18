@@ -223,17 +223,76 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(self.m.Refused):
             await self.start()
 
-    async def test_start_lost_os_ack_attempts_owned_cleanup_and_stays_unknown(self):
+    async def test_start_lost_os_ack_with_proven_reference_cleans_up_and_stays_unknown(self):
+        # Здесь OS уже доказал reference; случай без snapshot/proof ниже обязан
+        # остаться unknown без adoption/kill даже при matching позднем unit.
         original = self.adapter.start
         async def lost(address):
-            await original(address)
-            raise self.m.Unknown('launch ACK lost')
+            facts = await original(address)
+            raise self.m.StartUnknown('launch ACK lost', facts.verify(self.p, address).reference)
         self.adapter.start = lost
         with self.assertRaisesRegex(self.m.Unknown, 'ACK lost'):
             await self.start()
         self.assertFalse(self.adapter.units[self.s].populated)
         with self.assertRaises(self.m.Refused):
             await self.start()
+
+    async def test_unknown_start_without_snapshot_never_adopts_a_later_invocation(self):
+        # HYPOTHESIS (#741): start Unknown не несёт reference; повторный inspect
+        # может усыновить уже другую incarnation и выдать ей cgroup.kill.
+        # SOLUTION: cleanup только по pinned StartUnknown.reference; без proof
+        # остаются fence и громкий unknown, но нет чужого destructive effect.
+        # RESULT: RED выдавал retire другой invocation; GREEN не вызывает kill.
+        # STATUS: FIXED — see #741
+        original = self.adapter.start
+        async def replaced_before_observation(address):
+            original_facts = await original(address)
+            self.adapter.units[address] = replace(original_facts, invocation_id=uuid4().hex)
+            raise self.m.Unknown('start inspection unavailable; no snapshot')
+        self.adapter.start = replaced_before_observation
+        with self.assertRaisesRegex(self.m.Unknown, 'no snapshot'):
+            await self.start()
+        self.assertFalse(any(c[0] == 'retire' for c in self.adapter.calls),
+                         'no initial reference means no authority to adopt a later unit')
+        self.assertTrue(self.adapter.units[self.s].populated)
+        self.assertIn(self.s, self.owner._fences)
+        with self.assertRaises(self.m.Refused):
+            await self.start()
+        self.assertIn('unknown', self.owner.last_error)
+        with self.assertRaises(self.m.Unknown):
+            await self.owner.aclose()
+        self.assertEqual(sum(c[0] == 'start' for c in self.adapter.calls), 1)
+
+    async def test_pinned_unknown_start_never_cleans_a_changed_invocation_or_missing_snapshot(self):
+        for observation in ('changed', 'unavailable', 'absent'):
+            with self.subTest(observation=observation):
+                await self.asyncSetUp()
+                original_start, original_inspect = self.adapter.start, self.adapter.inspect
+                async def lost(address):
+                    facts = await original_start(address)
+                    reference = facts.verify(self.p, address).reference
+                    if observation == 'changed':
+                        self.adapter.units[address] = replace(facts, invocation_id=uuid4().hex)
+                    raise self.m.StartUnknown('start observation unknown', reference)
+                async def inspect(address):
+                    if self.adapter.entered.is_set():
+                        if observation == 'unavailable':
+                            raise self.m.Unknown('kernel snapshot unavailable')
+                        if observation == 'absent':
+                            return None
+                    return await original_inspect(address)
+                self.adapter.start, self.adapter.inspect = lost, inspect
+                with self.assertRaisesRegex(self.m.Unknown, 'observation unknown'):
+                    await self.start()
+                self.assertTrue(self.adapter.units[self.s].populated)
+                self.assertFalse(any(c[0] == 'retire' for c in self.adapter.calls))
+                self.assertIn(self.s, self.owner._fences)
+                with self.assertRaises(self.m.Refused):
+                    await self.start()
+                self.assertIsNotNone(self.owner.last_error)
+                with self.assertRaises(self.m.Unknown):
+                    await self.owner.aclose()
+                self.assertEqual(sum(c[0] == 'start' for c in self.adapter.calls), 1)
 
     async def test_unknown_cleanup_retains_fence_and_never_reports_empty(self):
         snap = await self.start()
@@ -559,6 +618,191 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(systemd, 'installed_file', return_value=adapter._runner_identity), \
                     patch.object(systemd, 'read_kernel', return_value=adapter.boot_id):
                 yield adapter, s, body, cgroup
+
+    def manager_transition(self, adapter, s, termination):
+        """Fake manager bytes через production _unit/parser, не actual signal."""
+        from mop.node import host_scope_systemd as systemd
+        p = adapter.installed
+        values = dict.fromkeys(systemd.EXTRA_PROPERTIES, '')
+        values.update(systemd.properties(p, s))
+        values.update(Id=s.unit, LoadState='loaded', Transient='yes', DynamicUser='no',
+                      PrivateUsers='no', FragmentPath='/run/systemd/transient/'+s.unit,
+                      ControlGroup=s.cgroup, MainPID='76', InvocationID=uuid4().hex,
+                      ActiveState='active', SubState='running')
+        class Command:
+            def __init__(self):
+                self.calls, self.observations = [], 0
+
+            async def run(self, executable, *args):
+                self.calls.append((executable, *args))
+                if '--property=LoadState' in args:
+                    return b'LoadState=loaded\n'
+                if 'get-property' in args:
+                    key = args[-1]
+                    if key in systemd.STRUCTURED_EMPTY:
+                        return json.dumps(dict(type=systemd.STRUCTURED_EMPTY[key], data=[])).encode()
+                    extended = key == 'ExecStartEx'
+                    row = [str(p.runner), [str(p.runner), '--scope', s.unit],
+                           [] if extended else False, 0, 0, 0, 0, 76]
+                    row += [0, 0] if self.observations == 1 else list(termination)
+                    return json.dumps(dict(type='a(sasasttttuii)' if extended else 'a(sasbttttuii)',
+                                           data=[row])).encode()
+                self.observations += 1
+                state = values if self.observations == 1 else {**values, 'MainPID': '0', 'SubState': 'exited'}
+                return ''.join(k+'='+v+'\n' for k, v in state.items()).encode()
+        adapter.command = Command()
+        adapter._unit = systemd.SystemdCgroupAdapter._unit.__get__(adapter)
+        return values
+
+    async def test_unit_retains_structured_termination_proof_without_extra_commands(self):
+        # BUG (#741): _unit теряет code/status уже прочитанного ExecStart.
+        # HYPOTHESIS: state/PID пара не отличает штатный exit от SIGTERM.
+        # SOLUTION: внутренний details parser сохраняет code/status без нового I/O.
+        # RESULT: RED None вместо пары; GREEN две пары и прежние 20 commands.
+        # STATUS: FIXED — see #741
+        with self.directory_adapter() as (adapter, s, body, cgroup):
+            self.manager_transition(adapter, s, (1, 0))
+            before = await adapter._unit(s)
+            after = await adapter._unit(s)
+            self.assertEqual(before[0].get('ExecStartTermination'), (0, 0))
+            self.assertEqual(after[0].get('ExecStartTermination'), (1, 0))
+            self.assertEqual(len(adapter.command.calls), 2*(4+6), 'reuse structured ExecStart; no extra read')
+
+    async def test_production_parser_transition_requires_normal_manager_termination(self):
+        # BUG (#741): Type=exec считает SIGTERM success, но это не CLD_EXITED/0.
+        # HYPOTHESIS: exception разрешён только с retained manager code=1/status=0.
+        # SOLUTION: code/status из того же validated _unit, только int 1/0.
+        # RESULT: RED принимал 2/15, 1/7, 0/0; GREEN, malformed/bool тоже refused.
+        # Actual private systemd RED принимал настоящий SIGTERM 2/15; GREEN
+        # вернул unknown без snapshot, exact empty cleanup, replay refused.
+        # STATUS: FIXED — see #741
+        for termination in ((1, 0), (2, 15), (1, 7), (0, 0), (True, 0),
+                            (1, False), (), (1,), ('1', 0), (1, None)):
+            with self.subTest(termination=termination), self.directory_adapter() as (adapter, s, body, cgroup):
+                values = self.manager_transition(adapter, s, termination)
+                if all(type(v) is int for v in termination) and termination == (1, 0):
+                    facts = await adapter._inspect(s, launched=True)
+                    self.assertEqual(facts.verify(adapter.installed, s).reference.invocation_id,
+                                     values['InvocationID'])
+                else:
+                    with self.assertRaises(api().StartUnknown) as caught:
+                        await adapter._inspect(s, launched=True)
+                    self.assertEqual(caught.exception.reference,
+                                     api().Reference(s, values['InvocationID'], adapter.boot_id))
+                # Два чтения, не retry/adoption; malformed row может отказать до ExecStartEx.
+                self.assertEqual(adapter.command.observations, 2)
+                self.assertLessEqual(len(adapter.command.calls), 20)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_termination_metadata_is_only_a_gate_for_the_transition_exception(self):
+        # HYPOTHESIS 1 (WRONG): включение metadata в equality создаёт новые
+        # Unknown даже без state/PID transition. Это proof исключения, не identity.
+        # SOLUTION: metadata исключена из прежней equality, читается только в gate.
+        # RESULT: отдельный RED metadata-only -> GREEN без нового admission rule.
+        # STATUS: FIXED — see #741
+        for before_exit, after_exit in (((0, 0), (1, 0)), ((0, 0), (2, 15)), ((2, 15), (2, 15))):
+            with self.subTest(before=before_exit, after=after_exit), self.directory_adapter() as (adapter, s, body, cgroup):
+                values, executable, argv = adapter._unit.return_value
+                values = {**values, 'MainPID': '0', 'ActiveState': 'active', 'SubState': 'exited'}
+                adapter._unit.side_effect = [({**values, 'ExecStartTermination': proof}, executable, argv)
+                                             for proof in (before_exit, after_exit)]
+                facts = await adapter.inspect(s)
+                self.assertTrue(facts.verify(adapter.installed, s).populated)
+                self.assertEqual(adapter._unit.await_count, 2)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_starter_transition_without_termination_proof_stays_unknown(self):
+        # HYPOTHESIS: сравнение tuple без exact int допускает bool как 1/0;
+        # отсутствие/сломанная форма proof также не разрешает transition.
+        # SOLUTION: gate проверяет tuple/длину/int, затем CLD_EXITED/0.
+        # RESULT: RED принимал все семь вариантов; GREEN сохраняет first reference.
+        # STATUS: FIXED — see #741
+        for termination in (None, (2, 15), (1, 7), (True, 0), (1, False), (1,), '1/0'):
+            with self.subTest(termination=termination), self.directory_adapter() as (adapter, s, body, cgroup):
+                values, executable, argv = adapter._unit.return_value
+                before = {**values, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running'}
+                if termination is not None:
+                    before['ExecStartTermination'] = termination
+                after = {**before, 'MainPID': '0', 'SubState': 'exited'}
+                adapter._unit.side_effect = [(before, executable, argv), (after, executable, argv)]
+                with self.assertRaises(api().StartUnknown) as caught:
+                    await adapter._inspect(s, launched=True)
+                self.assertEqual(caught.exception.reference,
+                                 api().Reference(s, values['InvocationID'], adapter.boot_id))
+                self.assertEqual(adapter._unit.await_count, 2)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_same_invocation_starter_exit_is_not_a_containment_identity_change(self):
+        # BUG: штатный double-fork между unit snapshots превращается в Unknown.
+        # HYPOTHESIS: MainPID/SubState — lifecycle, не exact invocation authority.
+        # SOLUTION: только running/PID>0 -> exited/PID=0 при active, полном
+        # равенстве остальных fields и manager proof int CLD_EXITED=1/status=0;
+        # те же два чтения, без нового budget/retry.
+        # RESULT: RED здесь и в actual barrier fixture: только MainPID/SubState
+        # и normal termination metadata изменились; затем GREEN.
+        # STATUS: FIXED — see #741
+        with self.directory_adapter() as (adapter, s, body, cgroup):
+            before, executable, argv = adapter._unit.return_value
+            before = {**before, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running',
+                      'ExecStartTermination': (0, 0)}
+            after = {**before, 'MainPID': '0', 'SubState': 'exited', 'ExecStartTermination': (1, 0)}
+            adapter._unit.side_effect = [(before, executable, argv), (after, executable, argv)]
+            facts = await adapter.inspect(s)
+            self.assertTrue(facts.verify(adapter.installed, s).populated)
+            self.assertEqual(facts.invocation_id, before['InvocationID'])
+            self.assertEqual(adapter._unit.await_count, 2, 'no inspection retry or added budget')
+            self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_start_unknown_pins_first_validated_invocation_without_extra_inspection(self):
+        from unittest.mock import AsyncMock, Mock
+        for failure in ('members', 'invocation', 'no-unit', 'invalid-executable'):
+            with self.subTest(failure=failure), self.directory_adapter() as (adapter, s, body, cgroup):
+                values, executable, argv = adapter._unit.return_value
+                before = (values, executable, argv)
+                after = ({**values, 'InvocationID': uuid4().hex}, executable, argv)
+                if failure == 'no-unit':
+                    before = None
+                elif failure == 'invalid-executable':
+                    before = (values, '/bin/sh', argv)
+                adapter._body = Mock()
+                adapter.command = Mock(run=AsyncMock(return_value=b''))
+                adapter._unit.side_effect = [None, before, after]
+                if failure == 'members':
+                    adapter._members = Mock(side_effect=api().Unknown('kernel membership unavailable'))
+                with self.assertRaises(api().StartUnknown) as caught:
+                    await adapter.start(s)
+                reference = caught.exception.reference
+                if failure in ('no-unit', 'invalid-executable'):
+                    self.assertIsNone(reference, 'unvalidated unit is not cleanup authority')
+                else:
+                    self.assertEqual(reference, api().Reference(s, values['InvocationID'], adapter.boot_id))
+                self.assertEqual(adapter.command.run.await_count, 2, 'one environment read, one start')
+                self.assertEqual(adapter._unit.await_count, 3 if failure == 'invocation' else 2)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_starter_exit_never_masks_identity_or_unexpected_state_changes(self):
+        for change in ({'InvocationID': uuid4().hex}, {'ControlGroup': '/foreign'},
+                       {'User': '0'}, {'Group': '0'}, {'ActiveState': 'failed'},
+                       {'SubState': 'dead'}, {'MainPID': '77'}):
+            with self.subTest(change=change), self.directory_adapter() as (adapter, s, body, cgroup):
+                before, executable, argv = adapter._unit.return_value
+                before = {**before, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running',
+                          'ExecStartTermination': (0, 0)}
+                after = {**before, 'MainPID': '0', 'SubState': 'exited',
+                         'ExecStartTermination': (1, 0), **change}
+                adapter._unit.side_effect = [(before, executable, argv), (after, executable, argv)]
+                with self.assertRaises((api().Unknown, api().Refused)):
+                    await adapter.inspect(s)
+                self.assertEqual(adapter._unit.await_count, 2)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+        for executable_change, argv_change in (('/bin/sh', None), (None, ('/bin/sh',))):
+            with self.directory_adapter() as (adapter, s, body, cgroup):
+                before, executable, argv = adapter._unit.return_value
+                adapter._unit.side_effect = [(before, executable, argv),
+                    (before, executable_change or executable, argv_change or argv)]
+                with self.assertRaises((api().Unknown, api().Refused)):
+                    await adapter.inspect(s)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
 
     async def test_owned_retirement_ignores_consumer_cwd_mutations(self):
         # HYPOTHESIS: launch admission _body повторно доверяет mutable cwd

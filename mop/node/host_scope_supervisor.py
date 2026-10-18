@@ -12,7 +12,7 @@ import stat
 import struct
 
 from mop.node.host_scope import (
-    FRAME_LIMIT, Facts, Installed, OsAdapter, Refused, Request, Unknown, decode, encode,
+    FRAME_LIMIT, Facts, Installed, OsAdapter, Refused, Request, StartUnknown, Unknown, decode, encode,
 )
 
 
@@ -66,15 +66,20 @@ class Supervisor:
                     raise Unknown('HOST start returned no actual OS facts')
                 facts.verify(self.installed, request.scope)
             except (Unknown, Refused) as launch_error:
-                # OS мог создать unit, но потерять ACK. До возврата unknown
-                # пытаемся убрать только точный проверенный собственный scope.
+                # Только reference первого actual launch observation разрешает
+                # cleanup. Адрес scope и поздний matching unit — не proof: там
+                # уже может стоять другая incarnation. Unknown не становится ACK.
                 try:
+                    reference = launch_error.reference if isinstance(launch_error, StartUnknown) else None
+                    if reference is None:
+                        raise Unknown('uncertain HOST launch has no owned reference; cleanup unknown')
                     owned = await self.adapter.inspect(request.scope)
-                    if owned is not None:
-                        snapshot = owned.verify(self.installed, request.scope)
-                        empty = await self.adapter.retire(snapshot.reference)
-                        if empty.verify(self.installed, request.scope, snapshot.reference).populated:
-                            raise Unknown('uncertain HOST launch remains populated')
+                    if owned is None:
+                        raise Unknown('uncertain HOST launch absent; cleanup unknown')
+                    owned.verify(self.installed, request.scope, reference)
+                    empty = await self.adapter.retire(reference)
+                    if empty.verify(self.installed, request.scope, reference).populated:
+                        raise Unknown('uncertain HOST launch remains populated')
                 except (Refused, Unknown) as cleanup_error:
                     self.last_error = str(cleanup_error)
                 raise Unknown('HOST launch uncertain: '+str(launch_error)) from launch_error

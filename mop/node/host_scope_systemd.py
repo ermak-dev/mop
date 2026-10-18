@@ -14,7 +14,7 @@ import signal
 import stat
 import time
 
-from mop.node.host_scope import Facts, Installed, Refused, Scope, Unknown, unique
+from mop.node.host_scope import Facts, Installed, Refused, Scope, StartUnknown, Unknown, unique
 
 CGROUP_ROOT = Path('/sys/fs/cgroup')
 TASKS_MAX = 128
@@ -271,7 +271,7 @@ def parse_properties(raw, names):
         raise Refused('invalid unit property encoding') from error
 
 
-def _parse_exec(raw, extended):
+def _parse_exec_details(raw, extended):
     signature = 'a(sasasttttuii)' if extended else 'a(sasbttttuii)'
     try:
         value = json.loads(raw, object_pairs_hook=unique)
@@ -285,9 +285,13 @@ def _parse_exec(raw, extended):
                 or (row[2] != [] if extended else row[2] is not False)
                 or not all(type(v) is int for v in row[3:])):
             raise Refused('exact ExecStart shape required')
-        return row[0], tuple(row[1])
+        return row[0], tuple(row[1]), (row[8], row[9])
     except (ValueError, UnicodeError, RecursionError) as error:
         raise Refused('invalid structured ExecStart') from error
+
+
+def _parse_exec(raw, extended):
+    return _parse_exec_details(raw, extended)[:2]
 
 
 def parse_exec(raw):
@@ -421,12 +425,14 @@ class SystemdCgroupAdapter:
         raw_exec = await self.command.run(TOOLS[2], '--system', '--json=short', 'get-property',
             'org.freedesktop.systemd1', '/org/freedesktop/systemd1/unit/'+object_name,
             'org.freedesktop.systemd1.Service', 'ExecStart')
-        executable, argv = parse_exec(raw_exec)
+        executable, argv, termination = _parse_exec_details(raw_exec, False)
         raw_ex = await self.command.run(TOOLS[2], '--system', '--json=short', 'get-property',
             'org.freedesktop.systemd1', '/org/freedesktop/systemd1/unit/'+object_name,
             'org.freedesktop.systemd1.Service', 'ExecStartEx')
         if parse_exec_ex(raw_ex) != (executable, argv):
             raise Refused('HOST ExecStartEx differs from installed ExecStart')
+        # Уже прочитанные manager facts, не новый запрос и не consumer assertion.
+        values['ExecStartTermination'] = termination
         return values, executable, argv
 
     def _cgroup(self, scope):
@@ -476,36 +482,72 @@ class SystemdCgroupAdapter:
                 os.close(proc)
 
     async def inspect(self, scope):
+        return await self._inspect(scope)
+
+    async def _inspect(self, scope, *, launched=False):
         if type(scope) is not Scope:
             raise Refused('typed HOST scope required')
         # Consumer cwd — launch admission, не authority уже созданного scope:
         # тело может chmod/сменить/удалить его, но не своё containment ownership.
         self._runner()
+        reference = None
         try:
             result = await self._unit(scope)
             if result is None:
                 return None
             values, executable, argv = result
+            values = values.copy()
+            values.pop('ExecStartTermination', None)
+            result = values, executable, argv
+            # Pin первого проверенного invocation до чтения volatile membership.
+            # False здесь не empty claim: snapshot не выходит из этого метода.
+            facts = Facts(scope, values['InvocationID'], self.boot_id,
+                int(values['User']), int(values['Group']), executable, argv,
+                values['ControlGroup'], False, True)
+            reference = facts.verify(self.installed, scope).reference
             fd = self._cgroup(scope)
             try:
                 self._members(fd, scope)
                 populated = self._populated(fd)
                 again = await self._unit(scope)
+                termination = None
+                if again is not None:
+                    observed, observed_executable, observed_argv = again
+                    observed = observed.copy()
+                    # Metadata нужна только exception, не меняет прежнюю equality.
+                    termination = observed.pop('ExecStartTermination', None)
+                    again = observed, observed_executable, observed_argv
                 if again != result:
-                    raise Unknown('HOST unit changed during inspection')
+                    # Единственный доказанный lifecycle transition Type=exec /
+                    # RemainAfterExit: starter штатно ушёл (CLD_EXITED=1/status=0).
+                    # SIGTERM тоже systemd success, но не разрешённый normal exit.
+                    # Все прочие поля и exact invocation сравниваются как раньше;
+                    # нет повторного inspect, нового start или adoption incarnation.
+                    exited = ({**values, 'MainPID': '0', 'SubState': 'exited'}, executable, argv)
+                    if not (values.get('ActiveState') == 'active'
+                            and values.get('SubState') == 'running'
+                            and int(values.get('MainPID', '0')) > 0
+                            and type(termination) is tuple and len(termination) == 2
+                            and all(type(v) is int for v in termination)
+                            and termination == (1, 0) and again == exited):
+                        raise Unknown('HOST unit changed during inspection')
                 if self.boot_id != read_kernel('/proc/sys/kernel/random/boot_id', 64):
                     raise Refused('HOST boot identity changed')
-                facts = Facts(scope, values['InvocationID'], self.boot_id,
-                    int(values['User']), int(values['Group']), executable, argv,
-                    values['ControlGroup'], populated, True)
-                facts.verify(self.installed, scope)
+                facts = replace(facts, populated=populated)
+                facts.verify(self.installed, scope, reference)
                 return facts
             finally:
                 os.close(fd)
-        except (OSError, IndexError, ValueError) as error:
-            if isinstance(error, Refused):
+        except (Refused, Unknown, OSError, IndexError, ValueError) as error:
+            if isinstance(error, (Refused, Unknown)):
+                failure = error
+            else:
+                failure = Unknown('HOST kernel/unit observation unavailable: '+type(error).__name__)
+            if launched:
+                raise StartUnknown(str(failure), reference) from error
+            if failure is error:
                 raise
-            raise Unknown('HOST kernel/unit observation unavailable: '+type(error).__name__) from error
+            raise failure from error
 
     async def start(self, scope):
         self._body(scope)
@@ -522,9 +564,9 @@ class SystemdCgroupAdapter:
             raise Refused('system manager environment is not consumer-only')
         # Не передаём environment root-процесса: BoundedCommand задаёт свой.
         await self.command.run(*launch_argv(self.installed, scope))
-        facts = await self.inspect(scope)
+        facts = await self._inspect(scope, launched=True)
         if facts is None:
-            raise Unknown('HOST launch acknowledged without inspectable containment')
+            raise StartUnknown('HOST launch acknowledged without inspectable containment')
         return facts
 
     async def retire(self, reference):
