@@ -3257,34 +3257,104 @@ def check_deploy_check(c):
 
 
 def check_agent_on_node_172(c):
-    """#172: юнит агента переезжает с `python3 -m mop.agent` на `mop agent`,
-    а на узле .env нет -- только node.env. Считалось, что диспетчер откажет
-    там на REQUIRED; не отказывает: require зовёт только lib.cluster, а
-    командлет агента его не берёт. Проверка зелёная с первого прогона и
-    закрепляет нынешнее поведение, а не чинит: отказ здесь уронил бы агента
-    на каждом узле, как только юнит переедет. Живьём то же на hyper:
-    `cd / && ~/mop/bin/mop agent --check` -- exit 0, subscribed.
+    """Ранний node entry #172 сохраняется на explicit bootstrap #640/#642.
 
-    Узел здесь -- временный дом с одним node.env, .env нет, каталог `/`.
-    Дальше отказа на настройках команда дойти обязана: до агента -- его
-    отказ на кредах шины, либо, без nats-py, отказ командлета про библиотеку.
-    STATUS: FIXED — see #172"""
+    HYPOTHESIS: старый check принимает только bus diagnostic и падает на новом
+    обязательном --bootstrap. SOLUTION: тот же entry без .env/context/NATS,
+    но с явным private transport; настоящие TLS discovery/refusal и safe errors.
+    RESULT: обязательный input не подменяется node.env; успешный check читает
+    только executor discovery, unbound serve не двигает fence.
+    STATUS: FIXED — see #642"""
+    import http.server
+    from pathlib import Path
     import subprocess
-    import tempfile
-    home = tempfile.mkdtemp(prefix="mop-node-172-")
-    os.makedirs(os.path.join(home, ".config", "mop"))
-    with open(os.path.join(home, ".config", "mop", "node.env"), "w") as f:
-        f.write("MOP_DRIVER=host\nMOP_USER=mopuser\n")
-    env = hermetic.child_env({"HOME": home,
-                              "MOP_ENV_FILE": os.path.join(home, "no-such.env"),
-                              "MOP_NODE": "hyper"})
-    r = subprocess.run(["bash", os.path.join(ROOT, "bin", "mop"), "agent", "--check"],
-                       cwd="/", env=env, capture_output=True, text=True, timeout=60)
-    out = r.stdout + r.stderr
-    reached = "no bus credentials" in out or "bus library needed" in out
-    c.check("mop agent --check on a node with node.env and no .env must reach the agent",
-            not ("required settings not filled" in out or not reached),
-            f"rc {r.returncode}, {out.strip()!r}")
+    from uuid import uuid4
+    from _control_fixture import own_tls
+
+    script = '''
+import importlib.abc, os, sys
+class RejectOld(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname == 'nats' or fullname.startswith('nats.') or fullname in (
+            'mop.common.context', 'mop.common.config', 'mop.common.bus',
+            'mop.node.agent', 'mop.client.control', 'mop.cli._control'):
+            raise AssertionError('legacy import: '+fullname)
+def reject_store(event, args):
+    if event == 'open' and isinstance(args[0], (str, bytes)):
+        if os.path.basename(os.fsdecode(args[0])) in (
+            '.env', 'node.env', 'bus.json', 'ready.json', 'connection.json',
+            'operator.json', 'client.json', 'no-such.env'):
+            raise AssertionError('legacy store read')
+sys.meta_path.insert(0, RejectOld())
+sys.addaudithook(reject_store)
+from mop.cli import main
+sys.exit(main(sys.argv[1:]))
+'''
+
+    class Discovery(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.server.calls.append((self.command, self.path, self.headers.get('Authorization')))
+            raw = json.dumps(self.server.value).encode()
+            self.send_response(self.server.status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            self.server.calls.append((self.command, self.path, None))
+            self.send_error(500, 'unexpected mutation')
+
+    with tempfile.TemporaryDirectory(prefix='mop-node-172-') as home, own_tls(Discovery) as tls:
+        server, origin, ca, directory = tls
+        config = Path(home)/'.config'/'mop'
+        config.mkdir(parents=True)
+        (config/'node.env').write_text('MOP_DRIVER=host\nMOP_USER=mopuser\n')
+        env = hermetic.child_env({'HOME': home, 'MOP_ENV_FILE': str(Path(home)/'no-such.env'),
+                                  'MOP_NODE': 'legacy-node-must-not-authorize'})
+        env['PYTHONPATH'] = ROOT
+        node, epoch, executor = (str(uuid4()) for _ in range(3))
+        token = 'a' * 40
+        ca.chmod(0o600)
+        file = Path(directory)/'bootstrap.json'
+        file.write_text(json.dumps(dict(schema_version=1, installation_id='fixture',
+            origin=origin, ca_file=str(ca), node_id=node, token=token)))
+        file.chmod(0o600)
+        server.value = dict(schema_version=1, installation_id='fixture', epoch=epoch,
+                            node_id=node, executor_epoch=executor)
+        server.status, server.calls = 200, []
+
+        def invoke(args, code, diagnostic=''):
+            result = subprocess.run([sys.executable, '-P', '-c', script, 'agent', *args],
+                cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            c.expect(f'#642 explicit bootstrap agent {args} exit', result.returncode, code)
+            c.expect('#642 agent never writes stdout', result.stdout, '')
+            if diagnostic:
+                c.check('#642 agent explains its safe refusal', diagnostic in result.stderr,
+                        result.stderr)
+            else:
+                c.expect('#642 successful node discovery is silent', result.stderr, '')
+            for forbidden in ('Traceback', 'legacy import', 'legacy store read',
+                              'required settings not filled', 'no bus credentials',
+                              'bus library needed', token):
+                c.check(f'#642 node entry never exposes {forbidden!r}',
+                        forbidden not in result.stdout+result.stderr)
+
+        invoke(['--check'], 2, '--bootstrap')
+        invoke(['--bootstrap', str(Path(directory)/'missing'), '--check'], 1,
+               'node bootstrap private input is unavailable')
+        c.expect('#642 missing input never contacts discovery', server.calls, [])
+        invoke(['--bootstrap', str(file), '--check'], 0)
+        expected = [('GET', '/api/v1/machine/executor?schema_version=1&node_id='+node, 'Token '+token)]
+        c.expect('#642 check is authenticated read-only discovery', server.calls, expected)
+        invoke(['--bootstrap', str(file)], 1, 'native physical startup root is not bound')
+        c.expect('#642 unbound physical root has no HTTP effect', server.calls, expected)
+        server.status = 401
+        invoke(['--bootstrap', str(file), '--check'], 1, 'machine request refused (HTTP 401)')
+        c.expect('#642 auth refusal never falls back or retries', server.calls, expected * 2)
 
 
 def check_bus_import_169(c):
@@ -3677,9 +3747,10 @@ def check_server_namespace_259(c):
     c.check("#536 mop diagnose stays top-level, for the operator's machine",
             "diagnose" in top)
     # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
-    c.expect("#646 driver keeps existing operations and non-model diagnostics",
+    # #719: private OS fixture -- node diagnostic, не pool/model operation.
+    c.expect("#646/#719 driver keeps operations and bounded non-model diagnostics",
              set(tree.get("driver") or {}),
-             {"run", "list", "sweep", "build", "clone-work", "purge-clone", "exec"})
+             {"run", "list", "sweep", "build", "clone-work", "purge-clone", "exec", "scope-probe"})
     for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
         c.expect(f"#259 LEGACY must map {old} into server", cli.LEGACY.get(old), ("server", old))
     for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],
