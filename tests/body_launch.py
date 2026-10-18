@@ -557,58 +557,17 @@ class SessionConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 return receipt
         self.assertFalse(await ReadyConfirmation(resolver, RacingReceipts()).confirmed(w, target))
 
-    async def test_new_producer_is_registered_before_private_hook_bridge_is_exposed(self):
-        m = api()
-        from mop.node import body_launch
-        self.assertTrue(hasattr(body_launch, 'SessionRuntime'), 'registered producer lifetime is missing')
-        from mop.node.body_launch import SessionRuntime, SessionProof
-        from mop.common.telemetry import Ack
-        w = work()
-        r = m.Registration(w, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
-        # Короткий собственный корень (#677): bridge-сокет здесь настоящий
-        # (bind и chmod 0o600 проверяются), во вложенном прогоне наследуемый
-        # TMPDIR удлиняет путь за sockaddr_un.
-        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
-            path = Path(directory)/'hook.sock'
-            os.chmod(directory, 0o700)
-            proof = SessionProof(r, '%0', 'actual-session', uuid4(), Path(directory)/'session.sock', 123, 'start-1')
-            events = []
-            class Source:
-                async def register(self, observed):
-                    events.append(('registered', observed.scope))
-                    self.scope = observed.scope
-                    return observed.scope
-                async def ingest(self, observation):
-                    self.observation = observation
-                    return Ack(observation.scope.producer_epoch, observation.sequence)
-            source = Source()
-            runtime = SessionRuntime(source, source)
-            bridge = await runtime.attach(proof, path=path)
-            try:
-                self.assertEqual(events, [('registered', proof.scope)])
-                env = bridge.environment()
-                self.assertEqual(set(env), {'MOP_TELEMETRY_SOCKET', 'MOP_TELEMETRY_TOKEN'})
-                self.assertEqual(len(env['MOP_TELEMETRY_TOKEN']), 64)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                from mop import session
-                from unittest.mock import patch
-                with patch.dict(os.environ, env):
-                    await asyncio.to_thread(session.hook, json.dumps(dict(session_id='actual-session',
-                        hook_event_name='SessionStart')), 0)
-                for _ in range(100):
-                    if bridge.buffered: break
-                    await asyncio.sleep(.001)
-                await bridge.flush()
-                self.assertEqual(source.observation.scope, proof.scope)
-            finally:
-                await runtime.aclose()
-            self.assertFalse(path.exists())
-            class WrongSource:
-                async def register(self, observed):
-                    return replace(observed.scope, producer_epoch=uuid4())
-            runtime = SessionRuntime(WrongSource(), source)
-            with self.assertRaises(Refused): await runtime.attach(proof, path=path)
-            self.assertFalse(path.exists())
+    async def test_producer_cannot_attach_without_preexec_preparation(self):
+        # Полный env/ACK/IPC happy path теперь в session_runtime.py: настоящий
+        # owned child вместо proof со synthetic PID=123 и env подменой parent.
+        from mop.node.body_launch import SessionRuntime
+        runtime = SessionRuntime(None, None)
+        try:
+            with self.assertRaises(Unavailable):
+                runtime.environment()
+            with self.assertRaises(Unavailable):
+                await runtime.attach()
+        finally:
             await runtime.aclose()
 
 

@@ -10,13 +10,14 @@ from pathlib import Path
 import signal
 import socket
 import sys
+import subprocess
 
 
 def main():
     path = Path(sys.argv[1])
     config = Path(os.environ['CLAUDE_CONFIG_DIR'])
     registry = config/'sessions'
-    registry.mkdir(parents=True)
+    registry.mkdir(parents=True, exist_ok=True)
     fields = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(path))
@@ -38,8 +39,20 @@ def main():
         os.close(fd)
         (config/'stdin-changed').touch()
 
+    def hook(marker):
+        # Дочерний stdlib hook наследует env только от уже exec-нутого producer.
+        # Файл хранит лишь исход/тишину, никогда credential или его fingerprint.
+        if len(sys.argv) < 3:
+            return
+        payload = dict(session_id='owned-session', hook_event_name='SessionStart')
+        result = subprocess.run([sys.executable, '-I', sys.argv[2], 'hook'],
+            input=json.dumps(payload), capture_output=True, text=True, timeout=2)
+        (config/marker).write_text(json.dumps([result.returncode, result.stdout, result.stderr]))
+
     signal.signal(signal.SIGUSR1, change_cwd)
     signal.signal(signal.SIGUSR2, redirect_stdin)
+    signal.signal(signal.SIGWINCH, lambda _number, _frame: hook('hook-later'))
+    hook('hook-startup')
     pending = registry/'publishing'
     pending.write_text(json.dumps(record))
     pending.rename(registry/'owned.json')
