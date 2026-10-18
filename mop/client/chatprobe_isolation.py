@@ -214,7 +214,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/python3", "-I", "/opt/probe/c
 '''
 
 
-def run(root, timeout, managed):
+def run(root, timeout, managed, mcp_activation=False):
     """Владение по nonce+image+id, копия отчёта private, cleanup не по имени."""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -287,7 +287,8 @@ def run(root, timeout, managed):
                 manifest = {path: _copy_regular(top / path, context / Path(path).name) for path in selected}
                 manifest["native"] = _copy_regular(native, context / "claude", native=True)
                 report["snapshot"] = manifest
-                metadata = dict(namespaces=_namespaces(), host_uid=os.getuid(), uid=uid, timeout=timeout)
+                metadata = dict(namespaces=_namespaces(), host_uid=os.getuid(), uid=uid, timeout=timeout,
+                                mcp_activation=bool(mcp_activation))
                 (context / "host-namespaces.json").write_text(json.dumps(metadata))
                 (context / "Dockerfile").write_text(_dockerfile(uid, owner))
                 # Последняя policy проверка до передачи даже безопасного snapshot daemon-у.
@@ -336,7 +337,7 @@ def run(root, timeout, managed):
                 if inner_path.exists():
                     inner = json.loads(inner_path.read_text())
                     # Собственный fixture report; сырые request/transcript не включаются в outer.
-                    report.update({key: inner[key] for key in ("scenarios", "model_hooks", "claude_version",
+                    report.update({key: inner[key] for key in ("scenarios", "model_hooks", "mcp_activation", "claude_version",
                         "live_snapshots", "fixture_auth", "git_ssh_transport_blocked", "caller_git_metadata_absent",
                         "unexpected_home_paths", "initial_identity") if key in inner})
                     report["errors"].extend(inner.get("errors", []))
@@ -382,8 +383,10 @@ def run(root, timeout, managed):
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         report["errors"].append(str(error))
     finally:
-        for name in ("model-hooks-control", "model-hooks-same-model", "model-hooks-change", "model-hooks-return",
-                     "live-registry-contract"):
+        names = (("mcp-activation", "live-registry-contract") if mcp_activation else
+                 ("model-hooks-control", "model-hooks-same-model", "model-hooks-change", "model-hooks-return",
+                  "live-registry-contract"))
+        for name in names:
             report["scenarios"].setdefault(name, {"outcome": "unknown", "evidence": {"reason": "scenario not reached"}})
         for path in root.iterdir():
             if path.is_file():
@@ -395,13 +398,16 @@ def run(root, timeout, managed):
 def _container_main():
     """Фиксированный image entrypoint; ни subprocess argv, ни host launch API."""
     os.umask(0o077)
+    if sys.version_info[:2] != (3, 12):
+        raise RuntimeError("owned normal fixture requires Python 3.12; no native exec")
     evidence = verify_normal_runtime()
     Path("/evidence/isolation.json").write_text(json.dumps(evidence))
     spec = importlib.util.spec_from_file_location("chatprobe_fixture", "/opt/probe/chatprobe.py")
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
     metadata = json.loads(Path("/opt/probe/host-namespaces.json").read_text())
-    report = probe._run_fixture("/evidence/native", metadata["timeout"], model_hooks=True, _normal=True)
+    report = probe._run_fixture("/evidence/native", metadata["timeout"], model_hooks=True, _normal=True,
+                                mcp_activation=metadata.get("mcp_activation") is True)
     return 1 if report["errors"] else 0
 
 
