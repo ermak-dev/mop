@@ -7,6 +7,22 @@ import _lib
 import hermetic
 
 
+def canonical_actor_contract():
+    # HYPOTHESIS (#744): isolated settings оставляют auth.User вместо Actor.
+    # SOLUTION: реальные identity dependencies и те же owner FK, что в runtime.
+    # RESULT: RED canonical Actor assertion; migration/permission/protection gates GREEN.
+    # STATUS: FIXED — see #744.
+    from django.conf import settings
+    assert settings.AUTH_USER_MODEL == 'actor.Actor', 'catalogue schema must use canonical Actor'
+    from django.contrib.auth import get_user_model
+    from mop.server.catalog.models import InitialCreatePolicy, InitialCreateSelection
+    actor = get_user_model()
+    assert actor._meta.label_lower == 'actor.actor'
+    for model in (InitialCreatePolicy, InitialCreateSelection):
+        assert model._meta.get_field('owner').remote_field.model is actor, (
+            f'{model._meta.label} owner must reference canonical Actor')
+
+
 def main():
     try:
         import django
@@ -14,10 +30,13 @@ def main():
         hermetic.skip('catalogue schema', 'declared server extra is not installed')
         return
     from django.conf import settings
-    settings.configure(INSTALLED_APPS=['mop.server.controller', 'mop.server.catalog'],
-                       DATABASES={}, DEFAULT_AUTO_FIELD='django.db.models.BigAutoField')
+    settings.configure(INSTALLED_APPS=['django.contrib.auth', 'django.contrib.contenttypes',
+                       'mop.server.actor', 'mop.server.controller', 'mop.server.catalog'],
+                       AUTH_USER_MODEL='actor.Actor', DATABASES={},
+                       DEFAULT_AUTO_FIELD='django.db.models.BigAutoField')
     import django
     django.setup()
+    canonical_actor_contract()
     from django.apps import apps
     from django.db.migrations.loader import MigrationLoader
     from django.db.migrations.state import ProjectState
