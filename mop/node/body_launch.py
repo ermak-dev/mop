@@ -6,9 +6,11 @@ markers, произвольного argv/write или подмены SessionApi 
 """
 import asyncio
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import secrets
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from mop.common.telemetry import SessionScope
 from mop.driver.launch import LaunchResponse, MachineConfig, RegisteredLayout, Registration
@@ -201,45 +203,154 @@ class ProducerRegistration(Protocol):
         ...
 
 
-class SessionRuntime:
-    """Lifetime одного producer; bridge не выдаётся до exact registration ACK.
+class _CurrentProducerTelemetry:
+    """Queued hook не переживает смену native identity перед HTTP ingest."""
+    def __init__(self, runtime):
+        self.runtime = runtime
 
-    HookBridge хранит только bounded volatile queue; durable authority — сервер.
-    Путь — приватный OS runtime composition, не input поля wire.
+    async def ingest(self, row):
+        await self.runtime._current()
+        return await self.runtime.telemetry.ingest(row)
+
+
+class SessionRuntime:
+    """Один finite producer: prepare -> exec с env -> attach/ACK -> active.
+
+    Prepare выдаёт ephemeral OS credential, но не scope и не listener. Root
+    обязан передать environment в native exec, затем вызвать attach. Startup
+    hooks тихо теряются обычным stdlib hook, не буферизуются как readiness.
+    Observer только ищет explicit attachment; epoch создаётся здесь один раз.
+    Нет authority-файла, native scope API, model/retirement capability или
+    перехода между work DTO: новый operation/step требует отдельной root wiring.
     """
     def __init__(self, registration: ProducerRegistration, telemetry):
         self.registration, self.telemetry = registration, telemetry
-        self._bridge = None
-        self._closed = False
-        self._lock = asyncio.Lock()
+        self._state = 'new'
+        self._layout = self._path = self._token = self._epoch = None
+        self._identity = self._proof = self._bridge = None
+        self._attachment = self._cleanup = None
 
-    async def attach(self, proof, *, path):
+    def prepare(self, layout, *, path):
+        from mop import session
+        if self._state != 'new':
+            raise Unavailable('session producer runtime already prepared or closed')
+        if (type(layout) is not RegisteredLayout or not isinstance(path, Path)
+                or not path.is_absolute() or '..' in path.parts
+                or len(os.fsencode(path)) > 100):
+            raise Refused('registered layout and bounded private IPC path required')
+        # No-follow проверка всех компонентов, до выдачи env ребёнку. Ничего
+        # не пишем на диск; directory создаёт доверенный OS composition root.
+        fd = session.identity_open(str(path.parent), directory=True)
+        try:
+            info = os.fstat(fd)
+            if info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise Refused('private owned hook runtime directory required')
+        finally:
+            os.close(fd)
+        if os.path.lexists(path):
+            raise Refused('hook endpoint already exists')
+        self._layout, self._path = layout, path
+        self._token, self._epoch = secrets.token_hex(32), uuid4()
+        self._state = 'prepared'
+        return self.environment()
+
+    def environment(self):
+        if self._state not in ('prepared', 'attaching', 'active'):
+            raise Unavailable('session producer environment is unavailable')
+        return dict(MOP_TELEMETRY_SOCKET=str(self._path), MOP_TELEMETRY_TOKEN=self._token)
+
+    async def producer_epoch(self, layout, identity):
+        """Lookup для NativePhysicalSessions: никогда не attach/mint на observe."""
+        if (self._state not in ('attaching', 'active') or self._identity is None
+                or layout != self._layout):
+            return None
+        if identity != self._identity:
+            self._begin_close()
+            return None
+        return self._epoch
+
+    async def attach(self):
+        if self._state != 'prepared':
+            raise Unavailable('session producer runtime is not prepared or already attached')
+        self._state = 'attaching'
+        # Отдельная owned task позволяет close прервать registration/start;
+        # cleanup ждёт её окончания, прежде чем убирать свой listener.
+        self._attachment = asyncio.create_task(self._attach())
+        try:
+            return await self._attachment
+        except BaseException:
+            await asyncio.shield(self._begin_close())
+            raise
+
+    async def _attach(self):
+        from mop.node.native_observer import NativePhysicalSessions, _snapshot
         from mop.node.telemetry import HookBridge
-        import secrets
-        if type(proof) is not SessionProof or not isinstance(path, Path) or not path.is_absolute():
-            raise Refused('typed live process proof and private IPC path required')
-        async with self._lock:
-            if self._closed or self._bridge is not None:
-                raise Unavailable('session producer runtime already attached or closed')
-            async with asyncio.timeout(5):
-                scope = await self.registration.register(proof)
-            if type(scope) is not SessionScope or scope != proof.scope:
-                raise Refused('producer registration scope changed')
-            bridge = HookBridge(self.telemetry, scope, path=str(path), token=secrets.token_hex(32))
-            try:
-                await bridge.start()
-            except BaseException:
-                await bridge.aclose()
-                raise
-            self._bridge = bridge
-            return bridge
+        # Explicit lifecycle attachment, не побочный эффект producer lookup.
+        # Snapshot -- уже существующий read-only native observer, не новый
+        # протокол scope и не currentSession из caller/hook JSON.
+        async with asyncio.timeout(5):
+            self._identity = await asyncio.to_thread(_snapshot, self._layout)
+        physical = NativePhysicalSessions(owner=self)
+        proof = await physical.observe(self._layout)
+        async with asyncio.timeout(5):
+            scope = await self.registration.register(proof)
+        if type(scope) is not SessionScope or scope != proof.scope:
+            raise Refused('producer registration scope changed')
+        if await physical.observe(self._layout) != proof:
+            raise Unavailable('native producer changed during registration')
+        self._proof = proof
+        runtime = self
+
+        class ScopedHookBridge(HookBridge):
+            def accept(self, record, *, token):
+                # start() может await-ить: listener ещё не означает activation.
+                if runtime._state != 'active':
+                    return False
+                return super().accept(record, token=token)
+
+        bridge = ScopedHookBridge(_CurrentProducerTelemetry(self), scope,
+                                  path=str(self._path), token=self._token)
+        self._bridge = bridge
+        await bridge.start()
+        if await physical.observe(self._layout) != proof or self._state != 'attaching':
+            raise Unavailable('native producer changed before hook activation')
+        self._state = 'active'
+        return bridge
+
+    async def _current(self):
+        from mop.node.native_observer import NativePhysicalSessions
+        if self._state != 'active':
+            raise Unavailable('session producer bridge is inactive')
+        try:
+            if await NativePhysicalSessions(owner=self).observe(self._layout) != self._proof:
+                raise Unavailable('session producer identity changed')
+            if self._state != 'active':
+                raise Unavailable('session producer bridge is inactive')
+        except (Refused, Unavailable):
+            self._begin_close()
+            raise
+
+    def _begin_close(self):
+        # Немедленный gate для accept/lookup, cleanup не ждёт caller/worker,
+        # который мог сам обнаружить смену identity. Repeated cancel не оставит
+        # бесхозный start/socket; внешняя aclose может снова дождаться cleanup.
+        self._state = 'closed'
+        self._token = self._identity = None
+        if self._cleanup is None:
+            self._cleanup = asyncio.create_task(self._close())
+            self._cleanup.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception())
+        return self._cleanup
+
+    async def _close(self):
+        if self._attachment is not None:
+            self._attachment.cancel()
+            await asyncio.gather(self._attachment, return_exceptions=True)
+        if self._bridge is not None:
+            await self._bridge.aclose()
 
     async def aclose(self):
-        async with self._lock:
-            self._closed = True
-            if self._bridge is not None:
-                await self._bridge.aclose()
-                self._bridge = None
+        await asyncio.shield(self._begin_close())
 
 
 class BootstrapPorts(Protocol):
