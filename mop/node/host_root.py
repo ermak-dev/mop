@@ -20,6 +20,14 @@ ROOT_SOURCES = (
 )
 
 
+PHASE_ROOT_SOURCES = (
+    'mop/node/host_phase_supervisor.py', 'mop/node/host_phases.py',
+    'mop/node/host_phase_source.py', 'mop/node/host_phase_manifest.py',
+    'mop/node/host_inputs.py', 'mop/node/host_input_files.py',
+    'mop/common/credentials.py',
+)
+
+
 def _directory(path):
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts:
@@ -83,13 +91,15 @@ class PhysicalConfig:
     identity: object
     installed: object
     socket: Path
+    phase_config: Path | None = None
 
     @classmethod
     def parse(cls, value):
         from mop.node.host_backend import Identity
         from mop.node.host_scope import Installed, Refused, exact
-        exact(value, ('schema_version', 'installation_id', 'node_id', 'node_uid', 'body_uid',
-            'body_gid', 'runner', 'body_root', 'node_private', 'socket'))
+        fields = ('schema_version', 'installation_id', 'node_id', 'node_uid', 'body_uid',
+            'body_gid', 'runner', 'body_root', 'node_private', 'socket')
+        exact(value, fields + (('phase_config',) if 'phase_config' in value else ()))
         if type(value['schema_version']) is not int or value['schema_version'] != 1:
             raise Refused('unsupported physical HOST config schema')
         paths = ('runner', 'body_root', 'node_private', 'socket')
@@ -103,7 +113,14 @@ class PhysicalConfig:
                 or len(os.fsencode(path)) > 100 or any(path == p or p in path.parents
                     for p in (installed.runner, installed.body_root, installed.node_private))):
             raise Refused('separate bounded installed HOST socket required')
-        return cls(identity, installed, path)
+        phase = value.get('phase_config')
+        if phase is not None:
+            if type(phase) is not str or Path(phase) != Path(__file__).absolute().parents[2]/'host-phase.json':
+                raise Refused('fixed installed HOST phase config required')
+            phase = Path(phase)
+        elif 'phase_config' in value:
+            raise Refused('HOST phase config cannot be null')
+        return cls(identity, installed, path, phase)
 
 
 def load(path):
@@ -120,12 +137,16 @@ async def run(config):
     import asyncio
     import signal
     from mop.node.host_scope_supervisor import serve
+    if config.phase_config is not None:
+        release = Path(__file__).absolute().parents[2]
+        for name in PHASE_ROOT_SOURCES:
+            _read(release/name, limit=1048576)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     try:
-        await serve(config.installed, config.socket, stop, identity=config.identity)
+        await serve(config.installed, config.socket, stop, identity=config.identity, phase_config=config.phase_config)
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
