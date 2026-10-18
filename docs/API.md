@@ -1010,6 +1010,58 @@ not a pending-work queue. Operation and Step links are UUID values, never import
 of private operations models. A unique operation/step and a conditional unique
 unresolved assignment enforce admission across processes. `LandingToken` guards
 human landing ownership only; TerminalControl remains a separate realtime domain.
+
+#### Project landing v1 (#638)
+
+`GET /api/v1/projects/{project_id}/landing` requires current
+`execution.view_landing` in that current project. It is a finite SQL query, not
+an operation, node RPC, repair or token acquisition. It accepts only an optional
+canonical UUID `epoch` query parameter; duplicate/unknown parameters refuse.
+No cursor is needed for one resource. The response is exactly:
+
+```json
+{"schema_version":1,"epoch":"00000000-0000-0000-0000-000000000001","landing":{"project_id":"00000000-0000-0000-0000-000000000002","state":"unmaterialized","revision":"0","generation":null,"owner_id":null}}
+```
+
+An absent `LandingToken` is explicitly `unmaterialized`, revision `"0"`, without
+an owner or generation; reading never creates a row. A materialized token has
+state `free` (null owner) or `held` (the actual human Actor ID as an integer),
+with positive decimal-string revision and generation. No puppet name is resolved
+or guessed into an Actor, and no phantom holder is created.
+
+`POST` to its `/commands/take` and `/commands/release` accepts exactly
+`schema_version` (integer 1), canonical installation `epoch`, and
+`expected_revision` (canonical decimal string, 0..9223372036854775807).
+Both return the same v1 envelope with HTTP 200 only after an independent COMMIT.
+The commands require current `execution.acquire_landing` or
+`execution.release_landing` respectively, current project membership and a
+current **human** actor. Agent/service/delegated credentials cannot acquire or
+release by inheriting an owner's identity. Release is only by the exact current
+human owner. No force takeover, puppet parameter, request key or arbitrary
+operation/node anchor is supported. Revision 0 acquires only an unmaterialized
+row; an already-held token conflicts even when held by the same human. Release
+of an unmaterialized resource conflicts without creating one. Every successful
+transition increments revision/generation; late releases cannot touch a new
+acquisition.
+
+The public boundary rejects surrounding transactions (including disabled
+autocommit), uses the bounded short SQL transaction, locks the restore guard and
+installation before project/token locks, checks the installation epoch and
+revalidates live actor/permissions under the subject locks. A closed restore
+guard refuses; `effects_enabled` is not required for this SQL-only human state.
+There is no pool/provider I/O. Errors use the shared safe v1 error envelope;
+successes and refusals are `Cache-Control: no-store`. A DB commit with an unknown
+outcome is not retryable.
+
+A lost HTTP/COMMIT response is **not** a grant or permission to retake. Recovery
+is read-only: use the same project/epoch and compare the exact successor revision
+(`expected_revision + 1`) and actual human owner (take) or null owner (release).
+An unchanged revision, a later revision even with the same owner, another owner,
+a changed epoch or an unavailable read is uncertain: explain that uncertainty
+and do not POST again automatically. Even a matching observation describes that
+current resource state, not a historical command receipt or authority over
+execution/terminal work. A new intent needs a fresh explicit CAS binding.
+
 `IdentityApplication` and `ReadinessReceipt` require matching confirmed attempts.
 Send admission requires identity confirmation for that exact assignment generation,
 incarnation, role, digest and grant. None of these rows grants terminal control.

@@ -45,6 +45,9 @@ PUBLIC = {
     '/api/v1/identity': {'get'},
     '/api/v1/projects': {'get', 'post'},
     '/api/v1/projects/{project_id}': {'get', 'put'},
+    '/api/v1/projects/{project_id}/landing': {'get'},
+    '/api/v1/projects/{project_id}/landing/commands/take': {'post'},
+    '/api/v1/projects/{project_id}/landing/commands/release': {'post'},
     '/api/v1/projects/{project_id}/commands/build': {'post'},
     '/api/v1/projects/{project_id}/commands/create-puppet': {'post'},
     '/api/v1/nodes/{node_id}/commands/drain': {'post'},
@@ -127,6 +130,19 @@ def check_error_envelope(c, document):
     c.check("#696 Error envelope is referenced by public operations", used)
 
 
+def check_landing_contract(c, document):
+    # HYPOTHESIS: обнаруженного маршрута мало: generic view без аннотации
+    # публикует пустой response и теряет finite CAS-контракт #638.
+    schemas = document.get('components', {}).get('schemas', {})
+    for name, fields in {
+        'LandingCommand': {'schema_version', 'epoch', 'expected_revision'},
+        'LandingReply': {'schema_version', 'epoch', 'landing'},
+        'LandingState': {'project_id', 'state', 'revision', 'generation', 'owner_id'},
+    }.items():
+        c.expect('#638 ' + name + ' has its exact public fields',
+                 set(schemas.get(name, {}).get('properties', {})), fields)
+
+
 def check_security(c, document):
     schemes = document.get('components', {}).get('securitySchemes', {})
     c.check("#696 token and session security schemes are declared",
@@ -167,6 +183,7 @@ def main():
     check_drift(c, text)
     check_public_contract(c, document)
     check_error_envelope(c, document)
+    check_landing_contract(c, document)
     check_security(c, document)
     check_deterministic(c, text)
     return c.report('openapi_schema')

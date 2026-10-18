@@ -22,6 +22,7 @@ from . import endpointviews as endpoint
 from .buildviews import BuildProject
 from . import projectionviews as projection
 from .usageviews import Usage
+from . import landingviews as landing
 
 from mop.server.gateway.views import gateway_view
 
@@ -71,6 +72,9 @@ urlpatterns = [
     path('api/v1/identity', auth.Identity.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
+    path('api/v1/projects/<uuid:project_id>/landing', landing.LandingDetail.as_view()),
+    path('api/v1/projects/<uuid:project_id>/landing/commands/take', landing.TakeLanding.as_view()),
+    path('api/v1/projects/<uuid:project_id>/landing/commands/release', landing.ReleaseLanding.as_view()),
     path('api/v1/projects/<uuid:project_id>/commands/build', BuildProject.as_view()),
     path('api/v1/projects/<uuid:project_id>/commands/create-puppet', operations.CreatePuppet.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/drain', operations.DrainNode.as_view()),
