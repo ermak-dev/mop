@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,7 +54,10 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         self.root.chmod(0o700)
         self.bundle = bundle()
         self.initial = replace(work(), action='native_exec', bundle_digest=self.bundle.digest)
-        self.registration = Registration(self.initial, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        self.image_revision = str(uuid4())
+        self.image_policy = dict(policy_id=str(uuid4()), cpu=100, memory_mb=256, disk_mb=1024)
+        image_digest = hashlib.sha256(('image-revision:'+self.image_revision).encode()).hexdigest()
+        self.registration = Registration(self.initial, str(uuid4()), 'b'*64, image_digest, 'pu-owned-1')
         self.layout = RegisteredLayout(self.root, self.registration)
         self.layout.runtime.mkdir(parents=True, mode=0o700)
         self.identity = NativeIdentity('%0', 123, 'boot:start', 'owned-session', self.root/'config',
@@ -111,7 +115,8 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response(dict(schema_version=1, work=self.server_work.wire(),
                 phase=self.server_work.action, bootstrap_revision=self.registration.bootstrap_revision,
                 bootstrap_digest=self.registration.bootstrap_digest,
-                image_digest=self.registration.image_digest, selection=dict(policy_id=self.request,
+                image_digest=self.registration.image_digest, display_name=self.registration.display_name,
+                image_revision=self.image_revision, image_policy=self.image_policy, selection=dict(policy_id=self.request,
                     digest='d'*64, source=dict(origin='https://example.test/owned.git',
                     commit='e'*40, ref='refs/heads/owned'), desired_model='fixture-model',
                     model_config_digest='f'*64, consumers=[dict(purpose='model_config', version_id=self.attempt)]),
@@ -247,6 +252,19 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Refused):
             await self.view(registration=replace(self.current_registration, work=expired),
                             admission=replace(self.admission, work=expired))
+        self.assertEqual(self.rows, [])
+
+    # HYPOTHESIS (#738): valid HTTPS metadata может подменить canonical label,
+    # пока current view сверяет только bootstrap/image pins своей registration.
+    # SOLUTION: exact name относится к тому же immutable physical layout.
+    # RESULT: RED Refused not raised; 19 current-view checks и PG125 + UID4 GREEN.
+    # STATUS: FIXED — see #738.
+    async def test_canonical_name_must_match_attached_registration(self):
+        await self.activate()
+        self.pin_change = {'display_name': 'pu-other-1'}
+        with self.assertRaises(Refused):
+            await self.view()
+        self.assertEqual(len(self.registered), 1)
         self.assertEqual(self.rows, [])
 
     async def test_pending_ack_and_prepared_runtime_never_expose_a_current_view(self):

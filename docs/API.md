@@ -714,6 +714,48 @@ bundle digest on the node. `MachineClient.read_launch` implements `LaunchQuery`
 through the existing verified HTTPS transport's explicit POST allowlist; the
 Work never appears in a URL. `AddressedLaunchSource` consumes this adapter.
 
+#### Initial-launch layout metadata (#738)
+
+`POST /api/v1/machine/work/initial-launch` uses the separate protected-socket
+`read_initial_launch` command and `initialcreate.parse_delivery`, not an extension
+of the role-only `LaunchResponse`. Its exact version-1 response fields are
+`schema_version`, `work`, `phase`, `bootstrap_revision`, `bootstrap_digest`,
+`image_digest`, `display_name`, `image_revision`, `image_policy`, `selection`,
+`git_name`, `git_email`, `role`, `bootstrap` and `consumers`. Missing or unknown
+fields are refused; there is no optional legacy shape. Work must match the
+addressed request exactly, including field types and phase.
+
+`display_name` is the canonical name assigned to this target, not a project name,
+a path or a local naming hint. It must be a valid `pu-<project>-<number>` name of
+at most 64 characters. The server snapshots the assignment name with the launch
+proof and refuses a change during provider I/O; a consumer with an existing
+registration must require the same name, not derive a different clone location.
+
+`image_revision` is the canonical UUID of the admitted `ImageRevision`, read
+through the pinned `IncarnationLaunch`, never the latest catalog revision.
+`image_policy` has exactly `policy_id` (the canonical UUID of that image's
+immutable `ProjectPolicySnapshot`), `cpu`, `memory_mb` and `disk_mb`. CPU is in
+MHz, not cores; memory and disk are in MiB (1,048,576 bytes). Each resource is a
+strict integer from 1 through 2,147,483,647; booleans, floats and numeric strings
+are invalid. This policy UUID is distinct from `selection.policy_id`, which
+identifies the admitted source/model/consumer selection. Image/policy/resource
+metadata are part of the same before/after-provider proof as the reserved
+selection and exact Work. A newer selection cannot replace the reservation;
+a mismatching pinned or unavailable node image refuses delivery.
+
+`image_digest` remains the logical SHA256 of UTF-8
+`image-revision:<image_revision UUID>`. It is checked against that UUID, but is
+not a hash of physical artifact bytes. These fields neither certify an installed
+image nor carry a physical receipt or installed capability flags. The installed
+root port must verify physical artifacts separately and enforce resources on
+the actual body cgroup: a passive scheduler hold does not constrain that cgroup.
+No raw image source, arbitrary path, argv or generic consumer destination is
+introduced. Existing phase-purpose byte restrictions remain unchanged: source
+credentials only for `prepare_body`, approved bootstrap and its selected inputs
+only for `bootstrap_body`, role bytes only for `initial_identity`/`native_exec`,
+model configuration/credentials only for `native_exec`, and no such bytes for
+`confirm_ready`. SQL/HTTP budgets, phase leases and cleanup reserves are unchanged.
+
 Startup still has to bind the protected credential client in the web root and
 supply the authenticated machine client to the node source (#644). Without the
 credential binding the endpoint returns unavailable; neither web nor worker gets

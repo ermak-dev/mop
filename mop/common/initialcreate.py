@@ -38,13 +38,38 @@ def source_ref(value):
             and all(part and not part.startswith('.') and not part.endswith('.lock') for part in value.split('/')))
 
 
+def layout_metadata(*, display_name, image_revision, image_policy, image_digest):
+    """Логические пины layout: CPU MHz, memory/disk MiB, не physical receipt.
+
+    int32 -- положительный диапазон ProjectPolicySnapshot в PostgreSQL.
+    image_digest адресует UUID ImageRevision, а не checksum установленных bytes.
+    """
+    from . import credentials as p
+    import hashlib
+    import re
+    if (type(display_name) is not str or not 1 <= len(display_name) <= 64
+            or re.fullmatch(r'pu-[A-Za-z0-9][A-Za-z0-9._-]*-[0-9]+', display_name) is None):
+        raise p.CredentialError('canonical initial launch display name required')
+    p.identifier(image_revision)
+    p.exact(image_policy, ('policy_id', 'cpu', 'memory_mb', 'disk_mb'))
+    p.identifier(image_policy['policy_id'])
+    if any(type(image_policy[key]) is not int or not 1 <= image_policy[key] < 2**31
+           for key in ('cpu', 'memory_mb', 'disk_mb')):
+        raise p.CredentialError('positive int32 initial launch resources required')
+    if image_digest != hashlib.sha256(('image-revision:'+image_revision).encode()).hexdigest():
+        raise p.CredentialError('logical initial launch image revision pin changed')
+    return dict(display_name=display_name, image_revision=image_revision, image_policy=dict(image_policy))
+
+
 def parse_delivery(value, work):
     """Строгий отдельный response; Registration.matches/old LaunchResponse неизменны."""
     from . import credentials as p
     import hashlib
     import re
     p.exact(value, ('schema_version', 'work', 'phase', 'bootstrap_revision', 'bootstrap_digest',
-        'image_digest', 'selection', 'git_name', 'git_email', 'role', 'bootstrap', 'consumers'))
+        'image_digest', 'display_name', 'image_revision', 'image_policy',
+        'selection', 'git_name', 'git_email', 'role', 'bootstrap', 'consumers'))
+    layout_metadata(**{key: value[key] for key in ('display_name', 'image_revision', 'image_policy', 'image_digest')})
     phase = value['phase']
     if type(work) is not dict:
         raise p.CredentialError('exact expected initial launch work required')
