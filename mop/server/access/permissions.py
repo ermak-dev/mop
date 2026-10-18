@@ -28,7 +28,7 @@ _EXECUTION = ('assign_work',
     'register_endpoint', 'deliver_report', 'view_history', 'view_tail', 'read_terminal',
     'control_terminal', 'send_session_command', 'change_session_model', 'view_usage',
     'view_landing', 'acquire_landing', 'release_landing', 'reconcile_work', 'read_history',
-    'poll_work', 'claim_work', 'report_result', 'read_facts', 'read_launch', 'ingest_telemetry', 'ingest_observations')
+    'poll_work', 'claim_work', 'report_result', 'read_facts', 'read_launch', 'register_producer', 'ingest_telemetry', 'ingest_observations')
 _OPERATIONS = ('stop_puppet_job', 'override_assignment', 'recover_operation', 'cancel_operation',
     'view_operation', 'view_audit', 'diagnose_pool', 'treat_pool', 'collect_pool_garbage',
     'sweep_pool', 'view_node_disk')
@@ -67,7 +67,7 @@ ACTIONS = frozenset(ACTION_PERMISSIONS)
 # enrollment этой одной permission не даёт secret management/human authority.
 MACHINE_ACTIONS = frozenset(('catalog.record_node_application', 'catalog.observe_node',
     'catalog.record_settings_application', 'execution.poll_work', 'execution.claim_work',
-    'execution.report_result', 'execution.read_facts', 'execution.read_launch', 'execution.ingest_telemetry',
+    'execution.report_result', 'execution.read_facts', 'execution.read_launch', 'execution.register_producer', 'execution.ingest_telemetry',
     'execution.ingest_observations', 'secrets.deliver_secret', 'access.activate_grant'))
 
 # Инвариант оставшейся scope-таблицы: у installation-wide действий нет строки

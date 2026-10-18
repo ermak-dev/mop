@@ -9,6 +9,7 @@ from mop.server.catalog.models import Record, ImmutableRecord
 from .telemetry_models import (SessionObservation, TurnOutcome, ModelObservation,
     TelemetryReceipt, PrivateHistoryCursor)  # noqa: F401
 from .terminal_models import TerminalControl, TerminalAttachment  # noqa: F401
+from .producer_models import SessionProducer, CurrentProducer  # noqa: F401
 
 
 class Assignment(Record):

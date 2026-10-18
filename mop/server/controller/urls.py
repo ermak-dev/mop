@@ -16,6 +16,7 @@ from . import authviews as auth
 from . import operationviews as operations
 from . import machineviews as machine
 from . import telemetryviews as telemetry
+from .producerviews import RegisterProducer
 from . import terminalviews as terminal
 from . import endpointviews as endpoint
 from .buildviews import BuildProject
@@ -44,6 +45,7 @@ urlpatterns = [
     path('api/v1/machine/work/result', machine.Result.as_view()),
     path('api/v1/machine/executor/restarted', machine.Restarted.as_view()),
     path('api/v1/machine/facts', machine.Facts.as_view()),
+    path('api/v1/machine/session-producers', RegisterProducer.as_view()),
     path('api/v1/machine/telemetry', telemetry.Ingest.as_view()),
     path('api/v1/sessions/telemetry', telemetry.Latest.as_view()),
     path('api/v1/sessions/history', telemetry.History.as_view()),
