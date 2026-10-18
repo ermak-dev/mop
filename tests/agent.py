@@ -585,26 +585,51 @@ def check_intake(c):
 
 
 def check_main_169(c):
-    """HYPOTHESIS (#169): как только bus при импорте без nats-py бросает, а не
-    выходит, переходный вход юнитов `python3 -m mop.agent` печатал бы трассу:
-    импорты модуля идут раньше его блока __main__.
-    SOLUTION: блок __main__ -- до импортов пакета; командлет проверяет nats
-    первым и отказывает одной строкой.
-    STATUS: FIXED — see #169"""
+    """HYPOTHESIS (#642/#640): прежний вход проверял отсутствие NATS вместо
+    обязательного private bootstrap. Гарантия #169 остаётся: ранний отказ
+    понятен без traceback и без импорта старого транспорта/настроек.
+    SOLUTION: настоящий dispatcher с запретом старых импортов; ambient stores
+    не заменяют явный файл, даже если содержат credential.
+    RESULT: исходный strict RED ожидал старую фразу missing NATS.
+    STATUS: FIXED — see #642"""
     import subprocess
     import tempfile
+    from pathlib import Path
+
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    shadow = tempfile.mkdtemp(prefix="mop-test-nonats-")
-    os.makedirs(os.path.join(shadow, "nats"))
-    with open(os.path.join(shadow, "nats", "__init__.py"), "w") as f:
-        f.write("raise ImportError('no nats')\n")
-    r = subprocess.run([sys.executable, "-m", "mop.node.agent", "--check"], cwd=root,
-                       env=dict(os.environ, PYTHONPATH=shadow),
-                       capture_output=True, text=True)
-    want = "bus library needed: pip install --user --break-system-packages nats-py\n"
-    c.check("python3 -m mop.node.agent without nats refuses in one line",
-            not (r.returncode != 1 or r.stdout or r.stderr != want),
-            f"code {r.returncode}, stdout {r.stdout!r}, stderr {r.stderr[-300:]!r}")
+    script = '''
+import importlib.abc, sys
+class RejectOld(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname in ('nats', 'mop.node.agent', 'mop.common.context',
+                        'mop.common.config', 'mop.common.bus'):
+            raise AssertionError('legacy import: ' + fullname)
+sys.meta_path.insert(0, RejectOld())
+from mop.cli import main
+sys.exit(main(sys.argv[1:]))
+'''
+    with tempfile.TemporaryDirectory() as directory:
+        private = Path(directory)
+        credential = 'a' * 40
+        for name in ('.env', 'bus.json', 'connection.json', 'ready.json', 'node.env'):
+            (private / name).write_text(credential)
+        env = dict(os.environ, PYTHONPATH=root, MOP_BUS_CONFIG=str(private / 'bus.json'),
+                   MOP_API_ORIGIN='https://ambient.example.invalid', MOP_API_TOKEN=credential)
+        for args, status, reason in ((['agent', '--check'], 2, '--bootstrap'),
+                (['agent', '--bootstrap', str(private / 'missing'), '--check'], 1,
+                 'node bootstrap private input is unavailable')):
+            result = subprocess.run([sys.executable, '-P', '-c', script, *args],
+                cwd=directory, env=env, capture_output=True, text=True, timeout=10)
+            c.expect('#169 explicit private bootstrap refusal status', result.returncode, status)
+            c.expect('#169 early refusal has no stdout', result.stdout, '')
+            c.check('#169 bootstrap refusal retains its reason', reason in result.stderr,
+                    result.stderr)
+            c.check('#169 no traceback, legacy imports or leaked credential',
+                    not any(word in result.stderr for word in
+                            ('Traceback', 'legacy import:', credential)), result.stderr)
+            if status == 1:
+                c.expect('#169 invalid bootstrap refuses in one line',
+                         len(result.stderr.splitlines()), 1)
 
 
 def check_subject_173(c):
@@ -4040,76 +4065,76 @@ async def _subjects_584():
 
 
 
-async def _serve_584(fake_nats, agent_mod, bus_mod):
-    """Запуск настоящего serve() с фальшивым NATS: соединение обязано нести
-    creds-снимок ДО attach -- его читает resolver_subject (#581), и без
-    него живой агент спрашивал бы резолвер анонимно или вовсе отказом."""
-    import asyncio
-    from mop.cli.service import agent as cli_agent
-
-    seen = {}
-
-    class Conn:
-        creds = None
-
-        async def subscribe(self, *a, **k):
-            return None
-
-    class Nats:
-        async def connect(self, **kw):
-            conn = Conn()
-            seen["auth"] = kw
-            seen["conn"] = conn
-            return conn
-
-    async def attach(conn, node):
-        seen["creds_at_attach"] = getattr(conn, "creds", None)
-        return []
-
-    fake_nats.connect = Nats().connect
-    real_attach = agent_mod.attach
-    agent_mod.attach = attach
-    try:
-        task = asyncio.create_task(cli_agent.serve(fake_nats, agent_mod, bus_mod))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        try:
-            await task
-        except BaseException:
-            pass
-    finally:
-        agent_mod.attach = real_attach
-    return seen
-
-
 def check_serve_creds_584(c):
-    """HYPOTHESIS (#584): serve() зовёт nats.connect напрямую и никогда не
-    ставит creds-снимок на соединение -- #603 штампует только bus.connect().
-    Живой агент оставался бы без узлового имени для квалифицированных
-    вопросов резолверу (#581), при зелёных тестах с фикстурой NodeConn.
-    SOLUTION: serve ставит creds-снимок (тот же c, что ушёл в auth) на
-    соединение ДО attach.
-    RESULT: RED до правки командлета; зелёный после.
-    """
+    """HYPOTHESIS (#642/#640): старого serve/creds больше нет, но запрос всё
+    ещё обязан использовать одну проверенную transport identity: origin,
+    credential, node и CA bytes из private bootstrap, не ambient stores.
+    SOLUTION: настоящий machine client и собственный TLS listener; смена
+    файла/CA после load не смешивает два набора credentials в одном client.
+    RESULT: исходный strict RED вызывал удалённый cli_agent.serve.
+    STATUS: FIXED — see #642"""
     import asyncio
-    from mop.node import agent as agent_mod
-    from mop.common import bus as bus_mod
-    from _lib import patched
-    import tempfile, json as _json
+    import http.server
+    import json
+    from pathlib import Path
+    from _control_fixture import own_tls
+    from _native_startup_fixture import state, NODE
+    from _lib import run_command, patched_env
+    from mop import cli
+    from mop.node import native_startup
+    from mop.node.bootstrap_transport import load
 
-    fd, path = tempfile.mkstemp(prefix="mop-test-584-serve-")
-    import os as _os
-    with _os.fdopen(fd, "w") as f:
-        _json.dump({"url": "nats://10.0.0.1:4222", "user": "node-hyper",
-                    "password": "node-pass"}, f)
-    class Nats:
-        pass
-    with patched(bus_mod, NODE_FILE=path):
-        seen = asyncio.run(_serve_584(Nats(), agent_mod, bus_mod))
-    _os.unlink(path)
-    c.check("584 serve stamps the credential snapshot on the connection",
-            seen.get("creds_at_attach") is not None
-            and seen["creds_at_attach"].get("user") == "node-hyper", seen)
+    credential = 'a' * 40
+
+    class Discovery(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.server.calls.append((self.command, self.path, self.headers.get('Authorization')))
+            raw = json.dumps(state()).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    with own_tls(Discovery) as (server, origin, ca, directory):
+        server.calls = []
+        ca.chmod(0o600)
+        path = Path(directory) / 'bootstrap.json'
+        document = dict(schema_version=1, installation_id='fixture', origin=origin,
+                        ca_file=str(ca), node_id=NODE, token=credential)
+        path.write_text(json.dumps(document))
+        path.chmod(0o600)
+        # Настоящий --check читает explicit bootstrap и проверяет live identity.
+        with patched_env(MOP_API_TOKEN='b' * 40,
+                         MOP_API_ORIGIN='https://ambient.example.invalid'):
+            out, err, code = run_command(cli.main,
+                ['agent', '--bootstrap', str(path), '--check'])
+        c.expect('#584 canonical agent check succeeds over verified HTTPS', (out, err, code), ('', '', 0))
+        bootstrap = load(path)
+        path.write_text(json.dumps({**document, 'token': 'b' * 40,
+                                   'origin': 'https://changed.example.invalid'}))
+        ca.write_text('not the verified CA anymore')
+
+        async def scenario():
+            client = native_startup.machine_client(bootstrap)
+            try:
+                for _ in range(2):
+                    authority = await native_startup.check(client,
+                        installation_id=bootstrap.installation_id, node_id=bootstrap.node_id)
+                    c.expect('#584 live response is bound to the bootstrap node', authority.node_id, NODE)
+                    c.expect('#584 live response is bound to the installation', authority.installation_id, 'fixture')
+            finally:
+                await client.aclose()
+            c.check('#584 the request owner closes its HTTPS session',
+                    client.transport._closed and client.transport._session.closed)
+        asyncio.run(scenario())
+        c.expect('#584 every request uses the same verified node and credential', server.calls,
+                 [('GET', '/api/v1/machine/executor?schema_version=1&node_id=' + NODE,
+                   'Token ' + credential)] * 3)
+        c.check('#584 transport repr does not expose the credential', credential not in repr(bootstrap))
 
 
 def check_terminal_admin_598(c):
