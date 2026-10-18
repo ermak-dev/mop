@@ -491,6 +491,51 @@ class CreateActivation(TransactionTestCase):
         self.assertEqual(Operation.objects.get(pk=operation).state, 'succeeded')
         self.assertEqual(self.ops.activations.activator.calls, 1)
 
+    # HYPOTHESIS (#703): готовность не отменяет not_after -- новый шаг
+    # активации не должен начинаться после истечения intent.
+    # SOLUTION: проверка на claim и непосредственно перед внешним вызовом;
+    # lease ограничен тем же сроком, сверка прежнего результата не меняется.
+    # RESULT: оба RED дали calls=1; после правки calls=0, activation 5/5.
+    # STATUS: FIXED — see #703
+    def test_expired_create_never_calls_activation(self):
+        from unittest.mock import patch
+        from mop.server.access.models import Grant
+        from mop.server.operations.models import Operation
+        from mop.server.sessions.models import Assignment
+        operation, target, _ = self.launch()
+        self.ops.activations.activator = self.activator()
+        self.through_readiness(operation)
+        deadline = Operation.objects.get(pk=operation).not_after
+        with patch('mop.server.operations.launch.timezone.now', return_value=deadline + timedelta(seconds=1)):
+            self.ops.activations.run(operation)
+        self.assertEqual(self.ops.activations.activator.calls, 0)
+        self.assertEqual(Grant.objects.get(pk=Assignment.objects.get(pk=target).grant_id).state, 'reserved')
+        self.assertNotEqual(Operation.objects.get(pk=operation).state, 'succeeded')
+
+    def test_deadline_crossed_after_claim_never_calls_activation(self):
+        from unittest.mock import patch
+        from mop.server.access.models import Grant
+        from mop.server.operations.models import Operation
+        from mop.server.sessions.models import Assignment
+        operation, target, _ = self.launch()
+        self.ops.activations.activator = self.activator()
+        self.through_readiness(operation)
+        deadline = Operation.objects.get(pk=operation).not_after
+        claim = self.ops.activations.claim
+        clock = [deadline - timedelta(seconds=1)]
+
+        def cross_deadline(value):
+            ticket = claim(value)
+            clock[0] = deadline + timedelta(seconds=1)
+            return ticket
+
+        with patch('mop.server.operations.launch.timezone.now', side_effect=lambda: clock[0]), \
+                patch.object(self.ops.activations, 'claim', side_effect=cross_deadline):
+            self.ops.activations.run(operation)
+        self.assertEqual(self.ops.activations.activator.calls, 0)
+        self.assertEqual(Grant.objects.get(pk=Assignment.objects.get(pk=target).grant_id).state, 'reserved')
+        self.assertNotEqual(Operation.objects.get(pk=operation).state, 'succeeded')
+
     def test_activation_receipt_needs_current_readiness(self):
         operation, target, _ = self.launch()
         self.through_readiness(operation, ready=False)
