@@ -619,18 +619,133 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(systemd, 'read_kernel', return_value=adapter.boot_id):
                 yield adapter, s, body, cgroup
 
+    def manager_transition(self, adapter, s, termination):
+        """Fake manager bytes через production _unit/parser, не actual signal."""
+        from mop.node import host_scope_systemd as systemd
+        p = adapter.installed
+        values = dict.fromkeys(systemd.EXTRA_PROPERTIES, '')
+        values.update(systemd.properties(p, s))
+        values.update(Id=s.unit, LoadState='loaded', Transient='yes', DynamicUser='no',
+                      PrivateUsers='no', FragmentPath='/run/systemd/transient/'+s.unit,
+                      ControlGroup=s.cgroup, MainPID='76', InvocationID=uuid4().hex,
+                      ActiveState='active', SubState='running')
+        class Command:
+            def __init__(self):
+                self.calls, self.observations = [], 0
+
+            async def run(self, executable, *args):
+                self.calls.append((executable, *args))
+                if '--property=LoadState' in args:
+                    return b'LoadState=loaded\n'
+                if 'get-property' in args:
+                    key = args[-1]
+                    if key in systemd.STRUCTURED_EMPTY:
+                        return json.dumps(dict(type=systemd.STRUCTURED_EMPTY[key], data=[])).encode()
+                    extended = key == 'ExecStartEx'
+                    row = [str(p.runner), [str(p.runner), '--scope', s.unit],
+                           [] if extended else False, 0, 0, 0, 0, 76]
+                    row += [0, 0] if self.observations == 1 else list(termination)
+                    return json.dumps(dict(type='a(sasasttttuii)' if extended else 'a(sasbttttuii)',
+                                           data=[row])).encode()
+                self.observations += 1
+                state = values if self.observations == 1 else {**values, 'MainPID': '0', 'SubState': 'exited'}
+                return ''.join(k+'='+v+'\n' for k, v in state.items()).encode()
+        adapter.command = Command()
+        adapter._unit = systemd.SystemdCgroupAdapter._unit.__get__(adapter)
+        return values
+
+    async def test_unit_retains_structured_termination_proof_without_extra_commands(self):
+        # BUG (#741): _unit теряет code/status уже прочитанного ExecStart.
+        # HYPOTHESIS: state/PID пара не отличает штатный exit от SIGTERM.
+        # SOLUTION: внутренний details parser сохраняет code/status без нового I/O.
+        # RESULT: RED None вместо пары; GREEN две пары и прежние 20 commands.
+        # STATUS: FIXED — see #741
+        with self.directory_adapter() as (adapter, s, body, cgroup):
+            self.manager_transition(adapter, s, (1, 0))
+            before = await adapter._unit(s)
+            after = await adapter._unit(s)
+            self.assertEqual(before[0].get('ExecStartTermination'), (0, 0))
+            self.assertEqual(after[0].get('ExecStartTermination'), (1, 0))
+            self.assertEqual(len(adapter.command.calls), 2*(4+6), 'reuse structured ExecStart; no extra read')
+
+    async def test_production_parser_transition_requires_normal_manager_termination(self):
+        # BUG (#741): Type=exec считает SIGTERM success, но это не CLD_EXITED/0.
+        # HYPOTHESIS: exception разрешён только с retained manager code=1/status=0.
+        # SOLUTION: code/status из того же validated _unit, только int 1/0.
+        # RESULT: RED принимал 2/15, 1/7, 0/0; GREEN, malformed/bool тоже refused.
+        # Actual private systemd RED принимал настоящий SIGTERM 2/15; GREEN
+        # вернул unknown без snapshot, exact empty cleanup, replay refused.
+        # STATUS: FIXED — see #741
+        for termination in ((1, 0), (2, 15), (1, 7), (0, 0), (True, 0),
+                            (1, False), (), (1,), ('1', 0), (1, None)):
+            with self.subTest(termination=termination), self.directory_adapter() as (adapter, s, body, cgroup):
+                values = self.manager_transition(adapter, s, termination)
+                if all(type(v) is int for v in termination) and termination == (1, 0):
+                    facts = await adapter._inspect(s, launched=True)
+                    self.assertEqual(facts.verify(adapter.installed, s).reference.invocation_id,
+                                     values['InvocationID'])
+                else:
+                    with self.assertRaises(api().StartUnknown) as caught:
+                        await adapter._inspect(s, launched=True)
+                    self.assertEqual(caught.exception.reference,
+                                     api().Reference(s, values['InvocationID'], adapter.boot_id))
+                # Два чтения, не retry/adoption; malformed row может отказать до ExecStartEx.
+                self.assertEqual(adapter.command.observations, 2)
+                self.assertLessEqual(len(adapter.command.calls), 20)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_termination_metadata_is_only_a_gate_for_the_transition_exception(self):
+        # HYPOTHESIS 1 (WRONG): включение metadata в equality создаёт новые
+        # Unknown даже без state/PID transition. Это proof исключения, не identity.
+        # SOLUTION: metadata исключена из прежней equality, читается только в gate.
+        # RESULT: отдельный RED metadata-only -> GREEN без нового admission rule.
+        # STATUS: FIXED — see #741
+        for before_exit, after_exit in (((0, 0), (1, 0)), ((0, 0), (2, 15)), ((2, 15), (2, 15))):
+            with self.subTest(before=before_exit, after=after_exit), self.directory_adapter() as (adapter, s, body, cgroup):
+                values, executable, argv = adapter._unit.return_value
+                values = {**values, 'MainPID': '0', 'ActiveState': 'active', 'SubState': 'exited'}
+                adapter._unit.side_effect = [({**values, 'ExecStartTermination': proof}, executable, argv)
+                                             for proof in (before_exit, after_exit)]
+                facts = await adapter.inspect(s)
+                self.assertTrue(facts.verify(adapter.installed, s).populated)
+                self.assertEqual(adapter._unit.await_count, 2)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_starter_transition_without_termination_proof_stays_unknown(self):
+        # HYPOTHESIS: сравнение tuple без exact int допускает bool как 1/0;
+        # отсутствие/сломанная форма proof также не разрешает transition.
+        # SOLUTION: gate проверяет tuple/длину/int, затем CLD_EXITED/0.
+        # RESULT: RED принимал все семь вариантов; GREEN сохраняет first reference.
+        # STATUS: FIXED — see #741
+        for termination in (None, (2, 15), (1, 7), (True, 0), (1, False), (1,), '1/0'):
+            with self.subTest(termination=termination), self.directory_adapter() as (adapter, s, body, cgroup):
+                values, executable, argv = adapter._unit.return_value
+                before = {**values, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running'}
+                if termination is not None:
+                    before['ExecStartTermination'] = termination
+                after = {**before, 'MainPID': '0', 'SubState': 'exited'}
+                adapter._unit.side_effect = [(before, executable, argv), (after, executable, argv)]
+                with self.assertRaises(api().StartUnknown) as caught:
+                    await adapter._inspect(s, launched=True)
+                self.assertEqual(caught.exception.reference,
+                                 api().Reference(s, values['InvocationID'], adapter.boot_id))
+                self.assertEqual(adapter._unit.await_count, 2)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
     async def test_same_invocation_starter_exit_is_not_a_containment_identity_change(self):
         # BUG: штатный double-fork между unit snapshots превращается в Unknown.
         # HYPOTHESIS: MainPID/SubState — lifecycle, не exact invocation authority.
-        # SOLUTION: только running/PID>0 -> exited/PID=0 при active и полном
-        # равенстве остальных fields; те же два чтения, без нового budget/retry.
+        # SOLUTION: только running/PID>0 -> exited/PID=0 при active, полном
+        # равенстве остальных fields и manager proof int CLD_EXITED=1/status=0;
+        # те же два чтения, без нового budget/retry.
         # RESULT: RED здесь и в actual barrier fixture: только MainPID/SubState
-        # изменились, ExecMainCode=CLD_EXITED (1), ExecMainStatus=0; затем GREEN.
+        # и normal termination metadata изменились; затем GREEN.
         # STATUS: FIXED — see #741
         with self.directory_adapter() as (adapter, s, body, cgroup):
             before, executable, argv = adapter._unit.return_value
-            before = {**before, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running'}
-            after = {**before, 'MainPID': '0', 'SubState': 'exited'}
+            before = {**before, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running',
+                      'ExecStartTermination': (0, 0)}
+            after = {**before, 'MainPID': '0', 'SubState': 'exited', 'ExecStartTermination': (1, 0)}
             adapter._unit.side_effect = [(before, executable, argv), (after, executable, argv)]
             facts = await adapter.inspect(s)
             self.assertTrue(facts.verify(adapter.installed, s).populated)
@@ -671,8 +786,10 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
                        {'SubState': 'dead'}, {'MainPID': '77'}):
             with self.subTest(change=change), self.directory_adapter() as (adapter, s, body, cgroup):
                 before, executable, argv = adapter._unit.return_value
-                before = {**before, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running'}
-                after = {**before, 'MainPID': '0', 'SubState': 'exited', **change}
+                before = {**before, 'MainPID': '76', 'ActiveState': 'active', 'SubState': 'running',
+                          'ExecStartTermination': (0, 0)}
+                after = {**before, 'MainPID': '0', 'SubState': 'exited',
+                         'ExecStartTermination': (1, 0), **change}
                 adapter._unit.side_effect = [(before, executable, argv), (after, executable, argv)]
                 with self.assertRaises((api().Unknown, api().Refused)):
                     await adapter.inspect(s)

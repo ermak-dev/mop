@@ -54,7 +54,7 @@ async def node():
             await writer.drain()
             reply = m.decode(await read_frame(reader))
             if reply['status'] != 'ok':
-                raise RuntimeError('fixture lost-start did not receive a successful reply')
+                raise RuntimeError('fixture lost-start did not receive a successful reply: '+json.dumps(reply))
             snap = m.Snapshot.parse(reply['snapshot'])
             barrier = Path('/var/lib/mop/node-service')/s.launch_id
             barrier.write_text(json.dumps(snap.wire()))
@@ -105,10 +105,12 @@ async def acceptance():
     consumer.write_text(json.dumps(dict(schema_version=1, fixture='double-fork', hold_starter=True)))
     consumer.chmod(0o600)
     os.chown(consumer, BODY_UID, BODY_UID)
-    transition, launches = {}, []
+    transition, launches, observations = {}, [], {}
+    expected_exit = ('1', '0')
     class FixtureAdapter(Adapter):
         async def _unit(self, address):
             result = await super()._unit(address)
+            observations[address] = (observations.get(address, [])+[result])[-2:]
             if address != transition_scope or result is None or transition.get('after') is not None:
                 return result
             if 'before' in transition:
@@ -118,7 +120,7 @@ async def acceptance():
                            if before[0][key] != result[0][key]}
                 transition['changes'] = changes
                 print(json.dumps(dict(fixture_unit_transition=changes,
-                    same_executable=before[1:] == result[1:],
+                    same_executable=before[1:] == result[1:], starter_exit=transition['starter_exit'],
                     invocation_id=result[0]['InvocationID'])), file=sys.stderr, flush=True)
                 return result
             # Первый fully validated manager snapshot остаётся исходным: release
@@ -137,8 +139,8 @@ async def acceptance():
                         '--property=MainPID,ExecMainCode,ExecMainStatus', '--', address.unit)
                     status = dict(line.split('=', 1) for line in raw.decode('ascii').splitlines())
                     if status['MainPID'] == '0':
-                        if status['ExecMainCode'] != '1' or status['ExecMainStatus'] != '0':
-                            raise AssertionError('fixture starter did not exit normally: '+str(status))
+                        if (status['ExecMainCode'], status['ExecMainStatus']) != expected_exit:
+                            raise AssertionError('fixture starter termination differs from expected: '+str(status))
                         transition['starter_exit'] = status
                         break
                     await asyncio.sleep(.01)
@@ -178,6 +180,8 @@ async def acceptance():
                 raw = await command.run(sys.executable, '-I', __file__, 'node', json.dumps(value))
             except m.Unknown as error:
                 detail = getattr(error, 'stderr', b'').decode('utf-8', errors='replace')
+                print(json.dumps(dict(fixture_last_unit_observations=observations.get(s, []))),
+                      file=sys.stderr, flush=True)
                 object_name = ''.join(c if c.isalnum() else '_'+format(ord(c), '02x') for c in s.unit)
                 for prop in ('ExecStart', 'ExecStartPre', 'EnvironmentFiles'):
                     raw_property = await adapter.command.run('/usr/bin/busctl', '--system', '--json=short',
@@ -190,7 +194,7 @@ async def acceptance():
             value = json.loads(raw)
             return value if action == 'start-unknown' else m.Snapshot.parse(value)
         started = await call('start')
-        if transition.get('changes') != {
+        if {k: v for k, v in transition.get('changes', {}).items() if k != 'ExecStartTermination'} != {
                 'MainPID': [transition['before'][0]['MainPID'], '0'], 'SubState': ['running', 'exited']}:
             raise AssertionError('fixture did not reproduce only the proven starter lifecycle transition')
         if started.reference.invocation_id != transition['before'][0]['InvocationID']:
@@ -249,6 +253,61 @@ async def acceptance():
         if empty.populated or empty.reference != started.reference:
             raise AssertionError('cgroup retirement did not prove the exact empty subtree')
         retired = True
+
+        normal_transition = transition
+
+        # BUG/HYPOTHESIS (#741): systemd принимает настоящий SIGTERM как success
+        # Type=exec; та же state/PID пара не доказывает штатный CLD_EXITED/0.
+        # Собственный новый scope: никаких signal чужим PID или manager unit.
+        # SOLUTION: production сохраняет structured manager code/status;
+        # RESULT: actual RED выдал success при 2/15, GREEN unknown + exact cleanup.
+        # STATUS: FIXED — see #741
+        s = m.Scope(*(str(uuid4()) for _ in range(6)))
+        transition_scope, transition, expected_exit = s, {}, ('2', '15')
+        body = p.body(s)
+        body.mkdir(mode=0o700)
+        os.chown(body, BODY_UID, BODY_UID)
+        consumer = body/'consumer.json'
+        consumer.write_text(json.dumps(dict(schema_version=1, fixture='double-fork',
+                                            hold_starter=True, starter_signal='SIGTERM')))
+        consumer.chmod(0o600)
+        os.chown(consumer, BODY_UID, BODY_UID)
+        started, retired = None, False
+        original_retire = adapter.retire
+        signal_cleanup = []
+        async def tracked_signal_retire(reference):
+            signal_cleanup.append(reference)
+            return await original_retire(reference)
+        adapter.retire = tracked_signal_retire
+        try:
+            unknown = await call('start-unknown')
+            if (unknown.get('status') != 'unknown' or unknown.get('snapshot') is not None
+                    or 'HOST unit changed during inspection' not in unknown.get('error', '')):
+                raise AssertionError('signalled starter was misreported as normal start')
+            if {k: v for k, v in transition['changes'].items() if k != 'ExecStartTermination'} != {
+                    'MainPID': [transition['before'][0]['MainPID'], '0'], 'SubState': ['running', 'exited']}:
+                raise AssertionError('SIGTERM did not reproduce the same active running/exited transition')
+            reference = m.Reference(s, transition['before'][0]['InvocationID'], adapter.boot_id)
+            if signal_cleanup != [reference] or s not in owner._fences or owner.last_error is not None:
+                raise AssertionError('signalled start lost first validated reference/cleanup/fence')
+            empty = await adapter.inspect(s)
+            if empty is None or empty.verify(p, s, reference).populated:
+                raise AssertionError('signalled start cleanup did not prove exact empty cgroup')
+            retired = True
+            try:
+                await owner.execute(NODE_UID, m.Request('start', s, str(uuid4())))
+            except m.Refused:
+                pass
+            else:
+                raise AssertionError('signalled start replay repeated the physical start')
+            for observation, expected in ((normal_transition, (1, 0)), (transition, (2, 15))):
+                if observation['after'][0].get('ExecStartTermination') != expected:
+                    raise AssertionError('production observation dropped actual manager termination proof')
+            signalled_start = dict(status='unknown', snapshot=None, starter_exit=transition['starter_exit'],
+                                  transition=transition['changes'], invocation_id=reference.invocation_id,
+                                  cleanup='exact empty cgroup', replay='refused')
+        finally:
+            adapter.retire = original_retire
 
         # Отдельный Unknown после первого exact unit proof: snapshot не выдан,
         # но root сохраняет reference и проверяет cleanup через actual OS ports.
@@ -354,13 +413,14 @@ async def acceptance():
             await asyncio.gather(*(task for task in (lost_task, inspection_task)
                                    if task is not None), return_exceptions=True)
             adapter.inspect, owner.abandon_started = original_inspect, original_abandon
-        if len(launches) != 3 or len(set(launches)) != 3:
+        if len(launches) != 4 or len(set(launches)) != 4:
             raise AssertionError('fixture repeated a physical start instead of exact observation/cleanup')
         # PID disappearance alone никогда не является positive criterion.
         print(json.dumps(dict(status='accepted', physical='systemd-cgroup-v2',
-            starter_transition=transition['changes'], starter_exit=transition['starter_exit'],
+            starter_transition=normal_transition['changes'], starter_exit=normal_transition['starter_exit'],
+            signalled_start=signalled_start,
             unknown_start=dict(status='unknown', snapshot=None, cleanup='exact empty cgroup', replay='refused'),
-            physical_starts=3,
+            physical_starts=4,
             double_fork=True, setsid=True, retired_empty=True, negative_checks=record['checks'],
             cwd_mutations=['body-chmod-0755', 'renamed', 'removed'],
             lost_ack_concurrent_inspection='retired exact empty cgroup, replay refused',

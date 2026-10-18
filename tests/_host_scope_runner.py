@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import sys
 import time
@@ -17,7 +18,9 @@ scope = Scope.from_unit(sys.argv[2])
 body = Path('/var/lib/mop/host-bodies') / scope.launch_id
 consumer = json.loads((body/'consumer.json').read_text())
 if consumer not in ({'fixture': 'double-fork', 'schema_version': 1},
-                    {'fixture': 'double-fork', 'schema_version': 1, 'hold_starter': True}):
+                    {'fixture': 'double-fork', 'schema_version': 1, 'hold_starter': True},
+                    {'fixture': 'double-fork', 'schema_version': 1, 'hold_starter': True,
+                     'starter_signal': 'SIGTERM'}):
     raise SystemExit(3)
 starter = os.getpid()
 if consumer.get('hold_starter'):
@@ -29,6 +32,10 @@ if consumer.get('hold_starter'):
             raise RuntimeError('fixture starter barrier deadline expired')
         time.sleep(.01)
 if os.fork():
+    if consumer.get('starter_signal') == 'SIGTERM':
+        # Настоящий signal своему starter внутри private PID/cgroup fixture.
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise RuntimeError('fixture starter survived SIGTERM')
     raise SystemExit(0)
 os.setsid()
 if os.fork():
