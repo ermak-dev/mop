@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
+from uuid import UUID
 
 from mop.client import control as api
 
@@ -32,14 +33,14 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete', 'add'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add', 'send'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
 GAPS = {
     'agents': 'live address aggregation and private endpoint inbox binding',
     'update': 'update admission',
-    'recycle': 'recycle admission', 'send': 'message admission/receipts',
+    'recycle': 'recycle admission',
     'dispatch': 'dispatch admission and scoped target selection',
     'model': 'session model action', 'models': 'inference model query',
     'attach': 'private terminal physical resolver/capability discovery',
@@ -251,6 +252,18 @@ def _operation_options(p, *, binding_required=True):
     p.add_argument('--wait', type=float)
 
 
+def _resource_id(value):
+    """Send принимает только canonical UUID; имя/сокет не становятся local target."""
+    valid = False
+    try:
+        valid = str(UUID(value)) == value
+    except ValueError:
+        pass
+    if not valid:
+        raise api.ClientError('send requires canonical resource ids, not local recipients or puppet names')
+    return value
+
+
 def _render_operation(operation, *, credential):
     # Только canonical receipt; никакого stdout исходного message/credential.
     emit({'schema_version': operation.schema_version, 'epoch': operation.epoch,
@@ -330,6 +343,35 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
             args = p.parse_args(argv)
+        elif words == 'send':
+            # Эти опции требуют иной authority/holder lifecycle, не скрытого
+            # перевода на bus или UDS. Отказ даже до чтения private stdin.
+            unsupported = {'--list', '--local', '--mode', '--force', '--notify-when-idle', '--reply-to'}
+            options = argv[:argv.index('--')] if '--' in argv else argv
+            if (argv and argv[0] == 'list') or any(word.split('=', 1)[0] in unsupported for word in options):
+                print('unsupported: local recipients/listing, legacy routing/permission mode, takeover and '
+                      'idle notifications (trusted holder endpoint is not bound)', file=sys.stderr)
+                return 2
+            p.add_argument('puppet_id', type=_resource_id)
+            p.add_argument('message')
+            p.add_argument('--priority', choices=('now', 'next', 'later'), default='next')
+            p.add_argument('--wait-seconds', type=int, default=0)
+            p.add_argument('--incarnation', type=_resource_id)
+            _operation_options(p, binding_required=False)
+            args = p.parse_args(argv)
+            args.request_id = api.new_request_id(args.request_id)
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+            api.admission_deadline(args.not_after)
+            values = (args.epoch, args.incarnation, args.expected_revision)
+            args.explicit_binding = all(value is not None for value in values)
+            if any(value is not None for value in values) and not args.explicit_binding:
+                raise api.ClientError('provide epoch, incarnation and expected-revision together')
+            if args.explicit_binding:
+                _resource_id(args.epoch)
+                target = api.Target(args.puppet_id, args.incarnation, args.expected_revision)
+            if not 0 <= args.wait_seconds <= 60:
+                raise api.ClientError('wait-seconds must be within 0..60; it is not an idle/delivery receipt')
         elif words in ('restart', 'wipe', 'stop', 'delete'):
             p.add_argument('puppet_id')
             p.add_argument('--incarnation')
@@ -407,6 +449,18 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         if hasattr(args, 'wait') and args.wait is not None:
             if not 0 < args.wait <= api.Limits().wait_timeout:
                 raise api.ClientError('wait must be within the client wait limit')
+        if words == 'send':
+            if args.message == '-':
+                try:
+                    # TextIO может декодировать несколько bytes на символ. После
+                    # bounded read проверяем ещё UTF-8 byte limit; newline не режем.
+                    args.message = sys.stdin.read(api.MAX_MESSAGE_BYTES + 1)
+                except (OSError, UnicodeError):
+                    raise api.ClientError('message stdin is unavailable or invalid UTF-8') from None
+            args.message = api.message_text(args.message)
+            if args.explicit_binding:
+                prepare = api.PreparedCommand('send', target, args.epoch, args.request_id,
+                    args.not_after, message=args.message, priority=args.priority, wait_seconds=args.wait_seconds)
         if words == 'diagnose' and missing(origin):
             # Как empty у прежней сводки (#536): not-ready -- информация, не отказ.
             emit({'schema_version': 1, 'ready': False, 'missing': missing(origin),
@@ -419,11 +473,14 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                   'network_observed': False}, credential=selected.token)
             return 0
         client = api.Client(selected)
-        if words in ('restart', 'wipe', 'stop', 'delete') and not args.explicit_binding:
+        if words in ('restart', 'wipe', 'stop', 'delete', 'send') and not args.explicit_binding:
             view = client.read_puppet(args.puppet_id)
+            params = dict(message=args.message, priority=args.priority,
+                          wait_seconds=args.wait_seconds) if words == 'send' else {}
             prepare = {'restart': client.prepare_restart, 'wipe': client.prepare_wipe,
-                       'stop': client.prepare_stop, 'delete': client.prepare_delete}[words](view.target, epoch=view.epoch,
-                                                           not_after=args.not_after, request_id=args.request_id)
+                       'stop': client.prepare_stop, 'delete': client.prepare_delete,
+                       'send': client.prepare_send}[words](view.target, epoch=view.epoch,
+                           not_after=args.not_after, request_id=args.request_id, **params)
         if words == 'health':
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
         elif words in ('profile', 'mcp'):

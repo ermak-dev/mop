@@ -112,7 +112,8 @@ def new_request_id(value: str | None = None) -> str:
     return _key(str(uuid4()) if value is None else value)
 
 
-def _deadline(value):
+def admission_deadline(value):
+    """Проверяет абсолютный UTC-срок до context/detail I/O; старый retry допустим."""
     valid = False
     if isinstance(value, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)", value):
         try:
@@ -121,6 +122,22 @@ def _deadline(value):
         except ValueError:
             pass
     # Срок не сравнивается с часами клиента: идентичный retry может быть старым.
+    _require(valid)
+    return value
+
+
+# MessageHandler имеет более узкий предел, чем общий JSON envelope.
+MAX_MESSAGE_BYTES = 16384
+
+
+def message_text(value):
+    """Transient plaintext: без NUL/пустоты, с той же границей, что у message admission."""
+    valid = False
+    if isinstance(value, str) and value.strip() and '\x00' not in value:
+        try:
+            valid = len(value.encode('utf-8')) <= MAX_MESSAGE_BYTES
+        except UnicodeError:
+            pass
     _require(valid)
     return value
 
@@ -224,7 +241,7 @@ class PreparedCommand:
         _require(type(self.target) is Target)
         _identity(self.epoch)
         _key(self.request_id)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
         _require(self.action in ("restart", "send", "wipe", "stop", "delete") and type(self.fresh) is bool and
                  type(self.notify_when_idle) is bool and self.priority in ("now", "next", "later") and
                  type(self.wait_seconds) is int and 0 <= self.wait_seconds <= 60)
@@ -234,13 +251,8 @@ class PreparedCommand:
             # wipe и stop-job не несут параметров (#642): ни fresh, ни force.
             _require(self.action == "restart" or not self.fresh)
         else:
-            valid = False
-            if not self.fresh and isinstance(self.message, str):
-                try:
-                    valid = 0 < len(self.message.encode("utf-8")) <= 65536
-                except UnicodeError:
-                    pass
-            _require(valid)
+            _require(not self.fresh)
+            message_text(self.message)
 
     @property
     def body(self) -> bytes:
@@ -274,7 +286,7 @@ class NodeCommand:
         _require(self.action in ("drain", "enable"))
         for value in (self.node_id, self.epoch, self.request_id):
             _key(value)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
         _revision(self.expected_revision)
         _require(1 <= int(self.expected_revision) < 2 ** 63)
 
@@ -300,7 +312,7 @@ class CreateCommand:
     def __post_init__(self):
         for value in (self.project_id, self.node_id, self.definition_id, self.epoch, self.request_id):
             _key(value)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
 
     @property
     def body(self) -> bytes:
@@ -327,7 +339,7 @@ class BuildCommand:
     def __post_init__(self):
         for value in (self.project_id, self.policy_id, self.epoch, self.request_id):
             _key(value)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
         _revision(self.expected_revision)
         _require(int(self.expected_revision) >= 1 and self.mode in ('missing', 'update', 'rebuild'))
         _require(type(self.target_nodes) is tuple and 1 <= len(self.target_nodes) <= 64)

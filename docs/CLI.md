@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
+Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -301,23 +301,26 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 #### mop send
 
 ```text
-send a message to a pool puppet or a session on this machine
+mop send <id> <text|-> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-  mop send <target> <text>            send
-  mop send <target> -                 text from stdin
-  mop send <target> <text> --wait[=N] send and wait until the recipient goes free
-  mop send --list                     live sessions on this machine
+Submit one finite remote send through /api/v1/messages. The target is a puppet
+assignment resource id, never a name, pid, directory or socket. Without a full
+explicit binding, authorized detail supplies the epoch, incarnation and desired
+revision, not the projection clock. The request key and UTC --not-after (default
+two minutes) are fixed before context/detail I/O. MCP requires the full binding.
 
-<target> — puppet name (pu-<project>-1), session name, pid, directory, or socket
-path. A puppet is recognized by the pu- prefix and reached over the bus; anything
-else is a local session, reached directly through its uds inbox.
+Text '-' reads bounded stdin; UTF-8 text is limited to 16384 bytes, nonempty and
+without NUL. Newlines are preserved. Text stays in the transient request body, not
+a URL, diagnostic or local store. --priority now|next|later defaults to next.
+--wait-seconds N (0..60) is the server command field; --wait seconds is a bounded
+GET-only operation wait. Neither option proves idle state or message delivery.
 
-  --priority now|next|later   where in the recipient's queue (default next)
-  --mode bypass|prompting     which permission mode to present as (bypass)
-  --quiet                     silent, exit code only
-  --force                     take over a puppet another master leads
-
-Channel protocol — CHANNEL.md, bus subjects — BUS.md.
+accepted/unknown/outstanding operations exit 3, not delivered. Recover with mop
+operation using the original request-id and epoch; a lost reply never reposts.
+Local send/--list, --mode, --force, --local, --reply-to and --notify-when-idle are
+explicitly unsupported before I/O: this client has no trusted holder endpoint.
+An unavailable physical message binding is a server refusal, never bus/UDS/SSH
+fallback. The HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop stat

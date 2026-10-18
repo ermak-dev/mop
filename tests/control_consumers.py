@@ -27,6 +27,11 @@ from mop import cli
 from mop.client import control as api
 
 
+class BoundedRefusalInput(io.StringIO):
+    def read(self, size=-1):
+        raise AssertionError('unsupported/invalid routing must not read stdin')
+
+
 class Consumers(unittest.TestCase):
     def setUp(self):
         self.fixture = Fixture()
@@ -169,6 +174,236 @@ class Consumers(unittest.TestCase):
                 'definition_id': DEFINITION, 'epoch': EPOCH, 'request_id': KEY, 'not_after': DEADLINE})
         self.assertEqual(json.loads(result)['operation']['state'], 'accepted')
         self.assertEqual(len(self.fixture.calls), 1)
+
+    def send_args(self, text='private-send-input'):
+        return [PUPPET, text, '--epoch', EPOCH, '--incarnation', INCARNATION,
+            '--expected-revision', '7', '--request-id', KEY, '--not-after', DEADLINE]
+
+    # HYPOTHESIS: send остаётся unsupported, прямой commandlet открывает legacy bus.
+    # SOLUTION: один id-only HTTPS consumer; text живёт только в transient POST.
+    # RESULT: unsupported/missing-MCP red -> green; native delivery не подменяется.
+    # STATUS: FIXED — see #642
+    def test_send_client_body_is_the_published_finite_server_command(self):
+        from mop.server.operations.commands import parse_send
+        command = self.client.prepare_send(api.Target(PUPPET, INCARNATION, '7'), epoch=EPOCH,
+            request_id=KEY, not_after=DEADLINE, message='private-send-input', priority='later', wait_seconds=2)
+        parsed = parse_send(json.loads(command.body))
+        self.assertEqual(str(parsed.intent.target_id), PUPPET)
+        self.assertEqual(parsed.intent.expected_revision, 7)
+        self.assertEqual(parsed.message, 'private-send-input')
+        self.assertEqual(parsed.priority.value, 'later')
+        self.assertEqual(parsed.wait_seconds, 2)
+        self.assertFalse(parsed.notify_when_idle)
+        self.assertNotIn('private-send-input', repr(command))
+        self.assertNotIn('private-send-input', repr(parsed))
+
+    def test_send_cli_detail_and_direct_explicit_binding_use_no_legacy_context(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        from mop.cli.core import send
+        from mop.common import context
+        self.response({'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()})
+        self.response(send_operation(), 202)
+        self.response(send_operation(), 202)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             patch.object(context, 'here', side_effect=AssertionError('legacy context read')), \
+             patch.object(cli, 'environment', side_effect=AssertionError('installation environment read')):
+            out, err, code = run_command(cli.main, ['send', PUPPET, 'private-send-input',
+                '--request-id', KEY, '--not-after', DEADLINE, '--priority', 'later', '--wait-seconds', '2'])
+            self.assertEqual(code, 3, err)
+            self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
+            out2, err2, code = run_command(send.main, self.send_args())
+        self.assertEqual(code, 3, err2)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'POST', 'POST'])
+        self.assertEqual(self.fixture.calls[0][1], '/api/v1/puppets/'+PUPPET)
+        body = json.loads(self.fixture.calls[1][2])
+        self.assertEqual(body, {'schema_version': 1, 'epoch': EPOCH, 'request_id': KEY,
+            'target_id': PUPPET, 'incarnation': INCARNATION, 'expected_revision': '7',
+            'not_after': DEADLINE, 'params': {'message': 'private-send-input', 'priority': 'later',
+                'wait_seconds': 2, 'notify_when_idle': False}})
+        for method, path, _, _ in self.fixture.calls:
+            self.assertNotIn('private-send-input', path)
+        for private in (TOKEN, 'private-send-input'):
+            self.assertNotIn(private, out+out2+err+err2)
+
+    def test_send_fixes_generated_key_deadline_and_text_before_context_and_detail(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        from datetime import datetime, timezone
+        order = []
+        class Clock(datetime):
+            calls = 0
+            @classmethod
+            def now(cls, tz=None):
+                cls.calls += 1
+                return datetime(2026, 10, 18, 12, tzinfo=timezone.utc)
+        original = api.new_request_id
+        def key(value=None):
+            result = original(value)
+            order.append(result)
+            return result
+        def context(*args):
+            self.assertEqual(len(order), 1, 'key must be pinned before context I/O')
+            self.assertEqual(Clock.calls, 1, 'deadline must be fixed before context I/O')
+            return api.ServerContext('https://controller.example', TOKEN)
+        def detail(client, puppet_id):
+            self.assertEqual(len(order), 1)
+            view = api._puppet_view(api._freeze(puppet_row()), EPOCH)
+            return view
+        def submit(client, command):
+            self.assertEqual(command.request_id, order[0])
+            self.assertEqual(command.not_after, '2026-10-18T12:02:00+00:00')
+            self.assertEqual(Clock.calls, 1)
+            self.assertEqual(command.message, 'private-send-input')
+            reply = send_operation()
+            reply['operation']['request_id'] = order[0]
+            return api.Submission(202, api.Client._read_operation(api._freeze(reply)))
+        with patch.object(api, 'new_request_id', side_effect=key), \
+             patch.object(_control, 'datetime', Clock), \
+             patch.object(_control, 'context', side_effect=context), \
+             patch.object(api.Client, 'read_puppet', autospec=True, side_effect=detail), \
+             patch.object(api.Client, 'submit', autospec=True, side_effect=submit):
+            out, err, code = run_command(cli.main, ['send', PUPPET, 'private-send-input'])
+        self.assertEqual(code, 3, err)
+
+    def test_send_stdin_is_bounded_preserved_and_validated_before_context(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        class BoundedInput(io.StringIO):
+            def read(self, size=-1):
+                self.assert_size(size)
+                return super().read(size)
+            def assert_size(self, size):
+                if not 0 < size <= 16385:
+                    raise AssertionError('stdin must use a bounded read')
+        text = 'private\nmessage\n'
+        self.response(send_operation(), 202)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             patch.object(sys, 'stdin', BoundedInput(text)):
+            out, err, code = run_command(cli.main, ['send', *self.send_args('-')])
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(self.fixture.calls[-1][2])['params']['message'], text)
+        with patch.object(_control, 'context', side_effect=AssertionError('context before validation')):
+            for text in ('', '  \n', 'x' * 16385, 'я' * 8193, 'private\x00input', '\ud800'):
+                with patch.object(sys, 'stdin', BoundedInput(text)):
+                    out, err, code = run_command(cli.main, ['send', *self.send_args('-')])
+                self.assertEqual(code, 1, err)
+                self.assertNotIn('private\x00input', err)
+                self.assertEqual(out, '')
+        self.assertEqual(len(self.fixture.calls), 1)
+
+    def test_send_refuses_local_routing_idle_and_invalid_bindings_before_any_io(self):
+        from mop.cli import _control
+        unsupported = [['--list'], ['list'], [*self.send_args(), '--force'],
+            [*self.send_args(), '--mode', 'bypass'], [*self.send_args(), '--notify-when-idle'],
+            [*self.send_args(), '--local'], [*self.send_args(), '--reply-to', 'private:other']]
+        bad = [['some-session', 'private-send-input'], ['/tmp/inbox.sock', 'private-send-input'],
+            ['pu-fixture-1', 'private-send-input'], ['1234', 'private-send-input'],
+            [PUPPET, 'private-send-input', '--epoch', EPOCH],
+            [*self.send_args(), '--wait-seconds', '-1'], [*self.send_args(), '--wait-seconds', '61'],
+            [*self.send_args(), '--wait', 'nan'], [*self.send_args(), '--wait', 'inf']]
+        for option in ('--request-id', '--not-after', '--incarnation', '--epoch', '--expected-revision'):
+            args = self.send_args()
+            args[args.index(option)+1] = 'invalid-private-value'
+            bad.append(args)
+        with patch.object(_control, 'context', side_effect=AssertionError('context before refusal')), \
+             patch.object(sys, 'stdin', BoundedRefusalInput()):
+            for args in unsupported:
+                out, err, code = run_command(cli.main, ['send', *args])
+                self.assertEqual(code, 2, err)
+                self.assertIn('unsupported', err)
+                self.assertEqual(out, '')
+            for args in bad:
+                out, err, code = run_command(cli.main, ['send', *args])
+                self.assertEqual(code, 1, err)
+                self.assertNotIn('invalid-private-value', err)
+                self.assertEqual(out, '')
+        self.assertEqual(self.fixture.calls, [])
+
+    # HYPOTHESIS: invalid wait читает stdin, а marker -- не отделяет text от options.
+    # SOLUTION: wait проверяется до stdin, marker -- завершает options scan.
+    # RESULT: два meaningful red -> green, все 62 consumer checks проходят.
+    # STATUS: FIXED — see #642
+    def test_send_invalid_wait_does_not_consume_stdin(self):
+        from mop.cli import _control
+        with patch.object(sys, 'stdin', BoundedRefusalInput()), \
+             patch.object(_control, 'context', side_effect=AssertionError('context before validation')):
+            for value in ('nan', 'inf', '-1', '0', '61'):
+                out, err, code = run_command(cli.main, ['send', *self.send_args('-'), '--wait', value])
+                self.assertEqual(code, 1, err)
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_send_literal_text_after_double_dash_is_not_a_routing_option(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        self.response(send_operation(), 202)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['send', *self.send_args()[2:], '--', PUPPET, '--mode'])
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(self.fixture.calls[0][2])['params']['message'], '--mode')
+
+    def test_send_unknown_is_get_only_even_if_lookup_missing_or_changes_binding(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        replies = [send_operation('succeeded'),
+            {'schema_version': 1, 'error': {'code': 'not_found', 'message': 'resource not found', 'retryable': False}},
+            send_operation('succeeded')]
+        replies[2]['operation']['target']['source_revision'] = '8'
+        for index, reply in enumerate(replies):
+            self.fixture.responses.append(OSError('lost private-send-input reply'))
+            self.response(reply, 404 if index == 1 else 200)
+            with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+                out, err, code = run_command(cli.main, ['send', *self.send_args()])
+            self.assertEqual(code, 0 if index == 0 else 3, err)
+            if index:
+                self.assertEqual(out, '')
+                self.assertIn(KEY, err)
+                self.assertIn(EPOCH, err)
+                self.assertIn('unknown', err)
+            self.assertNotIn('private-send-input', out+err)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET']*3)
+        self.assertTrue(all(call[1] == f'/api/v1/operations?request_id={KEY}&epoch={EPOCH}'
+                            for call in self.fixture.calls if call[0] == 'GET'))
+
+    def test_send_operation_wait_timeout_is_not_idle_or_delivery_evidence(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        self.response(send_operation(), 202)
+        last = api.Client._read_operation(api._freeze(send_operation('running')))
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             patch.object(api.Client, 'wait_operation', side_effect=api.WaitTimeout(last)) as wait:
+            out, err, code = run_command(cli.main, ['send', *self.send_args(), '--wait', '1'])
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(out)['operation']['state'], 'running')
+        self.assertIn('not cancelled', err)
+        self.assertNotIn('delivered', out+err)
+        self.assertNotIn('idle', out+err)
+        wait.assert_called_once()
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST'])
+
+    def test_send_mcp_uses_canonical_permissions_full_binding_and_same_handler(self):
+        from _control_fixture import send_operation
+        from mop.cli import _control
+        declaration = cli.declared(os.path.join(cli.PACKAGE, 'core', 'send.py'))
+        actions = ['execution.send_message', 'operations.view_operation']
+        self.assertIsNotNone(declaration, '#642 send has no canonical MCP declaration')
+        self.assertEqual(declaration.get('actions'), actions)
+        self.assertFalse({'node_verbs', 'cluster_verbs', 'dispatch'} & declaration.keys())
+        for kind in ('human', 'agent', 'service'):
+            grant = OP if kind == 'service' else None
+            self.assertTrue(_control.allowed(declaration, api.Identity(1, kind, 1, None, grant, frozenset(actions))))
+            for action in actions:
+                self.assertFalse(_control.allowed(declaration, api.Identity(1, kind, 1, None, grant, frozenset({action}))))
+        required = {arg['name'] for arg in declaration['args'] if arg.get('required')}
+        self.assertLessEqual({'puppet_id', 'message', 'epoch', 'incarnation', 'expected_revision'}, required)
+        self.response(send_operation(), 202)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            result = _control.tool_call(['send'], declaration, {'puppet_id': PUPPET,
+                'message': 'private-send-input', 'epoch': EPOCH, 'incarnation': INCARNATION,
+                'expected_revision': '7', 'request_id': KEY, 'not_after': DEADLINE})
+        self.assertEqual(json.loads(result)['operation']['state'], 'accepted')
+        self.assertNotIn('private-send-input', result)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST'])
 
     def test_build_uses_published_finite_parser_and_preserves_pinned_policy(self):
         self.assertTrue(hasattr(self.client, 'prepare_build'), '#642 missing published build consumer')
