@@ -377,6 +377,38 @@ class CreateMachineSteps(TransactionTestCase):
                                  'confirm_ready': 'succeeded', 'activate_grant': ''})
         self.assertEqual(Operation.objects.get(pk=operation).state, 'running')
 
+    # HYPOTHESIS (#705): успешный scheduler_register снимал target fence,
+    # а машинные шаги её не возвращали -- release менял живое назначение.
+    # SOLUTION: target claim остаётся за Operation; передаются только claims
+    # полосы. Терминал освобождает всё, unknown по-прежнему держит цель.
+    # RESULT: RED -- Conflict not raised; GREEN -- 11/11 create cases.
+    # STATUS: FIXED — see #705
+    def test_create_holds_target_fence_across_server_and_machine_stages(self):
+        from mop.server.controller.runtime import assignments_service
+        from mop.server.sessions.models import Assignment
+        from mop.server.sessions.services import Conflict
+        operation, target, _ = self.launch()
+        self.ops.launches.run(operation)
+        before = Assignment.objects.values().get(pk=target)
+
+        def cannot_release():
+            with self.assertRaises(Conflict):
+                assignments_service().release(self.actor, UUID(target), expected_revision=before['revision'])
+            self.assertEqual(Assignment.objects.values().get(pk=target), before)
+
+        cannot_release()
+        service, actor = self.machine()
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        attempt = service.claim(actor, work, request_id=uuid4())
+        service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                       outcome='succeeded', evidence='identity-applied')
+        cannot_release()
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        attempt = service.claim(actor, work, request_id=uuid4())
+        service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                       outcome='unknown', evidence='connection-lost')
+        cannot_release()
+
     def test_a_provisioned_grant_authorizes_launch_steps_only(self):
         operation, target, incarnation = self.launch()
         from django.db import transaction

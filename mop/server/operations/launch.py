@@ -417,8 +417,11 @@ class LaunchJobs:
                 # Сверка частичного workflow не выдаёт оставшиеся effects автоматически.
                 _move(row, State.UNKNOWN, 'outcome_unknown', expected_revision=row.revision)
                 return _snapshot(row)
-            # Цель остаётся за операцией: дальше её шаги исполняет узел.
-            m.ResourceClaim.objects.filter(operation=row, step=step, released_at=None).update(released_at=step.quiescent_at)
+            # #705: общая target fence остаётся за операцией до терминала,
+            # в том числе между шагами. Узел берёт свои node/project/puppet
+            # claims, но release/activate не должны видеть цель свободной.
+            m.ResourceClaim.objects.filter(operation=row, step=step, released_at=None).exclude(
+                resource_id='target:' + str(row.target_id)).update(released_at=step.quiescent_at)
             before = row.revision
             row.revision += 1
             row.code, row.reason = 'step_confirmed', 'named stage receipt committed'
