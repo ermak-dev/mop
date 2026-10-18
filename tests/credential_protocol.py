@@ -51,6 +51,41 @@ class ClientBoundary(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     self.assertFalse(any(a.name.startswith(('django', 'mop.server', 'nacl', 'channels')) for a in node.names))
 
+    # HYPOTHESIS: worker без root и human token не может вызвать конечную активацию.
+    # SPEC: только grant UUID + CAS revision; никакого actor/proof из wire.
+    # RED: unsupported credential command и missing worker adapter.
+    # SOLUTION: finite schema, GrantReceipt и service-token-only worker port.
+    # RESULT: 14/14 pure checks green; socket authority проверена на PG17 отдельно.
+    # STATUS: FIXED — see #643.
+    def test_activation_has_only_grant_and_revision_not_caller_supplied_authority(self):
+        from mop.common import credentials as p
+        from uuid import uuid4
+        request = {'version': 1, 'auth': {'kind': 'token', 'value': 'a' * 40},
+            'command': 'activate_grant', 'args': {'grant_id': str(uuid4()), 'expected_revision': 2}}
+        _, command, args = p.parse_request(request)
+        self.assertEqual(command.value, 'activate_grant')
+        self.assertEqual(args['expected_revision'], 2)
+        for field in ('actor_id', 'owner_id', 'node_id', 'project_id', 'receipt', 'ready', 'credential'):
+            with self.subTest(field=field), self.assertRaises(p.CredentialError):
+                p.parse_request({**request, 'args': {**request['args'], field: 'untrusted'}})
+        for revision in (True, -1, 2 ** 63, '2'):
+            with self.subTest(revision=revision), self.assertRaises(p.CredentialError):
+                p.parse_request({**request, 'args': {**request['args'], 'expected_revision': revision}})
+
+    def test_worker_activator_uses_only_explicit_service_credential_and_returns_metadata(self):
+        from mop.common import credential_client as c, credentials as p
+        from uuid import uuid4
+        from unittest.mock import Mock
+        self.assertTrue(hasattr(c, 'GrantActivator'), 'bounded worker activation adapter is missing')
+        auth, grant = p.Credential('token', 'a' * 40), uuid4()
+        client = Mock(spec=c.CredentialClient)
+        worker = c.GrantActivator(client, auth)
+        self.assertIs(worker.activate_grant(grant, expected_revision=2), client.activate_grant.return_value)
+        client.activate_grant.assert_called_once_with(auth, grant, expected_revision=2)
+        self.assertNotIn(auth.value, repr(worker))
+        with self.assertRaises(p.CredentialError):
+            c.GrantActivator(client, p.Credential('session', 'a' * 32))
+
     def test_publish_definition_protocol_accepts_only_exact_domain_inputs(self):
         from mop.common import credentials as p
         from uuid import uuid4

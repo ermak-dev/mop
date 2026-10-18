@@ -85,6 +85,84 @@ class CurrentBindings:
         raise access.Denied('transport retirement receipt composition is not bound')
 
 
+class CreateActivation:
+    """Request-local authority worker: не произвольная активация по grant UUID.
+
+    Worker предъявляет только свой token. Узел/проект -- enrollment и текущее
+    назначение, допуск эффекта -- claimed create общего журнала. Снимок не
+    переживает запрос; каждый callback после crypto заново читает живые факты.
+    """
+    def __init__(self, application, actor, grant_id):
+        self.application, self.actor, self.grant_id = application, actor, grant_id
+        self.proof = None
+
+    def require(self):
+        from django.utils import timezone
+        from mop.server.access.models import ServiceEnrollment
+        from mop.server.operations import models as operations
+        from mop.server.sessions.models import Assignment
+        app, actor = self.application, self.actor
+        with transaction.atomic():
+            app.fence()
+            access.current_actor(actor, grants=app.local_grants)
+            enrollment = ServiceEnrollment.objects.filter(actor_id=actor.user_id,
+                use_case='grant-activator', node__isnull=False).first()
+            if enrollment is None or actor.kind is not access.ActorKind.SERVICE or actor.grant_id is not None:
+                raise access.Denied('enrolled grant activator required')
+            if not app.snapshot['effects_enabled']:
+                raise access.Denied('installation effects are disabled')
+            target_id = Assignment.objects.filter(grant_id=self.grant_id, deleted_at=None).values_list('id', flat=True).first()
+            binding = None if target_id is None else Assignments().target(target_id, lock=True)
+            if binding is None:
+                raise access.Denied('current create assignment required for grant activation')
+            access.Access().authorize(actor, 'access.activate_grant', project_ids=(binding.project_id,),
+                node_ids=(binding.node_id,))
+            # Assignment -> Operation -> Step: те же блокировки, что у worker.
+            row = operations.Operation.objects.select_for_update().filter(action='create', state='running',
+                target_id=binding.target_id, incarnation_id=binding.incarnation_id, node_id=binding.node_id,
+                expected_revision=binding.revision, actor_id=binding.owner_id,
+                epoch=UUID(app.snapshot['epoch']), restore_generation=UUID(app.generation),
+                not_after__gt=timezone.now(), restartbinding__grant_id=self.grant_id,
+                restartbinding__project_id=binding.project_id, restartbinding__owner_id=binding.owner_id,
+                restartbinding__generation=binding.generation, restartbinding__role=binding.role,
+                restartbinding__bundle_digest=binding.bundle_digest,
+                restartbinding__executor_epoch=binding.executor_epoch).first()
+            if row is None or set(row.projects.values_list('pk', flat=True)) != {binding.project_id}:
+                raise access.Denied('matching claimed create required for grant activation')
+            stages = tuple(operations.Step.objects.select_for_update().filter(operation=row).order_by('ordinal'))
+            if (tuple(step.name for step in stages) != ('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')
+                    or any(step.outcome != 'succeeded' or step.quiescent_at is None for step in stages[:3])):
+                raise access.Denied('matching claimed create required for grant activation')
+            step = stages[-1]
+            if (step.token is None or step.attempt_id != step.token or step.dispatched_at is None
+                    or step.quiescent_at is not None or step.outcome or step.lease_until is None
+                    or step.lease_until <= timezone.now()):
+                raise access.Denied('matching claimed create required for grant activation')
+            keys = {'node:'+str(binding.node_id), 'project:'+str(binding.project_id),
+                    'puppet:'+str(binding.target_id), 'target:'+str(binding.target_id)}
+            claims = tuple(operations.ResourceClaim.objects.filter(operation=row, released_at=None,
+                resource_id__in=keys).order_by('resource_id').values_list('resource_id', 'step_id', 'token'))
+            if {claim[0] for claim in claims} != keys:
+                raise access.Denied('matching claimed create resource fences required for grant activation')
+            proof = (enrollment.id, binding, row.id, row.revision, step.id, step.token, claims)
+            if self.proof is not None and self.proof != proof:
+                raise access.Denied('claimed create activation authority changed')
+            self.proof = proof
+
+
+class CreateActivationBindings(CurrentBindings):
+    """Финальный callback Grants держит SQL authority до его COMMIT, не crypto."""
+    def __init__(self, authority):
+        super().__init__()
+        self.authority = authority
+
+    def activation(self, grant_id):
+        if grant_id != self.authority.grant_id:
+            raise access.Denied('activation grant changed')
+        self.authority.require()
+        return super().activation(grant_id)
+
+
 class CurrentAccess:
     def __init__(self, application):
         self.application = application
@@ -108,11 +186,13 @@ class CurrentPreparationAccess(CurrentAccess):
 
 class CurrentRetention:
     """Root fence дополняет, но не заменяет SQL-only authority предметного владельца."""
-    def __init__(self, application, authority):
-        self.application, self.authority = application, authority
+    def __init__(self, application, authority, *, activation=None):
+        self.application, self.authority, self.activation = application, authority, activation
 
     def check(self, actor, scope):
         self.application.fence()
+        if self.activation is not None:
+            self.activation.require()
         self.authority.check(actor, scope)
         self.application.fence()
 
@@ -175,9 +255,18 @@ class CredentialApplication:
             result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
         elif command is p.Command.APPROVE_DEFINITION:
             result = self.grants.approve_definition(actor, **args)
-        elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT):
-            row = (self.grants.reserve(actor, **args) if command is p.Command.RESERVE_GRANT
-                   else self.grants.provision(actor, **args))
+        elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT, p.Command.ACTIVATE_GRANT):
+            if command is p.Command.ACTIVATE_GRANT:
+                authority = CreateActivation(self, actor, args['grant_id'])
+                authority.require()
+                # Отдельные ports запроса: concurrent clients не меняют общий Grants.
+                grants = Grants(provider=self.store.provider, bindings=CreateActivationBindings(authority),
+                    approvals=self.preparation.approval_query())
+                grants.secrets.authority = CurrentRetention(self, grants.secrets.authority, activation=authority)
+                row = grants.activate(**args)
+            else:
+                row = (self.grants.reserve(actor, **args) if command is p.Command.RESERVE_GRANT
+                       else self.grants.provision(actor, **args))
             result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
                 row.role, row.digest, row.state, row.revision, row.credential_version_id)
         elif command is p.Command.PUBLISH_PREPARATION:
