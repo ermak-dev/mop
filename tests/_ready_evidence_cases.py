@@ -4,6 +4,11 @@ HYPOTHESIS: отсутствует read-only query, любой nonempty model п
 а successful ready result доверяет producer ACK без committed model evidence.
 SPEC: exact claimed admission + physical scope, original successful native ACK,
 реальный TelemetryReceipt/PostModelSwitch desired model, повторная проверка commit.
+SOLUTION: read-only owner query, exact snapshot в successful result и concrete
+node Source с selected-model equality/повторным physical observe.
+RESULT: первоначальные 4/4 и расширенные 11/11 behavioral RED; 14/14 GREEN
+на PG17/private credential socket/verified HTTPS, без retry или новых ACK.
+STATUS: FIXED — see #749
 Наблюдатель native контролируемый; vendor/physical acceptance здесь не заявляется.
 """
 import asyncio
@@ -49,7 +54,7 @@ class ReadyEvidence(TransactionTestCase):
             get_user_model().objects.get(pk=self.machine.user_id).user_permissions.add(
                 Permission.objects.get(content_type__app_label='execution', codename='ingest_telemetry'))
         await self.sql(authorize)
-        observation = Observation(runtime._proof.scope, sequence, event, None, model, causal_switch, None, 0)
+        observation = Observation(runtime._proof.scope, sequence, event, None, model, None, causal_switch, 0)
         await TelemetryClient(machine.transport).ingest(observation)
         from mop.server.sessions.telemetry_models import TelemetryReceipt
         return await self.sql(lambda: TelemetryReceipt.objects.get(sequence=sequence).pk)
@@ -75,8 +80,18 @@ class ReadyEvidence(TransactionTestCase):
             identity = await self.telemetry(machine, runtime, payload['selection']['desired_model'])
             view = await runtime.current_view(CurrentLaunchAuthority(machine, registration, admission))
             proof = await view.proof(registration.work)
+            from mop.server.sessions import models as sm
+            from mop.server.sessions.producer_models import SessionProducer, CurrentProducer
+            from mop.server.sessions.telemetry_models import SessionObservation, TelemetryReceipt, ModelObservation
+            from mop.server.operations import models as om
+            def snapshot():
+                return tuple(list(model.objects.order_by('pk').values()) for model in
+                    (sm.AssignmentAttempt, sm.ResultReceipt, sm.ReadinessReceipt, SessionProducer, CurrentProducer,
+                     SessionObservation, TelemetryReceipt, ModelObservation, om.Operation, om.Step, om.ResourceClaim))
+            before = await self.sql(snapshot)
             status, headers, text = await self.raw_query(machine, self.query_metadata(registration, admission, proof))
             self.assertEqual(status, 200, text)
+            self.assertEqual(await self.sql(snapshot), before, 'successful query must be read-only too')
             import json
             value = json.loads(text)
             self.assertEqual(value['receipt_id'], str(identity), 'receipt must be the committed database identity')
@@ -95,7 +110,7 @@ class ReadyEvidence(TransactionTestCase):
                 desired_model = payload['selection']['desired_model']
                 async def ready(inner, work, observed):
                     return ReadyReceipt(registration, proof.scope, proof.pid, proof.process_start,
-                        str(uuid4()), 'definitely-not-the-selected-model')
+                        '42', 'definitely-not-the-selected-model')
             self.assertFalse(await ReadyConfirmation(view, WrongModel()).confirmed(registration.work, target),
                 'a nonempty model is not equality with the immutable desired selection')
         self.check_current(exercise)
@@ -187,7 +202,7 @@ class ReadyEvidence(TransactionTestCase):
             # SQL corruption/revocation simulations, restored exactly between cases.
             mutations = [(SessionProducer, {}, 'attempt_id', uuid4()),
                 (SessionProducer, {}, 'pid', 124), (SessionProducer, {}, 'process_start', str(uuid4())+':124'),
-                (SessionProducer, {}, 'executor_user_id', self.actor.user_id),
+                (SessionProducer, {}, 'executor_user_id', self.user.pk),
                 (SessionProducer, {}, 'assignment_revision', 999),
                 (sm.ResultReceipt, {'attempt_id': self.attempt.id}, 'outcome', 'unknown'),
                 (om.Step, {'pk': registration.work.step_id}, 'token', uuid4()),
@@ -205,7 +220,9 @@ class ReadyEvidence(TransactionTestCase):
                     rows = model.objects.filter(**lookup)
                     old = list(rows.values_list('pk', field))
                     self.assertTrue(old)
-                    rows.update(**{field: replacement})
+                    # Corruption simulation намеренно обходит immutable ORM guard.
+                    from django.db.models import QuerySet
+                    QuerySet.update(rows, **{field: replacement})
                     return old
                 previous = await self.sql(change)
                 try:
@@ -215,10 +232,11 @@ class ReadyEvidence(TransactionTestCase):
                 finally:
                     def restore():
                         for pk, old in previous:
-                            model.objects.filter(pk=pk).update(**{field: old})
+                            from django.db.models import QuerySet
+                            QuerySet.update(model.objects.filter(pk=pk), **{field: old})
                     await self.sql(restore)
             def remove_project():
-                NodeProject.objects.filter(node=self.node, project=self.project).delete()
+                NodeProject.objects.filter(node_id=self.assignment.node_id, project=self.project).delete()
             await self.sql(remove_project)
             status, _, text = await self.raw_query(machine, self.query_metadata(registration, admission, proof))
             self.assertIn(status, (403, 409, 503), text)
@@ -282,6 +300,128 @@ class ReadyEvidence(TransactionTestCase):
             with patch.object(view, 'proof', side_effect=[proof, replace(proof, process_start=str(uuid4())+':999')]):
                 self.assertFalse(await confirmation.confirmed(registration.work, target))
             self.assertIsNone(confirmation.evidence, 'failed physical recheck cannot export successful result evidence')
+        self.check_current(exercise)
+
+    async def result_with(self, machine, admission, value):
+        return await machine.transport.request('POST', 'work/result', payload=dict(schema_version=1,
+            attempt_id=admission.attempt_id, expected_revision=str(admission.revision), receipt_id=str(uuid4()),
+            outcome='succeeded', evidence='ready', ready_evidence=value))
+
+    def test_query_to_result_rechecks_claim_epoch_restore_producer_time_and_permissions(self):
+        async def exercise(machine, runtime, registration, admission, calls, payload):
+            from datetime import timedelta
+            from django.utils import timezone
+            from django.contrib.auth import get_user_model
+            from django.contrib.auth.models import Permission
+            from mop.server.sessions import models as sm
+            from mop.server.sessions.producer_models import CurrentProducer, SessionProducer
+            from mop.server.sessions.telemetry_models import SessionObservation
+            from mop.server.operations import models as om
+            from mop.server.controller.models import Installation, RestoreGuard
+            await self.telemetry(machine, runtime, payload['selection']['desired_model'])
+            view = await runtime.current_view(CurrentLaunchAuthority(machine, registration, admission))
+            proof = await view.proof(registration.work)
+            original = await self.query(machine, registration, admission, proof)
+            mutations = [(SessionObservation, {}, 'model_received_at', timezone.now()-timedelta(seconds=31)),
+                (SessionObservation, {}, 'model_proven', False),
+                (SessionObservation, {}, 'revision', 999),
+                (SessionProducer, {}, 'attempt_id', uuid4()), (SessionProducer, {}, 'producer_epoch', uuid4()),
+                (SessionProducer, {}, 'process_start', str(uuid4())+':999'),
+                (CurrentProducer, {}, 'revision', 2),
+                (sm.AssignmentAttempt, {'pk': admission.attempt_id}, 'lease_until', timezone.now()),
+                (sm.AssignmentAttempt, {'pk': admission.attempt_id}, 'request_id', uuid4()),
+                (sm.Assignment, {'pk': registration.work.target_id}, 'expires_at', timezone.now()),
+                (sm.NodeExecutor, {}, 'executor_epoch', uuid4()),
+                (om.Step, {'pk': registration.work.step_id}, 'token', uuid4()),
+                (om.ResourceClaim, {'resource_id': 'target:'+registration.work.target_id}, 'released_at', timezone.now()),
+                (om.ResourceClaim, {'resource_id': 'target:'+registration.work.target_id}, 'token', uuid4()),
+                (om.ScheduledPuppet, {}, 'restore_generation', uuid4()),
+                (Installation, {'pk': 1}, 'epoch', uuid4()), (Installation, {'pk': 1}, 'effects_enabled', False),
+                (RestoreGuard, {'pk': 1}, 'generation', uuid4())]
+            for model, lookup, field, replacement in mutations:
+                def change():
+                    rows = model.objects.filter(**lookup)
+                    previous = list(rows.values_list('pk', field))
+                    self.assertTrue(previous)
+                    # Corruption simulation намеренно обходит immutable ORM guard.
+                    from django.db.models import QuerySet
+                    QuerySet.update(rows, **{field: replacement})
+                    return previous
+                previous = await self.sql(change)
+                try:
+                    with self.subTest(model=model.__name__, field=field), self.assertRaises((Refused, Unavailable)):
+                        await self.result_with(machine, admission, original)
+                    self.assertFalse(await self.sql(lambda: sm.ReadinessReceipt.objects.exists()))
+                finally:
+                    def restore():
+                        for pk, value in previous:
+                            from django.db.models import QuerySet
+                            QuerySet.update(model.objects.filter(pk=pk), **{field: value})
+                    await self.sql(restore)
+            def revoke_read():
+                user = get_user_model().objects.get(pk=self.machine.user_id)
+                user.user_permissions.remove(Permission.objects.get(content_type__app_label='execution', codename='read_launch'))
+            await self.sql(revoke_read)
+            status, _, text = await self.raw_query(machine, self.query_metadata(registration, admission, proof))
+            self.assertEqual(status, 403, text)
+            with self.assertRaises(Refused):
+                await self.result_with(machine, admission, original)
+        self.check_current(exercise)
+
+    def test_query_then_same_model_reassertion_or_new_switch_cannot_reuse_old_snapshot(self):
+        async def exercise(machine, runtime, registration, admission, calls, payload):
+            desired = payload['selection']['desired_model']
+            await self.telemetry(machine, runtime, desired)
+            view = await runtime.current_view(CurrentLaunchAuthority(machine, registration, admission))
+            proof = await view.proof(registration.work)
+            original = await self.query(machine, registration, admission, proof)
+            await self.telemetry(machine, runtime, desired, event='Statusline', sequence=2)
+            status, _, text = await self.raw_query(machine, self.query_metadata(registration, admission, proof))
+            self.assertIn(status, (409, 503), 'uncausal same model must not restore proof: '+text)
+            with self.assertRaises((Refused, Unavailable)):
+                await self.result_with(machine, admission, original)
+            await self.telemetry(machine, runtime, desired, sequence=3)
+            fresh = await self.query(machine, registration, admission, proof)
+            self.assertNotEqual(fresh['receipt_id'], original['receipt_id'])
+            with self.assertRaises((Refused, Unavailable)):
+                await self.result_with(machine, admission, original)
+        self.check_current(exercise)
+
+    def test_query_requires_current_enrolled_machine_token_not_human_or_other_purpose(self):
+        async def exercise(machine, runtime, registration, admission, calls, payload):
+            from mop.server.access import services as auth
+            from mop.node.http_execution import HttpsTransport, MachineClient
+            await self.telemetry(machine, runtime, payload['selection']['desired_model'])
+            view = await runtime.current_view(CurrentLaunchAuthority(machine, registration, admission))
+            proof = await view.proof(registration.work)
+            metadata = self.query_metadata(registration, admission, proof)
+            other = await self.sql(lambda: auth.enroll_service('ready-activation-only', self.assignment.node_id,
+                project_ids=(self.project.pk,), permissions=('access.activate_grant',), use_case='grant-activator'))
+            def foreign_executors():
+                from mop.server.catalog.models import Node, NodeProject
+                node = Node.objects.create(name='ready-foreign-node', driver='host',
+                    ssh_host='example.invalid', control_origin='https://example.invalid',
+                    lan_address='example.invalid', bootstrap_address='example.invalid')
+                NodeProject.objects.create(node=node, project=self.project)
+                permissions = ('execution.claim_work', 'execution.read_launch')
+                wrong_node = auth.enroll_service('ready-wrong-node', node.pk,
+                    project_ids=(self.project.pk,), permissions=permissions)
+                wrong_project = auth.enroll_service('ready-without-project', self.assignment.node_id,
+                    project_ids=(), permissions=permissions)
+                return wrong_node, wrong_project
+            foreign_keys = await self.sql(foreign_executors)
+            for key in (self.token, other, *foreign_keys):
+                foreign = MachineClient(HttpsTransport(machine.transport.origin.removesuffix('/api/v1/machine/'),
+                    key, tls=machine.transport._tls))
+                try:
+                    status, _, text = await self.raw_query(foreign, metadata)
+                    self.assertIn(status, (403, 404) if key in foreign_keys else (403,), text)
+                finally:
+                    await foreign.aclose()
+            from django.contrib.auth import get_user_model
+            await self.sql(lambda: get_user_model().objects.get(pk=self.machine.user_id).auth_token.delete())
+            status, _, text = await self.raw_query(machine, metadata)
+            self.assertIn(status, (401, 403), text)
         self.check_current(exercise)
 
     def test_stale_model_cannot_be_committed_as_successful_ready(self):
