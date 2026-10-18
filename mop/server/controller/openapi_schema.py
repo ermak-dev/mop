@@ -258,6 +258,37 @@ class Events(serializers.Serializer):
     coverage = free({'type': 'array', 'items': {'type': 'string'}})
 
 
+class AuditTarget(serializers.Serializer):
+    kind = choices('node', 'puppet', 'project')
+    id = serializers.UUIDField()
+    incarnation = serializers.UUIDField(allow_null=True)
+
+
+class AuditItem(serializers.Serializer):
+    id = serializers.RegexField(r'^[1-9][0-9]*$', max_length=19)
+    operation_id = serializers.UUIDField()
+    revision = serializers.RegexField(r'^[1-9][0-9]*$', max_length=19)
+    created_at = serializers.DateTimeField()
+    action = choices('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch',
+                     'wipe', 'delete', 'create', 'update')
+    state = choices('accepted', 'running', 'reconciling', 'succeeded', 'refused', 'failed',
+                    'partial', 'unknown', 'expired', 'cancelled')
+    code = serializers.CharField(max_length=64, allow_blank=True)
+    reason = serializers.CharField(max_length=512, allow_blank=True)
+    target = AuditTarget()
+    node_id = serializers.UUIDField()
+    project_ids = serializers.ListField(child=serializers.UUIDField(), min_length=1)
+
+
+class AuditPage(serializers.Serializer):
+    schema_version = free({'type':'integer', 'enum':[1]}, required=True)
+    epoch = serializers.UUIDField()
+    results = AuditItem(many=True)
+    next_cursor = serializers.CharField(allow_null=True, max_length=4096)
+    coverage = free({'type':'array', 'items':{'type':'string', 'enum':['operation_audit']},
+                     'minItems':1, 'maxItems':1}, required=True)
+
+
 class UsageSource(serializers.Serializer):
     id = serializers.CharField()
     profile = serializers.CharField()
@@ -308,8 +339,17 @@ def _param(name, required=False, description='', pattern=None):
 
 def parameters():
     """{класс view: query-параметры реального адаптера} (#696)."""
-    from . import operationviews, projectionviews, usageviews
+    from . import auditviews, operationviews, projectionviews, usageviews
     return {
+        auditviews.Audit: (
+            OpenApiParameter('project_id', OpenApiTypes.UUID, OpenApiParameter.QUERY,
+                             description='Optional explicit project intersection; never adds authority.'),
+            OpenApiParameter('cursor', {'type': 'string', 'minLength': 1, 'maxLength': 4096},
+                             OpenApiParameter.QUERY,
+                             description='Opaque descending keyset cursor; expires after 300 seconds.'),
+            OpenApiParameter('limit', {'type': 'integer', 'minimum': 1, 'maximum': 100},
+                             OpenApiParameter.QUERY, default=100,
+                             description='Maximum audit items; the same limit is required on continuation.')),
         usageviews.Usage: (
             _param('schema_version', description='wire version, always 1'),
             _param('start', description='inclusive ISO date of the period'),
@@ -339,8 +379,13 @@ def annotations():
     urlpatterns и держится рядом с реальными адаптерами. Вызывается
     лениво: модуль urls импортируется только при генерации.
     """
-    from . import authviews, buildviews, operationviews, projectionviews, usageviews, views
+    from . import auditviews, authviews, buildviews, operationviews, projectionviews, usageviews, views
     return {
+        auditviews.Audit: {'get': (None, AuditPage, 200,
+            'Read-only immutable operation audit, authorized before keyset pagination. '
+            'Requires operations.view_audit and current complete project/node/grant scope. '
+            'Coverage is operation_audit, not legacy bus messages. Responses are no-store; '
+            'invalid or stale cursors require a reset (410).')},
         views.Health: {'get': (None, Health, 200,
             'Liveness and installation identity of the controller.')},
         usageviews.Usage: {'get': (None, Usage, 200,

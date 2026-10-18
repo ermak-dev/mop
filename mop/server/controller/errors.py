@@ -13,6 +13,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import DatabaseError
 from mop.server.access.services import Denied, NotVisible
 from mop.server.operations.service import Refused, _MESSAGES
+from mop.server.operations.audit import AuditReset, AuditCapacity
 from mop.server.sessions import endpoints as delivery
 from mop.server.sessions import services as execution
 from mop.server.sessions import usage_services as usage
@@ -77,6 +78,8 @@ TYPED = (
     (usage.Unavailable, Entry(503, 'usage_unavailable', True)),
     (ReadAuthorityUnavailable, Entry(503, 'authority_unavailable', True)),
     (SnapshotReset, Entry(410, 'reset_required', False, reset=True)),
+    (AuditReset, Entry(410, 'reset_required', False, reset=True)),
+    (AuditCapacity, Entry(503, 'unavailable', True)),
     (SnapshotCapacity, Entry(503, 'unavailable', True)),
     (SourceConflict, Entry(409, 'incarnation_conflict', False)),
 )

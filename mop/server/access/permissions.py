@@ -80,7 +80,7 @@ GLOBAL_ACTIONS = frozenset(
       'drain_node', 'enable_node', 'forget_node', 'build_project', 'recover_build',
       'view_installationsetting', 'change_installationsetting', 'view_nodesetting', 'change_nodesetting')] +
     ['execution.' + x for x in ('view_history', 'view_tail', 'read_terminal', 'control_terminal')] +
-    ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation', 'view_audit',
+    ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation',
       'diagnose_pool', 'treat_pool', 'collect_pool_garbage', 'sweep_pool', 'view_node_disk')] +
     ['secrets.rotate_proxy_key', 'controller.manage_proxy', 'builds.force_build', 'execution.view_usage'])
 
