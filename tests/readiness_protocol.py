@@ -15,6 +15,7 @@ import unittest
 from uuid import uuid4
 
 import _lib  # noqa: F401
+import hermetic  # noqa: F401
 from mop.common.readiness import ReadyRequest, ReadyEvidence
 from mop.node.http_execution import MachineClient, Refused, Unavailable
 
