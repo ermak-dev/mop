@@ -4,10 +4,18 @@ HYPOTHESIS: совпадение synthetic stat/UID не проверяет kern
 SOLUTION: реальные fork/setgroups/setgid/setuid, node-private input и root copy.
 RESULT: actual Python 3.12 root=0/node=21071/body=21072: 19 checks GREEN.
 Отдельные RED для mutable receipt/large reader, failed cleanup, stale release и
-world-readable foreign quarantine. Это не root backend/phase runner acceptance.
+world-readable foreign quarantine.
+BUG/HYPOTHESIS: body O_RDONLY directory flock блокирует root snapshot/cleanup.
+SOLUTION: owner-private 0600 regular lock, новый open description и pinned inode.
+RESULT: actual UID barrier RED до fix; 24 checks GREEN, body держит directory
+flock во время fresh/repeated snapshot и обеих уборок; private lock body недоступен.
+Это не root backend/phase runner acceptance.
 STATUS: FIXED — see #746
 """
 import copy
+from contextlib import contextmanager
+import fcntl
+import select
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -29,6 +37,12 @@ from _host_inputs_data import selected
 from mop.node.http_execution import Refused
 
 NODE, BODY = 21071, 21072
+LOCK = '.phase-input.lock'
+
+
+def data_entries(directory):
+    """Fixed lock metadata не расходует budget approved data; unknown entries остаются."""
+    return [entry for entry in directory.iterdir() if entry.name != LOCK]
 
 
 def as_uid(uid, function):
@@ -114,6 +128,168 @@ class ActualPrivateInputTests(unittest.TestCase):
                 return dict(value=body.value, payload=body.payload.decode())
         return as_uid(BODY, consume)
 
+    @contextmanager
+    def held_directory_lock(self, uid, directory):
+        """Actual UID держит LOCK_EX до явного release, не timing-based sleep."""
+        ready_r, ready_w = os.pipe()
+        release_r, release_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(ready_r)
+            os.close(release_w)
+            try:
+                # Body не получает даже унаследованные root-private descriptors.
+                self.owner.close()
+                os.setgroups([])
+                os.setgid(uid)
+                os.setuid(uid)
+                fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.write(ready_w, str(os.geteuid()).encode())
+                if not select.select([release_r], [], [], 5)[0]:
+                    os._exit(3)
+                os.read(release_r, 1)
+                os.close(fd)
+                os._exit(0)
+            except BaseException:
+                os._exit(2)
+        os.close(ready_w)
+        os.close(release_r)
+        try:
+            self.assertTrue(select.select([ready_r], [], [], 5)[0], 'UID lock barrier missing')
+            self.assertEqual(os.read(ready_r, 32), str(uid).encode(), 'UID directory lock not held')
+            yield
+        finally:
+            os.close(ready_r)
+            try:
+                os.write(release_w, b'1')
+            except BrokenPipeError:
+                pass
+            os.close(release_w)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0, 'UID lock child failed')
+
+    def test_body_readonly_directory_flock_cannot_block_root_snapshot_or_cleanup(self):
+        # BUG: body O_RDONLY directory fd удерживает flock всего root transport.
+        # HYPOTHESIS: доступный body inode нельзя использовать как root lock.
+        descriptor = self.write()
+        receipt = self.owner.snapshot(NODE, descriptor, self.a)
+        a, s, value = selected()
+        work = replace(a.work, epoch=self.s.epoch, node_id=self.s.node_id,
+                       executor_epoch=self.s.executor_epoch)
+        a = replace(a, work=work)
+        s = replace(s, epoch=work.epoch, node_id=work.node_id, executor_epoch=work.executor_epoch)
+        value['work'] = work.wire()
+        second = self.write(a, s, value)
+        blocked, created = [], []
+        with self.held_directory_lock(BODY, self.snapshots):
+            for name, operation in (
+                    ('snapshot_repeat', lambda: self.owner.snapshot(NODE, descriptor, self.a)),
+                    ('snapshot_fresh_scope', lambda: created.append(self.owner.snapshot(NODE, second, a))),
+                    ('cleanup_input', lambda: self.owner.cleanup_input(receipt)),
+                    ('cleanup_snapshot', lambda: self.owner.cleanup_snapshot(receipt))):
+                try:
+                    operation()
+                except Refused as error:
+                    blocked.append((name, str(error)))
+            self.assertEqual(blocked, [], 'body read-only directory flock blocked root operations')
+            self.assertEqual(len(created), 1)
+            self.assertTrue(self.owner.cleanup_input(created[0]))
+            self.assertTrue(self.owner.cleanup_snapshot(created[0]))
+        self.assertEqual(data_entries(self.ingress), [])
+        self.assertEqual(data_entries(self.snapshots), [])
+
+    def test_root_lock_is_private_even_through_body_readonly_directory_fd(self):
+        descriptor = self.write()
+        self.owner.snapshot(NODE, descriptor, self.a)
+        for directory, uid in ((self.ingress, NODE), (self.snapshots, 0)):
+            value = (directory/LOCK).stat()
+            self.assertTrue(stat.S_ISREG(value.st_mode))
+            self.assertEqual((value.st_uid, stat.S_IMODE(value.st_mode), value.st_nlink, value.st_size),
+                             (uid, 0o600, 1, 0))
+        def via_body_fd():
+            with self.f.BodyReader(self.snapshots, body_uid=BODY, body_gid=BODY,
+                    backend_epoch=self.s.epoch, node_id=self.s.node_id,
+                    executor_epoch=self.s.executor_epoch) as reader:
+                fd = os.open(LOCK, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=reader.directory.fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(fd)
+        for uid, function in ((BODY, via_body_fd), (NODE, lambda: os.open(self.snapshots/LOCK, os.O_RDONLY)),
+                              (BODY, lambda: os.open(self.ingress/LOCK, os.O_RDONLY))):
+            denied = as_uid(uid, function)
+            self.assertFalse(denied['ok'], denied)
+            self.assertEqual(denied['error'], 'PermissionError', denied)
+        self.assertTrue(self.read(descriptor)['ok'])
+
+    def test_root_private_lock_serializes_store_processes_and_threads(self):
+        descriptor = self.write()
+        other = self.store()
+        with other, self.owner.snapshots.lock():
+            result = as_uid(0, lambda: other.snapshot(NODE, descriptor, self.a))
+            self.assertFalse(result['ok'], result)
+            self.assertEqual(result['error'], 'Refused')
+            self.assertIn('busy', result['reason'])
+            errors = []
+            def attempt():
+                try:
+                    other.snapshot(NODE, descriptor, self.a)
+                except Refused as error:
+                    errors.append(str(error))
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIn('busy', errors[0])
+            self.assertEqual(data_entries(self.snapshots), [])
+        self.owner.snapshot(NODE, descriptor, self.a)
+
+    def test_root_lock_inode_survives_cleanup_forget_close_and_reopen(self):
+        descriptor = self.write()
+        receipt = self.owner.snapshot(NODE, descriptor, self.a)
+        path = self.snapshots/LOCK
+        before = path.stat()
+        self.owner.cleanup_input(receipt)
+        self.owner.cleanup_snapshot(receipt)
+        self.owner.forget(receipt)
+        self.owner.close()
+        with self.store() as other, other.snapshots.lock():
+            after = path.stat()
+            self.assertEqual((before.st_dev, before.st_ino, before.st_ctime_ns),
+                             (after.st_dev, after.st_ino, after.st_ctime_ns))
+        self.assertEqual(data_entries(self.snapshots), [])
+
+    def test_root_lock_rejects_untrusted_inode_and_never_adopts_replacement(self):
+        descriptor = self.write()
+        path = self.snapshots/LOCK
+        # Root-owned namespace меняется только fixture root: unprivileged UID не может.
+        self.assertTrue(path.exists(), 'dedicated private lock inode missing')
+        old = self.snapshots/'saved-lock'
+        path.rename(old)
+        for kind in ('symlink', 'hardlink', 'fifo', 'directory', 'owner', 'mode', 'contents'):
+            if kind == 'symlink': path.symlink_to(old)
+            elif kind == 'hardlink': os.link(old, path)
+            elif kind == 'fifo': os.mkfifo(path, 0o600)
+            elif kind == 'directory': path.mkdir(mode=0o600)
+            else:
+                path.touch(mode=0o600)
+                if kind == 'owner': os.chown(path, BODY, BODY)
+                if kind == 'mode': path.chmod(0o640)
+                if kind == 'contents': path.write_bytes(b'not-lock-metadata')
+            with self.subTest(kind=kind), self.assertRaises(Refused):
+                with self.store():
+                    pass
+            if kind == 'directory': path.rmdir()
+            else: path.unlink()
+        path.touch(mode=0o600)
+        replacement = path.stat()
+        with self.assertRaisesRegex(Refused, 'lock.*(identity|changed|mismatch)'):
+            self.owner.snapshot(NODE, descriptor, self.a)
+        self.assertEqual(path.stat().st_ino, replacement.st_ino)
+        self.assertFalse((self.snapshots/descriptor.filename).exists())
+
     def test_actual_exact_bytes_root_ownership_and_kernel_uid_denials(self):
         with patch.dict(os.environ, NODE_BEARER='ambient-node-bearer-sentinel'):
             descriptor = self.write()
@@ -147,7 +323,7 @@ class ActualPrivateInputTests(unittest.TestCase):
             owner = self.store(**changes)
             with owner, self.assertRaises(Refused):
                 owner.snapshot(NODE, descriptor, self.a)
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_snapshot_repeat_is_read_only_and_unknown_existing_never_adopted(self):
         descriptor = self.write()
@@ -183,7 +359,7 @@ class ActualPrivateInputTests(unittest.TestCase):
                      (descriptor, replace(self.a, lease_until=datetime.now(timezone.utc)-timedelta(seconds=1)))):
             with self.assertRaises(Refused):
                 self.owner.snapshot(NODE, d, a)
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_nofollow_hardlinks_loose_mode_fifo_oversize_and_wrong_owner(self):
         descriptor = self.write()
@@ -206,7 +382,7 @@ class ActualPrivateInputTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(Refused):
                 self.owner.snapshot(NODE, descriptor, self.a)
             path.unlink()
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_parent_symlink_replacement_and_file_swap_during_read_never_copy(self):
         descriptor = self.write()
@@ -231,7 +407,7 @@ class ActualPrivateInputTests(unittest.TestCase):
             return raw
         with patch('os.read', side_effect=racing), self.assertRaises(Refused):
             self.owner.snapshot(NODE, descriptor, self.a)
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_in_place_mutation_while_reading_never_copies(self):
         descriptor = self.write()
@@ -248,7 +424,7 @@ class ActualPrivateInputTests(unittest.TestCase):
             return raw
         with patch('os.read', side_effect=racing), self.assertRaises(Refused):
             self.owner.snapshot(NODE, descriptor, self.a)
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_body_strict_actual_delivery_not_root_nested_interpretation(self):
         descriptor = self.write()
@@ -283,7 +459,7 @@ class ActualPrivateInputTests(unittest.TestCase):
             self.assertTrue(self.owner.cleanup_snapshot(receipt))
             self.assertTrue(self.owner.cleanup_snapshot(receipt))
         self.assertFalse((self.ingress/descriptor.filename).exists())
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_retained_cleanup_never_deletes_foreign_replacement_or_forged_receipt(self):
         descriptor = self.write()
@@ -394,7 +570,7 @@ class ActualPrivateInputTests(unittest.TestCase):
             self.owner.snapshot(NODE, descriptor, self.a)
         self.assertTrue(self.owner.cleanup_snapshot(receipt))
         self.assertTrue(self.owner.cleanup_input(receipt))
-        self.assertEqual(list(self.snapshots.iterdir()), [])
+        self.assertEqual(data_entries(self.snapshots), [])
 
     def test_cleanup_failure_retains_captured_inode_for_expired_retry_without_foreign_deletion(self):
         descriptor = self.write()
@@ -488,8 +664,8 @@ class ActualPrivateInputTests(unittest.TestCase):
         codes = [os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) for pid in children]
         self.assertEqual(codes.count(0), 1, codes)
         self.assertEqual(codes.count(2), 3, codes)
-        self.assertEqual(len(list(self.ingress.iterdir())), 1)
-        self.assertLessEqual(sum(p.stat().st_size for p in self.ingress.iterdir()), limit.max_bytes)
+        self.assertEqual(len(data_entries(self.ingress)), 1)
+        self.assertLessEqual(sum(p.stat().st_size for p in data_entries(self.ingress)), limit.max_bytes)
 
     def test_root_file_and_byte_capacity_stays_bounded_with_concurrent_calls(self):
         first = self.write()
@@ -511,8 +687,8 @@ class ActualPrivateInputTests(unittest.TestCase):
             for t in threads: t.start()
             for t in threads: t.join(timeout=5)
             self.assertTrue(all(not t.is_alive() for t in threads))
-        self.assertLessEqual(len(list(self.snapshots.iterdir())), 1)
-        self.assertLessEqual(sum(p.stat().st_size for p in self.snapshots.iterdir()), size)
+        self.assertLessEqual(len(data_entries(self.snapshots)), 1)
+        self.assertLessEqual(sum(p.stat().st_size for p in data_entries(self.snapshots)), size)
         self.assertEqual(sum(r is not None for r in results), 1)
 
 

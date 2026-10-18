@@ -15,6 +15,8 @@ from mop.node.host_inputs import (Descriptor, Envelope, Limits, MAX_FILE_BYTES, 
                                   canonical, digest, pack, parse_body)
 
 _FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOCK = '.phase-input.lock'
+_LOCK_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 _STABLE = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
            'st_size', 'st_mtime_ns', 'st_ctime_ns')
 
@@ -42,11 +44,45 @@ def _path(value):
 
 
 class _Directory:
-    def __init__(self, path, *, uid, gid, mode, ancestors):
+    def __init__(self, path, *, uid, gid, mode, ancestors, locking=False):
         self.path = _path(path)
         self.uid, self.gid, self.mode, self.ancestors = uid, gid, mode, ancestors
-        self.fd = self._open()
-        self.identity = _fingerprint(os.fstat(self.fd))[:2]
+        self.fd = self.lock_fd = None
+        self.lock_physical = None
+        try:
+            self.fd = self._open()
+            self.identity = _fingerprint(os.fstat(self.fd))[:2]
+            if locking:
+                self._prepare_lock()
+        except BaseException:
+            self.close()
+            raise
+
+    def _prepare_lock(self):
+        try:
+            try:
+                self.lock_fd = os.open(_LOCK, _LOCK_FLAGS | os.O_CREAT | os.O_EXCL,
+                                       0o600, dir_fd=self.fd)
+            except FileExistsError:
+                self.lock_fd = os.open(_LOCK, _LOCK_FLAGS, dir_fd=self.fd)
+            else:
+                # Root может первым открыть ingress, но lock принадлежит node UID.
+                # Existing inode никогда не chown/chmod и не усыновляется по замене.
+                if os.geteuid() == 0 and self.uid != 0:
+                    os.fchown(self.lock_fd, self.uid, -1)
+            self.lock_physical = _fingerprint(os.fstat(self.lock_fd))
+            self._check_lock(self.lock_fd)
+        except OSError:
+            raise Refused('phase input private lock unavailable') from None
+
+    def _check_lock(self, fd):
+        value, named = os.fstat(fd), self.stat(_LOCK)
+        if (not stat.S_ISREG(value.st_mode) or value.st_uid != self.uid
+                or stat.S_IMODE(value.st_mode) != 0o600 or value.st_nlink != 1
+                or value.st_size != 0 or named is None
+                or _fingerprint(value) != self.lock_physical
+                or _fingerprint(named) != self.lock_physical):
+            raise Refused('phase input private lock identity or mode mismatch')
 
     def _open(self):
         fd = None
@@ -90,16 +126,24 @@ class _Directory:
     @contextmanager
     def lock(self):
         self.check()
+        if self.lock_fd is None:
+            raise Refused('phase input directory has no private writer lock')
         fd = None
         try:
-            # Новый open description: flock одного shared fd не защищает threads.
-            fd = os.open('.', _FLAGS, dir_fd=self.fd)
+            self._check_lock(self.lock_fd)
+            # Directory inode доступен body O_RDONLY и допускает LOCK_EX.
+            # Отдельный 0600 inode закрыт body даже через его readonly dirfd.
+            # Новый open description сохраняет process/thread serialization.
+            fd = os.open(_LOCK, _LOCK_FLAGS, dir_fd=self.fd)
+            self._check_lock(fd)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Refused('phase input store busy with concurrent operation') from None
             self.check()
+            self._check_lock(fd)
             yield
+            self._check_lock(fd)
             self.check()
         except OSError:
             raise Refused('phase input filesystem operation unavailable') from None
@@ -108,6 +152,11 @@ class _Directory:
                 os.close(fd)
 
     def close(self):
+        # Не unlink: waiter/new store должны видеть тот же lock inode. Anchor
+        # держит inode живым до close и не даёт reuse скрыть unlink/replacement.
+        if self.lock_fd is not None:
+            os.close(self.lock_fd)
+            self.lock_fd = None
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
@@ -122,6 +171,11 @@ class _Directory:
         count = total = 0
         with os.scandir(self.fd) as entries:
             for entry in entries:
+                if entry.name == _LOCK:
+                    # Один fixed infrastructure inode вне data budget; подмена
+                    # не становится бесплатной unknown entry.
+                    self._check_lock(self.lock_fd)
+                    continue
                 value = entry.stat(follow_symlinks=False)
                 count += 1
                 total += value.st_size
@@ -240,7 +294,7 @@ class NodeWriter(_Closable):
         if type(limits) is not Limits:
             raise Refused('typed phase input limits required')
         self.node_uid, self.limits = node_uid, limits
-        self.directory = _Directory(ingress, uid=node_uid, gid=None, mode=0o700, ancestors=(0, node_uid))
+        self.directory = _Directory(ingress, uid=node_uid, gid=None, mode=0o700, ancestors=(0, node_uid), locking=True)
         self._owned = {}
 
     @property
@@ -331,9 +385,9 @@ class SnapshotStore(_Closable):
         if ingress == snapshots or ingress in snapshots.parents or snapshots in ingress.parents:
             raise Refused('separate installed phase input trees required')
         self.limits = limits
-        self.ingress = _Directory(ingress, uid=node_uid, gid=None, mode=0o700, ancestors=(0, node_uid))
+        self.ingress = _Directory(ingress, uid=node_uid, gid=None, mode=0o700, ancestors=(0, node_uid), locking=True)
         try:
-            self.snapshots = _Directory(snapshots, uid=0, gid=body_gid, mode=0o750, ancestors=(0,))
+            self.snapshots = _Directory(snapshots, uid=0, gid=body_gid, mode=0o750, ancestors=(0,), locking=True)
             if os.fstat(self.ingress.fd).st_dev != os.fstat(self.snapshots.fd).st_dev:
                 raise Refused('phase input cleanup requires one installed filesystem')
         except BaseException:
@@ -516,7 +570,7 @@ class BodyReader(_Closable):
         _running_as(self.body_uid)
         if type(descriptor) is not Descriptor:
             raise Refused('typed phase input descriptor required')
-        # Body не берёт exclusive lock: group-readable directory не writable.
+        # Body не открывает private writer lock; readable directory не служит lock inode.
         raw, _ = self.directory.read(descriptor.filename, uid=0, gid=self.body_gid,
                                     mode=0o440, limit=MAX_FILE_BYTES)
         return parse_body(Envelope.parse(raw, descriptor, admission, **self.expected))

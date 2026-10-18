@@ -7,6 +7,10 @@ RESULT: 14 RED для отсутствующего transport, затем RED bou
 safe diagnostics (probe, delivery и duplicate JSON); 19 pure/filesystem checks GREEN.
 Actual Python 3.12 UID probe: 19 checks GREEN после отдельных RED large reader,
 mutable receipt, failed cleanup, stale release и world-readable foreign quarantine.
+BUG/HYPOTHESIS: доступный body directory inode не может быть private root lock.
+SOLUTION: fixed owner-private lock inode, pinned lifetime, per-call open description.
+RESULT: private lock contract RED, затем 21 checks GREEN; max_files=1 сохраняет
+один data slot, unknown entries и replacement не исключаются из safety checks.
 Runner/backend не проверены.
 STATUS: FIXED — see #746
 """
@@ -186,6 +190,13 @@ class EnvelopeTests(unittest.TestCase):
         self.assertNotIn('raw-secret-sentinel', str(caught.exception))
 
 
+LOCK = '.phase-input.lock'
+
+
+def data_entries(directory):
+    return [entry for entry in directory.iterdir() if entry.name != LOCK]
+
+
 class NodeWriterTests(unittest.TestCase):
     def setUp(self):
         self.m, self.f = api(), files()
@@ -291,12 +302,52 @@ class NodeWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, 'bound|limit'):
             too_small.write(a, s, value)
         import fcntl
-        locked = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = os.open(self.path/LOCK, os.O_RDONLY | os.O_NOFOLLOW)
         self.addCleanup(os.close, locked)
         fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with self.assertRaisesRegex(Refused, 'busy|concurrent'):
             self.write()
-        self.assertEqual(len(list(self.path.iterdir())), 1)
+        self.assertEqual(len(data_entries(self.path)), 1)
+
+    def test_node_lock_uses_private_pinned_inode_not_readable_directory(self):
+        # BUG/HYPOTHESIS: flock на readable directory не является private lock.
+        import fcntl
+        descriptor = self.write()
+        path = self.path/LOCK
+        before = path.stat()
+        self.assertEqual((before.st_uid, before.st_mode & 0o777, before.st_nlink, before.st_size),
+                         (os.geteuid(), 0o600, 1, 0))
+        directory = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.write(), descriptor)
+        finally:
+            os.close(directory)
+        # Удалённый inode остаётся pinned; новый inode даже с теми же mode/UID — отказ.
+        path.unlink()
+        path.touch(mode=0o600)
+        self.assertNotEqual(path.stat().st_ino, before.st_ino)
+        with self.assertRaisesRegex(Refused, 'lock.*(identity|changed|mismatch)'):
+            self.write()
+        self.assertEqual(data_entries(self.path), [self.path/descriptor.filename])
+
+    def test_node_lock_refuses_symlink_hardlink_fifo_loose_mode_and_content(self):
+        path = self.path/LOCK
+        self.assertTrue(path.exists(), 'dedicated private node lock missing')
+        saved = self.path/'saved-lock'
+        path.rename(saved)
+        for kind in ('symlink', 'hardlink', 'fifo', 'mode', 'contents'):
+            if kind == 'symlink': path.symlink_to(saved)
+            elif kind == 'hardlink': os.link(saved, path)
+            elif kind == 'fifo': os.mkfifo(path, 0o600)
+            else:
+                path.touch(mode=0o600)
+                if kind == 'mode': path.chmod(0o640)
+                else: path.write_bytes(b'not-lock-metadata')
+            with self.subTest(kind=kind), self.assertRaises(Refused):
+                with self.f.NodeWriter(self.path, node_uid=os.geteuid()):
+                    pass
+            path.unlink()
 
     def test_retained_ownership_is_bounded_and_forget_never_deletes_files(self):
         limited = self.f.NodeWriter(self.path, node_uid=os.geteuid(),
