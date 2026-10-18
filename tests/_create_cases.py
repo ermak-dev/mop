@@ -320,6 +320,30 @@ class CreateRegistration(TransactionTestCase):
         self.assertEqual(ScheduledPuppet.objects.get(target_id=target).modify_index, 1)
         self.assertEqual(len(self.peer.posts), 1)
 
+    # HYPOTHESIS (#707): recovery заново рендерит spec текущим wrapper,
+    # а сверять нужно байты исходного dispatch, не новую версию контроллера.
+    # SOLUTION: точная несекретная spec сохраняется вместе с claim до POST;
+    # recovery только читает её, отсутствие evidence -- отказ без освобождения.
+    # RESULT: RED -- failed вместо succeeded; GREEN -- 5/5 с migration check.
+    # STATUS: FIXED — see #707
+    def test_register_recovery_uses_dispatched_spec_after_template_change(self):
+        from unittest.mock import patch
+        from mop.server import spec
+        from mop.server.operations.models import Operation, ScheduledPuppet
+        operation, target, _ = self.launch()
+        self.peer.lose_post = True
+        self.ops.launches.run(operation)
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'unknown')
+        original = self.peer.jobs[target]['Meta'].copy()
+        with patch.object(spec, 'API_WRAPPER', spec.API_WRAPPER + '\n# updated controller template\n'):
+            self.ops.launches.reconcile(self.actor, operation)
+        self.assertEqual((self.step(operation).outcome, self.step(operation).evidence),
+                         ('succeeded', 'job-registered'))
+        self.assertEqual(self.peer.jobs[target]['Meta'], original)
+        self.assertEqual(len(self.peer.posts), 1)
+        self.assertEqual(ScheduledPuppet.objects.get(target_id=target).modify_index, 1)
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'unknown')
+
     def test_an_existing_job_is_never_overwritten(self):
         operation, target, _ = self.launch()
         self.peer.jobs[target] = {'ID': target, 'Namespace': 'default', 'JobModifyIndex': 4,
