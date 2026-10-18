@@ -38,6 +38,138 @@ class Consumers(unittest.TestCase):
     def response(self, data, status=200):
         self.fixture.responses.append(Response(status, data))
 
+    def create_args(self):
+        from _control_fixture import DEFINITION
+        return [PROJECT, '--node-id', NODE, '--definition-id', DEFINITION, '--epoch', EPOCH,
+            '--request-id', KEY, '--not-after', DEADLINE]
+
+    # HYPOTHESIS: add всё ещё unsupported, а прямой вызов импортирует старую шину.
+    # SOLUTION: один transient HTTPS handler для CLI и MCP, без legacy role/origin.
+    # RESULT: unsupported/missing-actions red сменился green; invalid ввод не читает context.
+    # STATUS: FIXED — see #642
+    def test_create_uses_published_parser_without_preexisting_target(self):
+        from _control_fixture import DEFINITION, create_operation
+        self.assertTrue(hasattr(self.client, 'prepare_create'), '#642 missing published create consumer')
+        command = self.client.prepare_create(PROJECT, node_id=NODE, definition_id=DEFINITION,
+            epoch=EPOCH, request_id=KEY, not_after=DEADLINE)
+        from mop.server.operations.commands import parse_create
+        parsed = parse_create(PROJECT, json.loads(command.body))
+        self.assertEqual(str(parsed.intent.project_id), PROJECT)
+        self.assertEqual(str(parsed.node_id), NODE)
+        self.assertEqual(str(parsed.definition_id), DEFINITION)
+        self.assertEqual(self.fixture.calls, [])
+        self.response(create_operation(), 202)
+        self.assertEqual(self.client.submit(command).operation.target_id, PUPPET)
+
+    def test_add_cli_and_direct_commandlet_use_transient_context_only(self):
+        from _control_fixture import DEFINITION, create_operation
+        from mop.cli import _control
+        from mop.cli.core import add
+        from mop.common import context
+        for entry, args in ((cli.main, ['add', *self.create_args()]), (add.main, self.create_args())):
+            self.response(create_operation(), 202)
+            with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+                 patch.object(context, 'here', side_effect=AssertionError('legacy context read')), \
+                 patch.object(cli, 'environment', side_effect=AssertionError('installation environment read')):
+                out, err, code = run_command(entry, args)
+            self.assertEqual(code, 3, err)
+            self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
+            body = json.loads(self.fixture.calls[-1][2])
+            self.assertEqual(body, {'schema_version': 1, 'epoch': EPOCH, 'request_id': KEY,
+                'not_after': DEADLINE, 'params': {'node_id': NODE, 'definition_id': DEFINITION}})
+            self.assertNotIn(TOKEN, out+err)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'POST'])
+
+    def test_add_invalid_or_legacy_inputs_refuse_before_context_or_io(self):
+        from mop.cli import _control
+        args = self.create_args()
+        bad_inputs = [[], [PROJECT], ['git@example:repo.git', '--role', 'worker'],
+            [*args, '--force'], [*args, '--origin', 'git@example:repo.git'],
+            [*args, '--shell', 'whoami'], [*args, '--role', 'worker'],
+            [*args, '--incarnation', INCARNATION], [*args, '--expected-revision', '1'],
+            [*args, '--wait', '-1'], [*args, '--wait', 'nan']]
+        for option in ('--node-id', '--definition-id', '--epoch', '--request-id', '--not-after'):
+            changed = list(args)
+            changed[changed.index(option)+1] = ''
+            bad_inputs.append(changed)
+        bad_inputs.append(['not-a-uuid', *args[1:]])
+        with patch.object(_control, 'context', side_effect=AssertionError('context before validation')):
+            for argv in bad_inputs:
+                with self.subTest(argv=argv):
+                    out, err, code = run_command(cli.main, ['add', *argv])
+                    self.assertIn(code, (1, 2))
+                    self.assertEqual(out, '')
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_add_pins_generated_key_and_deadline_before_context_io(self):
+        from _control_fixture import DEFINITION, create_operation
+        from mop.cli import _control
+        self.assertTrue(hasattr(api, 'CreateCommand'), '#642 missing immutable create intent')
+        original = api.CreateCommand
+        order = []
+        class CheckedCreate(original):
+            def __post_init__(self):
+                super().__post_init__()
+                order.append(self)
+        def context(*args):
+            self.assertEqual(len(order), 1, 'intent must be pinned before context/TLS I/O')
+            return api.ServerContext('https://controller.example', TOKEN)
+        def factory(*args, **kwargs):
+            reply = create_operation()
+            reply['operation']['request_id'] = order[0].request_id
+            self.response(reply, 202)
+            return self.fixture.factory(*args, **kwargs)
+        with patch.object(api, 'CreateCommand', CheckedCreate), \
+             patch.object(_control, 'context', side_effect=context), \
+             patch.object(api, '_DeadlineHTTPSConnection', side_effect=factory):
+            out, err, code = run_command(cli.main, ['add', PROJECT, '--node-id', NODE,
+                '--definition-id', DEFINITION, '--epoch', EPOCH])
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(self.fixture.calls[-1][2])['request_id'], order[0].request_id)
+        self.assertEqual(json.loads(self.fixture.calls[-1][2])['not_after'], order[0].not_after)
+
+    def test_add_unknown_recovers_by_key_and_epoch_without_blind_post(self):
+        from _control_fixture import create_operation
+        from mop.cli import _control
+        self.fixture.responses.append(OSError('lost private admission reply'))
+        self.response(create_operation('succeeded'))
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['add', *self.create_args()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)['operation']['target']['id'], PUPPET)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET'])
+        self.assertEqual(self.fixture.calls[-1][1], f'/api/v1/operations?request_id={KEY}&epoch={EPOCH}')
+        self.fixture.responses.extend((OSError('lost private admission reply'), Response(404,
+            {'schema_version': 1, 'error': {'code': 'not_found', 'message': 'resource not found', 'retryable': False}})))
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            out, err, code = run_command(cli.main, ['add', *self.create_args()])
+        self.assertEqual(code, 3)
+        self.assertEqual(out, '')
+        for value in (KEY, EPOCH, 'unknown', 'resource not found'):
+            self.assertIn(value, err)
+        self.assertNotIn('private admission reply', err)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'GET', 'POST', 'GET'])
+
+    def test_add_mcp_requires_exact_canonical_human_actions_and_same_handler(self):
+        from _control_fixture import DEFINITION, create_operation
+        from mop.cli import _control
+        declaration = cli.declared(os.path.join(cli.PACKAGE, 'core', 'add.py'))
+        actions = ['execution.create_puppet', 'execution.assign_work', 'operations.view_operation']
+        self.assertEqual(declaration.get('actions'), actions)
+        self.assertIs(declaration.get('human_only'), True)
+        self.assertFalse({'node_verbs', 'cluster_verbs', 'dispatch'} & declaration.keys())
+        for missing in actions:
+            self.assertFalse(_control.allowed(declaration, api.Identity(1, 'human', 1, None, None,
+                frozenset(set(actions)-{missing}))))
+        self.assertTrue(_control.allowed(declaration, api.Identity(1, 'human', 1, None, None, frozenset(actions))))
+        self.assertFalse(_control.allowed(declaration, api.Identity(1, 'service', 1, None, OP, frozenset(actions))))
+        self.response(create_operation(), 202)
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+            result = _control.tool_call(['add'], declaration, {'project_id': PROJECT, 'node_id': NODE,
+                'definition_id': DEFINITION, 'epoch': EPOCH, 'request_id': KEY, 'not_after': DEADLINE})
+        self.assertEqual(json.loads(result)['operation']['state'], 'accepted')
+        self.assertEqual(len(self.fixture.calls), 1)
+
     def test_build_uses_published_finite_parser_and_preserves_pinned_policy(self):
         self.assertTrue(hasattr(self.client, 'prepare_build'), '#642 missing published build consumer')
         command = self.client.prepare_build(PROJECT, policy_id=POLICY, epoch=EPOCH,
@@ -632,7 +764,7 @@ class Consumers(unittest.TestCase):
 
     def test_absent_backend_refuses_before_any_io_and_never_ssh_or_nats(self):
         from mop.cli import _control
-        for words in ('add', 'update', 'recycle', 'model',
+        for words in ('update', 'recycle', 'model',
                       'secret file', 'secret var', 'server gc', 'attach', 'master'):
             with self.subTest(words=words), _control.use(api.ServerContext('https://controller.example', TOKEN)):
                 out, err, code = run_command(lambda a: _control.invoke(words, a[0]), [[]])

@@ -32,13 +32,12 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
 GAPS = {
     'agents': 'live address aggregation and private endpoint inbox binding',
-    'add': 'role creation admission and readiness',
     'update': 'update admission',
     'recycle': 'recycle admission', 'send': 'message admission/receipts',
     'dispatch': 'dispatch admission and scoped target selection',
@@ -354,6 +353,21 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             if args.explicit_binding:
                 prepare = api.PreparedCommand(words, api.Target(args.puppet_id, args.incarnation,
                     args.expected_revision), args.epoch, args.request_id, args.not_after)
+        elif words == 'add':
+            p.add_argument('project_id')
+            p.add_argument('--node-id', required=True)
+            p.add_argument('--definition-id', required=True)
+            p.add_argument('--epoch', required=True)
+            p.add_argument('--request-id')
+            p.add_argument('--not-after')
+            p.add_argument('--wait', type=float)
+            args = p.parse_args(argv)
+            # Create не имеет target/CAS. Весь intent фиксируется до context/TLS.
+            args.request_id = api.new_request_id(args.request_id)
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+            prepare = api.CreateCommand(args.project_id, args.node_id, args.definition_id,
+                args.epoch, args.request_id, args.not_after)
         elif words == 'build':
             p.add_argument('project_id')
             p.add_argument('--policy-id', required=True)

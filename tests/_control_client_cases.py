@@ -22,6 +22,7 @@ from datetime import timedelta
 
 import _operation_cases as operation_fixture
 import _build_cases as build_fixture
+import _create_cases as create_fixture
 from _control_fixture import own_tls
 from mop import cli
 from mop.cli import _control
@@ -214,3 +215,50 @@ class NativeControlClient(TransactionTestCase):
             self.assertEqual(self.m.Operation.objects.count(), 1)
             self.assertEqual(self.m.EffectReceipt.objects.count(), 0)
             self.assertEqual(len(server.calls), 4)
+
+
+@override_settings(ALLOWED_HOSTS=['localhost', 'testserver'])
+class NativeCreateControlClient(TransactionTestCase):
+    """#642: настоящий create admission через TLS/DRF, без запуска тела (#586).
+
+    HYPOTHESIS: новый add не связан с опубликованным create и не восстанавливает
+    серверное назначение после потери ответа COMMIT.
+    SOLUTION: тот же immutable intent, затем только GET исходного request key.
+    RESULT: unsupported red -> green: один SQL admission после потери HTTPS ответа;
+    шесть native TLS/DRF/PG17 checks проходят, запуск тела не исполнялся.
+    STATUS: FIXED — see #642
+    """
+    serialized_rollback = True
+    https = NativeControlClient.https
+
+    def setUp(self):
+        create_fixture.CreateVertical.setUp(self)
+        self.token = self.key
+        create_fixture.CreateVertical.ready(self)
+
+    def test_real_create_admission_and_lost_reply_keep_one_server_assigned_target(self):
+        from _lib import run_command
+        from mop.server.operations.models import Operation
+        from mop.server.sessions.models import Assignment
+        key = str(uuid4())
+        deadline = (timezone.now()+timedelta(minutes=2)).isoformat()
+        with self.https() as (server, client):
+            server.drop_post = True
+            out, err, code = run_command(cli.main, ['add', str(self.project.pk), '--node-id', str(self.node.pk),
+                '--definition-id', str(self.definition.id), '--epoch', str(self.epoch),
+                '--request-id', key, '--not-after', deadline])
+            self.assertEqual(code, 3, err)
+            result = json.loads(out)['operation']
+            self.assertEqual(result['state'], 'accepted')
+            self.assertEqual(result['request_id'], key)
+            self.assertEqual([method for method, _ in server.calls], ['POST', 'GET'])
+            self.assertEqual(Operation.objects.filter(request_id=key, action='create').count(), 1)
+            assignment = Assignment.objects.get(pk=result['target']['id'])
+            self.assertEqual((assignment.project_id, assignment.node_id), (self.project.pk, self.node.pk))
+            self.assertEqual(str(assignment.current_incarnation_id), result['target']['incarnation'])
+            self.assertEqual(Assignment.objects.count(), 1)
+            command = client.prepare_create(str(self.project.pk), node_id=str(self.node.pk),
+                definition_id=str(self.definition.id), epoch=str(self.epoch), request_id=key, not_after=deadline)
+            self.assertEqual(client.recover(command).id, result['id'])
+            self.assertEqual([method for method, _ in server.calls], ['POST', 'GET', 'GET'])
+        self.assertNotIn(self.token, out+err)
