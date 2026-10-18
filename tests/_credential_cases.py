@@ -751,3 +751,444 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
                 maintenance('migrate')
             with self.assertRaisesRegex(RuntimeError, 'web/gateway'):
                 validate_asgi_startup()
+
+
+# HYPOTHESIS: activate существует лишь как trusted Python port, а worker без
+# root/human token не может завершить create. Generic activate-any-grant опасен.
+# SPEC: permission access.activate_grant + node-bound grant-activator enrollment;
+# только точный claimed create, успешные стадии, current identity/readiness.
+# Fixture засевает persisted стадии/receipts, а не выдаёт их за запуск scheduler.
+# Provider, Preparation approvals, Grants, Actor/RBAC и Unix socket настоящие.
+# RED: PG17 -- unsupported credential command вместо authorization refusal;
+# canonical permission отсутствует. Дополнительные red: явный отказ не был
+# PermissionError для worker, human с enrollment активировал грант.
+# SOLUTION: finite activate_grant, canonical RBAC permission + node-bound
+# grant-activator enrollment и request-local claimed-create authority; все
+# проверки повторяются после provider wait и в финальном callback Grants.
+# RESULT: PG17 combined credential/enrollment/RBAC/schema -- 149/149; два
+# inherited cross-UID checks -- 2/2. Actual socket workflow и потерянный ответ,
+# stdlib worker без human credential, AEAD corruption/approval/revocation -- green.
+# STATUS: FIXED — see #643 (без production startup enrollment/worker wiring).
+class ActivationCredentialCases(TransactionTestCase):
+    serialized_rollback = True
+    setUp = CredentialSocketCases.setUp
+    exercise = CredentialSocketCases.exercise
+    run_socket = CredentialSocketCases.run_socket
+    reserved_grant = CredentialSocketCases.reserved_grant
+    grant_assignment = CredentialSocketCases.grant_assignment
+
+    async def raw(self, auth, grant_id, revision):
+        from mop.common import credentials as p
+        reader, writer = await asyncio.open_unix_connection(self.path)
+        try:
+            writer.write(p.frame({'version': 1, 'auth': {'kind': auth.kind, 'value': auth.value},
+                'command': 'activate_grant', 'args': {'grant_id': str(grant_id), 'expected_revision': revision}}))
+            await writer.drain()
+            size = p.frame_size(await reader.readexactly(4))
+            return p.loads(await reader.readexactly(size))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    def test_human_and_unrelated_service_are_not_activation_authority(self):
+        from uuid import uuid4
+        from mop.server.catalog.models import Node, NodeProject
+        node = Node.objects.create(name='unrelated-executor', driver='host', ssh_host='node.invalid',
+            control_origin='https://node.invalid', lan_address='node.invalid', bootstrap_address='node.invalid')
+        NodeProject.objects.create(node=node, project=self.project)
+        key = self.access.enroll_service('unrelated-executor', node.id, project_ids=(self.project.id,),
+            permissions=('execution.poll_work',))
+        async def body(client, server):
+            for auth in (self.auth, self.Auth('token', key)):
+                result = await self.raw(auth, uuid4(), 2)
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['error']['message'], 'enrolled grant activator required')
+                self.assertNotIn(auth.value, str(result))
+        self.run_socket(body)
+
+    def fixture(self):
+        from datetime import timedelta
+        from uuid import uuid4
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from mop.server.controller.models import Installation
+        from mop.server.operations import models as operation
+        from mop.server.sessions import models as execution
+        from mop.server.controller.models import RestoreGuard
+        # Отсутствующее canonical permission -- behavioral failure, не импорт/setup error.
+        permission = Permission.objects.filter(content_type__app_label='access', codename='activate_grant').first()
+        self.assertIsNotNone(permission, 'canonical activation action permission is missing')
+        Installation.objects.filter(pk=1).update(effects_enabled=True)
+        reserved = self.reserved_grant()
+        self.assignment = self.grant_assignment(reserved)
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            self.app = self.service.application()
+        self.provisioned = self.app.grants.provision(self.access.token_context(self.token), reserved.id,
+            expected_revision=reserved.revision)
+        self.grant_id = reserved.id
+        self.worker_key = self.access.enroll_service('activation-worker', self.assignment.node_id,
+            project_ids=(self.project.id,), permissions=('access.activate_grant',), use_case='grant-activator')
+        self.worker = get_user_model().objects.get(username='activation-worker')
+        self.worker_auth = self.Auth('token', self.worker_key)
+        installation, now = Installation.objects.get(pk=1), timezone.now()
+        self.operation = operation.Operation.objects.create(actor=self.user, actor_binding={}, request_id=uuid4(),
+            digest='a'*64, epoch=installation.epoch, restore_generation=RestoreGuard.objects.get(pk=1).generation,
+            action='create', node_id=self.assignment.node_id, target_kind='puppet', target_id=self.assignment.id,
+            incarnation_id=reserved.incarnation, expected_revision=self.assignment.revision,
+            not_after=now + timedelta(minutes=2), state='running')
+        self.operation.projects.set((self.project.id,))
+        operation.RestartBinding.objects.create(operation=self.operation, project=self.project,
+            executor_epoch=self.assignment.current_incarnation.executor_epoch, owner_id=self.user.pk,
+            generation=self.assignment.generation, role=reserved.role, bundle_digest=reserved.digest, grant_id=reserved.id)
+        self.steps, self.attempts = [], []
+        for ordinal, (action, evidence) in enumerate((('scheduler_register', 'job-registered'),
+                ('apply_identity', 'identity-applied'), ('confirm_ready', 'ready'), ('activate_grant', '')), 1):
+            token = uuid4()
+            step = operation.Step.objects.create(operation=self.operation, ordinal=ordinal, name=action,
+                token=token, attempt_id=token, outcome='succeeded' if ordinal < 4 else '', evidence=evidence,
+                started_at=now, dispatched_at=now, lease_until=now + timedelta(seconds=30),
+                quiescent_at=now if ordinal < 4 else None)
+            self.steps.append(step)
+            if action in ('apply_identity', 'confirm_ready'):
+                # Исполнитель узла отличается от worker активации.
+                if len(self.attempts) == 0:
+                    machine_key = self.access.enroll_service('identity-executor', self.assignment.node_id,
+                        project_ids=(self.project.id,), permissions=('execution.report_result',))
+                    self.machine = self.access.token_context(machine_key)
+                attempt = execution.AssignmentAttempt.objects.create(assignment=self.assignment,
+                    incarnation_id=reserved.incarnation, executor_user_id=self.machine.user_id, request_id=uuid4(),
+                    epoch=installation.epoch, operation_id=self.operation.id, step_id=step.id,
+                    executor_epoch=self.assignment.current_incarnation.executor_epoch, owner=self.user,
+                    generation=self.assignment.generation, assignment_revision=self.assignment.revision,
+                    role=reserved.role, bundle_digest=reserved.digest, grant_id=reserved.id, action=action,
+                    not_after=self.operation.not_after, lease_until=step.lease_until, state='succeeded', revision=2)
+                receipt = execution.ResultReceipt.objects.create(attempt=attempt, expected_revision=1,
+                    resulting_revision=2, outcome='succeeded', evidence=evidence)
+                model = execution.IdentityApplication if action == 'apply_identity' else execution.ReadinessReceipt
+                model.objects.create(attempt=attempt, receipt=receipt)
+                self.attempts.append(attempt)
+        for key in ('node:'+str(self.assignment.node_id), 'project:'+str(self.project.id),
+                    'puppet:'+str(self.assignment.id), 'target:'+str(self.assignment.id)):
+            resource = operation.Resource.objects.create(key=key)
+            operation.ResourceClaim.objects.create(resource=resource, operation=self.operation,
+                step=self.steps[-1], token=self.steps[-1].token)
+        return permission
+
+    def activate(self, client, *, auth=None, revision=None):
+        return client.activate_grant(auth or self.worker_auth, self.grant_id,
+            expected_revision=self.provisioned.revision if revision is None else revision)
+
+    def refused(self, change, *, provider=None, reason=None):
+        from mop.server.access.models import Grant, GrantEvent
+        self.fixture()
+        change()
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, reason or '.'):
+                await asyncio.to_thread(self.activate, client)
+        self.run_socket(body, provider=provider)
+        self.assertEqual(Grant.objects.get(pk=self.grant_id).state, 'reserved')
+        self.assertFalse(GrantEvent.objects.filter(grant_id=self.grant_id, action='activate').exists())
+
+    def test_ready_claimed_create_activates_over_socket_without_human_credential_in_worker(self):
+        from mop.common.credential_client import GrantActivator
+        from mop.server.access.models import Grant, GrantEvent
+        self.fixture()
+        async def body(client, server):
+            adapter = GrantActivator(client, self.worker_auth)
+            result = await asyncio.to_thread(adapter.activate_grant, self.grant_id,
+                expected_revision=self.provisioned.revision)
+            self.assertEqual((result.id, result.state, result.revision),
+                (self.grant_id, 'active', self.provisioned.revision + 1))
+            self.assertEqual(result.credential_version_id, self.provisioned.credential_version_id)
+            for value in (self.token, self.worker_key, 'private'):
+                self.assertNotIn(value, repr(result) + repr(adapter))
+        self.run_socket(body)
+        self.assertEqual(Grant.objects.get(pk=self.grant_id).state, 'active')
+        self.assertEqual(GrantEvent.objects.filter(grant_id=self.grant_id, action='activate').count(), 1)
+
+    def test_explicit_activation_refusal_is_not_an_unknown_transport_outcome(self):
+        self.fixture()
+        self.worker.user_permissions.clear()
+        async def body(client, server):
+            with self.assertRaises(self.Error) as caught:
+                await asyncio.to_thread(self.activate, client)
+            self.assertIsInstance(caught.exception, PermissionError,
+                'worker must record explicit refusal as failed, not unknown transport outcome')
+        self.run_socket(body)
+
+    def test_human_cannot_become_worker_through_an_enrollment_row(self):
+        from mop.server.access.models import ServiceEnrollment
+        permission = self.fixture()
+        self.user.user_permissions.add(permission)
+        ServiceEnrollment.objects.create(actor=self.user, node_id=self.assignment.node_id, use_case='grant-activator')
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'enrolled grant activator required'):
+                await asyncio.to_thread(self.activate, client, auth=self.auth)
+        self.run_socket(body)
+
+    def test_node_executor_with_activation_permission_is_not_the_worker_enrollment(self):
+        self.fixture()
+        key = self.access.enroll_service('not-activation-worker', self.assignment.node_id,
+            project_ids=(self.project.id,), permissions=('access.activate_grant',))
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'enrolled grant activator required'):
+                await asyncio.to_thread(self.activate, client, auth=self.Auth('token', key))
+        self.run_socket(body)
+
+    def test_node_free_controller_worker_cannot_activate_even_with_permission(self):
+        permission = self.fixture()
+        from django.contrib.auth import get_user_model
+        key = self.access.enroll_service('unbound-worker', None, project_ids=(),
+            permissions=('catalog.record_settings_application',), use_case='controller-worker')
+        get_user_model().objects.get(username='unbound-worker').user_permissions.add(permission)
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'enrolled grant activator required'):
+                await asyncio.to_thread(self.activate, client, auth=self.Auth('token', key))
+        self.run_socket(body)
+
+    def test_claim_changes_during_decryption_cannot_commit_activation(self):
+        from mop.server.controller import bootstrap
+        from mop.server.operations.models import Step
+        from mop.server.access.models import Grant
+        self.fixture()
+        provider = bootstrap.secret_provider(self.bootstrap, installation_id=self.app.snapshot['identity'],
+            expected_root_digest=self.app.snapshot['root_digest'], key_id='root-v1')
+        class Reclaiming:
+            def decrypt(inner, envelope, context):
+                from uuid import uuid4
+                self.assertFalse(connection.in_atomic_block)
+                value = provider.decrypt(envelope, context)
+                Step.objects.filter(pk=self.steps[-1].id).update(token=uuid4())
+                return value
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'claimed create'):
+                await asyncio.to_thread(self.activate, client)
+        self.run_socket(body, provider=Reclaiming())
+        self.assertEqual(Grant.objects.get(pk=self.grant_id).state, 'reserved')
+
+    def test_corrupt_retained_definition_cannot_activate_through_worker_service(self):
+        from mop.server.access.models import Grant
+        from mop.server.secrets.models import SecretVersion
+        def corrupt():
+            version_id = Grant.objects.get(pk=self.grant_id).intent.definition.content_version_id
+            version = SecretVersion.objects.get(pk=version_id)
+            value = bytes(version.envelope)
+            SecretVersion._base_manager.filter(pk=version_id).update(envelope=value[:-1] + bytes([value[-1] ^ 1]))
+        self.refused(corrupt, reason='authentication failed')
+
+    def test_revoked_bootstrap_approval_cannot_activate_through_worker_service(self):
+        from mop.server.access.models import Grant
+        from mop.server.preparation.models import ApprovalRevocation
+        def revoke():
+            grant = Grant.objects.get(pk=self.grant_id)
+            ApprovalRevocation.objects.create(approval_id=grant.intent.policy_approval_id)
+        self.refused(revoke)
+
+    def test_stdlib_worker_process_never_receives_root_or_original_human_credential(self):
+        import sys
+        self.fixture()
+        code = '''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from uuid import UUID
+from mop.common.credential_client import CredentialClient, GrantActivator
+from mop.common.credentials import Credential
+value = json.loads(sys.stdin.read())
+worker = GrantActivator(CredentialClient(value['path'], server_uid=value['uid']), Credential('token', value['service_token']))
+receipt = worker.activate_grant(UUID(value['grant']), expected_revision=value['revision'])
+assert not any(name.startswith(('mop.server', 'django', 'nacl')) for name in sys.modules)
+print(json.dumps({'state': receipt.state, 'revision': receipt.revision}))
+'''
+        async def body(client, server):
+            process = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', code,
+                str(Path(__file__).resolve().parents[1]), stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env={key: value for key, value in os.environ.items() if not key.startswith(('MOP_', 'DJANGO_'))})
+            data = json.dumps({'path': self.path, 'uid': os.geteuid(), 'service_token': self.worker_key,
+                'grant': str(self.grant_id), 'revision': self.provisioned.revision}).encode()
+            self.assertNotIn(self.token.encode(), data)
+            async with asyncio.timeout(5):
+                output, error = await process.communicate(data)
+            self.assertEqual(process.returncode, 0, error.decode())
+            self.assertEqual(json.loads(output)['state'], 'active')
+            for value in (self.token.encode(), self.worker_key.encode()):
+                self.assertNotIn(value, output + error)
+        self.run_socket(body)
+
+    def test_revoked_subject_credential_is_still_checked_by_grants(self):
+        from rest_framework.authtoken.models import Token
+        self.refused(lambda: Token.objects.filter(user_id=self.provisioned.subject_id).delete())
+
+    def test_cas_revision_mismatch_does_not_activate(self):
+        self.fixture()
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'grant revision changed'):
+                await asyncio.to_thread(self.activate, client, revision=self.provisioned.revision + 1)
+        self.run_socket(body)
+
+    def test_human_with_activation_permission_still_cannot_activate(self):
+        permission = self.fixture()
+        self.user.user_permissions.add(permission)
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'enrolled grant activator required'):
+                await asyncio.to_thread(self.activate, client, auth=self.auth)
+        self.run_socket(body)
+
+    def test_missing_activation_permission_refuses(self):
+        self.refused(lambda: self.worker.user_permissions.clear(), reason='permission required')
+
+    def test_deleted_enrollment_refuses(self):
+        from mop.server.access.models import ServiceEnrollment
+        self.refused(lambda: ServiceEnrollment.objects.filter(actor=self.worker).delete())
+
+    def test_revoked_worker_token_refuses(self):
+        from rest_framework.authtoken.models import Token
+        self.refused(lambda: Token.objects.filter(user=self.worker).delete())
+
+    def test_service_project_scope_removed_refuses(self):
+        from mop.server.access.models import ProjectMembership
+        self.refused(lambda: ProjectMembership.objects.filter(user=self.worker).delete(), reason='outside enrollment')
+
+    def test_node_project_scope_removed_refuses(self):
+        from mop.server.catalog.models import NodeProject
+        self.refused(lambda: NodeProject.objects.filter(node_id=self.assignment.node_id).delete(), reason='current create assignment')
+
+    def test_foreign_node_service_with_permission_refuses(self):
+        from mop.server.catalog.models import Node, NodeProject
+        self.fixture()
+        node = Node.objects.create(name='foreign-worker', driver='host', ssh_host='foreign.invalid',
+            control_origin='https://foreign.invalid', lan_address='foreign.invalid', bootstrap_address='foreign.invalid')
+        NodeProject.objects.create(node=node, project=self.project)
+        key = self.access.enroll_service('foreign-worker', node.id, project_ids=(self.project.id,),
+            permissions=('access.activate_grant',), use_case='grant-activator')
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'outside enrollment'):
+                await asyncio.to_thread(self.activate, client, auth=self.Auth('token', key))
+        self.run_socket(body)
+
+    def test_no_claimed_create_operation_is_not_generic_grant_activation(self):
+        from mop.server.operations.models import Operation
+        self.refused(lambda: Operation.objects.filter(pk=self.operation.id).update(state='failed'), reason='claimed create')
+
+    def test_unclaimed_or_completed_activation_step_refuses(self):
+        from mop.server.operations.models import Step
+        self.refused(lambda: Step.objects.filter(pk=self.steps[-1].id).update(token=None), reason='claimed create')
+
+    def test_unsuccessful_predecessor_refuses(self):
+        from mop.server.operations.models import Step
+        self.refused(lambda: Step.objects.filter(pk=self.steps[1].id).update(outcome='unknown'), reason='claimed create')
+
+    def test_released_resource_fence_refuses(self):
+        from django.utils import timezone
+        from mop.server.operations.models import ResourceClaim
+        self.refused(lambda: ResourceClaim.objects.filter(operation=self.operation).update(released_at=timezone.now()),
+            reason='claimed create')
+
+    def test_actual_readiness_is_required_not_only_successful_workflow_steps(self):
+        from mop.server.sessions.models import AssignmentAttempt
+        self.refused(lambda: AssignmentAttempt.objects.filter(pk=self.attempts[1].id).update(state='unknown'),
+            reason='activation receipt')
+
+    def test_creator_credential_revocation_is_still_checked_by_grants(self):
+        from rest_framework.authtoken.models import Token
+        self.refused(lambda: Token.objects.filter(user=self.user).delete(), reason='token revoked or rotated')
+
+    def test_service_permission_revoked_during_real_decryption_cannot_commit_activation(self):
+        from django.conf import settings
+        from mop.server.controller import bootstrap
+        self.fixture()
+        provider = bootstrap.secret_provider(self.bootstrap, installation_id=self.app.snapshot['identity'],
+            expected_root_digest=self.app.snapshot['root_digest'], key_id='root-v1')
+        # Реальный provider fixture, не patch результата Grants.activate.
+        class Revoking:
+            def decrypt(inner, envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                result = provider.decrypt(envelope, context)
+                self.worker.user_permissions.clear()
+                return result
+        async def body(client, server):
+            with self.assertRaisesRegex(self.Error, 'permission required'):
+                await asyncio.to_thread(self.activate, client)
+        self.run_socket(body, provider=Revoking())
+        from mop.server.access.models import Grant
+        self.assertEqual(Grant.objects.get(pk=self.grant_id).state, 'reserved')
+
+
+class CreateSocketActivationCases(TransactionTestCase):
+    """Настоящие admission, node results и GrantActivations используют socket port.
+
+    Scheduler -- owned HTTP fixture, не live pool; криптография и все ORM
+    approvals настоящие. Тест не передаёт worker исходный human credential.
+    """
+    serialized_rollback = True
+    exercise = CredentialSocketCases.exercise
+
+    def setUp(self):
+        from _create_cases import CreateActivation
+        from mop.server.controller import credentials as service
+        from mop.common.credential_client import CredentialClient
+        from django.conf import settings
+        CreateActivation.setUp(self)
+        self.service, self.Client = service, CredentialClient
+        self.directory = tempfile.TemporaryDirectory(prefix='mop-activation-')
+        self.addCleanup(self.directory.cleanup)
+        self.path = str(Path(self.directory.name) / 'credential.sock')
+        self.bootstrap = {**settings.BOOTSTRAP, 'role': 'credential'}
+
+    def ready(self, **kwargs):
+        from _create_cases import CreateVertical
+        from mop.server.preparation.services import Preparation
+        CreateVertical.ready(self, **kwargs)
+        # Reserve и activation читают реальное approval того же BootstrapRevision.
+        from mop.server.access.services import Access
+        self.grants.approvals = Preparation(provider=self.grants.secrets.provider, authorizer=Access()).approval_query()
+
+    def body(self, **kwargs):
+        from _create_cases import CreateVertical
+        return CreateVertical.body(self, **kwargs)
+
+    def submit(self, *args, **kwargs):
+        from _create_cases import CreateVertical
+        return CreateVertical.submit(self, *args, **kwargs)
+
+    def test_create_workflow_completes_through_real_bounded_activation_socket(self):
+        self.run_create()
+
+    def test_lost_real_socket_reply_is_unknown_and_reconciles_without_reactivation(self):
+        self.run_create(lose_reply=True)
+
+    def run_create(self, *, lose_reply=False):
+        from _create_cases import CreateActivation, CreateRegistration
+        from mop.common.credential_client import GrantActivator
+        from mop.common.credentials import Credential
+        from mop.server.access import services as auth
+        from mop.server.access.models import Grant
+        from mop.server.sessions.models import Assignment
+        from mop.server.operations.models import Operation
+        operation, target, _ = CreateRegistration.launch(self)
+        # Методы exercise требуют только Client/path; node результаты штатные.
+        self.machine = lambda: CreateActivation.machine(self)
+        CreateActivation.through_readiness(self, operation)
+        key = auth.enroll_service('socket-activation-worker', self.node.pk, project_ids=(self.project.pk,),
+            permissions=('access.activate_grant',), use_case='grant-activator')
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            app = self.service.application(provider=self.grants.secrets.provider)
+            async def body(client, server):
+                calls, execute = [], server.application.execute
+                def execute_then_lose_reply(*args):
+                    calls.append(args[1])
+                    value = execute(*args)
+                    if lose_reply:
+                        raise OSError('fixture reply lost after activation commit')
+                    return value
+                server.application.execute = execute_then_lose_reply
+                self.ops.activations.activator = GrantActivator(client, Credential('token', key))
+                result = await server.runtime.database(self.ops.activations.run, operation)
+                self.assertEqual(result['state'], 'unknown' if lose_reply else 'succeeded', result['reason'])
+                if lose_reply:
+                    await server.runtime.database(self.ops.activations.run, operation)
+                    await server.runtime.database(self.ops.activations.reconcile, self.actor, operation)
+                self.assertEqual(len(calls), 1, 'uncertain activation was replayed')
+            async_to_sync(self.exercise)(body, application=app)
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'succeeded')
+        self.assertEqual(Grant.objects.get(pk=Assignment.objects.get(pk=target).grant_id).state, 'active')

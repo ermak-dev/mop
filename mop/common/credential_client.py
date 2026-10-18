@@ -73,6 +73,8 @@ class CredentialClient:
             message = result['error']['message']
             if type(message) is not str or len(message) > 512:
                 raise p.CredentialError('invalid credential service response')
+            if result['error']['code'] == 'refused':
+                raise p.CredentialRefused(message)
             raise p.CredentialError(message)
         p.exact(result, ('ok', 'result'))
         return result['result']
@@ -145,6 +147,12 @@ class CredentialClient:
             {'grant_id': str(grant_id), 'expected_revision': expected_revision})
         return self._result(p.GrantReceipt, result)
 
+    def activate_grant(self, auth: p.Credential, grant_id: UUID, *, expected_revision: int) -> p.GrantReceipt:
+        """Только claimed create: authority service enrollment проверяет сервер."""
+        result = self._invoke(auth, p.Command.ACTIVATE_GRANT,
+            {'grant_id': str(grant_id), 'expected_revision': expected_revision})
+        return self._result(p.GrantReceipt, result)
+
     def publish_preparation(self, auth: p.Credential, *, project_id: UUID, tasks: bytes,
                             variables: bytes, provenance: str, commit: str,
                             secret_refs: tuple[UUID, ...] = ()) -> p.PreparationInfo:
@@ -164,3 +172,21 @@ class CredentialClient:
     def read_definition(self, auth: p.Credential, definition_id: UUID) -> p.DefinitionBytes:
         result = self._invoke(auth, p.Command.DEFINITION, {'definition_id': str(definition_id)})
         return self._result(p.DefinitionBytes, result)
+
+
+class GrantActivator:
+    """Worker port: хранит только явный service token, не credential создателя.
+
+    Транспорт не повторяет мутацию; потерянный ответ сверяется чтением гранта.
+    Enrollment/RBAC и claimed create проверяются credential-службой на каждый вызов.
+    """
+    def __init__(self, client: CredentialClient, credential: p.Credential):
+        if type(credential) is not p.Credential or credential.kind != 'token':
+            raise p.CredentialError('explicit service token required for activation worker')
+        self.client, self._credential = client, credential
+
+    def __repr__(self):
+        return 'GrantActivator(<service credential>)'
+
+    def activate_grant(self, grant_id: UUID, *, expected_revision: int) -> p.GrantReceipt:
+        return self.client.activate_grant(self._credential, grant_id, expected_revision=expected_revision)
