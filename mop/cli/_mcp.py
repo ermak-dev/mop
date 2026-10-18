@@ -78,22 +78,35 @@ def arguments(declaration, values):
 
 
 class Management:
-    def __init__(self, context, scope):
+    def __init__(self, context, scope, *, limits=None, validate=None, guard=None, on_failure=None):
         self.context, self.scope = context, scope
-        self.client = api.Client(context)
+        self.limits = limits or api.Limits()
+        self.validate, self.guard, self.on_failure = validate, guard, on_failure
+        self.client = api.Client(context, limits=self.limits, before_request=guard)
         self.commands = commandlets()
         self.lock = threading.RLock()
         initial = self.client.capabilities(scope)
+        if self.validate is not None:
+            self.validate(initial)
         self.binding = (initial.epoch, initial.identity.user_id, initial.identity.kind,
             initial.identity.human_owner_id, initial.identity.node_id, initial.identity.grant_id)
 
     def refresh(self):
-        current = self.client.capabilities(self.scope)
-        identity = current.identity
-        if (current.epoch, identity.user_id, identity.kind, identity.human_owner_id,
-                identity.node_id, identity.grant_id) != self.binding:
-            raise api.ClientError('MCP actor or installation changed; restart with current context')
-        return current
+        try:
+            if self.guard is not None:
+                self.guard()
+            current = self.client.capabilities(self.scope)
+            identity = current.identity
+            if (current.epoch, identity.user_id, identity.kind, identity.human_owner_id,
+                    identity.node_id, identity.grant_id) != self.binding:
+                raise api.ClientError('MCP actor or installation changed; restart with current context')
+            if self.validate is not None:
+                self.validate(current)
+            return current
+        except Exception as error:
+            if self.on_failure is not None:
+                self.on_failure(error)
+            raise
 
     def tools(self):
         from mcp import types
@@ -129,7 +142,9 @@ class Management:
                     values[field] = selected
             if 'epoch' in values and values['epoch'] != current.epoch:
                 raise api.ClientError('tool epoch differs from discovery context')
-            with _control.use(self.context):
+            if self.guard is not None:
+                self.guard()
+            with _control.use(self.context, limits=self.limits, before_request=self.guard):
                 text, status = _control.tool_call(words, declaration, values, with_status=True)
             text = text.replace(self.context.token, '[redacted]')
             # accepted/pending и unknown остаются честным operation результатом,
@@ -160,4 +175,123 @@ def serve(context, scope):
         async with stdio_server() as (read, write):
             await server.run(read, write, options)
     anyio.run(run)
+    return 0
+
+
+def serve_body(bootstrap, context, deadline):
+    """SDK initialize не ждёт activation. Только настоящий catalogue будит tools."""
+    import anyio
+    import time
+    from mcp import types
+    from mcp.server.lowlevel import Server, NotificationOptions
+    from mcp.server.stdio import stdio_server
+    from mop.client.body_management import BodyManagement, SerializedOwner, UNAVAILABLE
+
+    management = BodyManagement(bootstrap, context, deadline, Management)
+
+    async def run():
+        import os
+        # SDK AsyncFile.readline ждёт blocking stdin worker даже при cancel.
+        # Передаём только отменяемый reader; framing/JSON/stdio остаются у SDK.
+        class Input:
+            def __init__(self):
+                self.fd, self.buffer, self.eof = os.dup(0), bytearray(), False
+                null = os.open(os.devnull, os.O_RDONLY)
+                try:
+                    os.dup2(null, 0)
+                finally:
+                    os.close(null)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                while b'\n' not in self.buffer and not self.eof:
+                    await anyio.wait_readable(self.fd)
+                    chunk = os.read(self.fd, 65536)
+                    self.eof = not chunk
+                    self.buffer.extend(chunk)
+                    if len(self.buffer) > 1024 * 1024:
+                        raise api.ClientError('body MCP input exceeds size bound')
+                if not self.buffer:
+                    raise StopAsyncIteration
+                end = self.buffer.find(b'\n')
+                end = len(self.buffer) if end < 0 else end+1
+                line = bytes(self.buffer[:end]); del self.buffer[:end]
+                return line.decode('utf-8', errors='replace')
+
+            def close(self):
+                try:
+                    os.dup2(self.fd, 0)
+                finally:
+                    os.close(self.fd)
+
+        reader = Input()
+        owner = SerializedOwner(management)
+        initialized = anyio.Event()
+        session = None
+
+        async def ready(ctx, params):
+            nonlocal session
+            session = ctx.session
+            initialized.set()
+
+        async def list_tools(ctx, params):
+            try:
+                tools = await owner.request('tools')
+            except api.ClientError:
+                tools = []
+            return types.ListToolsResult(tools=tools)
+
+        async def call_tool(ctx, params):
+            try:
+                return await owner.request('call', params.name, params.arguments or {})
+            except api.ClientError:
+                return types.CallToolResult(isError=True,
+                    content=[types.TextContent(type='text', text=UNAVAILABLE)])
+
+        server = Server('mop', instructions=('Body standby has no identity or authority until a verified active '
+            'Agent catalogue is bound. '+INSTRUCTIONS), on_list_tools=list_tools, on_call_tool=call_tool)
+        server.add_notification_handler('notifications/initialized', types.NotificationParams, ready)
+        options = server.create_initialization_options(NotificationOptions(tools_changed=True),
+            experimental_capabilities={'private_inbox': PRIVATE_INBOX})
+
+        async def watch():
+            known, active = (), False
+            while True:
+                if not active and time.monotonic() >= management.deadline:
+                    raise api.ClientError('body management handoff deadline exceeded')
+                if initialized.is_set():
+                    try:
+                        tools = await owner.request('tools')
+                    except api.ClientError:
+                        tools = []
+                    if not active and management.state == 'failed':
+                        raise api.ClientError(management.failure or UNAVAILABLE)
+                    names = tuple(tool.name for tool in tools)
+                    if management.state == 'active':
+                        active = True
+                    if names != known and (active or known):
+                        await session.send_tool_list_changed()
+                        known = names
+                await anyio.sleep(1 if active else .1)
+
+        try:
+            async with anyio.create_task_group() as group:
+                group.start_soon(watch)
+                async with stdio_server(stdin=reader) as (read, write):
+                    await server.run(read, write, options)
+                group.cancel_scope.cancel()
+        finally:
+            # Ни EOF, ни repeated cancel не оставляют I/O/temp CA за SDK.
+            try:
+                with anyio.CancelScope(shield=True):
+                    await owner.aclose()
+            finally:
+                reader.close()
+
+    try:
+        anyio.run(run)
+    except Exception:
+        raise api.ClientError(management.failure or 'body management handoff failed or deadline exceeded') from None
     return 0
