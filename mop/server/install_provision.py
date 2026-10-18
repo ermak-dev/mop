@@ -106,10 +106,15 @@ def prepare(data, *, execute=subprocess.run):
             path.mkdir(mode=0o700)
             command(['chown', user + ':' + user, str(path)])
         Path(paths[base]).chmod(0o755)
-    # Собранная статика (#644/#695): пишет maintenance, читает только группа web.
-    shared = Path(paths['state']) / 'static'
-    shared.mkdir(mode=0o750)
-    command(['chown', users['maintenance'] + ':' + users['web'], str(shared)])
+    from .installation import CREDENTIAL_CLIENT_ROLES, shared_directories, specification
+    # Frontend-группа не читает private config/state credential-службы (0700).
+    for role in CREDENTIAL_CLIENT_ROLES:
+        command(['usermod', '--append', '--groups', users['credentials'], users[role]])
+    for item in shared_directories(specification(data)):
+        shared = Path(item['path'])
+        shared.mkdir(mode=int(item['mode'], 8))
+        shared.chmod(int(item['mode'], 8))
+        command(['chown', item['owner'] + ':' + item['group'], str(shared)])
     signing = secrets.token_hex(32).encode('ascii')
     for role in ('maintenance', 'web', 'worker', 'gateway'):
         path = Path(paths['configuration']) / role / 'django.key'

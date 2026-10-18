@@ -171,6 +171,37 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends', 'postgresql-client-16'], calls)
         self.assertFalse(any('systemctl' in argv or 'ansible-playbook' in argv for argv in calls))
 
+    # HYPOTHESIS: реальный OS executor расходится с review-artifact и не
+    # даёт разным web/worker uid прочесть service-owned socket directory.
+    # SOLUTION: shared_directories у review/executor, точная supplementary group.
+    # RESULT: RED -- каталог отсутствовал; GREEN -- 0750 без чтения private 0700.
+    # STATUS: FIXED — see #644.
+    def test_socket_directory_and_peer_groups_follow_the_same_installation_definition(self):
+        module = self.module()
+        from mop.server.installation import provisioning_artifact
+        spec = self.document()
+        calls = []
+        def execute(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError):
+            module.prepare(module.document(spec), execute=execute)
+        path = Path(dict(spec.paths)['state']) / 'credential-socket'
+        self.assertTrue(path.is_dir(), 'protected service socket directory was not provisioned')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o750)
+        users = dict(spec.identities)
+        self.assertIn(['chown', users['credentials'] + ':' + users['credentials'], str(path)], calls)
+        for role in ('web', 'worker'):
+            self.assertIn(['usermod', '--append', '--groups', users['credentials'], users[role]], calls)
+        for role in ('gateway', 'builder', 'maintenance'):
+            self.assertNotIn(['usermod', '--append', '--groups', users['credentials'], users[role]], calls)
+        self.assertIn(str(path), [item['path'] for item in provisioning_artifact(spec)['shared_directories']])
+        for base in ('configuration', 'state'):
+            self.assertEqual((Path(dict(spec.paths)[base]) / 'credentials').stat().st_mode & 0o777, 0o700)
+        self.assertFalse(any('systemctl' in argv for argv in calls))
+
     def test_private_caller_umask_does_not_make_shared_ancestors_untraversable(self):
         module = self.module()
         self.document()
@@ -229,6 +260,9 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertIn(669, result['blocked_services']['credentials'])
         for role, unit in result['units'].items():
             self.assertIn('User=' + self.spec['identities'][role], unit)
+            self.assertIn('SupplementaryGroups=' + self.spec['identities']['credentials'], unit)
+            self.assertIn(self.spec['paths']['configuration'] + '/credentials', unit)
+            self.assertIn(self.spec['paths']['state'] + '/credentials', unit)
             self.assertIn('MOP_CONTROLLER_BOOTSTRAP=' + self.spec['paths']['configuration'] + '/' + role + '/bootstrap.json', unit)
             for directive in ('NoNewPrivileges=true', 'ProtectSystem=strict', 'TimeoutStopSec=30', 'TasksMax=64'):
                 self.assertIn(directive, unit)

@@ -22,13 +22,13 @@ def provision(spec, admin, *, passwords):
     """Только явно новая БД. Ошибка после CREATE DATABASE не откатывает внешний мир."""
     import psycopg
     from psycopg import sql
-    from .installation import RUNTIME_ROLES, bootstrap_document
+    from .installation import RUNTIME_ROLES, database_password
     db, identities = dict(spec.database), dict(spec.identities)
     roles = (*RUNTIME_ROLES, 'maintenance')
     if type(passwords) is not dict or set(passwords) != set(roles):
         raise ValueError('database provisioning requires four distinct role passwords')
     for role in roles:
-        bootstrap_document(spec, role, password=passwords[role])
+        database_password(passwords[role])
         if len(passwords[role]) < 24 or not passwords[role].isascii():
             raise ValueError('database role passwords require at least 24 random ASCII characters')
     if len(set(passwords.values())) != len(roles):

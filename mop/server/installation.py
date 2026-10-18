@@ -8,6 +8,7 @@ from .controller.bootstrap import private_bytes
 
 IDENTITIES = ('maintenance', 'web', 'worker', 'gateway', 'credentials', 'builder')
 RUNTIME_ROLES = ('web', 'worker', 'gateway')
+CREDENTIAL_CLIENT_ROLES = ('web', 'worker')
 ORDER = ('setup', 'postgresql', 'migrations', 'initialize', 'admin', 'configuration',
          'services', 'enrollment', 'image', 'body')
 BLOCKERS = (
@@ -132,8 +133,7 @@ def provisioning_artifact(spec):
             directories.append({'path': paths[base] + '/' + role, 'owner': user, 'mode': '0700'})
     for base in ('backup', 'root_trust'):
         directories.append({'path': paths[base], 'owner': users['maintenance'], 'mode': '0700'})
-    # Единственный не приватный каталог: maintenance пишет, группа web читает.
-    shared = [{'path': static_root(spec), 'owner': users['maintenance'], 'group': users['web'], 'mode': '0750'}]
+    shared = shared_directories(spec)
     managed = db['topology'] == 'provisioned'
     playbook = [{'name': 'Prepare a separate fresh controller without starting services',
         'hosts': 'localhost', 'connection': 'local', 'gather_facts': False, 'become': True,
@@ -144,13 +144,16 @@ def provisioning_artifact(spec):
                 {'name': '{{ item }}', 'group': '{{ item }}', 'system': True,
                  'shell': '/usr/sbin/nologin', 'create_home': False, 'password_lock': True},
              'loop': list(users.values())},
+            {'name': 'Allow only rootless frontends to reach the credential socket', 'ansible.builtin.user':
+                {'name': '{{ item }}', 'groups': users['credentials'], 'append': True},
+             'loop': [users[role] for role in CREDENTIAL_CLIENT_ROLES]},
             {'name': 'Prepare separate root-owned parent trees', 'ansible.builtin.file':
                 {'path': '{{ item }}', 'state': 'directory', 'owner': 'root', 'group': 'root', 'mode': '0755'},
              'loop': [paths['configuration'], paths['state']]},
             {'name': 'Prepare purpose-owned private directories', 'ansible.builtin.file':
                 {'path': '{{ item.path }}', 'state': 'directory', 'owner': '{{ item.owner }}',
                  'group': '{{ item.owner }}', 'mode': '0700'}, 'loop': directories},
-            {'name': 'Prepare the shared collected-static directory', 'ansible.builtin.file':
+            {'name': 'Prepare narrowly shared static and credential socket directories', 'ansible.builtin.file':
                 {'path': '{{ item.path }}', 'state': 'directory', 'owner': '{{ item.owner }}',
                  'group': '{{ item.group }}', 'mode': '0750'}, 'loop': shared},
             {'name': 'Install matching native PostgreSQL client tools', 'ansible.builtin.apt':
@@ -180,13 +183,32 @@ def static_root(spec):
     return dict(spec.paths)['state'] + '/static'
 
 
-def bootstrap_document(spec, role, *, password):
-    """Credential bytes только в purpose-owned bootstrap, не в плане/артефакте узла."""
-    from .controller.bootstrap import Bootstrap
-    if role not in (*RUNTIME_ROLES, 'maintenance'):
-        raise ValueError('this consumer must not receive a database bootstrap')
+def credential_socket_directory(spec):
+    """Один installer-owned путь; не private state/config самой credential роли."""
+    return dict(spec.paths)['state'] + '/credential-socket'
+
+
+def shared_directories(spec):
+    """Одна definition для review playbook и конечного OS executor."""
+    users = dict(spec.identities)
+    return [{'path': static_root(spec), 'owner': users['maintenance'], 'group': users['web'], 'mode': '0750'},
+            {'path': credential_socket_directory(spec), 'owner': users['credentials'],
+             'group': users['credentials'], 'mode': '0750'}]
+
+
+def database_password(password):
+    """Проверка DB-only ввода не требует OS endpoint или root bootstrap."""
     if type(password) is not str or not password or any(c in password for c in '\x00\r\n'):
         raise ValueError('database password must be nonempty single-line text')
+    return password
+
+
+def bootstrap_document(spec, role, *, password, credential_uid=None):
+    """Credential bytes только в purpose-owned bootstrap, не в плане/артефакте узла."""
+    from .controller.bootstrap import Bootstrap, credential_endpoint
+    if role not in (*RUNTIME_ROLES, 'maintenance'):
+        raise ValueError('this consumer must not receive a database bootstrap')
+    database_password(password)
     db, paths, users = dict(spec.database), dict(spec.paths), dict(spec.identities)
     result = Bootstrap(installation_id=spec.identity, role=role,
         django_key=paths['configuration'] + '/' + role + '/django.key',
@@ -197,6 +219,13 @@ def bootstrap_document(spec, role, *, password):
         result['root_key'] = paths['root_trust'] + '/root.key'
     if role in ('maintenance', 'web'):
         result['static_root'] = static_root(spec)
+    if role in CREDENTIAL_CLIENT_ROLES:
+        result['credential_service'] = {'path': credential_socket_directory(spec) + '/service.sock',
+                                        'server_uid': credential_uid}
+        try:
+            credential_endpoint(result)
+        except RuntimeError as error:
+            raise ValueError(str(error)) from None
     return result
 
 
@@ -291,6 +320,7 @@ def service_artifact(spec, values):
         units[role] = '\n'.join([
             '[Unit]', 'Description=Fresh mop ' + role, 'After=network-online.target',
             '[Service]', 'Type=simple', 'User=' + users[role], 'Group=' + users[role],
+            'SupplementaryGroups=' + users['credentials'],
             'WorkingDirectory=' + state,
             'Environment=MOP_CONTROLLER_BOOTSTRAP=' + config + '/bootstrap.json',
             'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
@@ -301,7 +331,8 @@ def service_artifact(spec, values):
             'AmbientCapabilities=' + ('CAP_NET_BIND_SERVICE' if role == 'web' and settings['http_port'] < 1024 else ''),
             'ReadWritePaths=' + state,
             'InaccessiblePaths=' + paths['root_trust'] + ' ' + paths['backup'] + ' ' +
-                paths['configuration'] + '/maintenance',
+                paths['configuration'] + '/maintenance ' + paths['configuration'] + '/credentials ' +
+                paths['state'] + '/credentials',
             '[Install]', 'WantedBy=multi-user.target', ''])
     return {'units': units, 'connections': budget, 'applied': False, 'runtime_bound': False,
             'required_artifacts': {'web': ['bootstrap.json', 'django.key', 'tls.crt', 'tls.key'],
