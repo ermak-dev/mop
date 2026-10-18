@@ -622,6 +622,147 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
                     await adapter.retire(reference)
             self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
 
+    @contextmanager
+    def proc_adapter(self, name=b'fixture', *, start=b'12345', status_changes=None):
+        """Bounded byte fixtures /proc, без обхода настоящих host processes."""
+        from unittest.mock import patch
+        from mop.node import host_scope_systemd as systemd
+        with tempfile.TemporaryDirectory(prefix='m727-') as directory:
+            root, s, p = Path(directory), scope(), installed()
+            group, proc = root/'cgroup', root/'123'
+            group.mkdir(mode=0o700)
+            proc.mkdir(mode=0o700)
+            for key, value in {'cgroup.type': b'domain\n', 'cgroup.subtree_control': b'',
+                               'cgroup.procs': b'123\n'}.items():
+                (group/key).write_bytes(value)
+            raw_stat = b'123 ('+name+b') S '+b' '.join([b'0']*18+[start]+[b'0']*30)+b'\n'
+            (proc/'stat').write_bytes(raw_stat)
+            values = {b'Name': name, b'Uid': b'1102 1102 1102 1102',
+                      b'Gid': b'1102 1102 1102 1102', b'Groups': b'1102', b'NoNewPrivs': b'1',
+                      **{key: b'0000000000000000' for key in (b'CapInh', b'CapPrm', b'CapEff', b'CapAmb')}}
+            values.update(status_changes or {})
+            (proc/'status').write_bytes(b''.join(key+b':\t'+value+b'\n' for key, value in values.items()))
+            (proc/'cgroup').write_bytes(b'0::'+s.cgroup.encode()+b'\n')
+            adapter = object.__new__(systemd.SystemdCgroupAdapter)
+            adapter.installed = p
+            original = systemd.open_directory
+            def open_fixture(path, **kwargs):
+                return original(proc if path == Path('/proc/123') else path, **kwargs)
+            fd = original(group)
+            try:
+                with patch.object(systemd, 'open_directory', side_effect=open_fixture):
+                    yield adapter, fd, s, proc
+            finally:
+                os.close(fd)
+
+    async def test_membership_proof_treats_kernel_comm_as_opaque_bytes(self):
+        # HYPOTHESIS: ASCII decode всего stat/status делает body-controlled
+        # comm authority над retirement; kernel допускает любые non-NUL bytes.
+        # SOLUTION: bounded raw reads, opaque comm, ASCII только required
+        # fields, numeric PID/starttime и before/after identity comparison.
+        # RESULT: 48 GREEN, actual own PR_SET_NAME children и private systemd
+        # Unicode/invalid-UTF8 retirement GREEN (до fix probe был RED).
+        # STATUS: FIXED — see #727
+        for name in ('тело'.encode(), b'\xff\xfe a)b(', b'space ) ( name', b'line\nname'):
+            with self.subTest(name=name), self.proc_adapter(name) as (adapter, fd, s, proc):
+                adapter._members(fd, s)
+
+    async def test_opaque_comm_never_weakens_uid_gid_groups_caps_or_cgroup_proofs(self):
+        cases = [{b'Uid': b'0 0 0 0'}, {b'Gid': b'0 0 0 0'}, {b'Groups': b'1102 0'},
+                 {b'NoNewPrivs': b'0'}, {b'Uid': b'\xff 1102 1102 1102'},
+                 *({key: b'0000000000000001'} for key in (b'CapInh', b'CapPrm', b'CapEff', b'CapAmb'))]
+        for changes in cases:
+            with self.subTest(changes=changes), self.proc_adapter(b'\xff ()', status_changes=changes) as (adapter, fd, s, proc):
+                with self.assertRaises(api().Refused):
+                    adapter._members(fd, s)
+        with self.proc_adapter(b'\xff ()') as (adapter, fd, s, proc):
+            (proc/'cgroup').write_bytes(b'0::/foreign\n')
+            with self.assertRaises(api().Refused):
+                adapter._members(fd, s)
+
+    async def test_proc_start_proof_is_numeric_pid_bound_and_stable_before_after(self):
+        from unittest.mock import patch
+        from mop.node import host_scope_systemd as systemd
+        for value in (b'not-a-number', b'-1', str(2**64).encode(), b'\xff'):
+            with self.subTest(value=value), self.proc_adapter(b'fixture', start=value) as (adapter, fd, s, proc):
+                with self.assertRaises(api().Refused):
+                    adapter._members(fd, s)
+        with self.proc_adapter(b'fixture') as (adapter, fd, s, proc):
+            raw = (proc/'stat').read_bytes()
+            (proc/'stat').write_bytes(raw.replace(b'123 (', b'124 (', 1))
+            with self.assertRaises(api().Refused):
+                adapter._members(fd, s)
+        with self.proc_adapter(b'fixture') as (adapter, fd, s, proc):
+            original = systemd.read_at
+            def change_start(directory, name, **kwargs):
+                result = original(directory, name, **kwargs)
+                if name == 'cgroup':
+                    stat_path = proc/'stat'
+                    stat_path.write_bytes(stat_path.read_bytes().replace(b'12345', b'12346'))
+                return result
+            with patch.object(systemd, 'read_at', side_effect=change_start):
+                with self.assertRaisesRegex(api().Unknown, 'changed'):
+                    adapter._members(fd, s)
+
+    async def test_proc_byte_parsers_reject_missing_duplicate_nonascii_and_oversized_required_facts(self):
+        from mop.node.host_scope_systemd import parse_proc_start, parse_proc_status
+        raw = b'123 (\xff )) name) S '+b' '.join([b'0']*18+[b'12345'])
+        self.assertEqual(parse_proc_start(raw, 123), 12345)
+        for bad in (b'', b'124 (x) S '+b'0 '*20, b'123 (unterminated', raw[:30], raw+b'x'*16384):
+            with self.subTest(bad=bad[:30]), self.assertRaises(api().Refused):
+                parse_proc_start(bad, 123)
+        with self.proc_adapter(b'\xff ()') as (adapter, fd, s, proc):
+            status = (proc/'status').read_bytes()
+            values = parse_proc_status(status)
+            self.assertNotIn('Name', values)
+            self.assertEqual(values['Uid'].split(), ['1102']*4)
+            for bad in (status.replace(b'Uid:', b'Other:', 1), status+b'Uid:\t0\n',
+                        status.replace(b'NoNewPrivs:\t1', b'NoNewPrivs:\t\xff'), status+b'x'*16384):
+                with self.assertRaises(api().Refused):
+                    parse_proc_status(bad)
+            (proc/'stat').write_bytes(b'x'*16385)
+            with self.assertRaises(api().Unknown):
+                adapter._members(fd, s)
+
+    async def test_actual_owned_child_pr_set_name_supports_utf8_invalid_bytes_and_parentheses(self):
+        from mop.node import host_scope_systemd as systemd
+        code = ('import ctypes, os, sys; libc=ctypes.CDLL(None, use_errno=True); '
+                'name=bytes.fromhex(sys.argv[1]); '
+                'result=libc.prctl(15, ctypes.c_char_p(name), 0, 0, 0); '
+                'assert result == 0, ctypes.get_errno(); '
+                'assert libc.prctl(38, 1, 0, 0, 0) == 0; '
+                'print(os.getpid(), flush=True); sys.stdin.buffer.read(1)')
+        for name in ('тело'.encode(), b'\xff\xfe a)b(', b'a ) b ( c', b'line\nname'):
+            with self.subTest(name=name):
+                child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', code, name.hex(),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=1024)
+                try:
+                    async with asyncio.timeout(2.):
+                        self.assertEqual(int(await child.stdout.readline()), child.pid)
+                    proc = systemd.open_directory(Path('/proc')/str(child.pid))
+                    try:
+                        before = systemd.parse_proc_start(systemd.read_bytes_at(proc, 'stat'), child.pid)
+                        status = systemd.parse_proc_status(systemd.read_bytes_at(proc, 'status'))
+                        after = systemd.parse_proc_start(systemd.read_bytes_at(proc, 'stat'), child.pid)
+                        self.assertEqual(before, after)
+                        self.assertEqual(status['Uid'].split(), [str(os.getuid())]*4)
+                        self.assertEqual(status['Gid'].split(), [str(os.getgid())]*4)
+                        self.assertEqual(status['NoNewPrivs'], '1')
+                        self.assertEqual(Path(f'/proc/{child.pid}/comm').read_bytes(), name+b'\n')
+                    finally:
+                        os.close(proc)
+                finally:
+                    child.stdin.close()
+                    try:
+                        async with asyncio.timeout(2.):
+                            await child.communicate()
+                    except TimeoutError:
+                        if child.returncode is None:
+                            child.kill()
+                        await child.communicate()
+                self.assertEqual(child.returncode, 0)
+
     async def test_production_command_capture_is_bounded_and_cleans_owned_child(self):
         m = api()
         from mop.node.host_scope_systemd import BoundedCommand

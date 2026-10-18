@@ -146,7 +146,7 @@ def open_directory(path, *, owner=None, private=False, immutable=False):
             os.close(fd)
 
 
-def read_at(directory, name, *, limit=16384):
+def read_bytes_at(directory, name, *, limit=16384):
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
     try:
         info = os.fstat(fd)
@@ -155,11 +155,51 @@ def read_at(directory, name, *, limit=16384):
         data = os.read(fd, limit+1)
         if len(data) > limit:
             raise Unknown('kernel fact exceeds bounded read limit')
-        return data.decode('ascii').strip()
-    except UnicodeError as error:
-        raise Refused('invalid kernel fact encoding') from error
+        return data
     finally:
         os.close(fd)
+
+
+def read_at(directory, name, *, limit=16384):
+    try:
+        return read_bytes_at(directory, name, limit=limit).decode('ascii').strip()
+    except UnicodeError as error:
+        raise Refused('invalid kernel fact encoding') from error
+
+
+def parse_proc_start(raw, pid):
+    """comm между скобками — opaque bytes, proof только PID/starttime ядра."""
+    if (type(raw) is not bytes or not 0 < len(raw) <= 16384
+            or type(pid) is not int or not 0 < pid < 2**31):
+        raise Refused('bounded process stat and numeric PID required')
+    head, opening, record = raw.partition(b' (')
+    _, closing, tail = record.rpartition(b')')
+    fields = tail.split()
+    if (head != str(pid).encode('ascii') or not opening or not closing or len(fields) < 20
+            or not fields[19].isdigit() or len(fields[19]) > 20 or int(fields[19]) >= 2**64):
+        raise Refused('numeric PID-bound process starttime required')
+    return int(fields[19])
+
+
+def parse_proc_status(raw):
+    """Декодируем только authority fields; Name и прочий текст не authority."""
+    if type(raw) is not bytes or not 0 < len(raw) <= 16384:
+        raise Refused('bounded process status required')
+    required = {b'Uid', b'Gid', b'Groups', b'NoNewPrivs', b'CapInh', b'CapPrm', b'CapEff', b'CapAmb'}
+    values = {}
+    try:
+        for line in raw.split(b'\n'):
+            key, separator, value = line.partition(b':')
+            if key in required:
+                name = key.decode('ascii')
+                if not separator or name in values:
+                    raise Refused('duplicate or malformed process authority field')
+                values[name] = value.decode('ascii').strip()
+    except UnicodeError as error:
+        raise Refused('invalid process authority field encoding') from error
+    if len(values) != len(required):
+        raise Refused('incomplete process authority fields')
+    return values
 
 
 def read_kernel(path, limit=16384):
@@ -419,11 +459,8 @@ class SystemdCgroupAdapter:
         for pid in pids:
             proc = open_directory(Path('/proc')/pid)
             try:
-                before = read_at(proc, 'stat')
-                values = {}
-                for line in read_at(proc, 'status').splitlines():
-                    key, _, value = line.partition(':')
-                    values[key] = value.strip()
+                before = parse_proc_start(read_bytes_at(proc, 'stat'), int(pid))
+                values = parse_proc_status(read_bytes_at(proc, 'status'))
                 if (values.get('Uid', '').split() != [str(self.installed.body_uid)]*4
                         or values.get('Gid', '').split() != [str(self.installed.body_gid)]*4
                         or not set(values.get('Groups', '').split()) <= {str(self.installed.body_gid)}
@@ -432,8 +469,8 @@ class SystemdCgroupAdapter:
                                for k in ('CapInh', 'CapPrm', 'CapEff', 'CapAmb'))
                         or read_at(proc, 'cgroup', limit=4096) != '0::'+scope.cgroup):
                     raise Refused('HOST process actual UID/GID/cgroup/privilege mismatch')
-                after = read_at(proc, 'stat')
-                if before.rsplit(')', 1)[1].split()[19] != after.rsplit(')', 1)[1].split()[19]:
+                after = parse_proc_start(read_bytes_at(proc, 'stat'), int(pid))
+                if before != after:
                     raise Unknown('HOST process changed during inspection')
             finally:
                 os.close(proc)

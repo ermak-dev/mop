@@ -154,6 +154,15 @@ async def acceptance():
         pid = record['pid']
         if Path(f'/proc/{pid}/cgroup').read_text().strip() != '0::'+s.cgroup:
             raise AssertionError('actual detached descendant left its cgroup')
+        expected_names = ('тело'.encode(), b'\xff\xfe a)b(')
+        if len(record['opaque_names']) != len(expected_names):
+            raise AssertionError('fixture did not create both opaque-name descendants')
+        for named, expected in zip(record['opaque_names'], expected_names, strict=True):
+            named_pid = named['pid']
+            if (bytes.fromhex(named['name']) != expected
+                    or Path(f'/proc/{named_pid}/comm').read_bytes() != expected+b'\n'
+                    or Path(f'/proc/{named_pid}/cgroup').read_text().strip() != '0::'+s.cgroup):
+                raise AssertionError('actual opaque-name child did not retain owned containment')
         if stat.S_IMODE(body.stat().st_mode) != 0o755:
             raise AssertionError('owned body did not change its consumer cwd permissions')
         observed = await call('inspect', started.reference)
@@ -252,6 +261,7 @@ async def acceptance():
             double_fork=True, setsid=True, retired_empty=True, negative_checks=record['checks'],
             cwd_mutations=['body-chmod-0755', 'renamed', 'removed'],
             lost_ack_concurrent_inspection='retired exact empty cgroup, replay refused',
+            opaque_proc_names=['utf8', 'invalid-utf8-spaces-parentheses'],
             admission='fixture guard, not HTTP acceptance', native='not tested')), flush=True)
     finally:
         primary = sys.exception()

@@ -1,5 +1,6 @@
 #!/usr/local/bin/python3 -I
 """Installed runner fixture: настоящий setsid/double-fork, не native CLI."""
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -58,11 +59,34 @@ for name, path in (('system_manager_denied', '/run/systemd/private'),
     finally:
         sock.close()
 checks['no_user_manager_runtime'] = not os.access('/run/user', os.R_OK)
+# Kernel comm — opaque bytes: оба собственных descendants меняют имя,
+# но не UID/starttime/cgroup/privileges. Pipe — barrier до root observation.
+libc = ctypes.CDLL(None, use_errno=True)
+names = ('тело'.encode(), b'\xff\xfe a)b(')
+def set_name(value):
+    if libc.prctl(15, ctypes.c_char_p(value), 0, 0, 0):
+        raise OSError(ctypes.get_errno(), 'fixture PR_SET_NAME failed')
+set_name(names[0])
+ready_read, ready_write = os.pipe()
+opaque_child = os.fork()
+if opaque_child == 0:
+    os.close(ready_read)
+    set_name(names[1])
+    os.write(ready_write, b'1')
+    os.close(ready_write)
+    while True:
+        time.sleep(1)
+os.close(ready_write)
+if os.read(ready_read, 1) != b'1':
+    raise RuntimeError('opaque child did not reach fixture barrier')
+os.close(ready_read)
 # Consumer имеет право менять собственный cwd; retirement не зависит от
 # повторного launch admission этой директории (#725).
 body.chmod(0o755)
 record = dict(pid=os.getpid(), starter=starter, sid=os.getsid(0), uid=os.getuid(), gid=os.getgid(),
-              cgroup=Path('/proc/self/cgroup').read_text().strip(), checks=checks)
+              cgroup=Path('/proc/self/cgroup').read_text().strip(), checks=checks,
+              opaque_names=[dict(pid=os.getpid(), name=names[0].hex()),
+                            dict(pid=opaque_child, name=names[1].hex())])
 (body/'descendant.json').write_text(json.dumps(record))
 while True:
     time.sleep(1)
