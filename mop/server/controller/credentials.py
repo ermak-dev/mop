@@ -66,7 +66,20 @@ class CurrentBindings:
             binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id)
 
     def activation(self, grant_id):
-        raise access.Denied('trusted grant activation receipt composition is not bound')
+        """Доверенная квитанция активации (#643): текущее назначение этого гранта
+        с подтверждёнными identity и готовностью именно текущей инкарнации."""
+        from uuid import UUID
+        from mop.server.controller.models import Installation
+        from mop.server.sessions.models import Assignment
+        target_id = Assignment.objects.filter(grant_id=grant_id, deleted_at=None).values_list('id', flat=True).first()
+        binding = None if target_id is None else self.assignments.target(target_id)
+        if binding is None or binding.grant_id != grant_id:
+            return None
+        epoch = Installation.objects.values_list('epoch', flat=True).get()
+        if self.assignments.readiness(binding, epoch=UUID(str(epoch))) is None:
+            return None
+        return RoleBinding(binding.project_id, binding.target_id, binding.incarnation_id,
+            binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id)
 
     def retirement(self, grant_id, revision):
         raise access.Denied('transport retirement receipt composition is not bound')

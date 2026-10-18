@@ -396,8 +396,9 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
                 'worker', 'a' * 64, grant_id, self.user.pk))
             self.assertIsNone(app.grants.bindings.current(uuid.uuid4(), assignment.id))
             # A read projection не является подтверждением activation/retirement.
-            with self.assertRaises(PermissionError):
-                app.grants.bindings.activation(grant_id)
+            # #643: квитанция активации связана -- но только подтверждёнными
+            # identity и готовностью текущей инкарнации; одной проекции её нет.
+            self.assertIsNone(app.grants.bindings.activation(grant_id))
             with self.assertRaises(PermissionError):
                 app.grants.bindings.retirement(grant_id, 1)
 

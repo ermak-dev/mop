@@ -583,6 +583,18 @@ handler is bound only with a launch support (the target's job is registered for 
 incarnation); without it the machine route keeps refusing as unavailable. The last node
 step is not terminal: `activate_grant` follows on the server.
 
+`activate_grant` is discovered only once the registration and both node steps
+succeeded. The worker asks the credential service to activate the grant -- activation
+re-reads and re-checks the encrypted definition, so it can only run where the provider
+is. The service's trusted activation receipt (`CurrentBindings.activation`) is the
+target's current binding with confirmed identity and readiness of exactly the current
+incarnation (`Assignments.readiness`, shared with addressed credentials); a mere
+assignment projection is no receipt. The agent that becomes the delegation subject gets
+its own local identity, project membership and token at admission, outside the grant
+lifecycle (#688), or activation would always refuse. A refusal carries its phrase into
+the operation; a lost reply is `unknown` and reconciliation reads the grant: `active`
+succeeds the create, `revoked`/`expired` fail it, `reserved` proves nothing.
+
 ### Puppet delete vertical (#625)
 
 `POST /api/v1/puppets/<uuid>/commands/delete` takes the version-1 target intent with

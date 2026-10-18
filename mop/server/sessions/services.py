@@ -158,6 +158,17 @@ class Assignments:
             raise Denied('current addressed assignment is unavailable')
         Access().authorize(actor, 'secrets.deliver_secret', project_ids=(binding.project_id,),
             node_ids=(binding.node_id,))
+        receipts = self.readiness(binding, epoch=epoch)
+        if receipts is None:
+            raise Denied('current identity and readiness confirmations required for addressed credentials')
+        return CredentialAssignment(binding, epoch, *receipts)
+
+    def readiness(self, binding, *, epoch):
+        """SQL-only: подтверждённые identity и готовность именно текущего
+        admission назначения -> (identity receipt, ready receipt) | None.
+
+        Общая часть адресных credentials и квитанции активации гранта (#643):
+        не lease/claim и не просто наличие старого receipt."""
         scope = dict(attempt__assignment_id=binding.target_id, attempt__incarnation_id=binding.incarnation_id,
             attempt__generation=binding.generation, attempt__assignment_revision=binding.revision,
             attempt__owner_id=binding.owner_id, attempt__role=binding.role,
@@ -170,9 +181,7 @@ class Assignments:
             receipt__evidence='identity-applied').order_by('id').values_list('receipt_id', flat=True).first()
         ready = m.ReadinessReceipt.objects.filter(**scope, attempt__action='confirm_ready',
             receipt__evidence='ready').order_by('id').values_list('receipt_id', flat=True).first()
-        if identity is None or ready is None:
-            raise Denied('current identity and readiness confirmations required for addressed credentials')
-        return CredentialAssignment(binding, epoch, identity, ready)
+        return None if identity is None or ready is None else (identity, ready)
 
     def create(self, actor, *, project_id, node_id, role, bundle_digest, grant_id, expires_at):
         human(actor)

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from ..access.context import ActorContext, ActorKind
@@ -539,19 +539,23 @@ class Operations:
             'ordinal').values_list('name', flat=True).first()
 
     def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete',
-                                            'scheduler_register'), node_id=None):
+                                            'scheduler_register', 'activate_grant'), node_id=None):
         self._require_binding()
         if type(limit) is not int or not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
         if not handlers or not set(handlers) <= {'node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete',
-                                                 'scheduler_register'}:
+                                                 'scheduler_register', 'activate_grant'}:
             raise ValueError('finite controller worker handlers required')
         # Stop lane (#625) остаётся в общем discovery: worker исполняет её только
         # с_bound stops портом, что задаёт его handlers tuple. Create (#643) ждёт
         # регистрации, пока его первый шаг не взят.
         work = (Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action__in=('stop_job', 'delete'))
                 | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
-                | Q(state=State.ACCEPTED, action='create', step__name='scheduler_register', step__token=None))
+                | Q(state=State.ACCEPTED, action='create', step__name='scheduler_register', step__token=None)
+                # Активация -- только после успешных шагов узла (#643).
+                | (Q(state=State.RUNNING, action='create', step__name='activate_grant', step__token=None)
+                   & ~Exists(m.Step.objects.filter(operation=OuterRef('pk'), name__in=(
+                       'scheduler_register', 'apply_identity', 'confirm_ready')).exclude(outcome='succeeded'))))
         work &= Q(step__name__in=handlers)
         if node_id is not None:
             # Service enrollment касается только node-eligibility lane. Build

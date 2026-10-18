@@ -143,6 +143,16 @@ class CreatePuppets:
             raise Refused('result_expired')
         return old if retry is Retry.REPLAY else None
 
+    def _agent_credential(self, agent_id, project_id):
+        """Субъект делегирования -- агент со своим credential (#688), выданным
+        вне lifecycle гранта: без него активация отказала бы всегда. Каждый шаг
+        идемпотентен, повтор запроса ничего не меняет."""
+        from mop.server.access import models as a, services as auth
+        auth.bind_local_identity(agent_id)
+        source = a.LoginIdentity.objects.get(user_id=agent_id).source
+        a.ProjectMembership.objects.get_or_create(user_id=agent_id, project_id=project_id, source=source)
+        auth.issue_token(agent_id)
+
     def submit(self, actor, command, *, credential):
         if type(command) is not CreateCommand:
             raise ValueError('typed create command required')
@@ -161,8 +171,9 @@ class CreatePuppets:
         target_id, incarnation_id = identities(actor, intent.request_id)
         expires_at = timezone.now() + LIFETIME
         # 2. Агент и грант -- идемпотентны по target/request; вне SQL, от имени человека.
-        self.grants.register_agent(actor, project_id=intent.project_id, target_id=target_id,
-                                   definition_id=command.definition_id)
+        profile = self.grants.register_agent(actor, project_id=intent.project_id, target_id=target_id,
+                                             definition_id=command.definition_id)
+        self._agent_credential(profile.agent_id, intent.project_id)
         receipt = self.issuer.reserve_grant(credential, project_id=intent.project_id,
             definition_id=command.definition_id, target_id=target_id, incarnation=incarnation_id,
             request_id=intent.request_id, expires_at=expires_at)
@@ -438,3 +449,147 @@ class LaunchJobs:
                 raise Refused('operation_conflict')
             ticket = self._ticket(installation, row, step, self._target(row))
         return self.record(ticket, self.scheduler.inspect_register(ticket))
+
+
+class GrantActivations:
+    """Полоса activate_grant (#643): активация гранта credential-сервисом.
+
+    Зовётся только после успешных шагов узла: квитанцию готовности сервис
+    проверяет сам. Исход вызова может потеряться -- тогда unknown, и сверка
+    читает состояние гранта, не зовёт активацию повторно."""
+    step = 'activate_grant'
+    before = ('scheduler_register', 'apply_identity', 'confirm_ready')
+
+    def __init__(self, operations, *, targets=None, activator=None):
+        self.ops, self.targets, self.activator = operations, targets, activator
+
+    def _ports(self):
+        if self.targets is None or self.activator is None:
+            raise Refused('controller_unavailable', safe_reason='grant activation is unavailable')
+
+    def _locked(self, operation_id):
+        installation = self.ops._installation()
+        target_id = m.Operation.objects.values_list('target_id', flat=True).get(pk=operation_id, action='create')
+        current = self.targets.locked(target_id)
+        row = m.Operation.objects.select_for_update().get(pk=operation_id, action='create')
+        step = m.Step.objects.select_for_update().get(operation=row, name=self.step)
+        if row.epoch != installation.epoch or row.restore_generation != installation.generation:
+            raise Refused('epoch_conflict')
+        return installation, current, row, step
+
+    def _ready(self, row):
+        return not m.Step.objects.filter(operation=row, name__in=self.before).exclude(outcome='succeeded').exists()
+
+    def claim(self, operation_id):
+        _independent()
+        self._ports()
+        with self.ops._transaction():
+            installation, current, row, step = self._locked(operation_id)
+            if row.state != 'running' or step.token is not None or not self._ready(row):
+                return None
+            target = LaunchJobs._target(self, row)
+            try:
+                if not installation.effects_enabled:
+                    raise Refused('effects_disabled')
+                if current != target:
+                    raise Refused('revision_conflict')
+                actor = _actor(row)
+                self.ops.access.authorize(actor, 'execution.create_puppet', project_ids=(target.project_id,))
+                if actor.human_owner_id != target.owner_id:
+                    raise Denied('create belongs to another human assignment')
+                require_reserved_grant(target)
+            except (Denied, Refused) as error:
+                _move(row, State.FAILED, 'execution_refused', expected_revision=row.revision, safe_reason=str(error))
+                m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=timezone.now())
+                return None
+            keys = sorted(('node:'+str(row.node_id), 'project:'+str(target.project_id),
+                           'puppet:'+str(row.target_id), 'target:'+str(row.target_id)))
+            for key in keys:
+                m.Resource.objects.get_or_create(key=key)
+            tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
+            held = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
+            if held.exclude(operation=row).exists():
+                return None
+            step.token = step.attempt_id = uuid4()
+            step.started_at = step.dispatched_at = timezone.now()
+            step.lease_until = timezone.now() + timedelta(seconds=30)
+            step.save(update_fields=('token', 'attempt_id', 'started_at', 'dispatched_at', 'lease_until'))
+            # Шаги узла держат цель до терминала операции: их claims остаются,
+            # заводятся только недостающие ключи.
+            own = set(held.filter(operation=row).values_list('resource_id', flat=True))
+            for key in keys:
+                if key not in own:
+                    m.ResourceClaim.objects.create(resource_id=key, operation=row, step=step, token=step.token)
+            from mop.server.access.models import Grant
+            return (row.id, step.token, target.grant_id, Grant.objects.values_list('revision', flat=True).get(
+                pk=target.grant_id))
+
+    def record(self, operation_id, token, outcome, evidence, reason=None):
+        _independent()
+        with self.ops._transaction():
+            _, _, row, step = self._locked(operation_id)
+            if step.token != token:
+                raise Refused('claim_conflict')
+            if step.quiescent_at is not None:
+                if (step.outcome, step.evidence) == (outcome, evidence):
+                    return _snapshot(row)
+                raise Refused('claim_conflict')
+            if row.state not in ('running', 'unknown', 'reconciling'):
+                raise Refused('operation_conflict')
+            if outcome == 'unknown':
+                step.outcome, step.evidence = outcome, evidence
+                step.save(update_fields=('outcome', 'evidence'))
+                if row.state == 'running':
+                    _move(row, State.RECONCILING, 'effect_uncertain', expected_revision=row.revision)
+                    _move(row, State.UNKNOWN, 'outcome_unknown', expected_revision=row.revision)
+                return _snapshot(row)
+            if row.state == 'unknown':
+                _move(row, State.RECONCILING, 'late_confirmation', expected_revision=row.revision)
+            applied = outcome == 'succeeded'
+            step.outcome, step.evidence, step.quiescent_at = outcome, evidence, timezone.now()
+            step.save(update_fields=('outcome', 'evidence', 'quiescent_at'))
+            m.EffectReceipt.objects.create(step=step, token=token, epoch=row.epoch, node_id=row.node_id,
+                source_revision=row.expected_revision, decision_revision=row.revision, applied=applied)
+            # Отказ сервиса доходит до читателя своей фразой, не глухим failed.
+            _move(row, State.SUCCEEDED if applied else State.FAILED,
+                  'effect_confirmed' if applied else 'effect_failed', expected_revision=row.revision,
+                  **({'safe_reason': reason} if reason else {}))
+            m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
+            return _snapshot(row)
+
+    def run(self, operation_id):
+        """Blocking worker entry; вызов credential-сервиса вне SQL-транзакции."""
+        ticket = self.claim(operation_id)
+        if ticket is None:
+            return None
+        operation_id, token, grant_id, revision = ticket
+        try:
+            receipt = self.activator.activate_grant(grant_id, expected_revision=revision)
+            outcome = ('succeeded', 'grant-activated') if receipt.state == 'active' else (
+                'failed', 'activation-refused', 'grant is ' + str(receipt.state) + ' after activation')
+        except (Denied, PermissionError) as error:
+            outcome = ('failed', 'activation-refused', str(error))
+        except Exception:
+            # Ответ мог потеряться после COMMIT активации; повторного вызова нет.
+            outcome = ('unknown', 'activation-uncertain')
+        return self.record(operation_id, token, *outcome)
+
+    def reconcile(self, actor, operation_id):
+        """Сверка чтением гранта: active -- успех, отозван/истёк -- отказ;
+        reserved ничего не доказывает -- исход остаётся неизвестным."""
+        _independent()
+        self._ports()
+        with self.ops._transaction():
+            _, _, row, step = self._locked(operation_id)
+            self.ops.access.authorize(actor, 'operations.recover_operation',
+                                      project_ids=tuple(row.projects.values_list('pk', flat=True)))
+            if row.state not in ('running', 'unknown', 'reconciling') or step.token is None:
+                raise Refused('operation_conflict')
+            from mop.server.access.models import Grant
+            state = Grant.objects.values_list('state', flat=True).get(pk=row.restartbinding.grant_id)
+            token = step.token
+        if state == 'active':
+            return self.record(operation_id, token, 'succeeded', 'grant-activated')
+        if state in ('revoked', 'expired'):
+            return self.record(operation_id, token, 'failed', 'activation-refused')
+        return None

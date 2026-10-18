@@ -166,10 +166,12 @@ class AddressedCredentialCases(TransactionTestCase):
         async def body(client, server):
             rows = await asyncio.to_thread(self.issue, client)
             self.assertEqual(rows[0].value, b'exact-addressed-value')
-            for query in (lambda: server.application.grants.bindings.activation(self.grant_id),
-                          lambda: server.application.grants.bindings.retirement(self.grant_id, 3)):
-                with self.assertRaises(PermissionError):
-                    await server.runtime.database(query)
+            # Подтверждённая доставка не доказывает отзыв транспорта. Квитанция
+            # активации (#643) -- отдельное правило готовности, её проверяет
+            # _create_cases.CreateActivation.
+            with self.assertRaises(PermissionError):
+                await server.runtime.database(
+                    lambda: server.application.grants.bindings.retirement(self.grant_id, 3))
         self.run_socket(body)
 
     def test_missing_ready_receipt_refuses(self):

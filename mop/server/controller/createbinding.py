@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from .machinebinding import AssignmentBindings, Targets
 from .runtime import assignments_service, machine_execution_service, operations_service
 from mop.server.access.grants import Grants
-from mop.server.operations.launch import CreateMachine, CreatePuppets, LaunchJobs
+from mop.server.operations.launch import CreateMachine, CreatePuppets, GrantActivations, LaunchJobs
 
 
 class LaunchTargets:
@@ -139,7 +139,7 @@ class LaunchSupport:
             raise Refused('controller_unavailable', safe_reason='the job of the new target is not registered')
 
 
-def service(*, grants=None, issuer=None, scheduler=None):
+def service(*, grants=None, issuer=None, scheduler=None, activator=None):
     from .adminservices import credential_client
     grants = grants or Grants(provider=None, bindings=AssignmentBindings())
     operations = operations_service(grants=grants.local_authority())
@@ -151,4 +151,6 @@ def service(*, grants=None, issuer=None, scheduler=None):
     operations.targets = targets
     operations.launches = LaunchJobs(operations, scheduler=scheduler, targets=targets, specs=LaunchSpecs())
     operations.launch_machine = CreateMachine(operations, support=LaunchSupport())
+    # Активатор -- credential-сервис под служебным credential; связывает установка (#644).
+    operations.activations = GrantActivations(operations, targets=targets, activator=activator)
     return operations

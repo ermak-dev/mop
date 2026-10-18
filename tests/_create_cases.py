@@ -352,9 +352,11 @@ class CreateMachineSteps(TransactionTestCase):
         from mop.server.access import services as auth
         from mop.server.controller.createbinding import LaunchSupport
         from mop.server.controller.machinebinding import compose
-        key = auth.enroll_service('create-executor', self.node.pk, project_ids=(self.project.pk,),
-            permissions=('execution.poll_work', 'execution.claim_work', 'execution.report_result', 'execution.read_facts'))
-        return compose(grants=self.grants, launch_support=LaunchSupport()), auth.token_context(key)
+        if getattr(self, '_executor_key', None) is None:
+            self._executor_key = auth.enroll_service('create-executor', self.node.pk, project_ids=(self.project.pk,),
+                permissions=('execution.poll_work', 'execution.claim_work', 'execution.report_result',
+                             'execution.read_facts'))
+        return compose(grants=self.grants, launch_support=LaunchSupport()), auth.token_context(self._executor_key)
 
     def test_node_confirms_identity_and_readiness_under_the_provisioned_grant(self):
         operation, target, _ = self.launch()
@@ -395,3 +397,103 @@ class CreateMachineSteps(TransactionTestCase):
         with self.assertRaises(Denied), transaction.atomic():
             self.grants.authorize_launch(RoleBinding(row.project_id, row.id, uuid4(), row.role,
                                                      row.bundle_digest, row.grant_id, row.owner_id))
+
+
+class Activator:
+    """Порт активации credential-сервиса: grants с провайдером и доверенной
+    квитанцией готовности (CurrentBindings), как в его процессе."""
+    def __init__(self, grants, *, lose=False):
+        self.grants, self.lose, self.calls = grants, lose, 0
+
+    def activate_grant(self, grant_id, *, expected_revision):
+        self.calls += 1
+        row = self.grants.activate(grant_id, expected_revision=expected_revision)
+        if self.lose:
+            raise OSError('credential service reply lost after commit')
+        return row
+
+
+# HYPOTHESIS (#643): после готовности create не завершается: activate_grant
+# некому исполнить, квитанция активации в credential-сервисе не связана, а у
+# агента-субъекта нет своего credential -- активация отказала бы всегда.
+# SOLUTION: квитанция активации -- подтверждённые identity и готовность текущей
+# инкарнации; полоса GrantActivations зовёт активацию credential-сервиса только
+# после успешных шагов узла; потеря ответа -- unknown, сверка читает грант.
+# STATUS: FIXED — see #643 (боевой активатор credential-сервиса -- далее)
+class CreateActivation(TransactionTestCase):
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    ready, body, submit = CreateVertical.ready, CreateVertical.body, CreateVertical.submit
+    launch, step = CreateRegistration.launch, CreateRegistration.step
+    machine = CreateMachineSteps.machine
+
+    def through_readiness(self, operation, *, ready=True):
+        self.ops.launches.run(operation)
+        service, actor = self.machine()
+        steps = (('apply_identity', 'identity-applied'), ('confirm_ready', 'ready'))
+        for action, evidence in steps[:2 if ready else 1]:
+            work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+            attempt = service.claim(actor, work, request_id=uuid4())
+            service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                           outcome='succeeded', evidence=evidence)
+
+    def activator(self, **options):
+        from mop.server.access.grants import Grants
+        from mop.server.controller.credentials import CurrentBindings
+        # Как CredentialApplication: провайдер, порт одобрений и CurrentBindings.
+        grants = Grants(provider=self.grants.secrets.provider, approvals=self.grants.approvals,
+                        bindings=CurrentBindings())
+        return Activator(grants, **options)
+
+    def test_ready_target_activates_its_grant_and_completes_create(self):
+        operation, target, _ = self.launch()
+        self.ops.activations.activator = self.activator()
+        self.through_readiness(operation, ready=False)
+        # Без квитанции готовности активация не зовётся вовсе.
+        self.assertNotIn(operation, self.ops.pending(limit=8, handlers=('activate_grant',)))
+        self.assertIsNone(self.ops.activations.run(operation))
+        self.assertEqual(self.ops.activations.activator.calls, 0)
+        service, actor = self.machine()
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        attempt = service.claim(actor, work, request_id=uuid4())
+        service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                       outcome='succeeded', evidence='ready')
+        self.assertIn(operation, self.ops.pending(limit=8, handlers=('activate_grant',)))
+        self.ops.activations.run(operation)
+        from mop.server.access.models import Grant
+        from mop.server.operations.models import Operation
+        from mop.server.sessions.models import Assignment
+        grant = Grant.objects.get(pk=Assignment.objects.get(pk=target).grant_id)
+        self.assertEqual(grant.state, 'active', Operation.objects.values_list('state', 'reason').get(pk=operation))
+        step = self.step(operation)
+        activation = type(step).objects.get(operation_id=operation, name='activate_grant')
+        self.assertEqual((activation.outcome, activation.evidence), ('succeeded', 'grant-activated'))
+        row = Operation.objects.get(pk=operation)
+        self.assertEqual(row.state, 'succeeded')
+        status = self.client.get('/api/v1/operations/'+str(operation), secure=True).json()['operation']
+        self.assertFalse(status['resources_held'])
+        self.assertNotIn(operation, self.ops.pending(limit=8, handlers=('activate_grant',)))
+        self.ops.activations.run(operation)
+        self.assertEqual(self.ops.activations.activator.calls, 1)
+
+    def test_lost_activation_reply_is_unknown_and_reconciles_by_reading_the_grant(self):
+        operation, target, _ = self.launch()
+        self.ops.activations.activator = self.activator(lose=True)
+        self.through_readiness(operation)
+        self.ops.activations.run(operation)
+        from mop.server.operations.models import Operation, Step
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'unknown')
+        self.ops.activations.run(operation)
+        self.assertEqual(self.ops.activations.activator.calls, 1)
+        self.ops.activations.reconcile(self.actor, operation)
+        activation = Step.objects.get(operation_id=operation, name='activate_grant')
+        self.assertEqual((activation.outcome, activation.evidence), ('succeeded', 'grant-activated'))
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'succeeded')
+        self.assertEqual(self.ops.activations.activator.calls, 1)
+
+    def test_activation_receipt_needs_current_readiness(self):
+        operation, target, _ = self.launch()
+        self.through_readiness(operation, ready=False)
+        from mop.server.controller.credentials import CurrentBindings
+        from mop.server.sessions.models import Assignment
+        self.assertIsNone(CurrentBindings().activation(Assignment.objects.get(pk=target).grant_id))
