@@ -7,13 +7,14 @@ markers, произвольного argv/write или подмены SessionApi 
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Protocol
 from uuid import UUID
 
 from mop.common.telemetry import SessionScope
 from mop.driver.launch import LaunchResponse, MachineConfig, RegisteredLayout, Registration
-from mop.node.execution_adapters import ActionInput, BoundTarget
+from mop.node.execution_adapters import (
+    ActionInput, BoundTarget, SessionProof, process_identity, check_session_peer,
+)
 from mop.node.http_execution import Refused, Unavailable, Work
 
 
@@ -48,33 +49,6 @@ class AddressedLaunchSource:
             raise Refused(str(error)) from error
 
 
-@dataclass(frozen=True)
-class SessionProof:
-    registration: Registration
-    pane: str
-    session_id: str
-    producer_epoch: UUID
-    session_socket: Path
-    pid: int
-    process_start: str
-
-    def __post_init__(self):
-        if (type(self.registration) is not Registration or type(self.pane) is not str
-                or not re.fullmatch(r'%[0-9]+', self.pane)
-                or type(self.session_id) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', self.session_id)
-                or type(self.producer_epoch) is not UUID
-                or not isinstance(self.session_socket, Path) or not self.session_socket.is_absolute()
-                or type(self.pid) is not int or self.pid <= 0
-                or type(self.process_start) is not str or not self.process_start):
-            raise Refused('confirmed process and addressed session scope required')
-
-    @property
-    def scope(self):
-        w = self.registration.work
-        return SessionScope(UUID(w.epoch), UUID(w.target_id), UUID(w.incarnation_id),
-            UUID(w.node_id), UUID(w.executor_epoch), self.session_id, self.producer_epoch)
-
-
 class PhysicalSessions(Protocol):
     async def observe(self, layout: RegisteredLayout) -> SessionProof | None: ...
     async def reconcile(self, node_id: str, previous_epoch: str, new_epoch: str) -> bool:
@@ -90,25 +64,6 @@ class UnboundSessionApi:
         raise Unavailable('physical executor scope reconciliation is not bound')
 
 
-def process_identity(pid):
-    """Внешний Linux process handle; PID reuse не восстанавливает старую сессию."""
-    import os
-    if type(pid) is not int or pid <= 0:
-        raise Unavailable('invalid physical session process')
-    try:
-        root = Path('/proc')/str(pid)
-        if root.stat().st_uid != os.getuid():
-            raise Unavailable('physical session belongs to a different OS user')
-        # comm содержит пробелы/скобки; поля считаются после последней ).
-        fields = (root/'stat').read_text().rsplit(')', 1)[1].split()
-        if fields[0] in ('Z', 'X', 'x'):
-            raise Unavailable('physical session process has exited')
-        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        return boot+':'+fields[19]
-    except (OSError, IndexError) as error:
-        raise Unavailable('physical session process unavailable') from error
-
-
 class SessionApiProbe:
     """Дополняет addressed SessionApi proof проверкой настоящего local process.
 
@@ -122,9 +77,6 @@ class SessionApiProbe:
         self.session_api, self.reconciliation = session_api, reconciliation
 
     async def observe(self, layout):
-        import os
-        import socket
-        import struct
         async with asyncio.timeout(5):
             proof = await self.session_api.observe(layout)
         if (type(proof) is not SessionProof or proof.registration != layout.registration
@@ -134,16 +86,9 @@ class SessionApiProbe:
         try:
             if process_identity(proof.pid) != proof.process_start:
                 raise Unavailable('physical session process changed')
-            root = Path('/proc')/str(proof.pid)
-            if (Path(os.readlink(root/'cwd')) != layout.clone
-                    or (root/'ns/mnt').stat().st_ino != Path('/proc/self/ns/mnt').stat().st_ino):
-                raise Unavailable('physical session namespace or clone changed')
             async with asyncio.timeout(.5):
                 _, writer = await asyncio.open_unix_connection(str(proof.session_socket))
-                peer = writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-                pid, uid, _ = struct.unpack('3i', peer)
-                if pid != proof.pid or uid != os.getuid() or process_identity(pid) != proof.process_start:
-                    raise Unavailable('physical session socket peer changed')
+                check_session_peer(writer.get_extra_info('socket'), proof, layout.clone)
             return proof
         except (OSError, TimeoutError) as error:
             raise Unavailable('physical session socket or process unavailable') from error
@@ -191,7 +136,7 @@ class BindingsResolver:
         target = BoundTarget(work.target_id, work.incarnation_id, work.node_id,
             work.executor_epoch, work.generation, work.role, work.bundle_digest, work.grant_id,
             self.layout.clone, self.layout.tmux_socket, proof.pane, self.layout.launcher,
-            proof.session_socket)
+            proof.session_socket, proof)
         target.check(work)
         return target, response.inputs
 
@@ -228,7 +173,7 @@ class ReadyConfirmation:
         layout = self.resolver.layout
         if (target.clone != layout.clone or target.tmux_socket != layout.tmux_socket
                 or target.launcher != layout.launcher or target.pane != proof.pane
-                or target.session_socket != proof.session_socket):
+                or target.session_socket != proof.session_socket or target.session_proof != proof):
             raise Refused('readiness target differs from registered physical layout')
         async with asyncio.timeout(5):
             receipt = await self.source.ready(work, proof)

@@ -462,9 +462,15 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 writer.close()
                 await writer.wait_closed()
             server = await asyncio.start_unix_server(receive, path=socket)
+            from mop.driver.launch import Registration
+            from mop.node.body_launch import SessionProof, process_identity
+            registration = Registration(work, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+            proof = SessionProof(registration, '%0', 'owned-session', uuid4(), socket,
+                                 os.getpid(), process_identity(os.getpid()))
             target = BoundTarget(work.target_id, work.incarnation_id, work.node_id,
                 work.executor_epoch, work.generation, work.role, work.bundle_digest,
-                work.grant_id, root, root/'tmux', '%0', root/'launcher', session_socket=socket)
+                work.grant_id, Path.cwd(), root/'tmux', '%0', root/'launcher',
+                session_socket=socket, session_proof=proof)
             inputs = ActionInput('Owner','owner@example.test','text ; $(not-a-shell)', peer_token='private-token')
             sender = UnixSessionSender()
             calls = []

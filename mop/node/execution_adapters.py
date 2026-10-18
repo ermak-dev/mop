@@ -13,8 +13,74 @@ import re
 import shlex
 import signal
 from typing import Protocol
+from uuid import UUID
 
+from mop.common.telemetry import SessionScope
+from mop.driver.launch import Registration
 from mop.node.http_execution import Work, Refused, Unavailable, EffectGuard
+
+
+@dataclass(frozen=True)
+class SessionProof:
+    registration: Registration
+    pane: str
+    session_id: str
+    producer_epoch: UUID
+    session_socket: Path
+    pid: int
+    process_start: str
+
+    def __post_init__(self):
+        if (type(self.registration) is not Registration or type(self.pane) is not str
+                or not re.fullmatch(r'%[0-9]+', self.pane)
+                or type(self.session_id) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', self.session_id)
+                or type(self.producer_epoch) is not UUID
+                or not isinstance(self.session_socket, Path) or not self.session_socket.is_absolute()
+                or type(self.pid) is not int or self.pid <= 0
+                or type(self.process_start) is not str or not self.process_start):
+            raise Refused('confirmed process and addressed session scope required')
+
+    @property
+    def scope(self):
+        w = self.registration.work
+        return SessionScope(UUID(w.epoch), UUID(w.target_id), UUID(w.incarnation_id),
+            UUID(w.node_id), UUID(w.executor_epoch), self.session_id, self.producer_epoch)
+
+
+def process_identity(pid):
+    """Внешний Linux process handle; PID reuse не восстанавливает старую сессию."""
+    if type(pid) is not int or pid <= 0:
+        raise Unavailable('invalid physical session process')
+    try:
+        root = Path('/proc')/str(pid)
+        if root.stat().st_uid != os.getuid():
+            raise Unavailable('physical session belongs to a different OS user')
+        # comm содержит пробелы/скобки; поля считаются после последней ).
+        fields = (root/'stat').read_text().rsplit(')', 1)[1].split()
+        if fields[0] in ('Z', 'X', 'x'):
+            raise Unavailable('physical session process has exited')
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        return boot+':'+fields[19]
+    except (OSError, IndexError) as error:
+        raise Unavailable('physical session process unavailable') from error
+
+
+def check_session_peer(sock, proof, clone):
+    """Gate именно открытого соединения; повторный connect проверял бы другой peer."""
+    import socket
+    import struct
+    if type(proof) is not SessionProof:
+        raise Unavailable('physical session peer proof unavailable')
+    peer = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
+    pid, uid, _ = struct.unpack('3i', peer)
+    if pid != proof.pid or uid != os.getuid() or process_identity(pid) != proof.process_start:
+        raise Unavailable('physical session socket peer changed')
+    root = Path('/proc')/str(pid)
+    if (Path(os.readlink(root/'cwd')) != clone
+            or (root/'ns/mnt').stat().st_ino != Path('/proc/self/ns/mnt').stat().st_ino):
+        raise Unavailable('physical session peer namespace or clone changed')
+    if process_identity(pid) != proof.process_start:
+        raise Unavailable('physical session socket peer changed')
 
 
 @dataclass(frozen=True)
@@ -32,6 +98,8 @@ class BoundTarget:
     pane: str
     launcher: Path
     session_socket: Path | None = None
+    # Proof переносится целиком: равенство путей не доказывает равенства сессий.
+    session_proof: SessionProof | None = None
 
     def check(self, work):
         for name in ('target_id', 'incarnation_id', 'node_id', 'executor_epoch',
@@ -42,6 +110,11 @@ class BoundTarget:
                 (self.clone, self.tmux_socket, self.launcher))
                 or type(self.pane) is not str or not re.fullmatch(r'%[0-9]+', self.pane)):
             raise Refused('absolute physical handles and exact pane required')
+        if self.session_proof is not None:
+            proof = self.session_proof
+            if (type(proof) is not SessionProof or not proof.registration.matches(work)
+                    or proof.pane != self.pane or proof.session_socket != self.session_socket):
+                raise Refused('physical session proof does not match bound target')
 
 
 @dataclass(frozen=True)
@@ -192,6 +265,9 @@ class UnixSessionSender:
     def preflight(self, target, inputs):
         if (self._closed or not isinstance(target.session_socket, Path)
                 or not target.session_socket.is_absolute()
+                or type(target.session_proof) is not SessionProof
+                or target.session_proof.session_socket != target.session_socket
+                or target.session_proof.pane != target.pane
                 or type(inputs.peer_token) is not str or not 1 <= len(inputs.peer_token) <= 4096):
             raise Unavailable('addressed session channel and peer credential unavailable')
         inputs.check('send_message')
@@ -218,7 +294,12 @@ class UnixSessionSender:
                     await before_send()
                     if self._closed:
                         raise Unavailable('session sender closed')
+                    # После последнего await проверяем уже подключённый peer.
+                    # Pathname мог смениться дважды и снова показывать старый PID.
+                    check_session_peer(writer.get_extra_info('socket'), target.session_proof, target.clone)
                     frame = session.user_frame(session.envelope(inputs.message, from_name='mop'))
+                    # Native fence 2.1.296: /clear меняет разговор без смены PID.
+                    frame['session_id'] = target.session_proof.session_id
                     frames = ({'type':'auth', 'token':inputs.peer_token}, frame)
                     writer.write((''.join(json.dumps(f, ensure_ascii=False)+'\n' for f in frames)).encode())
                     await writer.drain()
