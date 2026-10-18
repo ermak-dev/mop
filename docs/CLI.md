@@ -1456,6 +1456,9 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
+  enroll-node --node UUID --origin HTTPS_ORIGIN --ca-file NODE_CA_PATH
+    --file NEW_PRIVATE_FOLDER/bootstrap.json --node-file NODE_OS_PATH
+    [--enrollment UUID]         export a node service transport; exact live reexport only
 
 Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and

@@ -76,6 +76,110 @@ unknown. Это не допуск к новому эффекту или credenti
   проверка отзыва во время реального I/O — зависимые задачи и приёмка эпика,
   не доказательство локального ORM gate. Старый пул не используется.
 
+## FreshNode: private transport export (#722)
+
+Это отдельный bootstrap OS-потребителя, не `.mop/bootstrap.yaml` проекта и не
+источник бизнес-политики. Исключение minimal bootstrap #624 остаётся конечным:
+на узел не едут DB credentials, root crypto, Django key, Nomad token, proxy
+management, человеческий login или снимок permissions/проектов/настроек.
+
+Поддержанный серверный вход — ранняя maintenance-команда, до старого
+context/`.env`/`node.env`; установка выбрана только защищённым
+`MOP_CONTROLLER_BOOTSTRAP`. Нужны роль `maintenance`, актуальные schema,
+installation identity/root и готовый restore guard. Узел — явный UUID текущей
+строки Catalog в этой БД, не имя из inventory или старых файлов.
+
+```sh
+mop server controller enroll-node --node NODE_UUID \
+  --origin https://controller.example.invalid \
+  --ca-file /etc/mop-node/controller-ca.pem \
+  --file /private/controller-exports/new-node/bootstrap.json \
+  --node-file /var/lib/mop-node/private/bootstrap.json
+```
+
+`/private/controller-exports` уже существует, принадлежит maintenance uid и
+имеет private mode. Каталог `new-node` обязан отсутствовать: команда создаёт
+его как `0700`, bootstrap и `delivery.json` — как `0600`, независимо от umask.
+Вся цепочка открывается через dirfd/no-follow; symlink, чужой/публичный parent,
+существующий каталог/файл и коллизии отвергаются без перезаписи. Ни destination,
+ни CA-файл на Node OS здесь не открываются. Успех молчит; raw credential бывает
+только в private bootstrap и стандартной таблице DRF Token, не в argv, stdout,
+repr результата или audit payload.
+
+### Замороженный JSON-контракт Node OS v1
+
+Bootstrap — UTF-8 JSON object с **ровно** этими ключами; неизвестные ключи,
+дубликаты и иная версия должны отвергаться будущим Node parser:
+
+| Ключ | Тип / значение |
+|---|---|
+| `schema_version` | JSON integer `1`, не boolean |
+| `installation_id` | Nonsecret namespace текущей установки: `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` |
+| `origin` | HTTPS origin без userinfo, path (также без завершающего `/`), query или fragment; явный порт допустим |
+| `ca_file` | Канонический абсолютный путь к заранее доставленному CA на **Node OS**; не bytes сертификата и не controller path |
+| `node_id` | Строка UUID конкретного текущего Catalog Node |
+| `token` | Стандартный DRF Token: 40 lowercase hex; только `Authorization: Token …` по проверенному TLS |
+
+Файл **не содержит** installation epoch, executor epoch, effects/readiness,
+список actions/проектов, owner или grant. Внешнее хранение этих полей превратило
+бы transport в authority. Технический начальный `NodeExecutor.executor_epoch`
+создаётся в SQL до старта пустого узла; существующий epoch не сбрасывается.
+`GET /api/v1/machine/executor?schema_version=1&node_id=…` отдаёт предыдущий epoch
+только живому enrolled исполнителю. Он не является доказательством quiescence:
+реальная physical reconciliation до `executor/restarted` и обычные execution
+claims/fences обязательны; export не включает effects и не связывает physical
+adapters.
+
+### Enrollment, reexport и доставка
+
+Создаётся один стандартный `Actor(kind='service')` с unusable password,
+`ServiceEnrollment(use_case='node-executor', node=…)`, DRF Token и штатным
+CredentialBinding. Права — фиксированные восемь canonical `execution.*`:
+`poll_work`, `claim_work`, `report_result`, `read_facts`, `read_launch`,
+`register_producer`, `ingest_telemetry`, `ingest_observations`. Это не весь
+machine registry: нет catalog administration/receipts, глобальных proxy rights,
+secret management или grant activation. Membership — ровно текущие не-retired
+NodeProjects, через enabled local source; нет all-project scope, Groups,
+LoginIdentity или human-owner impersonation.
+
+`delivery.json` — отдельный private nonsecret receipt, не Node authority:
+`schema_version: 1`, `node_id`, `enrollment_id`, `controller_file`, `node_file`,
+`mode: "0600"`, `directory_mode: "0700"`, `no_log: true`. Он только описывает
+источник/destination, не запускает Ansible, SSH, sudo, изменение OS account или
+live writes. Внешняя явно разрешённая доставка обязана сама проверять владельца,
+private destination/parent, переносить только этот файл и защищать copy через
+`no_log: true`; CA доставляется отдельно. `delivery.json` не отправляется узлу.
+
+Для повторного экспорта нужен новый каталог и `--enrollment UUID` из receipt.
+Issuer проверяет **тот же exact live enrollment**, узел/use case, Actor flags,
+полный точный набор permissions/membership и живой token/binding. Отзыв, другой
+UUID/узел, collision username (в том числе человеческого), изменённые права,
+проекты, purpose или отсутствие epoch — отказ, не repair. Нельзя добавить
+права/проекты, ротировать token, усыновить username или породить второй Actor.
+При обычном I/O/SQL отказе новый bundle удаляется, SQL откатывается. Это не
+распределённая транзакция DB/filesystem при аварийном завершении процесса:
+оставшийся файл/каталог сам по себе ничего не разрешает, а повторная команда
+его не перезаписывает и не принимает за authority.
+
+### Оставшиеся Node bindings и проверка
+
+#722 реализует только server-layer issuer/export. Private-file parser,
+consumer entry/daemon, проверенный TLS transport с Node CA, discovery текущего
+installation epoch через живую authority, native physical runtime/reconciliation,
+producers/telemetry и доставка в OS — отдельные Node/composition задачи.
+Никакой fallback к старым bus.json/ready.json/node.env не добавлен. Если будущий
+consumer выбирает файл через node.env/systemd, там может быть только nonsecret
+путь (новая переменная node.env должна быть объявлена NodeScoped), а не token,
+копия controller bootstrap/.env или policy. Новых global required settings нет.
+
+`tests/node_bootstrap_export.py` проверяет private paths/modes, no-overwrite,
+redaction и early CLI. `tests/node_bootstrap.py` на настоящем PostgreSQL 17
+проверяет issue/reexport/revocation, текущую identity, точные purpose/permissions,
+project/node denial и initial epoch discovery. У HTTP poll в проверке привязан
+пустой test work port; положительный facts query использует bounded test reader.
+Production physical ports этим не объявляются связанными: unbound facts всё
+ещё возвращает unavailable. Живой Node/пул/rollout здесь не проверяются.
+
 ## Зачем
 
 До #62 манифест при подъёме не играл никто: единственным механизмом было

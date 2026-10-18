@@ -16,6 +16,9 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
+  enroll-node --node UUID --origin HTTPS_ORIGIN --ca-file NODE_CA_PATH
+    --file NEW_PRIVATE_FOLDER/bootstrap.json --node-file NODE_OS_PATH
+    [--enrollment UUID]         export a node service transport; exact live reexport only
 
 Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and
@@ -35,10 +38,15 @@ import sys
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('setup', 'schema', 'check', 'migrate', 'migrations-check',
-                        'initialize', 'collectstatic', 'admin', 'serve', 'worker', 'backup', 'restore'))
+                        'initialize', 'collectstatic', 'admin', 'serve', 'worker', 'backup', 'restore', 'enroll-node'))
     parser.add_argument('--venv')
     parser.add_argument('--username')
     parser.add_argument('--file')
+    parser.add_argument('--node')
+    parser.add_argument('--origin')
+    parser.add_argument('--ca-file')
+    parser.add_argument('--node-file')
+    parser.add_argument('--enrollment')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--hostname', action='append', default=[])
@@ -69,6 +77,23 @@ def main(argv):
                         'import django, rest_framework, channels, psycopg, uvicorn, ldap, django_auth_ldap'], check=True)
         return 0
     from mop.server.controller.runtime import configure, maintenance, serve, worker, create_admin, close_pools
+    if args.action == 'enroll-node':
+        from uuid import UUID
+        if not all((args.node, args.origin, args.ca_file, args.file, args.node_file)):
+            parser.error('enroll-node requires --node, --origin, --ca-file, --file and --node-file')
+        try:
+            node = UUID(args.node)
+            enrollment = UUID(args.enrollment) if args.enrollment else None
+        except ValueError:
+            parser.error('enroll-node requires node and enrollment UUIDs')
+        from mop.server.controller.runtime import enroll_node
+        try:
+            configure()
+            enroll_node(node_id=node, origin=args.origin, ca_file=args.ca_file,
+                        file=args.file, node_file=args.node_file, enrollment_id=enrollment)
+        finally:
+            close_pools()
+        return 0
     configure()
     if args.action == 'admin':
         import getpass
