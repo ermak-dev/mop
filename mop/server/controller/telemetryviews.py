@@ -4,11 +4,8 @@ from rest_framework.exceptions import ParseError
 from rest_framework.parsers import BaseParser
 from rest_framework.response import Response
 from mop.common.telemetry import MAX_RECORD, Observation, SessionScope, counter, fields
-from mop.server.sessions.telemetry import Telemetry
-from .machineviews import MachineView, authority
-
-
-telemetry = Telemetry(installation=authority)
+from .machineviews import MachineView
+from .telemetryroot import telemetry
 
 
 def unique(pairs):
