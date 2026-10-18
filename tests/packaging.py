@@ -2,10 +2,10 @@
 """Упаковка клиента без пула и без сети: python3 tests/packaging.py
 
 Клиент ставится пакетом из git одной командой (#351):
-`uv tool install git+ssh://<origin>/ermak/mop.git`. Здесь проверяется то,
-что читается без сборки: pyproject.toml (tomllib, stdlib), зависимости,
-которые отдаёт setup.py, и то, что мастер, поднятый из пакета, находит свой
-MCP-сервер и скилл. Сама установка из git -- только руками.
+`uv tool install git+ssh://<origin>/ermak/mop.git`. Метаданные, зависимости,
+self_argv и скилл проверяются отдельно. #642 собирает wheel и ставит его с
+объявленными client dependencies в свой venv из wheelhouse окружения
+(PIP_FIND_LINKS, без сети); installed CLI/MCP читают собственный TLS fixture.
 """
 import importlib.util
 import os
@@ -110,8 +110,9 @@ def check_master_mcp_351(c):
 # каждый инструмент-командлет отдаёт модели [Errno 2], а перезапуск падает;
 # вдобавок ci_pull зовёт прежнее имя из LEGACY, которое уйдёт.
 # SOLUTION: lib.self_argv(bin_dir, python) по правилу #351 -- bin/mop клона,
-# если он есть, иначе [python, -m, mop.cli]; на ней стоят mcp_command,
-# mcp.run_command и ci_pull (каноническое `server deploy --from-ci`).
+# если он есть, иначе [python, -m, mop.cli]; ci_pull сохраняет каноническое
+# `server deploy --from-ci`. #642: MCP теперь вызывает dispatcher в процессе;
+# его пригодность из installed wheel проверяется ниже, не argv subprocess.
 # STATUS: FIXED — see #368
 def check_self_argv_368(c):
     import tempfile
@@ -121,23 +122,7 @@ def check_self_argv_368(c):
     if not c.check("#368 lib.self_argv exists", fn is not None):
         return
     from mop.cli.server import deploy
-    from mop.cli.service import mcp
-    from mop.client import channel
     py = "/venv/bin/python"
-
-    def adapter_argv():
-        calls = []
-
-        class Done:
-            returncode, stdout, stderr = 0, "ok", ""
-
-        def run(argv, **kw):
-            calls.append(argv)
-            return Done()
-        with patched(mcp.subprocess, run=run), \
-                patched(channel, my_session=lambda: {"cwd": d}):
-            mcp.run_command(["list"], ["--all"])
-        return calls[0] if calls else None
 
     def restart_argv():
         calls = []
@@ -162,17 +147,124 @@ def check_self_argv_368(c):
                  fn(nowhere, py), [py, "-P", "-m", "mop.cli"])
         with patched(sys, executable=py):
             with patched(lib, BIN=nowhere):
-                c.expect("#368 package: the adapter runs mop via -m mop.cli",
-                         adapter_argv(), [py, "-P", "-m", "mop.cli", "list", "--all"])
                 c.expect("#368 package: ci_pull restarts via -m mop.cli, canonical name",
                          restart_argv(),
                          (py, [py, "-P", "-m", "mop.cli", "server", "deploy", "--from-ci"]))
             with patched(lib, BIN=clone):
-                c.expect("#368 clone: the adapter runs its bin/mop",
-                         adapter_argv(), [launcher, "list", "--all"])
                 c.expect("#368 clone: ci_pull restarts its bin/mop, canonical name",
                          restart_argv(),
                          (launcher, [launcher, "server", "deploy", "--from-ci"]))
+
+
+# HYPOTHESIS (#642): старый adapter_argv падал на удалённом mcp.subprocess;
+# путь до bin/mop сам по себе не доказывает, что wheel пригоден для клиента.
+# SOLUTION: чистая установка wheel с объявленными client dependencies, без
+# server extra, вне checkout. CLI и MCP вызывают тот же bound commandlet и
+# читают один canonical pool DTO через собственный verified TLS listener.
+# RESULT: исходный strict RED -- AttributeError mcp.subprocess, не env failure.
+# STATUS: FIXED — see #642
+def check_installed_client_642(c):
+    import http.server
+    import json
+    from pathlib import Path
+    import shutil
+    import subprocess
+    import tempfile
+    from _control_fixture import own_tls, pool_page, TOKEN
+
+    class Pool(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.server.calls.append((self.path, self.headers.get('Authorization')))
+            authorized = self.path == '/api/v1/puppets?page_size=100' and \
+                self.headers.get('Authorization') == 'Token ' + TOKEN
+            raw = json.dumps(pool_page() if authorized else {}).encode()
+            self.send_response(200 if authorized else 403)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / 'source'
+        source.mkdir()
+        shutil.copytree(Path(ROOT) / 'mop', source / 'mop',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        for name in ('setup.py', 'pyproject.toml'):
+            shutil.copyfile(Path(ROOT) / name, source / name)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(('MOP_', 'PYTHON'))}
+        wheels = root / 'wheels'
+        build = subprocess.run([sys.executable, '-I', '-m', 'pip', 'wheel', '--no-deps',
+            '--no-index', '--disable-pip-version-check', '--wheel-dir', str(wheels), str(source)],
+            cwd=root, env=env, capture_output=True, text=True, timeout=90)
+        if not c.expect('#642 build the actual wheel from this tree', build.returncode, 0):
+            c.fail('#642 wheel build diagnostic', build.stdout + build.stderr)
+            return
+        home = root / 'venv'
+        create = subprocess.run([sys.executable, '-I', '-m', 'venv', str(home)],
+            cwd=root, env=env, capture_output=True, text=True, timeout=60)
+        if not c.expect('#642 create an isolated installed-client environment', create.returncode, 0):
+            c.fail('#642 venv diagnostic', create.stdout + create.stderr)
+            return
+        wheel, = wheels.glob('mop-*.whl')
+        python = home / 'bin' / 'python'
+        install = subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--no-index',
+            '--disable-pip-version-check', str(wheel)], cwd=root, env=env,
+            capture_output=True, text=True, timeout=90)
+        if not c.expect('#642 install declared client dependencies from the wheelhouse', install.returncode, 0):
+            c.fail('#642 client installation diagnostic', install.stdout + install.stderr)
+            return
+        # Не копия commandlet: production registry и production tool_call.
+        script = '''
+import importlib.util, json, sys
+from importlib.metadata import distribution
+from pathlib import Path
+from mop import cli
+from mop.cli import _control, _mcp
+import mcp.types
+assert importlib.util.find_spec('django') is None
+assert importlib.util.find_spec('rest_framework') is None
+assert importlib.util.find_spec('psycopg') is None
+assert Path(cli.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+entry, = distribution('mop').entry_points.select(name='mop', group='console_scripts')
+assert entry.value == 'mop.cli:console'
+assert (Path(cli.__file__).parents[1] / 'skills/master/SKILL.md').is_file()
+words, path, declaration = _mcp.commandlets()['list']
+assert words == ['list']
+assert Path(path).resolve().is_relative_to(Path(sys.prefix).resolve())
+text, status = _control.tool_call(words, declaration, {}, with_status=True)
+assert status == 0, text
+assert not any(name == 'django' or name == 'nats' or name.startswith(('django.', 'mop.server.', 'nats.'))
+               for name in sys.modules)
+# Legacy self_argv нужен ci_pull, но не входит в canonical MCP import path.
+from mop.cli import lib
+assert lib.self_argv() == [sys.executable, '-P', '-m', 'mop.cli']
+print(text)
+'''
+        with own_tls(Pool) as (server, origin, ca, _):
+            server.calls = []
+            env.update(MOP_API_ORIGIN=origin, MOP_API_TOKEN=TOKEN, MOP_API_CA=str(ca))
+            listed = subprocess.run([str(home / 'bin' / 'mop'), 'list'], cwd=root, env=env,
+                capture_output=True, text=True, timeout=20)
+            adapted = subprocess.run([str(python), '-I', '-c', script], cwd=root, env=env,
+                capture_output=True, text=True, timeout=20)
+            for name, result in (('console', listed), ('MCP dispatcher', adapted)):
+                if c.expect('#642 installed ' + name + ' is usable', result.returncode, 0):
+                    c.expect('#642 installed ' + name + ' preserves canonical pool facts',
+                             json.loads(result.stdout), pool_page())
+                c.expect('#642 installed ' + name + ' has no stderr', result.stderr, '')
+                c.check('#642 installed ' + name + ' never prints credentials',
+                        TOKEN not in result.stdout + result.stderr)
+            c.expect('#642 console and MCP share the canonical authenticated query', server.calls,
+                     [('/api/v1/puppets?page_size=100', 'Token ' + TOKEN)] * 2)
+    c.expect('#642 server dependencies remain a separate declared extra',
+             load_setup().requirements('server'), list(deps.SERVER))
+    c.check('#642 no server requirement leaks into client requirements',
+            not set(deps.PIP) & set(deps.SERVER))
 
 
 def check_master_skill_351(c):
@@ -193,6 +285,7 @@ def main():
     check_console_351(c)
     check_master_mcp_351(c)
     check_self_argv_368(c)
+    check_installed_client_642(c)
     check_master_skill_351(c)
     return c.report("packaging")
 

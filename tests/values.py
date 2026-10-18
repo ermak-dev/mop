@@ -17,7 +17,9 @@ to_dict/from_dict в одном месте на тип. Поведение не 
 -- всё, что уходит из процесса: ответы агента по шине (факты клона с
 владельцем, states), строка `.git/mop-owner` и откат аренды, ростер и строки
 мастера, снимок дашборда, строки `mop list` и таблица MCP, ответы сервиса кластера про
-проекты и лимит. После правки -- байт в байт.
+проекты и лимит. После правки -- байт в байт. #642 заменяет только старую
+MCP-таблицу semantic canonical pool DTO и общим CLI/MCP dispatcher check;
+все остальные снимки продолжают сравниваться без перезаписи fixture.
 STATUS: FIXED — see #204
 """
 import asyncio
@@ -32,12 +34,11 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(HERE))
 
-from _lib import Checks, FakeNomad, bash, patched, restored  # noqa: E402
+from _lib import Checks, FakeNomad, bash, patched, restored, run_command  # noqa: E402
 from mop.node import agent  # noqa: E402
 from mop.common import bus, puppets, projects  # noqa: E402
 from mop.server import cluster, web  # noqa: E402
 from mop.cli.core import list as mop_list  # noqa: E402
-from mop.cli.service import mcp  # noqa: E402
 
 SNAPSHOT = os.path.join(HERE, "values_snapshot.json")
 NOW = 1_000_000.5
@@ -139,7 +140,6 @@ def roster_forms():
             "rows_sized": dump(puppets.puppet_rows()),
             "sizes": dump(sizes),
             "list": "\n".join(mop_list.line(r) for r in puppets.puppet_rows()),
-            "mcp": "\n".join(mcp._roster("") + mcp._roster("rugent")),
             "dashboard": dump(web.snapshot(
                 web.with_sizes(rows, sizes), [{"name": "mate"}], [], [], [],
                 [{"at": 1.0, "event": "send"}], ["states: x"], NOW)),
@@ -370,9 +370,105 @@ def check_characterization_204(c):
     """Каждая сериализованная форма -- та же, что до правки, байт в байт."""
     with open(SNAPSHOT) as f:
         want = json.load(f)
+    # #642: MCP больше не строит текстовый ростер. Только его прежняя
+    # сериализация заменена semantic DTO check ниже; остальные снимки неизменны.
+    want.pop('mcp', None)
     got = forms()
     for key in sorted(set(want) | set(got)):
         c.expect(f"{key} drifted", got.get(key), want.get(key))
+
+
+# HYPOTHESIS (#642): _roster ушёл, но snapshot одной старой таблицы скрывал
+# потерю dirty/ahead/owner/lease или превращение неизвестных фактов в free.
+# SOLUTION: pure canonical projection policy -> immutable client DTO -> тот же
+# list commandlet через CLI и MCP. Source freshness и desired lease различны:
+# истечение observed facts не стирает owner, а старый lease не очищает клон.
+# RESULT: исходный strict RED -- удалённый mcp._roster; bytes старой таблицы
+# больше не контракт, остальные characterization assertions сохранены.
+# STATUS: FIXED — see #642
+def check_canonical_pool_642(c):
+    from datetime import datetime, timedelta, timezone
+    from uuid import UUID, uuid5
+    from _control_fixture import (Fixture, Response, pool_page, puppet_row,
+                                  TOKEN, PROJECT, PUPPET, OP, INCARNATION)
+    from mop import cli
+    from mop.cli import _control, _mcp
+    from mop.client import control as api
+    from mop.server.sessions import projection_policy as policy
+
+    now = datetime(2026, 10, 16, 10, 0, tzinfo=timezone.utc)
+    fresh_lease, old_lease = '2026-10-16T10:05:00Z', '2026-10-15T10:00:00Z'
+    cases = (
+        ('leased-clean', 0, 0, 'fresh', '2', fresh_lease, 'free'),
+        ('leased-dirty', 2, 0, 'fresh', '3', old_lease, 'idle'),
+        ('leased-ahead', 0, 1, 'fresh', '3', old_lease, 'idle'),
+        ('expired-clean', 0, 0, 'fresh', '3', old_lease, 'free'),
+        ('unowned-clean', 0, 0, 'fresh', None, fresh_lease, 'free'),
+        ('missing-clone', None, None, 'fresh', '2', fresh_lease, 'unknown'),
+        ('stale-session', 0, 0, 'stale', '2', fresh_lease, 'unknown'),
+        ('silent-source', 0, 0, 'unavailable', '2', fresh_lease, 'silent'),
+    )
+    rows = []
+    for name, dirty, ahead, freshness, owner, expires, kind in cases:
+        session = None if freshness == 'unavailable' else {'session': 'idle 1 1'}
+        clone = None if dirty is None else dict(dirty=dirty, ahead=ahead,
+                                               branch='master', default_branch='master')
+        row = puppet_row()
+        row['id'] = str(uuid5(UUID(PUPPET), name))
+        row['desired'].update(owner_id=owner, expires_at=expires)
+        for source, payload, status in (('state', session, freshness),
+                                       ('clone', clone, 'fresh' if clone else 'unavailable')):
+            raw = dict(status='unavailable' if payload is None else 'fresh',
+                       reason='source_unavailable' if payload is None else '',
+                       payload=payload or {}, incarnation=INCARNATION, producer_epoch=OP,
+                       controller_run=OP, sequence='1', observed_at=now.isoformat(),
+                       received_at=now.isoformat())
+            observation_now = now
+            if status == 'stale':
+                observation_now += timedelta(seconds=61)
+            row['observed'][source] = policy.observation(raw, kind=source,
+                incarnation=INCARNATION, producer_epoch=OP, run_id=OP,
+                accepting=True, now=observation_now, ttl=60)
+        row['state'] = policy.project_state(row['observed']['state']['value'],
+            row['observed']['clone']['value'], row['observed']['state']['freshness'])
+        c.expect('#642 canonical state preserves ' + name, row['state']['kind'], kind)
+        rows.append(row)
+    envelope = pool_page()
+    envelope['results'] = rows
+    fixture = Fixture(*(Response(data=envelope) for _ in range(3)))
+    selected = api.ServerContext('https://controller.example.invalid', TOKEN)
+    with patched(api, _DeadlineHTTPSConnection=fixture.factory), _control.use(selected):
+        page = api.Client(selected).puppets_page(project_id=PROJECT)
+        c.expect('#642 canonical pool DTO retains every semantic case', len(page.items), len(cases))
+        c.check('#642 canonical pool DTO is frozen', frozen(page, 'epoch'))
+        for view, (name, dirty, ahead, freshness, owner, expires, kind) in zip(page.items, cases):
+            c.expect('#642 DTO state survives ' + name, view.data['state']['kind'], kind)
+            c.expect('#642 DTO retains explicit lease/owner ' + name,
+                     (view.data['desired']['owner_id'], view.data['desired']['expires_at']),
+                     (owner, expires))
+            observed = view.data['observed']['clone']
+            c.expect('#642 DTO retains clone facts rather than guessing zeros ' + name,
+                     None if observed['value'] is None else
+                     (observed['value']['dirty'], observed['value']['ahead']),
+                     None if dirty is None else (dirty, ahead))
+            c.expect('#642 DTO retains unknown/stale/unavailable source ' + name,
+                     view.data['observed']['state']['freshness'], freshness)
+            c.expect('#642 command revision is not the observation clock ' + name,
+                     view.target.revision, '7')
+        out, err, code = run_command(cli.main, ['list', '--project-id', PROJECT])
+        words, _, declaration = _mcp.commandlets()['list']
+        adapted, status = _control.tool_call(words, declaration,
+            {'project_id': PROJECT}, with_status=True)
+    c.expect('#642 canonical list CLI succeeds without diagnostics', (err, code), ('', 0))
+    c.expect('#642 canonical MCP invokes the successful list commandlet', status, 0)
+    c.expect('#642 CLI preserves all canonical semantic pool facts', json.loads(out), envelope)
+    c.expect('#642 MCP and CLI expose the same canonical projection', json.loads(adapted), json.loads(out))
+    c.expect('#642 every consumer reads the same authorized canonical query',
+             [(method, path) for method, path, _, _ in fixture.calls],
+             [('GET', '/api/v1/puppets?page_size=100&project_id=' + PROJECT)] * 3)
+    c.check('#642 both frontends redact the credential', TOKEN not in out + err + adapted)
+    c.expect('#642 unavailable coverage never becomes completed handshake',
+             (page.coverage['pending_operations'], page.handshake_complete), (False, False))
 
 
 # ─── сами типы ───────────────────────────────────────────────────────────
@@ -500,7 +596,7 @@ def check_alloc_377(c):
             found)
 
 
-CHECKS = (check_characterization_204, check_owner_204, check_project_204,
+CHECKS = (check_characterization_204, check_canonical_pool_642, check_owner_204, check_project_204,
           check_puppet_row_204, check_one_verb_204, check_alloc_377)
 
 
