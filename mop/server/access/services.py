@@ -338,8 +338,8 @@ class Access:
 
 class AuthorizedCatalog(Catalog):
     """Access-composition: client и ownership принадлежат одной transaction."""
-    def __init__(self):
-        super().__init__(authorizer=Access())
+    def __init__(self, *, grants=None):
+        super().__init__(authorizer=Access(grants=grants))
 
     def register_client(self, actor, *, label):
         with transaction.atomic():

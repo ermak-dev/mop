@@ -18,8 +18,14 @@ from rest_framework.views import APIView
 from mop.server.access import services as access
 
 
+def grant_authority():
+    """Текущая SQL-only делегация: тот же Root, что у command/read consumers."""
+    from .machinebinding import local_grants
+    return local_grants().local_authority()
+
+
 def catalog_api():
-    return access.AuthorizedCatalog()
+    return access.AuthorizedCatalog(grants=grant_authority())
 
 
 def login_session(request, user):
@@ -175,7 +181,14 @@ class RevokeToken(PrivateView):
         return Response({'schema_version': 1})
 
 
-class Identity(PrivateView):
+class ActorView(PrivateView):
+    """Discovery использует живой resolver; парольные границы не меняются."""
+    @property
+    def grant_resolver(self):
+        return grant_authority()
+
+
+class Identity(ActorView):
     def get(self, request):
         actor = access.current_actor(request.actor, grants=getattr(self, 'grant_resolver', None))
         return Response({'schema_version': 1, 'user_id': actor.user_id,
@@ -240,38 +253,48 @@ def _catalog_mutation(function, *, created=False):
     return response
 
 
-class Projects(PrivateView):
+class Projects(ActorView):
     parser_classes = (ProjectJSONParser,)
 
     def post(self, request):
         serializer = ProjectCreate(data=request.data)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
-        return _catalog_mutation(lambda: catalog_api().create_project(actor_for_request(request),
+        return _catalog_mutation(lambda: catalog_api().create_project(request.actor,
             values['origin'], limit=values['puppet_limit']), created=True)
 
     def get(self, request):
-        actor = actor_for_request(request)
-        rows = catalog_api().list_projects(actor)
-        access.Access().authorize(actor, 'catalog.view_project', project_ids=tuple(row.id for row in rows))
+        actor = request.actor
+        catalog = catalog_api()
+        grants = self.grant_resolver
+        if actor.grant_id is not None:
+            # Делегирование имеет явную project-область, а не глобальный query.
+            # ReadScope всё равно доказывает current Actor/RBAC/ancestry.
+            from mop.server.access.readscope import read_scope
+            scope = read_scope(actor, 'catalog.view_project', grants=grants)
+            rows = tuple(catalog.get_project(actor, project) for project in scope.project_ids)
+        else:
+            rows = catalog.list_projects(actor)
+        gate = access.Access(grants=grants)
+        gate.authorize(actor, 'catalog.view_project', project_ids=tuple(row.id for row in rows))
         from .pagination import project_page
         page, following = project_page(actor, rows, request.query_params)
         # Фильтр применён до count и pagination; cursor не хранит authority.
-        access.Access().authorize(actor, 'catalog.view_project', project_ids=tuple(row.id for row in page))
+        gate.authorize(actor, 'catalog.view_project', project_ids=tuple(row.id for row in page))
         return Response({'schema_version': 1, 'count': len(rows), 'next_cursor': following,
             'results': [_project(row) for row in page]})
 
 
-class Project(PrivateView):
+class Project(ActorView):
     parser_classes = (ProjectJSONParser,)
 
     def put(self, request, project_id):
         serializer = ProjectConfiguration(data=request.data)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
-        return _catalog_mutation(lambda: catalog_api().configure_project(actor_for_request(request), project_id,
+        return _catalog_mutation(lambda: catalog_api().configure_project(request.actor, project_id,
             origin=values['origin'], limit=values['puppet_limit'], expected_revision=values['expected_revision']))
 
     def get(self, request, project_id):
-        row = catalog_api().get_project(actor_for_request(request), project_id)
+        row = catalog_api().get_project(request.actor, project_id)
         return Response({'schema_version': 1, **_project(row)})

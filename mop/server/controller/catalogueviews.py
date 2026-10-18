@@ -12,9 +12,8 @@ from .runtime import installation_snapshot
 
 def grant_authority():
     """SQL-only root: тот же живой assignment/ancestry resolver, что у команд."""
-    from mop.server.access.grants import Grants
-    from .machinebinding import AssignmentBindings
-    return Grants(provider=None, bindings=AssignmentBindings()).local_authority()
+    from .authviews import grant_authority as current
+    return current()
 
 
 def actor_snapshot(actor):
