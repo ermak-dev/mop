@@ -76,7 +76,7 @@ def snapshot_sources(source, context):
     (context/'Dockerfile').write_text(DOCKERFILE)
 
 
-async def run_probe(source):
+async def run_probe(source, *, snapshotter=snapshot_sources, acceptance='/opt/hostscope-acceptance.py'):
     """Возвращает actual accepted/blocked; code 77 не является green gate."""
     docker = shutil.which('docker')
     if docker is None:
@@ -93,7 +93,7 @@ async def run_probe(source):
     try:
         with tempfile.TemporaryDirectory(prefix='mop-host-scope-build-') as directory:
             context = Path(directory)
-            snapshot_sources(source, context)
+            snapshotter(source, context)
             await command.run(docker, 'build', '--label='+LABEL+'='+identifier,
                               '--tag='+name+':probe', str(context))
             image_created = True
@@ -129,7 +129,7 @@ async def run_probe(source):
         if ready:
             try:
                 raw = await command.run(docker, 'exec', name, '/usr/local/bin/python3',
-                                        '-I', '/opt/hostscope-acceptance.py')
+                                        '-I', acceptance)
             except Unknown as error:
                 # stderr acceptance хранится в bounded capture, не host secret store.
                 detail = error.stderr.decode('utf-8', errors='replace')[-8192:] if isinstance(error, CommandFailure) else ''
