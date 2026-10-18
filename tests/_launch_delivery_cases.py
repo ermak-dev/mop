@@ -71,10 +71,20 @@ def selected_fixture(case, reserved):
         source_commit='d'*40, source_ref='refs/heads/exact-source', desired_model='fixture-model',
         model_config_digest=hashlib.sha256(b'{}').hexdigest(), consumers=(('model_config', config.active_version_id),))
     identity = owner_identity(case.user.pk)
+    # HYPOTHESIS (#730): seeded reservation без exact proof отказывает до delivery.
+    # SOLUTION: та же approval/content/digest тройка, что у selection и grant.
+    # RESULT: 28 fixture errors RED; combined initial/delivery PG17 92 + UID3 GREEN.
+    # STATUS: FIXED — see #730.
+    from mop.server.access.models import Grant
+    intent = Grant.objects.select_related('intent').get(pk=reserved.id).intent
+    proof = selected.bootstrap_policy
+    case.assertEqual((intent.policy_approval_id, intent.policy_version_id, intent.policy_digest),
+        (proof.approval_id, proof.version_id, proof.digest))
     reservation = om.CreateReservation.objects.create(actor=case.user, request_id=case.operation.request_id,
         digest=case.operation.digest, expires_at=case.operation.not_after, epoch=case.operation.epoch,
         project=case.project, policy_id=selected.policy_id, policy_digest=selected.digest,
-        git_name=identity.name, git_email=identity.email)
+        bootstrap_approval_id=proof.approval_id, bootstrap_version_id=proof.version_id,
+        bootstrap_digest=proof.digest, git_name=identity.name, git_email=identity.email)
     binding, _ = om.CreateBinding.objects.get_or_create(operation=case.operation, defaults=dict(
         definition_id=reserved.definition_id, scheduler_id=uuid4(), job_id=str(case.assignment.id), namespace='default'))
     from mop.server.launch_spec import API_LAUNCH_CAPABILITIES
