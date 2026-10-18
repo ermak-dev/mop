@@ -168,6 +168,41 @@ class LaunchDelivery(TransactionTestCase):
                 self.assertNotIn(secret, response.content.decode())
         self.run_delivery(body)
 
+    # BUG/HYPOTHESIS (#732): read_launch_definition повторяет полный SQL gate
+    # вокруг RetainedSecrets.read, хотя тот уже проверяет его с двух сторон AEAD.
+    # Это четыре обхода authority вместо двух (всего шесть selection в delivery):
+    # 2642 SQL и ~2.19 s, server закрывает fixture socket на 2 s до успешного result.
+    # Контракт -- реальные проверки до/после provider, не кэш authority и не
+    # больший deadline. Проверяем настоящий retained read, все SQL gates и AEAD.
+    # RED: authority, authority, provider, authority, authority вместо трёх фаз;
+    # отдельно оба положительных DRF/HTTPS запроса дали исходный 503 и EOF.
+    # SOLUTION: убрать два внешних дубликата, оставив pre/post-provider gates
+    # RetainedSecrets и начальную/финальную selection контроллера неизменными.
+    # RESULT: 27/27 launch cases PG17; 1698 SQL, ~1.51/1.54 s, прежние 2/3 s.
+    # STATUS: FIXED — see #732.
+    def test_launch_definition_checks_authority_at_provider_boundaries_without_duplicate_round_trips(self):
+        self.fixture()
+        from mop.server.controller.launchdelivery import LaunchAuthority
+        from mop.server.sessions.protocol import work_from_wire
+        gate = LaunchAuthority(self.app, self.machine, work_from_wire(self.metadata))
+        role, definition, _, _ = gate.selection()
+        events = []
+        check = gate.check
+        provider = self.app.grants.secrets.provider
+        def checked(actor, scope):
+            events.append('authority')
+            return check(actor, scope)
+        class ObservedProvider:
+            def decrypt(inner, envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                events.append('provider')
+                return provider.decrypt(envelope, context)
+        with patch.object(gate, 'check', new=checked), \
+                patch.object(self.app.grants.secrets, 'provider', new=ObservedProvider()):
+            content = self.app.grants.read_launch_definition(self.machine, role, definition, authority=gate)
+        self.assertEqual(content.prompt, b'private')
+        self.assertEqual(events, ['authority', 'provider', 'authority'])
+
     def test_real_verified_https_transport_binds_addressed_launch_source(self):
         self.fixture()
         import socket
