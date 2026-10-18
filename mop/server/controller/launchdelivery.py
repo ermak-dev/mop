@@ -26,6 +26,10 @@ class LaunchAuthority:
         self.execution = compose(grants=application.grants, launch_support=LaunchSupport())
         self.proof = None
 
+    def metadata(self, launch):
+        """Старый role-only response не расширяет layout-контракт."""
+        return None
+
     def selection(self):
         from mop.server.sessions.models import IncarnationLaunch
         from mop.server.preparation.models import BootstrapApproval
@@ -44,7 +48,8 @@ class LaunchAuthority:
             access.Access().authorize(actor, 'execution.read_launch', project_ids=(binding.project_id,),
                 node_ids=(binding.node_id,))
             definition = self.execution.work.launch_definition(work, attempt_id)
-            launch = IncarnationLaunch.objects.select_related('image_revision__policy').get(incarnation_id=work.incarnation_id)
+            launch = IncarnationLaunch.objects.select_related('image_revision__policy',
+                'incarnation__assignment').get(incarnation_id=work.incarnation_id)
             approved = BootstrapApproval.objects.filter(revision_id=launch.bootstrap_revision,
                 human_id=binding.owner_id, revision__owner_id=binding.owner_id,
                 revision__project_id=binding.project_id, revision__digest=launch.bootstrap_digest,
@@ -61,10 +66,11 @@ class LaunchAuthority:
             from .createbinding import LaunchSupport
             operation = Operation.objects.get(pk=work.operation_id, action='create')
             self.selected = LaunchSupport().selection(binding, operation)
-            proof = (current, attempt_id, binding, definition, pins, identity, self.selected)
+            layout = self.metadata(launch)
+            proof = (current, attempt_id, binding, definition, pins, identity, self.selected, layout)
             if self.proof is not None and proof != self.proof:
                 raise Conflict('addressed launch authority or pins changed')
-            self.proof = proof
+            self.proof, self.layout = proof, layout
             role = RoleBinding(binding.project_id, binding.target_id, binding.incarnation_id,
                 binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id)
             return role, definition, pins, identity
@@ -93,6 +99,21 @@ class BootstrapAuthority:
 
 
 class InitialAuthority(LaunchAuthority):
+    def metadata(self, launch):
+        from mop.common.initialcreate import layout_metadata
+        # Только уже выбранные rows: новая authority-петля и latest lookup
+        # не нужны. Имя и ресурсы входят в тот же before/after-provider proof.
+        if launch.incarnation.assignment_id != self.work.target_id:
+            raise access.Denied('initial launch display name assignment changed')
+        policy = launch.image_revision.policy
+        try:
+            return layout_metadata(display_name=launch.incarnation.assignment.display_name,
+                image_revision=str(launch.image_revision_id), image_digest=launch.image_digest,
+                image_policy=dict(policy_id=str(policy.pk), cpu=policy.cpu,
+                    memory_mb=policy.memory_mb, disk_mb=policy.disk_mb))
+        except p.CredentialError as error:
+            raise access.Denied(str(error)) from None
+
     def check_consumer(self, actor, scope):
         from mop.common.initialcreate import PHASE_CONSUMERS
         from mop.server.secrets.services import InitialConsumerScope
@@ -138,7 +159,7 @@ def deliver_initial(application, actor, metadata):
         gate.selection()
         return dict(schema_version=1, work=protocol.work_to_wire(work), phase=work.action,
             bootstrap_revision=pins[0], bootstrap_digest=pins[1], image_digest=pins[2],
-            selection=selected.public(), git_name=identity.name, git_email=identity.email,
+            **gate.layout, selection=selected.public(), git_name=identity.name, git_email=identity.email,
             role=None if content is None else dict(manifest=json.loads(content.manifest), prompt=p.encoded(content.prompt)),
             bootstrap=None if bootstrap is None else dict(tasks=p.encoded(bootstrap.tasks), variables=p.encoded(bootstrap.variables)),
             consumers=consumers)

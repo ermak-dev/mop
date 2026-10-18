@@ -306,6 +306,147 @@ class LaunchDelivery(TransactionTestCase):
                 self.assertNotIn(base64.b64encode(b'private'), denied.content)
         self.run_delivery(body)
 
+    def initial_metadata(self):
+        policy = self.pin.image_revision.policy
+        return dict(display_name=self.assignment.display_name, image_revision=str(self.pin.image_revision_id),
+            image_policy=dict(policy_id=str(policy.pk), cpu=policy.cpu, memory_mb=policy.memory_mb, disk_mb=policy.disk_mb))
+
+    # HYPOTHESIS #738: layout/resources отсутствуют в exact response либо
+    # меняются во время provider; observed/latest image не заменяет admitted pin.
+    # SPEC: настоящие PostgreSQL + socket + client, immutable ImageRevision.policy,
+    # прежние Work/purpose и 5s deadlines; никакого physical acceptance.
+    # RESULT (RED): 7/10 отказов — metadata отсутствовали, смена name/policy/
+    # resources возвращала 200; отсутствие name не останавливало provider.
+    # SOLUTION: уже выбранные IncarnationLaunch/ImageRevision.policy/Assignment
+    # включены в прежний proof до/после provider, без новой authority-петли.
+    # RESULT: Python 3.12/PostgreSQL 17 — 171/171 delivery/create/producer checks,
+    # включая verified HTTPS; logical DTO, не native/physical acceptance.
+    # STATUS: FIXED — see #738.
+    def test_initial_metadata_survives_new_latest_policy_over_socket_and_http(self):
+        from mop.server.catalog import models as cm
+        self.fixture()
+        policy = cm.ProjectPolicySnapshot.objects.create(project=self.project, sequence=2, content=b'new',
+            digest='f'*64, source_commit='f'*40, source_ref='refs/heads/new', provenance='fixture',
+            cpu=900, memory_mb=4096, disk_mb=8192)
+        image = cm.ImageRevision.objects.create(policy=policy, source='new-latest-not-admitted')
+        from mop.server.controller.initialselection import configure
+        admitted = cm.InitialCreateSelection.objects.select_related('policy').get(project=self.project,
+            owner=self.user, definition_id=self.reserved.definition_id).policy
+        refs = tuple(cm.InitialCreateConsumer.objects.filter(policy=admitted)
+            .values_list('purpose', 'version_id'))
+        configure(self.access.token_context(self.token), project_id=self.project.pk,
+            definition_id=self.reserved.definition_id, bootstrap_revision=self.pin.bootstrap_revision,
+            image_id=image.pk, source_origin=self.project.origin, source_commit='f'*40,
+            source_ref='refs/heads/new', desired_model=admitted.desired_model,
+            model_config_digest=admitted.model_config_digest, consumers=refs)
+        metadata = self.initial_metadata()
+        async def body(client, server):
+            direct = await asyncio.to_thread(client.read_initial_launch, self.machine_auth, self.metadata)
+            for field, expected in metadata.items():
+                self.assertEqual(direct.get(field), expected)
+            for field in ('image_source', 'installed', 'receipt', 'capabilities', 'path', 'argv'):
+                self.assertNotIn(field, direct)
+            response = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch')
+            self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(response.json(), direct)
+            self.assertNotEqual(direct['image_revision'], str(image.pk))
+            self.assertNotEqual(direct['image_policy']['policy_id'], str(policy.pk))
+            self.assertEqual(direct['work'], self.metadata)
+        self.run_delivery(body)
+
+    def initial_during_provider(self, change):
+        from mop.server.controller import bootstrap
+        from mop.server.controller.models import Installation
+        row = Installation.objects.get(pk=1)
+        real = bootstrap.secret_provider(self.bootstrap, installation_id=row.identity,
+            expected_root_digest=row.root_digest, key_id='root-v1')
+        changed = []
+        class Changing:
+            def decrypt(inner, envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                value = real.decrypt(envelope, context)
+                if not changed:
+                    change()
+                    changed.append(True)
+                return value
+        async def body(client, server):
+            response = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch')
+            self.assertEqual(response.status_code, 403, response.content)
+            for private in (b'private', b'{}'):
+                self.assertNotIn(base64.b64encode(private), response.content)
+            for field in (b'image_policy', b'display_name', b'image_revision'):
+                self.assertNotIn(field, response.content)
+        self.run_delivery(body, provider=Changing())
+        self.assertTrue(changed, 'must change authority after actual decrypt outside SQL')
+
+    def test_initial_display_name_change_after_provider_refuses_without_metadata(self):
+        from mop.server.sessions.models import Assignment
+        self.fixture()
+        self.initial_during_provider(lambda: Assignment.objects.filter(pk=self.assignment.pk)
+            .update(display_name='pu-socket-project-2'))
+
+    def test_initial_image_policy_change_after_provider_refuses_without_metadata(self):
+        from mop.server.catalog.models import ImageRevision, ProjectPolicySnapshot
+        self.fixture()
+        policy = ProjectPolicySnapshot.objects.create(project=self.project, sequence=2, content=b'new',
+            digest='f'*64, source_commit='f'*40, source_ref='refs/heads/new', provenance='fixture',
+            cpu=900, memory_mb=4096, disk_mb=8192)
+        # Fault injection: обычный ImmutableRecord API такое изменение запрещает.
+        self.initial_during_provider(lambda: ImageRevision._base_manager.filter(pk=self.pin.image_revision_id)
+            .update(policy=policy))
+
+    def test_initial_resource_change_after_provider_refuses_without_metadata(self):
+        from mop.server.catalog.models import ProjectPolicySnapshot
+        self.fixture()
+        self.initial_during_provider(lambda: ProjectPolicySnapshot._base_manager
+            .filter(pk=self.pin.image_revision.policy_id).update(cpu=900))
+
+    def test_initial_token_revocation_after_provider_refuses_without_metadata(self):
+        from rest_framework.authtoken.models import Token
+        self.fixture()
+        self.initial_during_provider(lambda: Token.objects.filter(user_id=self.machine.user_id).delete())
+
+    def initial_before_provider(self, change):
+        from mop.server.controller import bootstrap
+        from mop.server.controller.models import Installation
+        change()
+        row = Installation.objects.get(pk=1)
+        real = bootstrap.secret_provider(self.bootstrap, installation_id=row.identity,
+            expected_root_digest=row.root_digest, key_id='root-v1')
+        class Guard:
+            calls = 0
+            def decrypt(inner, envelope, context):
+                inner.calls += 1
+                return real.decrypt(envelope, context)
+        guard = Guard()
+        async def body(client, server):
+            response = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch')
+            self.assertEqual(response.status_code, 403, response.content)
+            self.assertEqual(guard.calls, 0)
+        self.run_delivery(body, provider=guard)
+
+    def test_initial_missing_name_refuses_before_provider(self):
+        from mop.server.sessions.models import Assignment
+        self.fixture()
+        self.initial_before_provider(lambda: Assignment.objects.filter(pk=self.assignment.pk).update(display_name=None))
+
+    def test_initial_invalid_name_refuses_before_provider(self):
+        from mop.server.sessions.models import Assignment
+        self.fixture()
+        self.initial_before_provider(lambda: Assignment.objects.filter(pk=self.assignment.pk).update(display_name='../clone'))
+
+    def test_initial_different_policy_image_refuses_before_provider(self):
+        from mop.server.sessions.models import IncarnationLaunch
+        from mop.server.catalog.models import ProjectPolicySnapshot, ImageRevision
+        from mop.server.operations.launch import image_pin
+        self.fixture()
+        policy = ProjectPolicySnapshot.objects.create(project=self.project, sequence=2, content=b'new',
+            digest='f'*64, source_commit='f'*40, source_ref='refs/heads/new', provenance='fixture',
+            cpu=900, memory_mb=4096, disk_mb=8192)
+        image = ImageRevision.objects.create(policy=policy, source='different-policy')
+        self.initial_before_provider(lambda: IncarnationLaunch.objects.filter(pk=self.pin.pk)
+            .update(image_revision=image, image_digest=image_pin(image.pk)))
+
     def test_initial_delivery_rechecks_selection_after_real_provider_wait(self):
         from mop.server.controller import bootstrap
         from mop.server.controller.models import Installation
@@ -332,6 +473,7 @@ class LaunchDelivery(TransactionTestCase):
 
     def test_real_verified_https_transport_binds_addressed_launch_source(self):
         self.fixture()
+        metadata = self.initial_metadata()
         import socket
         import ssl
         import subprocess
@@ -375,6 +517,8 @@ class LaunchDelivery(TransactionTestCase):
                         payload=work.wire()), work.wire())
                     self.assertEqual(base64.b64decode(selected['role']['prompt']), b'private')
                     self.assertEqual(selected['phase'], 'native_exec')
+                    for field, expected in metadata.items():
+                        self.assertEqual(selected[field], expected)
                     self.assertEqual(selected['selection']['source']['ref'], 'refs/heads/exact-source')
                 finally:
                     await machine.aclose()

@@ -29,6 +29,76 @@ class ClientBoundary(unittest.TestCase):
     # SOLUTION: stdlib transport на common-границе; unreleased старый импорт удалён.
     # RESULT: common transport отсутствовал; после переноса шесть checks green.
     # STATUS: FIXED — see #669.
+    @staticmethod
+    def initial_delivery():
+        from dataclasses import replace
+        from uuid import uuid4
+        from _body_fixture import work
+        wire = replace(work(), action='prepare_body').wire()
+        value = dict(schema_version=1, work=wire, phase='prepare_body', bootstrap_revision=str(uuid4()),
+            bootstrap_digest='a'*64, image_digest='b'*64, display_name='pu-project-1',
+            image_revision=str(uuid4()), image_policy=dict(policy_id=str(uuid4()), cpu=100, memory_mb=256, disk_mb=1024),
+            git_name='Owner', git_email='owner@example.invalid',
+            selection=dict(policy_id=str(uuid4()), digest='c'*64,
+                source=dict(origin='https://example.invalid/repo.git', commit='d'*40, ref='refs/heads/source'),
+                desired_model='desired-only', model_config_digest='e'*64,
+                consumers=[dict(purpose='model_config', version_id=str(uuid4()))]),
+            role=None, bootstrap=None, consumers=[])
+        import hashlib
+        value['image_digest'] = hashlib.sha256(('image-revision:'+value['image_revision']).encode()).hexdigest()
+        return wire, value
+
+    def test_initial_metadata_is_exact_bounded_and_not_physical_evidence(self):
+        # HYPOTHESIS #738: без имени и immutable policy узел вынужден угадывать
+        # layout/resources; bool проходит как int, неизвестные поля расширяют DTO.
+        # SPEC: точные UUID и logical pin, cpu MHz, memory/disk MiB, int32 > 0;
+        # ни installed receipt, ни capability, ни произвольный path/argv.
+        # SOLUTION: exact обязательные metadata + UUID-derived logical pin;
+        # политика имеет ровно UUID/CPU/memory/disk, без legacy defaults.
+        # RESULT: RED -- parser отвергал новый canonical response; GREEN -- 17/17.
+        # STATUS: FIXED — see #738.
+        from copy import deepcopy
+        from mop.common import initialcreate as i, credentials as p
+        wire, value = self.initial_delivery()
+        self.assertEqual(i.parse_delivery(value, wire), value)
+        for field in ('display_name', 'image_revision', 'image_policy'):
+            changed = deepcopy(value)
+            del changed[field]
+            with self.subTest(missing=field), self.assertRaises(p.CredentialError):
+                i.parse_delivery(changed, wire)
+        variants = []
+        for field, invalid in (
+                ('display_name', (None, True, 1, [], '', 'pu-a-1\n', '../pu-a-1', 'pu-a/other-1', 'pu-'+'a'*60+'-1')),
+                ('image_revision', (None, True, 1, [], '', 'not-uuid')),
+                ('image_policy', (None, True, 1, [], {}))):
+            variants.extend({**deepcopy(value), field: bad} for bad in invalid)
+        for field in ('policy_id', 'cpu', 'memory_mb', 'disk_mb'):
+            changed = deepcopy(value)
+            del changed['image_policy'][field]
+            variants.append(changed)
+            invalid = (None, True, 1, [], '', 'not-uuid') if field == 'policy_id' else (None, True, False, '1', 1.0, [], 0, -1, 2**31)
+            for bad in invalid:
+                changed = deepcopy(value)
+                changed['image_policy'][field] = bad
+                variants.append(changed)
+        for field in ('path', 'argv', 'source', 'receipt', 'installed', 'capabilities'):
+            variants.append({**deepcopy(value), field: 'untrusted'})
+            changed = deepcopy(value)
+            changed['image_policy'][field] = 'untrusted'
+            variants.append(changed)
+        variants.append({**deepcopy(value), 'image_digest': 'b'*64})
+        for changed in variants:
+            with self.subTest(changed=changed), self.assertRaises(p.CredentialError):
+                i.parse_delivery(changed, wire)
+        for bound in (1, 2**31-1):
+            changed = deepcopy(value)
+            changed['image_policy'].update(cpu=bound, memory_mb=bound, disk_mb=bound)
+            self.assertEqual(i.parse_delivery(changed, wire), changed)
+        changed = deepcopy(value)
+        changed['display_name'] = 'pu-'+'a'*59+'-1'
+        self.assertEqual(len(changed['display_name']), 64)
+        self.assertEqual(i.parse_delivery(changed, wire), changed)
+
     def test_initial_delivery_rejects_malformed_types_and_boolean_work_schema(self):
         # HYPOTHESIS #721: equality допускает bool == int, set lookup роняет
         # malformed consumer payload вместо конечного CredentialError.
@@ -36,18 +106,8 @@ class ClientBoundary(unittest.TestCase):
         # RESULT: bool/list/ref обходы воспроизведены red; strict parser green.
         # STATUS: FIXED — see #721.
         from copy import deepcopy
-        from dataclasses import replace
-        from uuid import uuid4
-        from _body_fixture import work
         from mop.common import initialcreate as i, credentials as p
-        wire = replace(work(), action='prepare_body').wire()
-        value = dict(schema_version=1, work=wire, phase='prepare_body', bootstrap_revision=str(uuid4()),
-            bootstrap_digest='a'*64, image_digest='b'*64, git_name='Owner', git_email='owner@example.invalid',
-            selection=dict(policy_id=str(uuid4()), digest='c'*64,
-                source=dict(origin='https://example.invalid/repo.git', commit='d'*40, ref='refs/heads/source'),
-                desired_model='desired-only', model_config_digest='e'*64,
-                consumers=[dict(purpose='model_config', version_id=str(uuid4()))]),
-            role=None, bootstrap=None, consumers=[])
+        wire, value = self.initial_delivery()
         self.assertEqual(i.parse_delivery(value, wire), value)
         mutations = (lambda x: x.update(phase=[]),
             lambda x: x['work'].update(schema_version=True),
