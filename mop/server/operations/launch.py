@@ -13,7 +13,7 @@ from uuid import UUID, uuid4, uuid5
 from django.db import IntegrityError
 from django.utils import timezone
 
-from mop.common.credentials import Credential
+from mop.common.credentials import Credential, CredentialRefused
 from mop.server.access.context import ActorKind
 from mop.server.access.services import Denied, current_actor
 from . import models as m
@@ -24,7 +24,7 @@ from .puppet import RestartHandler
 from .scheduler import RegisterProof, RegisterTicket
 from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move
 
-STAGES = ('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')
+from mop.common.initialcreate import PHASES as STAGES, PLANNED, MACHINE, lease_seconds
 REGISTER = frozenset({'conditional_register_job', 'inspect_register_job'})
 # Грант и назначение живут не дольше предела гранта; продление -- отдельная операция.
 LIFETIME = timedelta(days=30)
@@ -37,6 +37,10 @@ class LaunchTargets(Protocol):
     """SQL-порт назначений от composition: операции не владеют execution-моделями."""
     def epoch(self, node_id: UUID) -> UUID | None:
         """Эпоха, заявленная executor узла; неизвестна -- None."""
+        ...
+
+    def require_node(self, node_id, scheduler_id):
+        """SQL-only installed anchor enrollment; отсутствующий port не заменяется defaults."""
         ...
 
     def assign(self, actor, *, target_id, incarnation_id, project_id, node_id, receipt, expires_at,
@@ -78,9 +82,9 @@ class CreatePuppets:
     action = 'create'
     permissions = ('operations.view_operation', 'execution.create_puppet', 'execution.assign_work')
 
-    def __init__(self, operations, *, grants, targets=None, issuer=None, scheduler=None, namespace='default'):
+    def __init__(self, operations, *, grants, targets=None, issuer=None, scheduler=None, selections=None, namespace='default'):
         self.ops, self.grants, self.issuer, self.scheduler = operations, grants, issuer, scheduler
-        self.targets, self.namespace = targets, namespace
+        self.targets, self.namespace, self.selections = targets, namespace, selections
 
     def _ports(self):
         if (self.issuer is None or self.scheduler is None or self.targets is None
@@ -94,7 +98,7 @@ class CreatePuppets:
         for action in self.permissions:
             self.ops.access.authorize(actor, action, project_ids=(project_id,))
 
-    def _pins(self, actor, command):
+    def _pins(self, actor, command, reservation=None):
         """SQL-only: узел проекта, эпоха executor, одобренный bootstrap, готовый образ."""
         from mop.server.catalog.models import NodeImage, NodeProject
         from mop.server.preparation.models import BootstrapApproval
@@ -103,6 +107,7 @@ class CreatePuppets:
             raise Denied('node is not in the project')
         if not m.ScheduledNode.objects.filter(node_id=node_id, scheduler_id=self.scheduler.scheduler_id).exists():
             raise Refused('controller_unavailable', safe_reason='node is not enrolled with the scheduler')
+        self.targets.require_node(node_id, self.scheduler.scheduler_id)
         epoch = self.targets.epoch(node_id)
         if epoch is None:
             raise Refused('controller_unavailable', safe_reason='node executor has not declared its epoch')
@@ -115,9 +120,18 @@ class CreatePuppets:
         image = NodeImage.objects.filter(node_id=node_id, project_id=project_id, available=True).first()
         if image is None or image.observed_image_id is None or image.observed_image_id != image.desired_image_id:
             raise Refused('revision_conflict', safe_reason='the node image of the project is not ready')
-        return epoch, approval.revision, image.observed_image_id
+        if self.selections is None:
+            raise Refused('controller_unavailable', safe_reason='trusted SQL initial launch selection is unavailable')
+        selected = self.selections.resolve(actor, command, reservation)
+        approval = BootstrapApproval.objects.select_related('revision').filter(revision_id=selected.bootstrap_revision,
+            revision__project_id=project_id, human_id=actor.human_owner_id, approvalrevocation__isnull=True).first()
+        if approval is None or image.observed_image_id != selected.image_id:
+            raise Refused('revision_conflict', safe_reason='the selected bootstrap or image is unavailable')
+        if reservation is not None and reservation.policy_digest != selected.digest:
+            raise Denied('pinned initial launch selection changed')
+        return epoch, approval.revision, selected.image_id, selected
 
-    def _admit(self, actor, command, installation):
+    def _admit(self, actor, command, installation, reservation=None):
         """Общие проверки admission; повторяются в финальной транзакции."""
         self._ports()
         self._authorize(actor, command.intent.project_id)
@@ -126,9 +140,9 @@ class CreatePuppets:
         now = timezone.now()
         if command.intent.not_after <= now:
             raise Refused('deadline_expired')
-        if command.intent.not_after > now + timedelta(minutes=5):
+        if command.intent.not_after > now + timedelta(minutes=15):
             raise Refused('deadline_horizon')
-        return self._pins(actor, command)
+        return self._pins(actor, command, reservation)
 
     def _replay(self, actor, command, installation):
         intent = command.intent
@@ -167,13 +181,13 @@ class CreatePuppets:
             old = self._replay(actor, command, installation)
             if old is not None:
                 return self.ops._disclose(actor, old)
-            self._admit(actor, command, installation)
             # Тот же actor/request -- один digest и один срок, даже если reserve
             # уже зафиксирован, а ответ или процесс потерян до _compose (#704).
             reservation = m.CreateReservation.objects.filter(
                 actor_id=actor.user_id, request_id=intent.request_id).first()
             if reservation is not None and reservation.digest != digest(command):
                 raise Refused('request_conflict')
+            _, _, _, selected = self._admit(actor, command, installation, reservation)
             # Доказанно отказавшие попытки отпускают слот, но не immutable
             # intent. Retry обязан вновь занять capacity; unknown её не терял.
             if reservation is None or not m.CreateProvisioningAttempt.objects.filter(
@@ -182,7 +196,12 @@ class CreatePuppets:
             if reservation is None:
                 reservation = m.CreateReservation.objects.create(
                     actor_id=actor.user_id, request_id=intent.request_id, digest=digest(command),
-                    expires_at=timezone.now() + LIFETIME, epoch=installation.epoch, project_id=intent.project_id)
+                    expires_at=timezone.now() + LIFETIME, epoch=installation.epoch, project_id=intent.project_id,
+                    policy_id=selected.policy_id, policy_digest=selected.digest,
+                    bootstrap_approval_id=selected.bootstrap_policy.approval_id,
+                    bootstrap_version_id=selected.bootstrap_policy.version_id,
+                    bootstrap_digest=selected.bootstrap_policy.digest,
+                    git_name=selected.git_name, git_email=selected.git_email)
             attempt = m.CreateProvisioningAttempt.objects.create(reservation=reservation)
             expires_at = reservation.expires_at
         try:
@@ -203,9 +222,12 @@ class CreatePuppets:
         profile = self.grants.register_agent(actor, project_id=intent.project_id, target_id=target_id,
                                              definition_id=command.definition_id)
         self._agent_credential(profile.agent_id, intent.project_id)
-        receipt = self.issuer.reserve_grant(credential, project_id=intent.project_id,
-            definition_id=command.definition_id, target_id=target_id, incarnation=incarnation_id,
-            request_id=intent.request_id, expires_at=expires_at)
+        reservation_id = m.CreateReservation.objects.values_list('id', flat=True).get(
+            actor_id=actor.user_id, request_id=intent.request_id)
+        try:
+            receipt = self.issuer.reserve_initial_grant(credential, reservation_id)
+        except CredentialRefused as error:
+            raise Denied(str(error)) from error
         if (receipt.target_id, receipt.incarnation, receipt.project_id) != (target_id, incarnation_id, intent.project_id):
             raise Denied('credential service returned a foreign grant')
         if receipt.credential_version_id is None:
@@ -235,7 +257,9 @@ class CreatePuppets:
                 return self.ops._disclose(actor, old)
             project = Project.objects.select_for_update().get(pk=intent.project_id)
             Node.objects.select_for_update().get(pk=command.node_id)
-            epoch, revision, image = self._admit(actor, command, installation)
+            reservation = m.CreateReservation.objects.get(actor_id=actor.user_id, request_id=intent.request_id)
+            epoch, revision, image, selected = self._admit(actor, command, installation, reservation)
+            self.selections.require_grant(selected, receipt.id)
             # Слот уже durable до provisioning. Конверсия в Operation в этой
             # же транзакции не занимает второй слот и не теряет первый.
             row = self.targets.assign(actor, target_id=target_id, incarnation_id=incarnation_id,
@@ -251,15 +275,110 @@ class CreatePuppets:
                 owner_id=actor.user_id, generation=row.generation, role=row.role,
                 bundle_digest=row.bundle_digest, grant_id=row.grant_id)
             m.CreateBinding.objects.create(operation=operation, definition_id=command.definition_id,
-                scheduler_id=self.scheduler.scheduler_id, job_id=str(row.id), namespace=self.namespace)
+                scheduler_id=self.scheduler.scheduler_id, job_id=str(row.id), namespace=self.namespace, reservation=reservation)
             for ordinal, name in enumerate(STAGES, 1):
                 m.Step.objects.create(operation=operation, ordinal=ordinal, name=name)
             _event(operation)
             return _snapshot(operation)
 
 
+def validate_claims(row, step, keys):
+    """Четыре retained claims первого prepare и точные квитанции предшественников."""
+    tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
+    held = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
+    if (held.exclude(operation=row).exists() or set(held.values_list('resource_id', flat=True)) != set(keys)
+            or m.ResourceClaim.objects.filter(operation=row, released_at=None).exclude(resource_id__in=keys).exists()):
+        raise Denied('current create launch resource fences required')
+    stages = tuple(row.step_set.order_by('ordinal'))
+    if (tuple(item.name for item in stages) != STAGES
+            or tuple(item.ordinal for item in stages) != tuple(range(1, len(STAGES)+1))):
+        raise Denied('fixed initial create phases required')
+    for prior in stages[:step.ordinal-1]:
+        if (prior.token is None or prior.attempt_id != prior.token or prior.dispatched_at is None
+                or prior.outcome != 'succeeded' or prior.quiescent_at is None
+                or not m.EffectReceipt.objects.filter(step=prior, token=prior.token,
+                    epoch=row.epoch, node_id=row.node_id, source_revision=row.expected_revision,
+                    decision_revision__lt=row.revision, applied=True).exists()):
+            raise Denied('current create launch predecessor receipt required')
+    owner = stages[0]
+    for claim in held:
+        if (claim.step_id != owner.id or owner.token != claim.token or owner.attempt_id != claim.token
+                or owner.dispatched_at is None):
+            raise Denied('current create launch resource fence token or stage changed')
+
+
+class CreateExpiry:
+    """Definite abort только между quiescent фазами; не cleanup и не inspection."""
+    def __init__(self, operations):
+        self.ops = operations
+
+    def _abort(self, row, step):
+        if (row.state != State.RUNNING or step is None or step.ordinal <= 1
+                or step.token is not None or step.attempt_id is not None or step.outcome
+                or row.not_after >= timezone.now()+timedelta(seconds=lease_seconds(step.name))):
+            return False
+        # Ни активный, ни неизвестный эффект нельзя объявлять definite abort.
+        if row.step_set.filter(ordinal__gte=step.ordinal).exclude(
+                token=None, attempt_id=None, outcome='', dispatched_at=None, quiescent_at=None).exists():
+            return False
+        if not m.CreateCleanup.objects.filter(operation=row, confirmed_at=None, adopted_at=None).exists():
+            raise Refused('claim_conflict')
+        keys = ('node:'+str(row.node_id), 'project:'+str(row.restartbinding.project_id),
+                'puppet:'+str(row.target_id), 'target:'+str(row.target_id))
+        validate_claims(row, step, keys)
+        _move(row, State.FAILED, 'deadline_expired', expected_revision=row.revision,
+            safe_reason='insufficient intent remaining for phase and cleanup; next phase never claimed')
+        return True
+
+    def abort_unstarted(self, work):
+        """Caller держит restore -> Assignment locks; commit до ответа-отказа."""
+        from django.db import transaction
+        if not transaction.get_connection().in_atomic_block:
+            raise Refused('transaction_boundary')
+        installation = self.ops._installation()
+        row = m.Operation.objects.select_for_update().filter(pk=work.operation_id, action='create',
+            state=State.RUNNING, epoch=installation.epoch, restore_generation=installation.generation).first()
+        if row is None:
+            return False
+        step = row.step_set.exclude(outcome='succeeded').order_by('ordinal').first()
+        if step is None or RestartHandler(self.ops)._value(row, step) != work:
+            return False
+        return self._abort(row, step)
+
+    def reconcile(self, *, limit):
+        from django.db.models import Exists, OuterRef, Q, Subquery
+        _independent()
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('bounded initial create recovery required')
+        next_step = m.Step.objects.filter(operation=OuterRef('pk')).exclude(outcome='succeeded').order_by('ordinal')
+        unresolved = m.Step.objects.filter(operation=OuterRef('pk'), token__isnull=False, quiescent_at=None)
+        due = Q()
+        now = timezone.now()
+        for phase in STAGES[1:]:
+            due |= Q(next_phase=phase, not_after__lt=now+timedelta(seconds=lease_seconds(phase)))
+        # Frontier, installation и budget фильтруются до LIMIT: история restore
+        # и активная/неистёкшая lane не вытесняют gap. Receipts не меняются.
+        with self.ops._transaction():
+            installation = self.ops._installation()
+            ids = tuple(m.Operation.objects.filter(action='create', state=State.RUNNING,
+                epoch=installation.epoch, restore_generation=installation.generation)
+                .annotate(next_phase=Subquery(next_step.values('name')[:1]))
+                .filter(due).filter(~Exists(unresolved)).order_by('not_after', 'pk').values_list('pk', flat=True)[:limit])
+        changed = []
+        for operation_id in ids:
+            with self.ops._transaction():
+                installation = self.ops._installation()
+                row = m.Operation.objects.select_for_update().get(pk=operation_id)
+                if row.epoch != installation.epoch or row.restore_generation != installation.generation:
+                    continue
+                step = row.step_set.exclude(outcome='succeeded').order_by('ordinal').first()
+                if self._abort(row, step):
+                    changed.append(row.id)
+        return tuple(changed)
+
+
 class CreateMachine(RestartHandler):
-    """Узловые шаги create (#643): apply_identity и confirm_ready общего протокола.
+    """Конечные узловые фазы create (#721): planned подготовка, native, readiness.
 
     Принимается только create-admission'ом, не машинным submit; стадии те же,
     что у Operation create, -- последний узловой шаг не терминален, дальше
@@ -278,57 +397,45 @@ class CreateMachine(RestartHandler):
     def launch_definition(self, work, attempt_id):
         """SQL-only public locator: только текущая claimed machine стадия create.
 
-        Проверяет четыре fences: target держит scheduler_register, узловые
-        ключи -- текущая стадия либо её succeeded/quiescent предшественник с
-        точным receipt. Токены между стадиями не переносятся. Не возвращает
-        bytes/authority definition: получатель отдельно проверяет grant,
-        approval и собственный enrolled machine credential.
+        Проверяет четыре retained fences первого prepare_body и immutable
+        succeeded/quiescent receipts всех предшественников. У каждой фазы свой
+        attempt/token; владелец fences не меняется. Не возвращает bytes/authority
+        definition: получатель отдельно проверяет grant, approval и собственный
+        enrolled machine credential.
         """
-        if work.action not in ('apply_identity', 'confirm_ready'):
+        if work.action not in MACHINE:
             raise Denied('create launch machine step required')
         if self.current(work.operation_id, work.step_id) != work:
             raise Denied('addressed launch work changed')
         row = m.Operation.objects.get(pk=work.operation_id, action='create', state='running')
         step = m.Step.objects.get(pk=work.step_id, operation=row)
         if (type(attempt_id) is not UUID or step.token != attempt_id or step.attempt_id != attempt_id
-                or (step.ordinal, step.name) not in ((2, 'apply_identity'), (3, 'confirm_ready'))
+                or step.ordinal not in range(1, len(STAGES)+1) or STAGES[step.ordinal-1] != step.name
                 or step.dispatched_at is None or step.quiescent_at is not None or step.outcome
                 or step.lease_until is None or step.lease_until <= timezone.now()):
             raise Denied('current claimed create launch step required')
         keys = sorted(('node:'+str(row.node_id), 'project:'+str(row.restartbinding.project_id),
                        'puppet:'+str(row.target_id), 'target:'+str(row.target_id)))
-        tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
-        held = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
-        if (held.exclude(operation=row).exists() or set(held.values_list('resource_id', flat=True)) != set(keys)
-                or m.ResourceClaim.objects.filter(operation=row, released_at=None).exclude(resource_id__in=keys).exists()):
-            raise Denied('current create launch resource fences required')
-        # Scheduler отпускает три узловых ключа, сохраняя target. Машинные
-        # claims затем остаются за первым взявшим их шагом до конца create.
-        # UUID операции недостаточно: каждый token доказывается своей stage,
-        # исторический -- ещё и immutable receipt после dispatch/quiescence.
-        for claim in held.select_related('step'):
-            owner = claim.step
-            names = ('scheduler_register',) if claim.resource_id == 'target:'+str(row.target_id) else (
-                'apply_identity', 'confirm_ready')
-            if (owner.operation_id != row.id or owner.token != claim.token or owner.attempt_id != claim.token
-                    or owner.name not in names or not 1 <= owner.ordinal <= step.ordinal
-                    or STAGES[owner.ordinal-1] != owner.name):
-                raise Denied('current create launch resource fence token or stage changed')
-            if owner.pk == step.pk:
-                continue
-            if (owner.ordinal >= step.ordinal or owner.dispatched_at is None
-                    or owner.outcome != 'succeeded' or owner.quiescent_at is None
-                    or not m.EffectReceipt.objects.filter(step=owner, token=claim.token,
-                        epoch=row.epoch, node_id=row.node_id, source_revision=row.expected_revision,
-                        decision_revision__lt=row.revision, applied=True).exists()):
-                raise Denied('current create launch predecessor receipt required')
+        validate_claims(row, step, keys)
         return row.createbinding.definition_id
 
     def require(self, target, row=None):
         if self.support is None:
             raise Refused('controller_unavailable', safe_reason='launch binding is unavailable')
-        self.support.require(target)
+        phases = tuple(row.step_set.order_by('ordinal').values_list('name', flat=True)) if row is not None else ()
+        if phases != STAGES:
+            raise Denied('fixed initial create phases required')
+        step = row.step_set.exclude(outcome='succeeded').order_by('ordinal').first()
+        if step is not None and step.name in PLANNED:
+            self.support.require_planned(target, row)
+        else:
+            self.support.require(target, row)
         self.ops.targets.authorize_launch(target)
+
+    def effect_lease(self, work):
+        if work.action not in MACHINE:
+            raise Denied('finite initial create machine phase required')
+        return lease_seconds(work.action)
 
 
 class LaunchJobs:
@@ -378,6 +485,15 @@ class LaunchJobs:
         if actor.human_owner_id != target.owner_id:
             raise Denied('create belongs to another human assignment')
         self.ops.targets.authorize_launch(target)
+        if self.ops.launch_machine is None or self.ops.launch_machine.support is None:
+            raise Refused('controller_unavailable', safe_reason='planned launch binding is unavailable')
+        self.ops.launch_machine.support.require_planned(target, row)
+        step = row.step_set.get(name=self.step)
+        keys = ('node:'+str(row.node_id), 'project:'+str(target.project_id),
+                'puppet:'+str(row.target_id), 'target:'+str(row.target_id))
+        validate_claims(row, step, keys)
+        if row.not_after < timezone.now()+timedelta(seconds=lease_seconds(self.step)):
+            raise Refused('deadline_expired', safe_reason='insufficient intent remaining for phase and cleanup')
         binding = row.createbinding
         if (binding.scheduler_id != self.scheduler.scheduler_id or not m.ScheduledNode.objects.filter(
                 node_id=row.node_id, scheduler_id=binding.scheduler_id).exists()):
@@ -391,7 +507,7 @@ class LaunchJobs:
             if job is not None:
                 raise Refused('claim_conflict')
             job = self.specs.render(target, epoch=row.epoch, restore_generation=installation.generation,
-                operation_id=row.id, step_id=m.Step.objects.get(operation=row, name='apply_identity').id,
+                operation_id=row.id, step_id=m.Step.objects.get(operation=row, name='native_exec').id,
                 not_after=row.not_after, definition_id=binding.definition_id, scheduler_id=binding.scheduler_id)['Job']
         elif job is None:
             # Нет доказательств исходного dispatch -- не подменяем их новым
@@ -410,7 +526,9 @@ class LaunchJobs:
         self._ports()
         with self.ops._transaction():
             installation, current, row, step = self._locked(operation_id)
-            if row.state != 'accepted' or step.token is not None:
+            if (row.state != 'running' or step.token is not None
+                    or tuple(row.step_set.order_by('ordinal').values_list('name', flat=True)) != STAGES
+                    or row.step_set.filter(ordinal__lt=step.ordinal).exclude(outcome='succeeded').exists()):
                 return None
             try:
                 target = self._validate(installation, current, row)
@@ -422,18 +540,15 @@ class LaunchJobs:
             for key in keys:
                 m.Resource.objects.get_or_create(key=key)
             tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
-            if m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None).exists():
+            held = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
+            if held.exclude(operation=row).exists() or set(held.values_list('resource_id', flat=True)) != set(keys):
                 return None
-            if m.Operation.objects.filter(state__in=('running', 'reconciling', 'unknown'),
-                                          resourceclaim__released_at=None).distinct().count() >= self.ops.execution_limit:
-                return None
+            validate_claims(row, step, keys)
             step.token = step.attempt_id = uuid4()
             step.started_at = timezone.now()
             step.lease_until = min(row.not_after, timezone.now() + timedelta(seconds=30))
             step.save(update_fields=('token', 'attempt_id', 'started_at', 'lease_until'))
-            for key in keys:
-                m.ResourceClaim.objects.create(resource_id=key, operation=row, step=step, token=step.token)
-            _move(row, State.RUNNING, 'effect_claimed', expected_revision=row.revision)
+            # Retained prepare claims не меняют владельца на scheduler token.
             return self._ticket(installation, row, step, target, capture=True)
 
     def prepare(self, ticket):
@@ -443,10 +558,12 @@ class LaunchJobs:
             if step.token != ticket.token or row.state != 'running' or step.dispatched_at is not None:
                 return False
             try:
+                if step.lease_until is None or step.lease_until <= timezone.now():
+                    raise Refused('deadline_expired', safe_reason='scheduler phase lease expired; renewal is not allowed')
                 self._validate(installation, current, row)
             except (Denied, Refused) as error:
                 _move(row, State.REFUSED, 'execution_refused', expected_revision=row.revision, safe_reason=str(error))
-                m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=timezone.now())
+                # Initial cleanup остаётся required вместе с четырьмя fences.
                 return False
             step.dispatched_at = timezone.now()
             step.save(update_fields=('dispatched_at',))
@@ -482,7 +599,7 @@ class LaunchJobs:
                 source_revision=row.expected_revision, decision_revision=row.revision, applied=applied)
             if not applied:
                 _move(row, State.FAILED, 'conditional_refusal', expected_revision=row.revision)
-                m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
+                # Quiescent phase не доказывает удаление ранее подготовленного тела.
                 return _snapshot(row)
             binding = row.createbinding
             binding.applied_index = proof.modify_index
@@ -495,11 +612,8 @@ class LaunchJobs:
                 # Сверка частичного workflow не выдаёт оставшиеся effects автоматически.
                 _move(row, State.UNKNOWN, 'outcome_unknown', expected_revision=row.revision)
                 return _snapshot(row)
-            # #705: общая target fence остаётся за операцией до терминала,
-            # в том числе между шагами. Узел берёт свои node/project/puppet
-            # claims, но release/activate не должны видеть цель свободной.
-            m.ResourceClaim.objects.filter(operation=row, step=step, released_at=None).exclude(
-                resource_id='target:' + str(row.target_id)).update(released_at=step.quiescent_at)
+            # #721: все четыре fences остаются у prepare_body после регистрации;
+            # один scheduler receipt не доказывает завершение create или cleanup.
             before = row.revision
             row.revision += 1
             row.code, row.reason = 'step_confirmed', 'named stage receipt committed'
@@ -539,7 +653,7 @@ class GrantActivations:
     проверяет сам. Исход вызова может потеряться -- тогда unknown, и сверка
     читает состояние гранта, не зовёт активацию повторно."""
     step = 'activate_grant'
-    before = ('scheduler_register', 'apply_identity', 'confirm_ready')
+    before = STAGES[:-1]
 
     def __init__(self, operations, *, targets=None, activator=None):
         self.ops, self.targets, self.activator = operations, targets, activator
@@ -559,7 +673,9 @@ class GrantActivations:
         return installation, current, row, step
 
     def _ready(self, row):
-        return not m.Step.objects.filter(operation=row, name__in=self.before).exclude(outcome='succeeded').exists()
+        stages = tuple(row.step_set.order_by('ordinal'))
+        return (tuple(step.name for step in stages) == STAGES
+                and all(step.outcome == 'succeeded' for step in stages[:-1]))
 
     def claim(self, operation_id):
         _independent()
@@ -581,9 +697,16 @@ class GrantActivations:
                 if actor.human_owner_id != target.owner_id:
                     raise Denied('create belongs to another human assignment')
                 self.ops.targets.authorize_launch(target)
+                if row.not_after < timezone.now()+timedelta(seconds=lease_seconds(self.step)):
+                    raise Refused('deadline_expired', safe_reason='insufficient intent remaining for phase and cleanup')
+                if self.ops.launch_machine is None or self.ops.launch_machine.support is None:
+                    raise Refused('controller_unavailable', safe_reason='registered launch binding is unavailable')
+                self.ops.launch_machine.support.require(target, row)
+                validate_claims(row, step, ('node:'+str(row.node_id), 'project:'+str(target.project_id),
+                    'puppet:'+str(row.target_id), 'target:'+str(row.target_id)))
             except (Denied, Refused) as error:
                 _move(row, State.FAILED, 'execution_refused', expected_revision=row.revision, safe_reason=str(error))
-                m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=timezone.now())
+                # Initial cleanup остаётся required вместе с четырьмя fences.
                 return None
             keys = sorted(('node:'+str(row.node_id), 'project:'+str(target.project_id),
                            'puppet:'+str(row.target_id), 'target:'+str(row.target_id)))
@@ -597,12 +720,7 @@ class GrantActivations:
             step.started_at = step.dispatched_at = timezone.now()
             step.lease_until = min(row.not_after, timezone.now() + timedelta(seconds=30))
             step.save(update_fields=('token', 'attempt_id', 'started_at', 'dispatched_at', 'lease_until'))
-            # Шаги узла держат цель до терминала операции: их claims остаются,
-            # заводятся только недостающие ключи.
-            own = set(held.filter(operation=row).values_list('resource_id', flat=True))
-            for key in keys:
-                if key not in own:
-                    m.ResourceClaim.objects.create(resource_id=key, operation=row, step=step, token=step.token)
+            # Только сохранённые prepare fences; потерю нельзя лечить новым claim.
             from mop.server.access.models import Grant
             return (row.id, step.token, target.grant_id, Grant.objects.values_list('revision', flat=True).get(
                 pk=target.grant_id), row.not_after)
@@ -637,7 +755,8 @@ class GrantActivations:
             _move(row, State.SUCCEEDED if applied else State.FAILED,
                   'effect_confirmed' if applied else 'effect_failed', expected_revision=row.revision,
                   **({'safe_reason': reason} if reason else {}))
-            m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
+            if applied:
+                m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
             return _snapshot(row)
 
     def run(self, operation_id):
