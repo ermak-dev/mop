@@ -108,6 +108,20 @@ class ScheduledPuppet(models.Model):
             models.CheckConstraint(condition=Q(modify_index__gte=1), name='scheduled_job_positive_index')]
 
 
+class ScheduledNode(models.Model):
+    """Доверенная привязка узла к планировщику (#643): id узла в Nomad и
+    заявленные capabilities запуска. Пишет только trusted enrollment Root,
+    не HTTP payload; рендер спеки нового тела берёт размещение отсюда."""
+    node = models.OneToOneField('catalog.Node', primary_key=True, on_delete=models.PROTECT)
+    scheduler_id = models.UUIDField()
+    nomad_node_id = models.UUIDField()
+    capabilities = models.JSONField()
+    enrolled_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        default_permissions = ()
+
+
 class StopBinding(models.Model):
     operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
     applied_revision = models.PositiveBigIntegerField(null=True)

@@ -54,6 +54,9 @@ class MachineStep:
 
 
 STAGES = ('apply_identity', 'restart_session', 'confirm_ready')
+# Шаги, которые исполняет узел (#643): серверные шаги той же операции
+# (scheduler_register, activate_grant) узлу как machine work не раздаются.
+MACHINE_ACTIONS = ('apply_identity', 'restart_session', 'confirm_ready', 'send_message', 'wipe_clone')
 
 
 def digest(command, action='restart'):
@@ -79,7 +82,7 @@ class RestartHandler:
             raise Refused('controller_unavailable', safe_reason='current target binding is unavailable')
         messages, wipes = self.ops.messages, self.ops.wipes
         if (self.ops.restart_support is None and (messages is None or messages.support is None)
-                and (wipes is None or wipes.support is None)):
+                and (wipes is None or wipes.support is None) and getattr(self.ops, 'launches', None) is None):
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
 
     def _valid(self, command):
@@ -163,7 +166,7 @@ class RestartHandler:
             raise ValueError('bounded machine projection required')
         # Текущее разрешённое project scope применяется в SQL до limit.
         rows = m.Step.objects.select_related('operation__restartbinding').filter(
-            operation__node_id=node_id, operation__target_kind='puppet',
+            name__in=MACHINE_ACTIONS, operation__node_id=node_id, operation__target_kind='puppet',
             operation__state__in=('accepted','running'), operation__restartbinding__executor_epoch=executor_epoch,
             operation__restartbinding__project_id__in=project_ids, token=None).exclude(
             operation__step__outcome='unknown').order_by('operation__created_at','operation_id','ordinal')

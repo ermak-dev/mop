@@ -63,7 +63,7 @@ class CreateVertical(TransactionTestCase):
     serialized_rollback = True
     setUp = RestartVertical.setUp
 
-    def ready(self, *, bootstrap=True, image=True, executor=True, approve=True):
+    def ready(self, *, bootstrap=True, image=True, executor=True, approve=True, enroll=True, scheduler=None):
         from _grant_cases import ApprovalFixture, BindingFixture, manifest
         from mop.server.access import services as auth
         from mop.server.access.grants import Grants, ApprovedPolicy
@@ -105,12 +105,23 @@ class CreateVertical(TransactionTestCase):
                 dict(schema_version=1, node_id=str(self.node.pk), previous_epoch=str(uuid4()), new_epoch=str(self.boot)),
                 content_type='application/json', secure=True)
             self.assertEqual(declared.status_code, 200, declared.content)
-        self.issuer, self.scheduler = Issuer(self.grants), Scheduler()
+        self.issuer, self.scheduler = Issuer(self.grants), scheduler or Scheduler()
+        if enroll:
+            # Настройки пула и доверенная привязка узла к планировщику (#643):
+            # рендер спеки берёт home/user/datacenter и id узла в Nomad отсюда.
+            from mop.server.controller.createbinding import enroll_node
+            from mop.server.spec import API_LAUNCH_CAPABILITIES
+            catalog = Catalog(authorizer=auth.Access())
+            catalog.set_installation_settings(self.actor, {'pool_home': '/srv/mop', 'pool_user': 'mop',
+                'pool_datacenter': 'owned'}, expected_revision=catalog.get_installation_settings(self.actor).revision)
+            self.nomad_node = uuid4()
+            enroll_node(self.node.pk, scheduler_id=self.scheduler.scheduler_id, nomad_node_id=self.nomad_node,
+                        capabilities=API_LAUNCH_CAPABILITIES)
         from unittest.mock import patch
         from mop.server.controller.createbinding import service
         self.addCleanup(patch.stopall)
-        patch('mop.server.controller.operationviews.create_api',
-              lambda: service(grants=self.grants, issuer=self.issuer, scheduler=self.scheduler)).start()
+        self.ops = service(grants=self.grants, issuer=self.issuer, scheduler=self.scheduler)
+        patch('mop.server.controller.operationviews.create_api', lambda: self.ops).start()
 
     def body(self, **changes):
         value = dict(schema_version=1, epoch=str(self.epoch), request_id=str(uuid4()),
@@ -211,6 +222,9 @@ class CreateVertical(TransactionTestCase):
     def test_no_declared_executor_refuses_before_any_row(self):
         self._refused_without('executor')
 
+    def test_node_without_scheduler_enrollment_refuses_before_any_row(self):
+        self._refused_without('enroll')
+
     def test_node_outside_the_project_creates_nothing(self):
         self.ready()
         from mop.server.catalog.models import Node
@@ -227,3 +241,95 @@ class CreateVertical(TransactionTestCase):
         response = self.submit(self.body())
         self.assertEqual(response.status_code, 503, response.content)
         self.assertEqual(self.rows(), (0, 0, 0, 0))
+
+
+# HYPOTHESIS (#643): шаг scheduler_register некому исполнить: у порта нет
+# полосы регистрации, воркер знает только однo-шаговые операции, и job нового
+# тела в планировщик не попадает.
+# SOLUTION: полоса LaunchJobs -- claim, рендер спеки из доверенных фактов
+# (узел, привязка к планировщику, пины инкарнации, пин определения), одна
+# условная запись с readback точной Meta, enrollment ScheduledPuppet; потеря
+# ответа -- unknown и сверка только чтением; существующий job не трогается.
+# STATUS: FIXED — see #643 (шаг регистрации; узел и грант -- далее)
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class CreateRegistration(TransactionTestCase):
+    serialized_rollback = True
+    setUp = RestartVertical.setUp
+    ready, body, submit = CreateVertical.ready, CreateVertical.body, CreateVertical.submit
+
+    def launch(self):
+        from _register_peer import RegisterPeer
+        from mop.server.operations.scheduler import NomadStopScheduler
+        self.peer = RegisterPeer()
+        self.addCleanup(self.peer.close)
+        self.adapter = NomadStopScheduler(origin=self.peer.origin, scheduler_id=uuid4(),
+                                          token='fixture-only', timeout=2)
+        self.ready(scheduler=self.adapter)
+        response = self.submit(self.body())
+        self.assertEqual(response.status_code, 202, response.content)
+        value = response.json()['operation']
+        return UUID(value['id']), value['target']['id'], value['target']['incarnation']
+
+    def step(self, operation):
+        from mop.server.operations.models import Step
+        return Step.objects.get(operation_id=operation, name='scheduler_register')
+
+    def test_register_puts_the_rendered_job_once_and_enrolls_it(self):
+        operation, target, incarnation = self.launch()
+        self.assertIn(operation, self.ops.pending(limit=8, handlers=('scheduler_register',)))
+        # Серверный шаг узлу не раздаётся: его machine work -- только действия узла.
+        self.assertEqual(self.ops.pending_machine(node_id=self.node.pk, executor_epoch=self.boot,
+                                                  project_ids=(self.project.pk,), limit=8), ())
+        self.ops.launches.run(operation)
+        self.assertEqual([(p['EnforceIndex'], p['JobModifyIndex']) for p in self.peer.posts], [(True, 0)])
+        job = self.peer.jobs[target]
+        task = job['TaskGroups'][0]['Tasks'][0]
+        self.assertEqual((job['Meta']['mop.target_id'], job['Meta']['mop.incarnation_id']), (target, incarnation))
+        self.assertEqual(job['Meta']['mop.bootstrap_digest'], self.revision.digest)
+        self.assertEqual(job['Meta']['mop.image_digest'],
+            hashlib.sha256(('image-revision:'+str(self.image.id)).encode()).hexdigest())
+        self.assertEqual(job['Constraints'][0]['RTarget'], str(self.nomad_node))
+        self.assertEqual((job['Datacenters'], task['User'], task['Env']['MOP_TARGET_ID']), (['owned'], 'mop', target))
+        self.assertTrue(task['Env']['MOP_REGISTERED_LAUNCHER'].startswith('/srv/mop/runtime/'+incarnation))
+        step = self.step(operation)
+        self.assertEqual((step.outcome, step.evidence), ('succeeded', 'job-registered'))
+        from mop.server.operations.models import CreateBinding, Operation, ScheduledPuppet
+        self.assertEqual(CreateBinding.objects.get(operation_id=operation).applied_index, 1)
+        enrolled = ScheduledPuppet.objects.get(target_id=target)
+        self.assertEqual((str(enrolled.incarnation_id), enrolled.job_id, enrolled.modify_index), (incarnation, target, 1))
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'running')
+        self.assertNotIn(operation, self.ops.pending(limit=8, handlers=('scheduler_register',)))
+        self.ops.launches.run(operation)
+        self.assertEqual(len(self.peer.posts), 1)
+
+    def test_lost_register_reply_is_unknown_and_reconciles_by_reading(self):
+        operation, target, _ = self.launch()
+        self.peer.lose_post = True
+        self.ops.launches.run(operation)
+        from mop.server.operations.models import Operation, ScheduledPuppet
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'unknown')
+        self.assertEqual(self.step(operation).outcome, 'unknown')
+        self.ops.launches.run(operation)
+        self.assertEqual(len(self.peer.posts), 1)
+        self.ops.launches.reconcile(self.actor, operation)
+        step = self.step(operation)
+        self.assertEqual((step.outcome, step.evidence), ('succeeded', 'job-registered'))
+        # Как у restart: сверка промежуточного шага не выдаёт оставшиеся эффекты
+        # автоматически -- операция остаётся unknown и держит цель.
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'unknown')
+        self.assertEqual(ScheduledPuppet.objects.get(target_id=target).modify_index, 1)
+        self.assertEqual(len(self.peer.posts), 1)
+
+    def test_an_existing_job_is_never_overwritten(self):
+        operation, target, _ = self.launch()
+        self.peer.jobs[target] = {'ID': target, 'Namespace': 'default', 'JobModifyIndex': 4,
+                                  'Meta': {'owner': 'someone else'}, 'Stop': False}
+        self.ops.launches.run(operation)
+        from mop.server.operations.models import Operation, ScheduledPuppet
+        step = self.step(operation)
+        self.assertEqual((step.outcome, step.evidence), ('failed', 'conditional-refusal'),
+                         Operation.objects.values_list('state', 'code', 'reason').get(pk=operation))
+        self.assertEqual(Operation.objects.get(pk=operation).state, 'failed')
+        self.assertEqual(self.peer.posts, [])
+        self.assertEqual(self.peer.jobs[target]['Meta'], {'owner': 'someone else'})
+        self.assertFalse(ScheduledPuppet.objects.filter(target_id=target).exists())

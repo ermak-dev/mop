@@ -558,6 +558,20 @@ metadata stop and delete read (`addressed_metadata`), by one conditional write
 the credential service and a registering scheduler (#644) the production root refuses
 admission as unavailable.
 
+The worker runs `scheduler_register` as a scheduler lane like stop: claim, a last SQL
+check, one conditional register, the record. The spec is rendered from trusted facts
+only: the node's machine configuration, its scheduler enrollment (`ScheduledNode`: the
+Nomad node id and declared launch capabilities, written by the trusted root, never by a
+payload), the pool settings (`pool_home`, `pool_user`, `pool_datacenter`), the
+incarnation's launch pins, the approved definition's role/digest/driver (`BundlePin`:
+the controller never decrypts the definition) and the image policy's resources. The
+step checks that the target's grant is still reserved and provisioned -- execution
+authority would be a false refusal before the agent's token is delivered. Success
+records `ScheduledPuppet`, so stop and delete recognize the job, and hands the next
+steps to the node; the node never receives a server step as machine work. A lost reply
+is `unknown`; reconciliation reads only, and like restart it does not resume the
+remaining steps automatically. An existing job is never overwritten.
+
 ### Puppet delete vertical (#625)
 
 `POST /api/v1/puppets/<uuid>/commands/delete` takes the version-1 target intent with
