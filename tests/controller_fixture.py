@@ -250,21 +250,47 @@ test:py3.12:
                             for target in node.targets)):
                 labels = ast.literal_eval(node.value)
         self.assertTrue(labels, 'the gate entry must declare its exact labels')
-        self.assertEqual(sorted(labels), sorted(
-            f'{module}.{cls}.{method}' for (cls, method), module in (
-                (pair, self.ROOT_GATE_MODULE.removesuffix('.py')) for pair in self.REQUIRED_ROOT_ONLY_IDS)))
+        expected = [f'{self.ROOT_GATE_MODULE.removesuffix(".py")}.{cls}.{method}'
+                    for cls, method in self.REQUIRED_ROOT_ONLY_IDS]
+        # #669 добавляет application send/take UID, не заменяет ни один из
+        # исходных credential IDs и не разрешает wildcard/class discovery.
+        private_ids, private_source, _ = self._test_inventory('_endpoint_credential_uid_gate.py')
+        self.assertEqual(private_ids, {('EndpointCredentialUids',
+            'test_private_reports_cross_real_uid_without_root_or_caller_authority')})
+        self.assertNotIn('skipTest', private_source)
+        expected += [f'_endpoint_credential_uid_gate.{cls}.{method}' for cls, method in private_ids]
+        self.assertEqual(sorted(labels), sorted(expected))
         suite_ids = set()
-        for name in ('_credential_cases.py', '_credential_binding_cases.py'):
+        root_ids = gate_ids | private_ids
+        for name in ('_credential_cases.py', '_credential_binding_cases.py', '_endpoint_credential_cases.py'):
             ids, source = self._test_inventory(name)[:2]
             self.assertNotIn('skipTest', source, f'{name} must not skip unprivileged')
-            self.assertEqual(ids & self.REQUIRED_ROOT_ONLY_IDS, set(),
+            self.assertEqual(ids & root_ids, set(),
                              f'{name} still carries root-only cases')
             suite_ids |= ids
         # #711: перенос, не потеря -- сохраняются точные исходные ID #669,
         # а не общий счётчик, который запрещал добавлять socket checks.
         from _credential_inventory import missing_original
-        self.assertEqual(missing_original(suite_ids | gate_ids), set())
-        self.assertEqual(suite_ids & gate_ids, set())
+        self.assertEqual(missing_original(suite_ids | root_ids), set())
+        self.assertEqual(suite_ids & root_ids, set())
+
+    # #669: entry уже существует; проверка закрепляет обязательный запуск
+    # настоящих application cases, отдельно от root-only и pure protocol.
+    def test_private_endpoint_credentials_have_a_mandatory_nonroot_entrypoint(self):
+        import runpy
+        from mop.cli.dev.test import plan
+        top = Path(__file__).resolve().parent
+        entries = ('endpoint_credentials.py', 'endpoint_credential_protocol.py')
+        selected = plan([], [path.name for path in top.iterdir()])
+        for name in entries:
+            self.assertIn(name, selected)
+        self.assertNotIn('_endpoint_credential_cases.py', selected)
+        self.assertNotIn('_endpoint_credential_uid_gate.py', selected)
+        with patch('_controller_fixture.main', return_value=23) as main:
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_path(str(top / entries[0]), run_name='__main__')
+        main.assert_called_once_with(['_endpoint_credential_cases'])
+        self.assertEqual(caught.exception.code, 23)
 
     # #668: selectable helper не должен остаться вне обязательного CI gate.
     # RED: entry отсутствовал; отдельный check исполняется и в hermetic HOME.

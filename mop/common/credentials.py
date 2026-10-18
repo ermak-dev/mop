@@ -20,8 +20,21 @@ class CredentialError(ValueError):
     """Безопасный отказ; transport timeout мутации означает неизвестный исход."""
 
 
+class CredentialInput(CredentialError):
+    """Локально отвергнутый finite input: запрос ещё не покидал client."""
+
+
 class CredentialRefused(CredentialError, PermissionError):
     """Явный отказ службы, не потерянный ответ/неизвестный исход мутации."""
+
+
+class PrivateDeliveryError(CredentialError):
+    """Конечный domain verdict send/take, не произвольный remote exception."""
+    def __init__(self, code, message):
+        if code not in ('conflict', 'capacity', 'not_found', 'invalid'):
+            raise CredentialError('invalid private delivery verdict')
+        self.code = code
+        super().__init__(message)
 
 
 class Command(str, Enum):
@@ -42,6 +55,8 @@ class Command(str, Enum):
     PUBLISH_PREPARATION = 'publish_preparation'
     READ_PREPARATION = 'read_preparation'
     APPROVE_PREPARATION = 'approve_preparation'
+    SEND_REPORT = 'send_private_report'
+    TAKE_DELIVERY = 'take_private_delivery'
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +232,32 @@ def instant(value):
     return result
 
 
+def delivery_deadline(value):
+    """Wire сохраняет точный aware deadline, включая offset и microseconds."""
+    if type(value) is not str or len(value) > 40:
+        raise CredentialError('canonical aware delivery deadline required')
+    try:
+        result = datetime.fromisoformat(value)
+    except ValueError:
+        raise CredentialError('canonical aware delivery deadline required') from None
+    if result.utcoffset() is None or result.isoformat() != value:
+        raise CredentialError('canonical aware delivery deadline required')
+    return result
+
+
+def delivery_options(value):
+    if (type(value['priority']) is not str or value['priority'] not in ('next', 'now')
+            or type(value['notify_when_idle']) is not bool):
+        raise CredentialError('invalid delivery options')
+
+
+def private_address(value):
+    if type(value) is not str or not value.startswith('private:'):
+        raise CredentialError('canonical private address required')
+    identifier(value[8:])
+    return value
+
+
 def parse_request(data):
     exact(data, ('version', 'auth', 'command', 'args'))
     if type(data['version']) is not int or data['version'] != 1:
@@ -240,7 +281,10 @@ def parse_request(data):
               Command.PREPARE_REPLACEMENT: ('operation_id',),
               Command.ACTIVATE_GRANT: ('grant_id', 'expected_revision'),
               Command.PUBLISH_PREPARATION: ('project_id', 'tasks', 'variables', 'provenance', 'commit', 'secret_refs'),
-              Command.READ_PREPARATION: ('revision_id',), Command.APPROVE_PREPARATION: ('revision_id',)}
+              Command.READ_PREPARATION: ('revision_id',), Command.APPROVE_PREPARATION: ('revision_id',),
+              Command.SEND_REPORT: ('expected_epoch', 'address', 'message_id', 'text', 'not_after',
+                  'operation_request_id', 'notify_when_idle', 'priority', 'sender_endpoint_id', 'sender_connection_nonce'),
+              Command.TAKE_DELIVERY: ('endpoint_id', 'connection_nonce')}
     exact(args, shapes[command])
     result = dict(args)
     for name in ('project_id', 'secret_id', 'rotation_id', 'claim_id', 'definition_id',
@@ -261,6 +305,20 @@ def parse_request(data):
         result['secret_refs'] = identifiers(result['secret_refs'])
     if 'expires_at' in result:
         result['expires_at'] = instant(result['expires_at'])
+    if command is Command.SEND_REPORT:
+        for name in ('expected_epoch', 'message_id', 'operation_request_id',
+                     'sender_endpoint_id', 'sender_connection_nonce'):
+            result[name] = (None if name in ('operation_request_id', 'sender_endpoint_id', 'sender_connection_nonce')
+                            and result[name] is None else identifier(result[name]))
+        if (result['sender_endpoint_id'] is None) != (result['sender_connection_nonce'] is None):
+            raise CredentialError('sender endpoint and connection must be supplied together')
+        result['address'] = private_address(result['address'])
+        result['text'] = _text(result['text'], 65536)
+        result['not_after'] = delivery_deadline(result['not_after'])
+        delivery_options(result)
+    elif command is Command.TAKE_DELIVERY:
+        for name in ('endpoint_id', 'connection_nonce'):
+            result[name] = identifier(result[name])
     return auth, command, result
 
 
