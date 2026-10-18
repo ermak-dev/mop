@@ -389,11 +389,26 @@ class Consumers(unittest.TestCase):
         self.assertIsNotNone(declaration, '#642 send has no canonical MCP declaration')
         self.assertEqual(declaration.get('actions'), actions)
         self.assertFalse({'node_verbs', 'cluster_verbs', 'dispatch'} & declaration.keys())
-        for kind in ('human', 'agent', 'service'):
-            grant = OP if kind == 'service' else None
-            self.assertTrue(_control.allowed(declaration, api.Identity(1, kind, 1, None, grant, frozenset(actions))))
-            for action in actions:
-                self.assertFalse(_control.allowed(declaration, api.Identity(1, kind, 1, None, grant, frozenset({action}))))
+        # HYPOTHESIS: старый service+grant искажал форму настоящего Actor.
+        # SOLUTION: delegated agent имеет owner+grant, service — ни того, ни другого;
+        # node nullable у обоих (#720), kind сам не выдаёт ни одного действия.
+        # RESULT: исходный RED заменён canonical positive и каждым missing-action negative.
+        # STATUS: FIXED — see #642
+        bindings = [(1, 'human', 1, None, None), (2, 'agent', 2, None, None)]
+        for node in (None, NODE):
+            bindings.extend(((2, 'agent', 1, node, OP), (3, 'service', None, node, None)))
+        for binding in bindings:
+            with self.subTest(binding=binding):
+                identity = api.Identity(*binding, frozenset(actions))
+                self.assertTrue(api.canonical_identity(identity))
+                self.assertTrue(_control.allowed(declaration, identity))
+                for missing in actions:
+                    self.assertFalse(_control.allowed(declaration,
+                        api.Identity(*binding, frozenset(set(actions)-{missing}))))
+                self.assertFalse(_control.allowed(declaration, api.Identity(*binding)))
+        legacy = api.Identity(3, 'service', 1, None, OP, frozenset(actions))
+        self.assertFalse(api.canonical_identity(legacy))
+        self.assertFalse(_control.allowed(declaration, legacy))
         required = {arg['name'] for arg in declaration['args'] if arg.get('required')}
         self.assertLessEqual({'puppet_id', 'message', 'epoch', 'incarnation', 'expected_revision'}, required)
         self.response(send_operation(), 202)
@@ -700,20 +715,57 @@ class Consumers(unittest.TestCase):
         self.assertEqual(self.fixture.calls, [])
 
     def test_mcp_never_starts_legacy_channel_or_invents_action_permissions(self):
-        from mop.common import context
+        from mop.common import bus, context
         from mop.cli import _control
-        self.response({'schema_version': 1, 'user_id': 2,
-            'kind': 'human', 'human_owner_id': 2, 'node_id': None, 'grant_id': None})
+        # HYPOTHESIS: identity-only ответ ошибочно принимался за каталог полномочий.
+        # SOLUTION: --check читает строгий v1 capabilities с explicit scope/actions;
+        # stdio без каталога отказывает до чтения протокола, а не как unsupported.
+        # RESULT: исходный RED; native initialize/list/call остаются в modern_mcp.
+        # STATUS: FIXED — see #642
+        actor = {'user_id': 2, 'kind': 'human', 'human_owner_id': 2,
+                 'node_id': None, 'grant_id': None}
+        scope = {'project_id': PROJECT, 'node_id': None, 'client_id': None}
+        catalogue = {'schema_version': 1, 'catalogue_version': 1, 'epoch': EPOCH,
+                     'actor': actor, 'scope': scope, 'actions': ['catalog.view_pool']}
         with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
-             patch.object(context, 'here', side_effect=AssertionError('legacy MCP started')):
+             patch.object(context, 'here', side_effect=AssertionError('legacy MCP started')), \
+             patch.object(bus, 'config', side_effect=AssertionError('legacy bus read')), \
+             patch.object(cli, 'environment', side_effect=AssertionError('installation environment read')), \
+             patch.object(sys, 'stdin', BoundedRefusalInput()):
+            self.response(catalogue)
+            out, err, code = run_command(cli.main, ['mcp', '--check', '--project-id', PROJECT])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out), {'schema_version': 1, 'catalogue_version': 1,
+                'epoch': EPOCH, 'actor': {**actor, 'action_permissions': ['catalog.view_pool']},
+                'scope': scope, 'private_inbox': {'available': False, 'reason': 'not_bound', 'issue': 649}})
+            self.assertNotIn(TOKEN, out+err)
+            self.response({**catalogue, 'scope': dict.fromkeys(scope), 'actions': []})
             out, err, code = run_command(cli.main, ['mcp', '--check'])
-            self.assertEqual(code, 0)
-            self.assertIsNone(json.loads(out)['action_permissions'])
-            _, refused, code = run_command(cli.main, ['mcp'])
-        self.assertEqual(code, 2)
-        self.assertIn('unsupported', refused)
-        self.assertNotIn(TOKEN, out+err+refused)
-        self.assertEqual([call[0] for call in self.fixture.calls], ['GET'])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)['actor']['action_permissions'], [])
+            self.assertNotIn(TOKEN, out+err)
+            for args in (['--check'], []):
+                self.response({'schema_version': 1, **actor})
+                with patch('mcp.server.stdio.stdio_server',
+                        side_effect=AssertionError('protocol entered without catalogue')):
+                    out, refused, code = run_command(cli.main, ['mcp', *args])
+                self.assertEqual(code, 1, refused)
+                self.assertEqual(out, '')
+                self.assertIn('invalid action catalogue response', refused)
+                self.assertNotIn('unsupported', refused)
+                self.assertNotIn(TOKEN, out+refused)
+            invalid_catalogues = [{key: value for key, value in catalogue.items() if key != 'actions'},
+                {**catalogue, 'catalogue_version': 2}, {**catalogue, 'schema_version': 2},
+                {**catalogue, 'actions': ['catalog.future']}]
+            for invalid in invalid_catalogues:
+                self.response(invalid)
+                out, refused, code = run_command(cli.main, ['mcp', '--check', '--project-id', PROJECT])
+                self.assertEqual(code, 1, refused)
+                self.assertEqual(out, '')
+                self.assertNotIn(TOKEN, out+refused)
+        scoped_query = ('GET', '/api/v1/capabilities?schema_version=1&project_id='+PROJECT)
+        self.assertEqual([call[:2] for call in self.fixture.calls], [scoped_query] +
+            [('GET', '/api/v1/capabilities?schema_version=1')]*3 + [scoped_query]*4)
 
     def test_default_project_query_and_offline_diagnose_do_not_read_old_login_store(self):
         from mop.common import context
@@ -950,8 +1002,31 @@ class Consumers(unittest.TestCase):
         drain = cli.declared(os.path.join(cli.PACKAGE, 'node', 'drain.py'))
         self.assertEqual(drain.get('actions'), ['catalog.drain_node', 'operations.view_operation'])
         build = cli.declared(os.path.join(cli.PACKAGE, 'core', 'build.py'))
-        self.assertEqual(build.get('actions'), ['catalog.build_project', 'operations.view_operation'])
-        self.assertIs(build.get('human_only'), True)
+        actions = ['catalog.build_project', 'operations.view_operation']
+        self.assertEqual(build.get('actions'), actions)
+        # HYPOTHESIS: build получил старый human-only fence вместо общего RBAC.
+        # SOLUTION: Builds.submit/_authorize проверяют эти же два действия;
+        # human-only остаётся бизнес-контрактом addresses/add, не видом authority.
+        # RESULT: исходный RED; каждый Actor требует всю конъюнкцию действий.
+        # STATUS: FIXED — see #642
+        from mop.cli import _control
+        self.assertFalse(build.get('human_only', False))
+        self.assertFalse({'cluster_verbs', 'node_verbs', 'dispatch'} & build.keys())
+        bindings = [(1, 'human', 1, None, None), (2, 'agent', 2, None, None)]
+        for node in (None, NODE):
+            bindings.extend(((2, 'agent', 1, node, OP), (3, 'service', None, node, None)))
+        for binding in bindings:
+            with self.subTest(binding=binding):
+                self.assertTrue(_control.allowed(build, api.Identity(*binding, frozenset(actions))))
+                self.assertFalse(_control.allowed(build, api.Identity(*binding)))
+                for missing in actions:
+                    self.assertFalse(_control.allowed(build,
+                        api.Identity(*binding, frozenset(set(actions)-{missing}))))
+                permissions = frozenset(address['actions'])
+                self.assertEqual(_control.allowed(address, api.Identity(*binding, permissions)),
+                    binding[1] == 'human')
+        self.assertFalse(_control.allowed(build,
+            api.Identity(3, 'service', 1, None, OP, frozenset(actions))))
 
     def test_mutating_declaration_cannot_claim_an_empty_action_requirement(self):
         with patch('builtins.open', return_value=io.StringIO(
@@ -961,25 +1036,62 @@ class Consumers(unittest.TestCase):
 
     def test_mcp_action_filter_fails_closed_and_invokes_same_commandlet(self):
         from mop.cli import _control
-        identity = api.Identity(1, 'service', 1, None, OP, frozenset({'execution.restart_puppet',
-            'operations.override_assignment'}))
+        # HYPOTHESIS: service+grant и actor-kind whitelist подменяли explicit RBAC.
+        # SOLUTION: override с правом допустим; реальный human_only fence берётся
+        # из add. Серверный Access/Grants заново проверяет action и resource scope.
+        # RESULT: исходный RED; missing/unknown catalogue и действия закрыты по умолчанию.
+        # STATUS: FIXED — see #642
         self.assertTrue(hasattr(_control, 'allowed'), '#642 missing server action permission filter')
-        self.assertTrue(_control.allowed({'actions': ['execution.restart_puppet']}, identity))
-        self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']}, identity))
-        self.assertFalse(_control.allowed({'actions': ['operations.override_assignment']}, identity))
-        self.assertFalse(_control.allowed({'cluster_verbs': ['restart']}, identity))
-        self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']},
-            api.Identity(1, 'human', 1, None, None)))
-        scoped = api.Identity(1, 'human', 1, None, None, frozenset())
-        self.assertTrue(_control.allowed({'annotations': 'readonly', 'actions': []}, scoped))
-        self.assertFalse(_control.allowed({'annotations': 'destructive', 'actions': []}, scoped))
-        self.assertFalse(_control.allowed({'annotations': 'readonly'}, scoped))
+        actions = frozenset({'execution.restart_puppet', 'operations.override_assignment'})
+        human_only = cli.declared(os.path.join(cli.PACKAGE, 'core', 'add.py'))
+        self.assertIs(human_only.get('human_only'), True)
+        bindings = [(1, 'human', 1, None, None), (2, 'agent', 2, None, None)]
+        for node in (None, NODE):
+            bindings.extend(((2, 'agent', 1, node, OP), (3, 'service', None, node, None)))
+        for binding in bindings:
+            with self.subTest(binding=binding):
+                identity = api.Identity(*binding, actions)
+                self.assertTrue(api.canonical_identity(identity))
+                for action in actions:
+                    declaration = {'actions': [action]}
+                    self.assertTrue(_control.allowed(declaration, identity))
+                    self.assertFalse(_control.allowed(declaration,
+                        api.Identity(*binding, actions-{action})))
+                    self.assertFalse(_control.allowed(declaration, api.Identity(*binding)))
+                self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']}, identity))
+                for declaration in ({'cluster_verbs': ['restart']}, {'annotations': 'readonly'},
+                        {'actions': ['catalog.future']}, {'actions': 'execution.restart_puppet'},
+                        {'actions': ['execution.restart_puppet', 'catalog.future']}):
+                    self.assertFalse(_control.allowed(declaration, identity))
+                self.assertFalse(_control.allowed({'actions': ['execution.restart_puppet']},
+                    api.Identity(*binding, actions | {'catalog.future'})))
+                self.assertFalse(_control.allowed({'actions': ['execution.restart_puppet']},
+                    api.Identity(*binding, set(actions))))
+                scoped = api.Identity(*binding, frozenset())
+                self.assertTrue(_control.allowed({'annotations': 'readonly', 'actions': []}, scoped))
+                self.assertFalse(_control.allowed({'annotations': 'destructive', 'actions': []}, scoped))
+                self.assertFalse(_control.allowed({'annotations': 'readonly'}, scoped))
+                permissions = frozenset(human_only['actions'])
+                self.assertEqual(_control.allowed(human_only, api.Identity(*binding, permissions)),
+                    binding[1] == 'human')
+                for missing in permissions:
+                    self.assertFalse(_control.allowed(human_only,
+                        api.Identity(*binding, permissions-{missing})))
+        for invalid in ((1, 'human', 2, None, None), (1, 'human', 1, NODE, None),
+                (1, 'human', 1, None, OP), (2, 'agent', None, None, OP),
+                (3, 'service', 1, None, OP), (3, 'service', None, NODE, OP),
+                (3, 'service', 1, None, None)):
+            identity = api.Identity(*invalid, actions)
+            self.assertFalse(api.canonical_identity(identity))
+            self.assertFalse(_control.allowed({'actions': ['execution.restart_puppet']}, identity))
         decl = {'args': [{'name': 'cursor', 'type': 'string', 'flag': '--cursor'}]}
         self.response({'schema_version': 1, 'count': 0, 'results': [], 'next_cursor': None})
         def mcp_tool(argv):
             return _control.tool_call(['project', 'list'], decl, {'cursor': 'safe-cursor'})
-        with _control.use(api.ServerContext('https://controller.example', TOKEN)):
+        with _control.use(api.ServerContext('https://controller.example', TOKEN)), \
+             patch.object(cli, 'main', wraps=cli.main) as dispatcher:
             out, err, result = run_command(mcp_tool, [])
+        dispatcher.assert_called_once_with(['project', 'list', '--cursor', 'safe-cursor'])
         self.assertEqual(json.loads(result)['results'], [])
         self.assertEqual(out, '')
         self.assertEqual(err, '')
