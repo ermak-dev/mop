@@ -238,17 +238,6 @@ class CreatePuppets:
             return _snapshot(operation)
 
 
-def require_reserved_grant(target):
-    """Грант новой цели всё ещё выдан ей: reserved, с retained credential, та
-    же инкарнация. Авторизация исполнения до готовности была бы ложным отказом:
-    token агента приходит после неё."""
-    from mop.server.access.models import Grant
-    grant = Grant.objects.select_related('intent').filter(pk=target.grant_id).first()
-    if (grant is None or grant.state != 'reserved' or grant.credential_version_id is None
-            or (grant.intent.target_id, grant.intent.incarnation) != (target.target_id, target.incarnation_id)):
-        raise Denied('reserved grant of the new target is no longer current')
-
-
 class CreateMachine(RestartHandler):
     """Узловые шаги create (#643): apply_identity и confirm_ready общего протокола.
 
@@ -270,7 +259,7 @@ class CreateMachine(RestartHandler):
         if self.support is None:
             raise Refused('controller_unavailable', safe_reason='launch binding is unavailable')
         self.support.require(target)
-        require_reserved_grant(target)
+        self.ops.targets.authorize_launch(target)
 
 
 class LaunchJobs:
@@ -319,7 +308,7 @@ class LaunchJobs:
         self.ops.access.authorize(actor, 'execution.create_puppet', project_ids=(target.project_id,))
         if actor.human_owner_id != target.owner_id:
             raise Denied('create belongs to another human assignment')
-        require_reserved_grant(target)
+        self.ops.targets.authorize_launch(target)
         binding = row.createbinding
         if (binding.scheduler_id != self.scheduler.scheduler_id or not m.ScheduledNode.objects.filter(
                 node_id=row.node_id, scheduler_id=binding.scheduler_id).exists()):
@@ -522,7 +511,7 @@ class GrantActivations:
                 self.ops.access.authorize(actor, 'execution.create_puppet', project_ids=(target.project_id,))
                 if actor.human_owner_id != target.owner_id:
                     raise Denied('create belongs to another human assignment')
-                require_reserved_grant(target)
+                self.ops.targets.authorize_launch(target)
             except (Denied, Refused) as error:
                 _move(row, State.FAILED, 'execution_refused', expected_revision=row.revision, safe_reason=str(error))
                 m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=timezone.now())

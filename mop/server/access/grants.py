@@ -20,7 +20,8 @@ from rest_framework.authtoken.models import Token
 
 from mop.common import soul
 from ..catalog.models import Project
-from ..secrets.services import RetainedSecrets, RetentionScope, outside_transaction
+from ..secrets.services import (RetainedSecrets, RetentionScope, outside_transaction,
+                                Refused as SecretRefused, Conflict as SecretConflict)
 from ..secrets.crypto import SecretCryptoError
 from . import models as m, services as auth
 from .context import ActorContext, ActorKind
@@ -402,11 +403,7 @@ class Grants:
                 raise auth.Denied('grant runtime binding changed')
             self._normalized(row.intent.definition, soul.parse(content.manifest.decode()))
 
-    def _execution_rows(self, binding):
-        if type(binding) is not RoleBinding:
-            raise ValueError('complete execution role binding required')
-        if not transaction.get_connection().in_atomic_block:
-            raise ValueError('execution authority requires a caller transaction')
+    def _locked_lineage(self, binding):
         row, identifiers = self._row(binding.grant_id), []
         while True:
             if row.id in identifiers or len(identifiers) >= 32:
@@ -421,7 +418,15 @@ class Grants:
                        .order_by('pk').values_list('pk', flat=True))
         if len(locked) != len(identifiers):
             raise auth.Denied('grant ancestry is unavailable')
-        row = self._row(binding.grant_id)
+        return tuple(self._row(identifier) for identifier in identifiers)
+
+    def _execution_rows(self, binding):
+        if type(binding) is not RoleBinding:
+            raise ValueError('complete execution role binding required')
+        if not transaction.get_connection().in_atomic_block:
+            raise ValueError('execution authority requires a caller transaction')
+        rows = self._locked_lineage(binding)
+        row = rows[0]
         if self._info(row).binding != binding:
             raise auth.Denied('execution role binding mismatch')
         credential = m.CredentialBinding.objects.filter(token_user_id=row.subject_id).first()
@@ -433,7 +438,7 @@ class Grants:
         self._check_ancestors_local(row)
         if self.bindings.current(binding.project_id, binding.target_id) != binding:
             raise auth.Denied('grant runtime binding changed')
-        return tuple(self._row(identifier) for identifier in identifiers)
+        return rows
 
 
     def _profile_row(self, actor, project_id, target_id):
@@ -516,22 +521,34 @@ class Grants:
 
     @storage_boundary
     def authorize_launch(self, binding):
-        """Узловые шаги запуска новой цели (#643): идентичность и готовность.
+        """SQL-only допуск регистрации, identity/readiness и активации новой цели.
 
-        Грант выдан (reserved с retained credential), но ещё не активен: агент
-        получит свой token только после готовности, а активация ждёт её
-        квитанций. Только тот же owner/project/target/incarnation/role/digest
-        и актуальное право владельца создавать; исполнение -- authorize_execution."""
+        Reserved снимает только требование active, не expiry/approval/authority.
+        Проверяется exact proof intent, sealed definition и retained references,
+        сохранённый credential создателя и живая цепочка issuer. Ни provider I/O,
+        ни допуска active-only действий: для них остаётся authorize_execution.
+        """
         if type(binding) is not RoleBinding:
             raise ValueError('complete launch role binding required')
         if not transaction.get_connection().in_atomic_block:
             raise ValueError('launch authority requires a caller transaction')
-        row = m.Grant.objects.select_for_update().select_related('intent__definition').filter(
-            pk=binding.grant_id).first()
-        if (row is None or row.state != 'reserved' or row.credential_version_id is None
+        row = self._locked_lineage(binding)[0]
+        if (row.state != 'reserved' or row.credential_version_id is None
                 or self._info(row).binding != binding):
             raise auth.Denied('reserved provisioned launch grant required')
-        self._owner_permission(binding.human_owner_id, 'execution.create_puppet', binding.project_id)
+        try:
+            self._check_row(row, state='reserved')
+            definition = row.intent.definition
+            self.secrets.check_reference(RetentionScope(row.intent.project_id, row.intent.owner_id,
+                definition.id, 'policy'), definition.content_version_id)
+            self._creation_actor(self._intent_actor(row), row)
+            self._check_ancestors_local(row)
+            if self.bindings.current(binding.project_id, binding.target_id) != binding:
+                raise auth.Denied('grant runtime binding changed')
+        except (PermissionError, SecretRefused, SecretConflict) as error:
+            # Оба потребителя получают один отказ с безопасной причиной порта,
+            # не raw provider exception и не молчаливое false.
+            raise auth.Denied(str(error)) from None
 
     @storage_boundary
     def authorize_execution(self, binding):
