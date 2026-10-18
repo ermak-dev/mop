@@ -22,6 +22,7 @@ from . import endpointviews as endpoint
 from .buildviews import BuildProject
 from . import projectionviews as projection
 from .usageviews import Usage
+from .catalogueviews import Capabilities
 
 from mop.server.gateway.views import gateway_view
 
@@ -69,6 +70,7 @@ urlpatterns = [
     path('api/v1/machine/observation-producers/<uuid:target_id>/<str:kind>', projection.ProducerStatus.as_view()),
     path('api/v1/machine/observation-context', projection.ObservationContext.as_view()),
     path('api/v1/identity', auth.Identity.as_view()),
+    path('api/v1/capabilities', Capabilities.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
     path('api/v1/projects/<uuid:project_id>/commands/build', BuildProject.as_view()),

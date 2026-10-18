@@ -43,6 +43,7 @@ PUBLIC = {
     '/api/v1/auth/token/rotate': {'post'},
     '/api/v1/auth/token/revoke': {'post'},
     '/api/v1/identity': {'get'},
+    '/api/v1/capabilities': {'get'},  # #633: authenticated scoped public query
     '/api/v1/projects': {'get', 'post'},
     '/api/v1/projects/{project_id}': {'get', 'put'},
     '/api/v1/projects/{project_id}/commands/build': {'post'},
