@@ -550,6 +550,7 @@ class LaunchDelivery(TransactionTestCase):
     # до/после real provider и same-size corruption отказаны без private bytes.
     # STATUS: FIXED — see #751; 5/10 s и production phase leases неизменны.
     def initial_phase_roundtrip(self, phase, *, bootstrap_content=None):
+        import time
         import hashlib
         import socket
         import ssl
@@ -583,11 +584,13 @@ class LaunchDelivery(TransactionTestCase):
                 self.assertEqual(hashlib.sha256(raw).hexdigest(), self.pin.bootstrap_digest)
                 decoded = codec.decode(raw, value['bootstrap_digest'])
                 self.assertEqual((decoded.tasks, decoded.variables, decoded.secret_refs),
-                    (content['tasks'], content['variables'], tuple(content.get('secret_refs', ()))))
+                    (content['tasks'], content['variables'], tuple(sorted(content.get('secret_refs', ()), key=str))))
             else:
                 self.assertIsNone(value['bootstrap'])
         async def body(client, server):
+            started = time.monotonic()
             direct = await asyncio.to_thread(client.read_initial_launch, self.machine_auth, self.metadata)
+            self.phase_timings = {'socket': time.monotonic()-started}
             verify(direct)
             with tempfile.TemporaryDirectory(prefix='mop-initial-envelope-tls-') as directory:
                 cert, key = Path(directory)/'cert.pem', Path(directory)/'key.pem'
@@ -609,7 +612,9 @@ class LaunchDelivery(TransactionTestCase):
                         while not https.started:
                             if task.done(): await task
                             await asyncio.sleep(.01)
+                    started = time.monotonic()
                     value = await machine.read_initial_launch(self.metadata)
+                    self.phase_timings['tls'] = time.monotonic()-started
                     verify(value)
                     self.assertEqual(value, direct)
                 finally:

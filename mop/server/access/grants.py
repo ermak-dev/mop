@@ -850,6 +850,11 @@ class Grants:
 
     def _creation_actor(self, actor, row):
         intent = row.intent
+        if type(actor) is ActorContext and actor.grant_id is None:
+            if actor.user_id != intent.actor_id or actor.credential_id != intent.actor_credential_id:
+                raise auth.Denied('creation actor or owner mismatch')
+            auth.Access().authorize_launch_issuer(actor, owner_id=intent.owner_id, project_id=intent.project_id)
+            return
         if (self._owner(actor) != intent.owner_id or actor.user_id != intent.actor_id
                 or actor.credential_id != intent.actor_credential_id):
             raise auth.Denied('creation actor or owner mismatch')
@@ -1058,9 +1063,9 @@ class Grants:
             return ActorContext(user.id, ActorKind(user.kind), binding.id,
                                 row.intent.owner_id, binding.bound_node_id, row.intent.parent_id)
         if user.kind in ('human', 'agent'):
-            actor = auth._context(binding, user)
-            auth.current_actor(actor)
-            return actor
+            # Только locator сохранённого issuer; каждый caller немедленно
+            # передаёт его в _creation_actor с новым credential/scope/RBAC read.
+            return auth._context(binding, user)
         raise auth.Denied('creation actor is not human or delegated agent')
 
     @storage_boundary

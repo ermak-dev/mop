@@ -64,7 +64,7 @@ def validate_references(policy, refs):
     if (len(refs) > 32 or len({version for _, version in refs}) != len(refs)
             or sum(purpose == 'model_config' for purpose, _ in refs) != 1):
         raise Denied('exact initial launch model configuration and bounded consumers required')
-    versions = {row.id: row for row in SecretVersion.objects.select_related('secret').filter(
+    versions = {row.id: row for row in SecretVersion.objects.select_related('secret').defer('envelope', 'nonce').filter(
         pk__in=[version for _, version in refs])}
     for purpose, version_id in refs:
         row = versions.get(version_id)
