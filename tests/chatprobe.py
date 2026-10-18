@@ -21,6 +21,36 @@ def main():
             "mop.client.chatprobe") is not None):
         return c.report("chatprobe")
     from mop.client import chatprobe as p
+    # HYPOTHESIS: #729 выдуманный ACK не подтверждается штатным native wire.
+    # Фикстура фиксирует только конечный набор полей и точную корреляцию;
+    # отсутствие status/idle остаётся unknown, а не успешным native прогоном.
+    # SOLUTION: whitelist projection и отдельный normal-only Unix callback.
+    # RESULT: RED — projection отсутствует; GREEN — чистая логика и owned normal
+    # Docker 2.1.302: msgV=1 idle, dropped наблюдались; delivered остаётся unknown.
+    # STATUS: FIXED — see #729
+    if not c.check("#729 native receipt projection exists", callable(getattr(p, "peer_receipt_projection", None))):
+        return c.report("chatprobe")
+    user_id, subscription = "user-id", "subscription-id"
+    receipt = dict(msgV=1, type="control", action="peer_message_status", orig_msg_id=user_id,
+                   status="held", reason="private detail", from_="private path", token="secret")
+    project = lambda frame: p.peer_receipt_projection((json.dumps(frame)+"\n").encode(), user_id, subscription)
+    c.expect("#729 exact native status projection", project(receipt),
+        dict(action="peer_message_status", orig_msg_id=user_id, status="held", msgV=1))
+    for status in ("held", "denied", "expired", "delivered", "refused", "dropped"):
+        c.expect("#729 finite status " + status, project({**receipt, "status": status})["status"], status)
+    for change in ({"action": "message_accepted"}, {"status": "accepted"}, {"orig_msg_id": subscription},
+                   {"orig_msg_id": "other"}, {"status": []}, {"msgV": True}, {"type": "user"}):
+        c.expect("#729 invented or uncorrelated receipt", project({**receipt, **change}), None)
+    idle = dict(type="control", action="peer_idle_notice", orig_msg_id=subscription, state="idle")
+    c.expect("#729 observes absent idle version without silently authorizing it", project(idle),
+        dict(action="peer_idle_notice", orig_msg_id=subscription, state="idle", msgV=None))
+    c.expect("#729 observes versioned idle", project({**idle, "msgV": 1})["msgV"], 1)
+    c.expect("#729 user id is never idle subscription", project({**idle, "orig_msg_id": user_id}), None)
+    for state in ("busy", "unknown", [], None):
+        c.expect("#729 unknown idle state", project({**idle, "state": state}), None)
+    duplicate = b'{"type":"control","action":"peer_message_status","orig_msg_id":"user-id","status":"held","status":"delivered","msgV":1}\n'
+    c.expect("#729 ambiguous wire is not evidence", p.peer_receipt_projection(duplicate, user_id, subscription), None)
+    c.expect("#729 bounded native projection", p.peer_receipt_projection(b" "*8193, user_id, subscription), None)
     dirty = {"PATH": "/usr/bin", "HOME": "/real", "ANTHROPIC_API_KEY": "secret",
              "ANTHROPIC_AUTH_TOKEN": "secret", "HTTP_PROXY": "https://real",
              "MOP_BUS_CONFIG": "secret", "CLAUDE_CODE_OAUTH_TOKEN": "secret",

@@ -232,6 +232,36 @@ def model_hook_projection(raw, now_ns):
     return dict(event=event, session_id=sid, to_model=to_model, from_model=from_model, at_ns=now_ns)
 
 
+def peer_receipt_projection(raw, user_id, subscription):
+    """Только собственная корреляция; отсутствие msgV наблюдаем, не разрешаем."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 8192:
+        return None
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate receipt field")
+            result[key] = value
+        return result
+    try:
+        frame = json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if type(frame) is not dict or frame.get("type") != "control":
+        return None
+    version = frame.get("msgV")
+    if version is not None and (type(version) is not int or version != 1):
+        return None
+    action, key = frame.get("action"), frame.get("orig_msg_id")
+    if (action == "peer_message_status" and key == user_id and version == 1
+            and frame.get("status") in ("held", "denied", "expired", "delivered", "refused", "dropped")):
+        return dict(action=action, orig_msg_id=key, status=frame["status"], msgV=version)
+    if (action == "peer_idle_notice" and key == subscription
+            and frame.get("state") in ("idle", "exited", "unavailable")):
+        return dict(action=action, orig_msg_id=key, state=frame["state"], msgV=version)
+    return None
+
+
 def bare_skips_hooks(help_text):
     """Только явный контракт установленного CLI, не догадка по пустому sink."""
     option = re.search(r"^\s+--bare\b(.*?)(?=^\s+--[a-z]|\Z)", help_text, re.MULTILINE | re.DOTALL)
@@ -782,6 +812,88 @@ def _run_model_hooks(terminal, fixture, report, output, ready, capture_live, sna
         evidence=dict(snapshots=list(report["live_snapshots"])))
 
 
+def _run_peer_receipts(terminal, report, ready, home, runtime, timeout, snapshot):
+    """Реальный inbox только своего normal Docker CLI, без invented ACK/registry."""
+    _normal_guard()
+    if not live_contract_observed(ready):
+        raise RuntimeError("native receipt probe requires proven own live session")
+    row = ready[0]
+    key = json.loads((home / ".claude" / "sessions" / row["key_file"]).read_text())
+    user_id, subscription, duplicate_id = (str(uuid.uuid4()) for _ in range(3))
+    callback = runtime / (str(os.getpid()) + "-" + uuid.uuid4().hex + ".sock")
+    records, rejected = [], []
+    # Та же форма и parent, что у LocalBridge: не маскируем native ограничения
+    # регистрацией фиктивного requester или ослаблением feature flags.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(callback))
+        callback.chmod(0o600)
+        listener.listen(16)
+        listener.setblocking(False)
+        def collect():
+            for _ in range(16):
+                try:
+                    connection, _ = listener.accept()
+                except BlockingIOError:
+                    break
+                with connection:
+                    pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+                    if pid != row["pid"] or uid != os.getuid():
+                        rejected.append("peer identity mismatch")
+                        continue
+                    connection.settimeout(.2)
+                    data = bytearray()
+                    try:
+                        while len(data) <= 8192 and b"\n" not in data:
+                            chunk = connection.recv(min(8193 - len(data), 4096))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                    except TimeoutError:
+                        rejected.append("callback read deadline")
+                        continue
+                    value = (peer_receipt_projection(bytes(data), user_id, subscription)
+                        or peer_receipt_projection(bytes(data), duplicate_id, subscription))
+                    if value is not None and len(records) < 64:
+                        records.append(value)
+            return False
+        def send(frame):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(2)
+                connection.connect(row["messagingSocketPath"])
+                pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+                if pid != row["pid"] or uid != os.getuid():
+                    raise RuntimeError("native receipt target peer changed")
+                auth = dict(type="auth", token=key["peerToken"])
+                connection.sendall((json.dumps(auth) + "\n" + json.dumps(frame) + "\n").encode())
+        try:
+            base = dict(msgV=1, session_id=row["sessionId"], **{"from": "uds:" + str(callback)})
+            send(dict(base, msg_id=subscription, type="control", action="notify_when_idle"))
+            terminal.wait(collect, min(timeout, 3))
+            message = dict(role="user", content="probe:after-model native receipt fixture " + user_id)
+            send(dict(base, msg_id=user_id, type="user", priority="next", message=message))
+            terminal.wait(collect, min(timeout, 3))
+            # Отдельный диагностический дубль fixture-only текста, не retry
+            # неизвестного production write и не попытка добиться accepted.
+            send(dict(base, msg_id=duplicate_id, type="user", priority="next", message=message))
+            terminal.wait(collect, min(timeout, 3))
+            snapshot("native-peer-receipts")
+        finally:
+            callback.unlink(missing_ok=True)
+    statuses = [value for value in records if value["action"] == "peer_message_status"]
+    notices = [value for value in records if value["action"] == "peer_idle_notice"]
+    evidence = dict(receipts=records, rejected=rejected, callback_removed=not callback.exists(),
+        diagnostic_duplicate_id=duplicate_id, ordinary_user_id=user_id,
+        normal_enqueue_ack="not fabricated; transport/drain/model request is not acceptance",
+        requester="unregistered fixture callback; same parent/name shape as LocalBridge",
+        limitations="Missing receipts remain unknown; no policy bypass, fake registry, approval, or production enablement.")
+    for name, observed in (("native-peer-status", bool(statuses)),
+            ("native-peer-idle", any(value["state"] == "idle" for value in notices)),
+            ("native-peer-delivered", any(value["status"] == "delivered" for value in statuses))):
+        report["scenarios"][name] = dict(outcome=outcome(observed), evidence=evidence)
+
+
 def run(root, timeout=30, history_module=None, model_hooks=False, isolated_normal=False):
     """Normal opt-in всегда создаёт Docker fixture, никогда не host argv."""
     if isolated_normal:
@@ -932,6 +1044,8 @@ def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _norm
         ready_registry = capture_live("ready")
         if model_hooks:
             _run_model_hooks(terminal, fixture, report, hook_output, ready_registry, capture_live, snapshot, turn)
+            if _normal:
+                _run_peer_receipts(terminal, report, capture_live("peer-receipts-before"), home, runtime, timeout, snapshot)
             return report
         framing_text = "probe:framing\nsecond line with Unicode: Проба"
         framing = turn("framing", framing_text)
