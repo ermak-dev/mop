@@ -22,6 +22,24 @@ class Unavailable(RuntimeError):
     pass
 
 
+def _response_error(status, value, token):
+    """Canonical DRF phrase сохраняется; raw body/HTML/traceback не отражаются."""
+    refused = status in (400, 401, 403, 404, 409)
+    prefix = 'machine request refused' if refused else 'machine authority unavailable'
+    reason = prefix + ' (HTTP ' + str(status) + ')'
+    error = value.get('error') if type(value) is dict and type(value.get('schema_version')) is int \
+        and value['schema_version'] == 1 else None
+    if type(error) is dict:
+        code, message = error.get('code'), error.get('message')
+        if (type(code) is str and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', code)
+                and type(message) is str and 0 < len(message) <= 1024 and message.isprintable()
+                and type(error.get('retryable')) is bool):
+            # Это уже безопасная фраза сервера, не вторая allowlist-санитизация.
+            # Даже ошибочный отражённый bearer не попадает в диагностику.
+            reason += ': ' + (code + ': ' + message).replace(token, '[redacted]')
+    return Refused(reason) if refused else Unavailable(reason)
+
+
 ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
 EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
     'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
@@ -170,17 +188,23 @@ class HttpsTransport:
             # redirects не должны уносить credential или повторять эффект на другом origin.
             async with self._session.request(method, self.origin+path, json=payload,
                     params=params, allow_redirects=False) as response:
-                if response.status != 200:
-                    if response.status in (400, 401, 403, 404, 409):
-                        raise Refused('machine request refused (HTTP ' + str(response.status) + ')')
-                    raise Unavailable('machine authority unavailable (HTTP ' + str(response.status) + ')')
                 if response.content_type != 'application/json':
+                    if response.status != 200:
+                        raise _response_error(response.status, None, self._token)
                     raise Refused('JSON response required')
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
                     body.extend(chunk)
                     if len(body) > self.response_limit:
+                        if response.status != 200:
+                            raise _response_error(response.status, None, self._token)
                         raise Refused('machine response exceeds limit')
+                if response.status != 200:
+                    try:
+                        value = json.loads(body, object_pairs_hook=_unique_object)
+                    except (ValueError, UnicodeError):
+                        value = None
+                    raise _response_error(response.status, value, self._token) from None
                 try:
                     return json.loads(body, object_pairs_hook=_unique_object)
                 except (ValueError, UnicodeError) as error:
