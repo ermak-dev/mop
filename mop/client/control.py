@@ -865,9 +865,10 @@ class Client:
     Сертификат проверяется всегда, CA выбирается только явным контекстом.
     """
 
-    def __init__(self, context: ServerContext, *, limits: Limits = Limits()):
+    def __init__(self, context: ServerContext, *, limits: Limits = Limits(), before_request=None):
         _require(type(context) is ServerContext and type(limits) is Limits)
-        self._context, self._limits = context, limits
+        _require(before_request is None or callable(before_request))
+        self._context, self._limits, self._before_request = context, limits, before_request
         failed = False
         try:
             self._tls = ssl.create_default_context(cafile=context.ca_file)
@@ -924,6 +925,12 @@ class Client:
     def _exchange(self, method, path, body=None, *, command=None, budget=None):
         limits = self._limits
         _require(body is None or len(body) <= limits.max_request_bytes)
+        # Body owner проверяет cancel/binding перед каждым I/O, включая
+        # recovery после unknown POST; один запрос не продлевает общий бюджет.
+        if self._before_request is not None:
+            remaining = self._before_request()
+            _seconds(remaining, limits.request_timeout)
+            budget = min(remaining, budget) if budget is not None else remaining
         deadline = time.monotonic() + min(limits.request_timeout, budget or limits.request_timeout)
         url = urlsplit(self._context.origin)
         connection = response = None

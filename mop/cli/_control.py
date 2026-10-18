@@ -21,6 +21,8 @@ from uuid import UUID
 from mop.client import control as api
 
 _CONTEXT = ContextVar('mop_https_context', default=None)
+_LIMITS = ContextVar('mop_https_limits', default=None)
+_BEFORE_REQUEST = ContextVar('mop_https_before_request', default=None)
 
 # Конечный inventory #624/642; unsupported не означает accepted/no-op.
 SURFACES = dict.fromkeys((
@@ -133,14 +135,18 @@ def route(modname, argv):
 
 
 @contextmanager
-def use(context):
+def use(context, *, limits=None, before_request=None):
     """Внутрипроцессный context для MCP/tests; не хранится и не сериализуется."""
     if type(context) is not api.ServerContext:
         raise api.ClientError('explicit HTTPS server context required')
     token = _CONTEXT.set(context)
+    budget = _LIMITS.set(limits)
+    guard = _BEFORE_REQUEST.set(before_request)
     try:
         yield
     finally:
+        _BEFORE_REQUEST.reset(guard)
+        _LIMITS.reset(budget)
         _CONTEXT.reset(token)
 
 
@@ -313,7 +319,19 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('--check', action='store_true')
             for field in ('project', 'node', 'client'):
                 p.add_argument('--' + field + '-id')
+            p.add_argument('--body-standby', action='store_true')
+            for field in ('bootstrap', 'context', 'deadline'):
+                p.add_argument('--body-' + field)
             args = p.parse_args(argv)
+            body = (args.body_bootstrap, args.body_context, args.body_deadline)
+            if args.body_standby or any(value is not None for value in body):
+                if (not args.body_standby or not all(body) or args.check
+                        or any(value is not None for value in (args.project_id, args.node_id, args.client_id))
+                        or origin is not None or ca_file is not None or _CONTEXT.get() is not None):
+                    print('body mode requires only its explicit files and deadline', file=sys.stderr)
+                    return 2
+                from . import _mcp
+                return _mcp.serve_body(*body)
             scope = api.CapabilityScope(args.project_id, args.node_id, args.client_id)
         elif words in ('health', 'profile', 'diagnose'):
             args = p.parse_args(argv)
@@ -506,7 +524,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                   'trust': 'explicit CA (unverified)' if selected.ca_file else 'system CA (unverified)',
                   'network_observed': False}, credential=selected.token)
             return 0
-        client = api.Client(selected)
+        client = api.Client(selected, limits=_LIMITS.get() or api.Limits(), before_request=_BEFORE_REQUEST.get())
         if words in ('restart', 'wipe', 'stop', 'delete', 'send') and not args.explicit_binding:
             view = client.read_puppet(args.puppet_id)
             params = dict(message=args.message, priority=args.priority,
