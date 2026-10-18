@@ -583,6 +583,47 @@ handler is bound only with a launch support (the target's job is registered for 
 incarnation); without it the machine route keeps refusing as unavailable. The last node
 step is not terminal: `activate_grant` follows on the server.
 
+#### Addressed launch delivery
+
+`POST /api/v1/machine/work/launch` takes exactly the version-1 `Work` object,
+not a definition UUID, project/owner selector or a reusable read capability. The
+caller must present its own current token, a `node-executor` service enrollment
+for that node, project/node access and canonical `execution.read_launch` permission
+in addition to the permissions for its claimed work. A human, another service
+purpose, another node/project or another executor's claim cannot read launch bytes.
+Only the current claimed `apply_identity` or `confirm_ready` of `create` is eligible:
+assignment revision/generation, incarnation, executor epoch, installation/restore
+generation, operation/step/claim identity, deadlines and retained create resource
+fences must still match. The server selects the definition from `CreateBinding`;
+wire metadata never grants definition-read authority.
+
+The rootless HTTP adapter forwards the original machine credential and Work through
+the finite protected-socket `read_launch` command. Only `CredentialApplication`
+opens the encrypted retained definition. Its Access-owned scoped reader uses
+`authorize_launch`, the current reserved provisioned grant/ancestry, exact definition
+and approved policy scope, seal/approval and retained references; it does not
+construct an owner credential or broaden generic `read_definition`. The launch
+pins must still name that owner's approved unrevoked project bootstrap and the
+pinned project image revision. Provider I/O runs outside database transactions;
+all authority, scope and pins are re-read after it and before disclosure.
+Revocation, completion, expiry or rebinding during that wait refuses the response.
+
+The no-store reply has exactly `schema_version`, `work`, `bootstrap_revision`,
+`bootstrap_digest`, `image_digest`, `manifest` (the approved definition's JSON
+object), `prompt` (canonical base64 of its actual approved bytes), `git_name`,
+`git_email`, `message` and `peer_token`. Create uses the owner's current Git
+identity, empty `message` and null `peer_token`: this endpoint does not issue an
+agent credential. `LaunchResponse.parse` verifies exact Work/pins and the complete
+bundle digest on the node. `MachineClient.read_launch` implements `LaunchQuery`
+through the existing verified HTTPS transport's explicit POST allowlist; the
+Work never appears in a URL. `AddressedLaunchSource` consumes this adapter.
+
+Startup still has to bind the protected credential client in the web root and
+supply the authenticated machine client to the node source (#644). Without the
+credential binding the endpoint returns unavailable; neither web nor worker gets
+a provider/root key. The scheduler remains metadata-only. This delivery does not
+implement or bind the physical `SessionApi`.
+
 `activate_grant` is discovered only once the registration and both node steps
 succeeded. The worker asks the credential service to activate the grant -- activation
 re-reads and re-checks the encrypted definition, so it can only run where the provider

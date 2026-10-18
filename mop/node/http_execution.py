@@ -156,7 +156,7 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry')}
+                   ('GET','work/input'), ('POST','work/launch'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp
@@ -215,6 +215,11 @@ class Admission:
 class MachineClient:
     def __init__(self, transport: JsonTransport):
         self.transport = transport
+
+    async def read_launch(self, metadata):
+        """LaunchQuery: конечный адресный POST; ответ проверяет LaunchResponse."""
+        work = Work.parse(metadata)
+        return await self.transport.request('POST', 'work/launch', payload=work.wire())
 
     async def action_input(self, work):
         value = await self.transport.request('GET','work/input',params=dict(schema_version='1',

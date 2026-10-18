@@ -52,6 +52,19 @@ class ActionInput(MachineView):
             'git_name':identity.name, 'git_email':identity.email, **payload})
 
 
+class Launch(MachineView):
+    def post(self, request):
+        from mop.common.credentials import Credential
+        from mop.server.access.services import node_executor
+        from .launchdelivery import read
+        work = p.work_from_wire(request.data)
+        node_executor(request.actor, work.node_id)
+        if request.auth is None:
+            from mop.server.access.services import Denied
+            raise Denied('machine token required for addressed launch')
+        return Response(read(Credential('token', request.auth.key), p.work_to_wire(work)))
+
+
 class ExecutorState(MachineView):
     def get(self, request):
         values = query(request.query_params, ('schema_version','node_id'))

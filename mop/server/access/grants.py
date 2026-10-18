@@ -116,6 +116,34 @@ class _RetentionAuthority:
             raise auth.Denied('unsupported retained access value')
 
 
+class _LaunchDefinitionAuthority:
+    """Request-local read: внешний порт доказывает machine Work, Access -- грант.
+
+    Не восстанавливает ActorContext владельца и не даёт машине policy read по
+    UUID. RetainedSecrets вызывает gate до и после crypto вне SQL locks.
+    """
+    def __init__(self, grants, binding, definition_id, authority):
+        self.grants, self.binding = grants, binding
+        self.definition_id, self.authority = definition_id, authority
+        self.proof = None
+
+    def check(self, actor, scope):
+        with transaction.atomic():
+            self.authority.check(actor, scope)
+            api, binding = self.grants, self.binding
+            api.authorize_launch(binding)
+            row = api._row(binding.grant_id)
+            api._check_row(row, state='reserved')
+            api._check_ancestors_local(row)
+            info = api._info(row)
+            wanted = RetentionScope(binding.project_id, binding.human_owner_id, self.definition_id, 'policy')
+            if scope != wanted or info.definition_id != self.definition_id or info.binding != binding:
+                raise auth.Denied('addressed launch definition scope changed')
+            if self.proof is not None and self.proof != info:
+                raise auth.Denied('addressed launch grant changed')
+            self.proof = info
+
+
 class LocalGrantAuthority:
     """SQL-only резолвер делегирования; права — общий RBAC (#688), без secret I/O."""
     def __init__(self, grants):
@@ -253,6 +281,33 @@ class Grants:
             raw = self.secrets.read(actor, RetentionScope(row.project_id, row.owner_id, row.id, 'policy'), row.content_version_id)
         except SecretCryptoError:
             raise auth.Denied('retained agent definition authentication failed') from None
+        return self._decode_definition(row, raw)
+
+    @storage_boundary
+    @sensitive_variables('raw')
+    def read_launch_definition(self, actor, binding, definition_id, *, authority):
+        """Конечная выдача definition для собственного admitted machine Work.
+
+        Authority задаёт trusted composition, не wire. Право владельца не
+        переносится на машину; generic read_definition остаётся owner-only.
+        """
+        outside_transaction()
+        if type(binding) is not RoleBinding:
+            raise ValueError('complete launch role binding required')
+        scope = RetentionScope(binding.project_id, binding.human_owner_id, definition_id, 'policy')
+        gate = _LaunchDefinitionAuthority(self, binding, definition_id, authority)
+        gate.check(actor, scope)
+        row = m.AgentDefinitionVersion.objects.get(pk=definition_id)
+        retained = RetainedSecrets(provider=self.secrets.provider, authority=gate)
+        try:
+            raw = retained.read(actor, scope, row.content_version_id)
+        except SecretCryptoError:
+            raise auth.Denied('retained agent definition authentication failed') from None
+        result = self._decode_definition(row, raw)
+        gate.check(actor, scope)
+        return result
+
+    def _decode_definition(self, row, raw):
         try:
             manifest, prompt, provenance = json.loads(raw)
             parsed = soul.parse(manifest)

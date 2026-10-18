@@ -250,6 +250,9 @@ class CredentialApplication:
         elif command is p.Command.PUBLISH_DEFINITION:
             row = self.grants.publish_definition(actor, **args)
             result = p.DefinitionInfo(row.id, row.role, row.digest, row.project_id, row.owner_id)
+        elif command is p.Command.LAUNCH:
+            from .launchdelivery import deliver
+            result = deliver(self, actor, args['work'])
         elif command is p.Command.DEFINITION:
             row = self.grants.read_definition(actor, **args)
             result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
@@ -287,6 +290,10 @@ class CredentialApplication:
 
 
 def _wire(value):
+    if type(value) is dict:
+        if len(value) > 128 or any(type(key) is not str for key in value):
+            raise p.CredentialError('invalid credential result fields')
+        return {key: _wire(item) for key, item in value.items()}
     if type(value) is bytes:
         return p.encoded(value)
     if type(value) is UUID:
