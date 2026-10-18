@@ -43,6 +43,8 @@ class ProducerOwner(Protocol):
         Lookup существующего attachment, не mint на каждом observe. Владелец
         проверяет incarnation/executor и native identity; hooks, executor_epoch
         и registry не являются источниками producer authority. None -- отказ.
+        Attached owner также может дать синхронный producer_changed(layout),
+        чтобы потеря physical evidence навсегда закрыла именно этот source slot.
         """
         ...
 
@@ -175,6 +177,20 @@ class NativePhysicalSessions:
     def __init__(self, *, owner: ProducerOwner | None = None):
         self.owner = owner
 
+    def _changed(self, layout):
+        # Attached owner может без await закрыть source slot. Даже если старый
+        # inode/registry вернётся к следующему observe, producer не воскреснет.
+        changed = getattr(self.owner, 'producer_changed', None)
+        if callable(changed):
+            changed(layout)
+
+    async def _snapshot(self, layout):
+        try:
+            return await asyncio.to_thread(_snapshot, layout)
+        except (Unavailable, OSError, ValueError, LookupError, subprocess.SubprocessError):
+            self._changed(layout)
+            raise
+
     async def observe(self, layout):
         if type(layout) is not RegisteredLayout:
             raise Refused('trusted registered native layout required')
@@ -182,21 +198,39 @@ class NativePhysicalSessions:
             raise Unavailable('native producer lifecycle owner is not bound')
         try:
             async with asyncio.timeout(5):
-                identity = await asyncio.to_thread(_snapshot, layout)
+                identity = await self._snapshot(layout)
                 epoch = await self.owner.producer_epoch(layout, identity)
                 if type(epoch) is not UUID or epoch == UUID(layout.registration.work.executor_epoch):
                     raise Unavailable('native producer lifecycle owner has no independent attached epoch')
-                if await asyncio.to_thread(_snapshot, layout) != identity:
+                if await self._snapshot(layout) != identity:
+                    self._changed(layout)
                     raise Unavailable('native physical session changed during owner lookup')
                 if await self.owner.producer_epoch(layout, identity) != epoch:
+                    self._changed(layout)
                     raise Unavailable('native producer lifecycle owner epoch changed')
-                if await asyncio.to_thread(_snapshot, layout) != identity:
+                if await self._snapshot(layout) != identity:
+                    self._changed(layout)
                     raise Unavailable('native physical session changed during owner confirmation')
+                # Последний to_thread тоже await: за это время root мог закрыть
+                # source. Direct observe обязан соблюдать тот же lifetime gate,
+                # что и view.proof, даже при неизменном физическом evidence.
+                if await self.owner.producer_epoch(layout, identity) != epoch:
+                    self._changed(layout)
+                    raise Unavailable('native producer lifecycle owner closed during final observation')
             return SessionProof(layout.registration, identity.pane, identity.session_id, epoch,
                                 layout.runtime/'session.sock', identity.pid, identity.process_start)
+        except asyncio.CancelledError:
+            # to_thread продолжает жить после отмены await. Его поздний успех
+            # или ошибка уже не могут разрешить прежний source/единственный ACK.
+            # Инвалидируем синхронно, прежде чем отдавать отмену caller.
+            self._changed(layout)
+            raise
+        except TimeoutError as error:
+            self._changed(layout)
+            raise Unavailable('native physical session evidence unavailable') from error
         except Refused:
             raise  # Без повторной санитизации безопасной причины lifecycle owner.
-        except (OSError, ValueError, LookupError, subprocess.SubprocessError, TimeoutError) as error:
+        except (OSError, ValueError, LookupError, subprocess.SubprocessError) as error:
             raise Unavailable('native physical session evidence unavailable') from error
 
     async def reconcile(self, node_id, previous_epoch, new_epoch):

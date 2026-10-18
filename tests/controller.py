@@ -20,7 +20,7 @@ if __name__ == '__main__':
         '_replacement_cases.ReplacementRegistration', '_replacement_cases.ReplacementPreparation', '_update_cases.UpdateAdmission',
         '_replacement_execution_cases.ReplacementExecution', '_replacement_execution_cases.ReplacementGrantExecution',
         '_telemetry_cases', '_producer_cases', '_realtime_cases', '_endpoint_cases', '_endpoint_grant_cases',
-        '_credential_cases', '_credential_binding_cases', '_launch_delivery_cases', '_preparation_cases', '_admin_cases',
+        '_credential_cases', '_credential_binding_cases', '_launch_delivery_cases', '_current_view_purpose_cases', '_preparation_cases', '_admin_cases',
         '_rbac_unified_cases', '_actor_cases', '_actor_auth_cases', '_agent_profile_cases', '_capability_cases', '_modern_mcp_cases',
         '_build_cases.ImageBuilds', '_projection_cases', '_audit_cases', '_proxy_usage_cases',
         '_control_client_cases', '_gateway_cases', '_controller_error_cases', '_cutover_cases.CutoverParity',
