@@ -113,7 +113,7 @@ class LaunchDelivery(TransactionTestCase):
     reserved_grant = credential_cases.CredentialSocketCases.reserved_grant
     grant_assignment = credential_cases.CredentialSocketCases.grant_assignment
 
-    def fixture(self):
+    def fixture(self, phase='native_exec'):
         from mop.server.controller.models import Installation, RestoreGuard
         from mop.server.operations import models as om
         from mop.server.operations.service import _binding
@@ -148,7 +148,7 @@ class LaunchDelivery(TransactionTestCase):
             action='create', state='running', revision=6,
             node_id=self.assignment.node_id, target_kind='puppet', target_id=self.assignment.id,
             incarnation_id=self.reserved.incarnation, expected_revision=self.assignment.revision,
-            not_after=timezone.now()+timedelta(minutes=2))
+            not_after=timezone.now()+timedelta(minutes=10 if phase == 'bootstrap_body' else 2))
         self.operation.projects.set((self.project.id,))
         om.RestartBinding.objects.create(operation=self.operation, project=self.project,
             executor_epoch=self.assignment.current_incarnation.executor_epoch, owner_id=self.user.pk,
@@ -159,7 +159,7 @@ class LaunchDelivery(TransactionTestCase):
         from mop.common.initialcreate import PHASES
         for ordinal, action in enumerate(PHASES, 1):
             step = om.Step.objects.create(operation=self.operation, ordinal=ordinal, name=action)
-            if ordinal <= 4:
+            if ordinal <= PHASES.index(phase):
                 step.token = step.attempt_id = uuid4()
                 step.started_at = step.dispatched_at = step.quiescent_at = timezone.now()
                 step.outcome = 'succeeded'
@@ -182,11 +182,18 @@ class LaunchDelivery(TransactionTestCase):
             image_revision=image, image_digest=image_pin(image.id))
         selected_fixture(self, self.reserved)
         # #721: все четыре fences остаются у первого prepare, а не scheduler.
-        prepare = om.Step.objects.get(operation=self.operation, name='prepare_body')
-        for key in ('target:'+str(self.assignment.id), 'node:'+str(self.assignment.node_id),
-                    'project:'+str(self.project.id), 'puppet:'+str(self.assignment.id)):
-            om.Resource.objects.get_or_create(key=key)
-            om.ResourceClaim.objects.create(resource_id=key, operation=self.operation, step=prepare, token=prepare.token)
+        # #751: первый prepare получает их от настоящего claim ниже; до него
+        # нет token и нельзя заранее создавать ResourceClaim с пустым proof.
+        if phase != 'prepare_body':
+            prepare = om.Step.objects.get(operation=self.operation, name='prepare_body')
+            for key in ('target:'+str(self.assignment.id), 'node:'+str(self.assignment.node_id),
+                        'project:'+str(self.project.id), 'puppet:'+str(self.assignment.id)):
+                om.Resource.objects.get_or_create(key=key)
+                om.ResourceClaim.objects.create(resource_id=key, operation=self.operation, step=prepare, token=prepare.token)
+        if phase in ('prepare_body', 'bootstrap_body', 'initial_identity'):
+            # Planned purpose не имеет scheduler receipt; initial delivery не
+            # приобретает registered authority от synthetic native fixture.
+            om.ScheduledPuppet.objects.filter(target_id=self.assignment.id).delete()
         work = self.execution.poll(self.machine, self.assignment.node_id,
             executor_epoch=self.assignment.current_incarnation.executor_epoch)[0]
         self.attempt = self.execution.claim(self.machine, work, request_id=uuid4())
@@ -527,6 +534,143 @@ class LaunchDelivery(TransactionTestCase):
                     listener.close()
         with override_settings(ALLOWED_HOSTS=['127.0.0.1']):
             self.run_delivery(body)
+
+    # HYPOTHESIS #751: finite initial shape обязана передавать retained
+    # envelope целиком; socket/HTTPS не должны возвращать старые fragments.
+    # SPEC: каждый purpose сохраняет fences и прежний бюджет 5 s.
+    # RED: actual bootstrap socket отказал старой tasks/variables shape как
+    # invalid credential command fields; canonical envelope отсутствовал.
+    # SOLUTION: Preparation canonical read port и один strict base64 envelope.
+    # RESULT: PG17 — 142/142 initial/delivery/preparation + 5/5 actual UID;
+    # пять machine purposes прошли actual socket + verified HTTPS. Revocation
+    # до/после real provider и same-size corruption отказаны без private bytes.
+    # STATUS: FIXED — see #751; 5/10 s и production phase leases неизменны.
+    def initial_phase_roundtrip(self, phase):
+        import hashlib
+        import socket
+        import ssl
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from django.core.asgi import get_asgi_application
+        from mop.common import credentials as p, bootstrap_envelope as codec
+        from mop.common.initialcreate import parse_delivery
+        from mop.node.http_execution import MachineClient, HttpsTransport
+        import uvicorn
+        self.fixture(phase)
+        expected = json.dumps(dict(format=1, tasks=p.encoded(b'tasks'), variables='',
+            provenance='fixture', commit='a'*40, secret_refs=[]), sort_keys=True,
+            separators=(',', ':'), ensure_ascii=True).encode()
+        def verify(value):
+            self.assertEqual(parse_delivery(value, self.metadata), value)
+            self.assertEqual(value['phase'], phase)
+            self.assertEqual(value['role'] is not None, phase in ('initial_identity', 'native_exec'))
+            if phase == 'bootstrap_body':
+                self.assertEqual(set(value['bootstrap']), {'envelope'})
+                raw = p.binary(value['bootstrap']['envelope'])
+                self.assertEqual(raw, expected)
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), self.pin.bootstrap_digest)
+                content = codec.decode(raw, value['bootstrap_digest'])
+                self.assertEqual((content.tasks, content.variables, content.secret_refs), (b'tasks', b'', ()))
+            else:
+                self.assertIsNone(value['bootstrap'])
+        async def body(client, server):
+            direct = await asyncio.to_thread(client.read_initial_launch, self.machine_auth, self.metadata)
+            verify(direct)
+            with tempfile.TemporaryDirectory(prefix='mop-initial-envelope-tls-') as directory:
+                cert, key = Path(directory)/'cert.pem', Path(directory)/'key.pem'
+                subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                    '-keyout', str(key), '-out', str(cert), '-subj', '/CN=localhost',
+                    '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                listener = socket.socket()
+                listener.bind(('127.0.0.1', 0))
+                listener.listen(8)
+                origin = 'https://127.0.0.1:'+str(listener.getsockname()[1])
+                https = uvicorn.Server(uvicorn.Config(get_asgi_application(), lifespan='off', log_level='error',
+                    access_log=False, ssl_certfile=str(cert), ssl_keyfile=str(key)))
+                task = asyncio.create_task(https.serve(sockets=[listener]))
+                machine = MachineClient(HttpsTransport(origin, self.machine_key,
+                    tls=ssl.create_default_context(cafile=str(cert))))
+                try:
+                    async with asyncio.timeout(5):
+                        while not https.started:
+                            if task.done(): await task
+                            await asyncio.sleep(.01)
+                    value = await machine.read_initial_launch(self.metadata)
+                    verify(value)
+                    self.assertEqual(value, direct)
+                finally:
+                    await machine.aclose()
+                    https.should_exit = True
+                    await asyncio.wait_for(task, 5)
+                    listener.close()
+        with override_settings(ALLOWED_HOSTS=['127.0.0.1']):
+            self.run_delivery(body)
+
+    def test_prepare_purpose_roundtrips_actual_socket_and_verified_https(self):
+        self.initial_phase_roundtrip('prepare_body')
+
+    def test_bootstrap_canonical_envelope_roundtrips_actual_socket_and_verified_https(self):
+        self.initial_phase_roundtrip('bootstrap_body')
+
+    def test_identity_purpose_roundtrips_actual_socket_and_verified_https(self):
+        self.initial_phase_roundtrip('initial_identity')
+
+    def test_native_purpose_roundtrips_actual_socket_and_verified_https(self):
+        self.initial_phase_roundtrip('native_exec')
+
+    def test_ready_purpose_roundtrips_actual_socket_and_verified_https(self):
+        self.initial_phase_roundtrip('confirm_ready')
+
+    def bootstrap_provider_fence(self, *, before=False, corrupt=False):
+        from mop.server.controller import bootstrap
+        from mop.server.controller.models import Installation
+        from mop.server.preparation.models import ApprovalRevocation, BootstrapApproval
+        self.fixture('bootstrap_body')
+        row = Installation.objects.get(pk=1)
+        real = bootstrap.secret_provider(self.bootstrap, installation_id=row.identity,
+            expected_root_digest=row.root_digest, key_id='root-v1')
+        decrypts = []
+        def revoke():
+            ApprovalRevocation.objects.create(approval=BootstrapApproval.objects.get(revision_id=self.pin.bootstrap_revision))
+        if before:
+            revoke()
+        class Changing:
+            def decrypt(inner, envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                value = real.decrypt(envelope, context)
+                decrypts.append(True)
+                if corrupt:
+                    # Та же длина и canonical JSON: RetainedSecrets size fence
+                    # не подменяет проверку selected digest в общем codec.
+                    changed = value.replace(base64.b64encode(b'tasks'), base64.b64encode(b'rogue'))
+                    self.assertNotEqual(changed, value)
+                    self.assertEqual(len(changed), len(value))
+                    return changed
+                revoke()
+                return value
+        async def body(client, server):
+            response = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch')
+            self.assertEqual(response.status_code, 403, response.content)
+            for raw in (b'tasks', b'rogue', b'private', b'{}'):
+                self.assertNotIn(base64.b64encode(raw), response.content)
+            self.assertEqual(set(response.json()), {'schema_version', 'error'})
+            self.assertNotIn(b'"envelope":', response.content)
+            if corrupt:
+                self.assertEqual(response.json()['error']['message'], 'bootstrap retained digest mismatch')
+            self.assertEqual(response['Cache-Control'], 'no-store')
+        self.run_delivery(body, provider=Changing())
+        self.assertEqual(decrypts, [] if before else [True])
+
+    def test_bootstrap_approval_revoked_before_provider_discloses_nothing(self):
+        self.bootstrap_provider_fence(before=True)
+
+    def test_bootstrap_approval_revoked_after_real_decrypt_discloses_nothing(self):
+        self.bootstrap_provider_fence()
+
+    def test_bootstrap_corrupted_retained_bytes_disclose_nothing(self):
+        self.bootstrap_provider_fence(corrupt=True)
 
     def test_generic_definition_read_is_not_machine_launch_authority(self):
         self.fixture()
