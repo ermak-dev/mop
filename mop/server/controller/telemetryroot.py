@@ -36,7 +36,8 @@ class CurrentLaunch:
         if current != work:
             raise Conflict('producer addressed launch work changed')
         # Этот public port сверяет durable attempt/token, live stage и четыре
-        # shared resource fences; для произвольной non-create work он закрыт.
+        # fences с tokens/receipts их реальных владельцев стадий. Root не
+        # переопределяет передачу claims; для non-create work port закрыт.
         execution.work.launch_definition(work, attempt_id)
         binding = Assignments().target(work.target_id)
         launch = IncarnationLaunch.objects.select_related('image_revision__policy').get(incarnation_id=work.incarnation_id)
@@ -64,15 +65,6 @@ class CurrentLaunch:
                 or job.modify_index != launch_job.applied_index
                 or not om.ScheduledNode.objects.filter(node_id=work.node_id, scheduler_id=job.scheduler_id).exists()):
             raise Conflict('current fixed launch job or scheduler enrollment changed')
-        # Удерживаемый claim должен принадлежать реально dispatched scheduler
-        # stage этого create, а не строке с совпавшим operation UUID.
-        claims = om.ResourceClaim.objects.filter(operation_id=work.operation_id, released_at=None)
-        for claim in claims.select_related('step'):
-            step = claim.step
-            if (step.operation_id != work.operation_id or step.token != claim.token
-                    or step.attempt_id != claim.token or step.name != 'scheduler_register'
-                    or step.outcome != 'succeeded' or step.quiescent_at is None):
-                raise Conflict('producer launch resource fence token changed')
         if work.not_after <= timezone.now():
             raise Conflict('producer launch deadline expired')
         return attempt_id

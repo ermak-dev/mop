@@ -70,7 +70,8 @@ class LaunchDelivery(TransactionTestCase):
         self.operation = om.Operation.objects.create(actor=self.user,
             actor_binding=_binding(self.access.token_context(self.token)), request_id=uuid4(), digest='a'*64,
             epoch=installation.epoch, restore_generation=RestoreGuard.objects.get(pk=1).generation,
-            action='create', node_id=self.assignment.node_id, target_kind='puppet', target_id=self.assignment.id,
+            action='create', state='running', revision=3,
+            node_id=self.assignment.node_id, target_kind='puppet', target_id=self.assignment.id,
             incarnation_id=self.reserved.incarnation, expected_revision=self.assignment.revision,
             not_after=timezone.now()+timedelta(minutes=2))
         self.operation.projects.set((self.project.id,))
@@ -96,16 +97,20 @@ class LaunchDelivery(TransactionTestCase):
         self.pin = em.IncarnationLaunch.objects.create(incarnation_id=self.reserved.incarnation,
             bootstrap_revision=revision.id, bootstrap_digest=revision.digest,
             image_revision=image, image_digest=image_pin(image.id))
-        # Настоящий scheduler_register держит эти fences до конца create;
-        # узловая стадия получает новый token, но не перевыпускает claims.
+        # После scheduler receipt остаётся только target fence; три machine
+        # claims создаёт настоящий claim ниже. Реальную HTTP-передачу без seeded
+        # scheduler строк проверяет CreateProducerHandoff (#716).
         scheduler = om.Step.objects.get(operation=self.operation, name='scheduler_register')
         scheduler.token = scheduler.attempt_id = uuid4()
-        scheduler.save(update_fields=['token', 'attempt_id'])
-        for key in ('node:'+str(self.assignment.node_id), 'project:'+str(self.project.id),
-                    'puppet:'+str(self.assignment.id), 'target:'+str(self.assignment.id)):
-            om.Resource.objects.get_or_create(key=key)
-            om.ResourceClaim.objects.create(resource_id=key, operation=self.operation,
-                step=scheduler, token=scheduler.token)
+        scheduler.started_at = scheduler.dispatched_at = scheduler.quiescent_at
+        scheduler.save(update_fields=['token', 'attempt_id', 'started_at', 'dispatched_at'])
+        om.EffectReceipt.objects.create(step=scheduler, token=scheduler.token,
+            epoch=self.operation.epoch, node_id=self.assignment.node_id,
+            source_revision=self.operation.expected_revision, decision_revision=2, applied=True)
+        key = 'target:'+str(self.assignment.id)
+        om.Resource.objects.get_or_create(key=key)
+        om.ResourceClaim.objects.create(resource_id=key, operation=self.operation,
+            step=scheduler, token=scheduler.token)
         work = self.execution.poll(self.machine, self.assignment.node_id,
             executor_epoch=self.assignment.current_incarnation.executor_epoch)[0]
         self.attempt = self.execution.claim(self.machine, work, request_id=uuid4())
@@ -278,6 +283,33 @@ class LaunchDelivery(TransactionTestCase):
         from mop.server.operations.models import Step
         wrong = uuid4()
         Step.objects.filter(pk=self.metadata['step_id']).update(token=wrong, attempt_id=wrong)
+        async def body(client, server):
+            response = await asyncio.to_thread(self.post)
+            self.assertEqual(response.status_code, 403, response.content)
+            self.assertNotIn(base64.b64encode(b'private'), response.content)
+        self.run_delivery(body)
+
+    # BUG/HYPOTHESIS (#716): один operation UUID не доказывает token/stage
+    # retained claim. Общий launch locator должен защищать также bytes delivery.
+    # SOLUTION: тот же create-only proof проверяет stage/token/receipt до provider.
+    # RESULT: RED -- 200 вместо 403; GREEN -- 99/99 producer/launch/create PG17.
+    # STATUS: FIXED — see #716
+    def test_launch_rejects_a_retained_scheduler_claim_with_the_wrong_token(self):
+        self.fixture()
+        from mop.server.operations.models import ResourceClaim
+        ResourceClaim.objects.filter(operation=self.operation,
+            resource_id='target:'+str(self.assignment.id)).update(token=uuid4())
+        async def body(client, server):
+            response = await asyncio.to_thread(self.post)
+            self.assertEqual(response.status_code, 403, response.content)
+            self.assertNotIn(base64.b64encode(b'private'), response.content)
+        self.run_delivery(body)
+
+    def test_launch_rejects_a_current_machine_claim_with_the_wrong_token(self):
+        self.fixture()
+        from mop.server.operations.models import ResourceClaim
+        ResourceClaim.objects.filter(operation=self.operation,
+            resource_id='node:'+str(self.assignment.node_id)).update(token=uuid4())
         async def body(client, server):
             response = await asyncio.to_thread(self.post)
             self.assertEqual(response.status_code, 403, response.content)
