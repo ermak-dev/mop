@@ -480,6 +480,67 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await client.aclose()
 
+    async def test_management_context_is_finite_bound_secret_safe_read_not_launch_work(self):
+        # HYPOTHESIS #742: нет strict typed post-activation клиента; scope не Work.
+        # SPEC: exact POST body, no token/owner/path/origin authority, DTO repr safe.
+        # SOLUTION: finite HTTPS method + strict common request/secret-safe DTO.
+        # RESULT: missing client RED; 33/33 GREEN, mismatched scope/plaintext refused.
+        # STATUS: FIXED — see #742.
+        from datetime import timedelta
+        from mop.common.management_context import ManagementRequest, ManagementContext
+        from mop.common.telemetry import SessionScope
+        request = ManagementRequest(SessionScope(uuid4(), uuid4(), uuid4(), uuid4(),
+            uuid4(), 'native-session', uuid4()), 3)
+        context = ManagementContext(request, 'installation-fixture', uuid4(), uuid4(), uuid4(), 12,
+            uuid4(), 7, datetime.now(timezone.utc)+timedelta(minutes=2), 'e'*40)
+        result, calls = context.wire(), []
+        class Response:
+            status = 200
+            content_type = 'application/json'
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            @property
+            def content(self): return self
+            async def iter_chunked(self, size): yield json.dumps(result).encode()
+        class Session:
+            def __init__(self, **kwargs): self.connector = kwargs['connector']
+            def request(self, method, url, **kwargs):
+                calls.append((method, url, kwargs))
+                return Response()
+            async def close(self): await self.connector.close()
+        with patch('aiohttp.ClientSession', Session):
+            transport = HttpsTransport('https://host.test', 'node-credential')
+            client = MachineClient(transport)
+            self.assertTrue(callable(getattr(client, 'read_management_context', None)),
+                'finite management context client is missing')
+            try:
+                received = await client.read_management_context(request.wire())
+                self.assertEqual(received, context)
+                self.assertNotIn(context.token, repr(received))
+                self.assertEqual(calls[0][:2], ('POST', 'https://host.test/api/v1/machine/management-context'))
+                self.assertEqual(calls[0][2]['json'], request.wire())
+                self.assertIsNone(calls[0][2]['params'])
+                for method, path in (('GET', 'management-context'), ('POST', 'management-context/token')):
+                    with self.assertRaises(Refused): await transport.request(method, path)
+                for key in ('token', 'actor_id', 'token_id', 'owner', 'origin', 'path', 'secret_name', 'work'):
+                    with self.subTest(key=key), self.assertRaises((ValueError, Refused)):
+                        await client.read_management_context({**request.wire(), key: 'untrusted'})
+                for key, value in (('subject_id', True), ('token', 'invalid'), ('credential_id', 'bad'),
+                        ('schema_version', True), ('assignment_revision', '0'), ('origin', 'https://foreign.invalid')):
+                    with self.subTest(key=key), self.assertRaises(ValueError):
+                        ManagementContext.parse({**result, key: value}, request)
+                for name in ('target_id', 'incarnation_id', 'node_id', 'executor_epoch', 'producer_epoch', 'epoch'):
+                    result['request'] = {**request.wire(), 'scope': {**request.scope.wire(), name: str(uuid4())}}
+                    with self.subTest(name=name), self.assertRaises(Refused):
+                        await client.read_management_context(request.wire())
+                result['request'] = request.wire()
+                result['token'] = 'response-plaintext-must-not-appear'
+                with self.assertRaises(Refused) as failure:
+                    await client.read_management_context(request.wire())
+                self.assertNotIn(result['token'], str(failure.exception))
+            finally:
+                await client.aclose()
+
     # HYPOTHESIS (#717): transport выбрасывает non-200 до чтения canonical
     # error envelope, и причина безопасного отказа теряется на HTTP503.
     # SOLUTION: bounded canonical error body читается под прежним deadline;

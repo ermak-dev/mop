@@ -176,7 +176,7 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
+                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('POST','management-context'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp
@@ -256,6 +256,19 @@ class MachineClient:
             return parse_delivery(value, work.wire())
         except ValueError as error:
             raise Refused(str(error)) from error
+
+    async def read_management_context(self, metadata):
+        """Read-only после activation; нет Work lease, origin и произвольного Token lookup."""
+        from mop.common.management_context import ManagementRequest, ManagementContext
+        try:
+            request = ManagementRequest.parse(metadata)
+        except ValueError:
+            raise Refused('invalid current runtime management request') from None
+        value = await self.transport.request('POST', 'management-context', payload=request.wire())
+        try:
+            return ManagementContext.parse(value, request)
+        except ValueError:
+            raise Refused('invalid addressed management context response') from None
 
     async def action_input(self, work):
         value = await self.transport.request('GET','work/input',params=dict(schema_version='1',
