@@ -66,7 +66,13 @@ def selected_fixture(case, reserved):
         defaults=dict(desired_image_id=pin.image_revision_id, observed_image_id=pin.image_revision_id, available=True))
     config = case.app.store.create(actor, project_id=case.project.pk, name='native-config',
         kind='file', purpose='project', value=b'{}')
+    from _grant_cases import permit_actions
+    from mop.server.access.rbac import AgentRBACProfiles
+    # Явные fixture admin права, а не kind/owner привилегия production.
+    permit_actions(case.user, 'auth.change_user', 'auth.change_group')
+    passive = AgentRBACProfiles().approve(actor, reserved.definition_id, [])
     selected = configure(actor, project_id=case.project.pk, definition_id=reserved.definition_id,
+        rbac_profile_id=passive.id,
         bootstrap_revision=revision.id, image_id=pin.image_revision_id, source_origin=case.project.origin,
         source_commit='d'*40, source_ref='refs/heads/exact-source', desired_model='fixture-model',
         model_config_digest=hashlib.sha256(b'{}').hexdigest(), consumers=(('model_config', config.active_version_id),))
@@ -93,6 +99,20 @@ def selected_fixture(case, reserved):
         defaults=dict(scheduler_id=binding.scheduler_id, nomad_node_id=uuid4(),
             capabilities=sorted(API_LAUNCH_CAPABILITIES),
             anchor_executable='/installed/sha256-'+'a'*64+'/anchor', anchor_digest='a'*64))
+    # Синтетическая choreography имеет не deterministic create UUID: её SQL
+    # authority явно связывает fixture Grant/reservation. Реальный create/socket
+    # без seeded subject RBAC отдельно проверяет #747 E2E.
+    from django.db import transaction
+    from mop.server.access.rbac import InitialRBACSelection
+    permit_actions(case.user, 'access.provision_agent_rbac')
+    class FixtureRBACAuthority:
+        def resolve(self, current, grant_id):
+            case.assertEqual((current, grant_id), (actor, reserved.id))
+            return InitialRBACSelection(passive.id, passive.digest, selected.policy_id, selected.digest, reservation.id)
+    grant = Grant.objects.get(pk=reserved.id)
+    with transaction.atomic():
+        case.app.grants.provision_subject_rbac(actor, grant.id, expected_revision=grant.revision,
+            authority=FixtureRBACAuthority())
     binding.reservation, binding.applied_index = reservation, 1
     binding.dispatched_job = dict(Constraints=[dict(LTarget='${node.unique.id}', Operand='=', RTarget=str(scheduler_node.nomad_node_id))])
     binding.save()
@@ -338,7 +358,7 @@ class LaunchDelivery(TransactionTestCase):
             definition_id=self.reserved.definition_id, bootstrap_revision=self.pin.bootstrap_revision,
             image_id=image.pk, source_origin=self.project.origin, source_commit='f'*40,
             source_ref='refs/heads/new', desired_model=admitted.desired_model,
-            model_config_digest=admitted.model_config_digest, consumers=refs)
+            model_config_digest=admitted.model_config_digest, consumers=refs, rbac_profile_id=admitted.rbac_profile_id)
         metadata = self.initial_metadata()
         async def body(client, server):
             direct = await asyncio.to_thread(client.read_initial_launch, self.machine_auth, self.metadata)

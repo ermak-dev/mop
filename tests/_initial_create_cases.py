@@ -670,6 +670,7 @@ class InitialCreatePhases(TransactionTestCase):
             commit='e'*40, secret_refs=(boot.active_version_id,))
         self.preparation.approve(self.actor, revision.id)
         configure(self.actor, project_id=self.project.pk, definition_id=self.definition.id,
+            rbac_profile_id=self.selection.rbac_profile_id,
             bootstrap_revision=revision.id, image_id=self.image.id, source_origin=self.selection.source_origin,
             source_commit=self.selection.source_commit, source_ref=self.selection.source_ref,
             desired_model=self.selection.desired_model, model_config_digest=self.selection.model_config_digest,
@@ -758,7 +759,8 @@ class InitialCreatePhases(TransactionTestCase):
         later = configure(self.actor, project_id=self.project.pk, definition_id=self.definition.id,
             bootstrap_revision=self.revision.id, image_id=self.image.id, source_origin=self.project.origin,
             source_commit='f'*40, source_ref='refs/heads/later', desired_model='later-model',
-            model_config_digest=first.model_config_digest, consumers=first.consumers)
+            model_config_digest=first.model_config_digest, consumers=first.consumers,
+            rbac_profile_id=first.rbac_profile_id)
         self.assertNotEqual(first.policy_id, later.policy_id)
         response = self.submit(body)
         self.assertEqual(response.status_code, 202, response.content)

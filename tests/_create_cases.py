@@ -136,7 +136,11 @@ class CreateVertical(TransactionTestCase):
             self.model_config = SecretStore(provider=provider, authorizer=auth.Access()).create(self.actor,
                 project_id=self.project.pk, name='native-model-config', kind='file', purpose='project',
                 value=b'{"model":"fixture-model"}')
+            from mop.server.access.rbac import AgentRBACProfiles
+            # Choreography выбирает явный approved passive baseline, не prod default.
+            self.passive_rbac = AgentRBACProfiles().approve(self.actor, self.definition.id, [])
             self.selection = configure(self.actor, project_id=self.project.pk, definition_id=self.definition.id,
+                rbac_profile_id=self.passive_rbac.id,
                 bootstrap_revision=self.revision.id, image_id=self.image.id, source_origin=self.project.origin,
                 source_commit='d'*40, source_ref='refs/heads/exact-source', desired_model='fixture-model',
                 model_config_digest=hashlib.sha256(b'{"model":"fixture-model"}').hexdigest(),
