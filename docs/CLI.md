@@ -975,6 +975,20 @@ the driver's remote shell; a nonzero child exit remains nonzero. Does not copy o
 credentials and does not create, restart or stop the body.
 ```
 
+#### mop driver hold-probe
+
+```text
+mop driver hold-probe: check the passive installed anchor in an owned container
+
+Runs the production standalone artifact with root and nonroot UIDs in a fresh
+Python 3.12 Docker container, with no network, pool, host credentials or writable
+host mounts. Checks exact hold argv, signals, hostile environment, bytes/hash,
+root ownership, modes and symlink refusals. Root runs only the passive hold,
+never a native runtime. Removes the owned container even after a failed check.
+Requires an existing Docker installation and a mop source checkout with tests.
+This is not an installer, runtime binding, allocation or native readiness check.
+```
+
 #### mop driver list
 
 ```text
