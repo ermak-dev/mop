@@ -76,7 +76,7 @@ class CurrentLaunchAuthority:
             value = await client.read_initial_launch(self.registration.work.wire())
             await gate()
             if any(value[name] != getattr(self.registration, name) for name in
-                    ('bootstrap_revision', 'bootstrap_digest', 'image_digest')):
+                    ('bootstrap_revision', 'bootstrap_digest', 'image_digest', 'display_name')):
                 raise Refused('current launch approval changed registration pins')
             inputs = ActionInput(value['git_name'], value['git_email'])
             inputs.check(self.registration.work.action)
