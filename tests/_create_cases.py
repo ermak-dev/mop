@@ -188,6 +188,177 @@ class CreateVertical(TransactionTestCase):
         self.assertEqual(Assignment.objects.get(pk=second.json()['operation']['target']['id']).display_name,
                          'pu-vertical-2')
 
+    # HYPOTHESIS (#704): expires_at пересчитывается после committed reserve,
+    # пока Operation ещё нет; неизменный envelope перестаёт быть повтором.
+    # Digest всего create должен сохраняться до первого credential-вызова:
+    # иначе другой node/deadline примет тот же грант после потери ответа.
+    # SOLUTION: CreateReservation фиксирует digest/expiry в независимом COMMIT
+    # до I/O; SQL unique actor/request и общий admission lock сводят повторы.
+    # RESULT: PG17 RED -- потеря ответа/падение/гонка дают Conflict,
+    # чужой digest принят (202 вместо 409). GREEN -- 27 проверок create,
+    # schema и reserve; точное равенство credential intent не менялось.
+    # STATUS: FIXED — see #704
+    def reservation_rows(self):
+        from django.contrib.auth import get_user_model
+        from rest_framework.authtoken.models import Token
+        from mop.server.access import models as a
+        return (get_user_model().objects.count(), a.AgentProfile.objects.count(), Token.objects.count(),
+                a.CredentialBinding.objects.count(), a.CreationIntent.objects.count(), a.Grant.objects.count())
+
+    def lose_reservation_reply(self, body):
+        from unittest.mock import patch
+        reserve = self.issuer.reserve_grant
+
+        def lose(*args, **kwargs):
+            reserve(*args, **kwargs)
+            raise OSError('reservation reply lost after commit')
+
+        with patch.object(self.issuer, 'reserve_grant', side_effect=lose), \
+                self.assertRaisesRegex(OSError, 'reservation reply lost after commit'):
+            self.submit(body)
+        from mop.server.access.models import Grant
+        from mop.server.operations.models import Operation
+        self.assertFalse(Operation.objects.exists())
+        return Grant.objects.select_related('intent').get()
+
+    def test_lost_reservation_reply_retries_the_same_immutable_create(self):
+        from unittest.mock import patch
+        from mop.server.controller.createbinding import service
+        from mop.server.sessions.models import Assignment
+        self.ready()
+        body, now = self.body(), timezone.now()
+        with patch('mop.server.operations.launch.timezone.now', return_value=now):
+            grant = self.lose_reservation_reply(body)
+        before = self.reservation_rows()
+        # Новый handler после падения процесса, не cache прежнего экземпляра.
+        self.ops = service(grants=self.grants, issuer=self.issuer, scheduler=self.scheduler)
+        with patch('mop.server.operations.launch.timezone.now', return_value=now + timedelta(seconds=45)):
+            response = self.submit(body)
+        self.assertEqual(response.status_code, 202, response.content)
+        operation = response.json()['operation']
+        row = Assignment.objects.get(pk=operation['target']['id'])
+        self.assertEqual((row.grant_id, row.id, row.current_incarnation_id, row.expires_at),
+            (grant.id, grant.intent.target_id, grant.intent.incarnation, grant.intent.expires_at))
+        self.assertEqual(self.reservation_rows(), before)
+        self.assertEqual(self.rows(), (1, 1, 1, 1))
+        from mop.server.operations.models import CreateReservation
+        pinned = CreateReservation.objects.get()
+        self.assertEqual((pinned.request_id, pinned.expires_at), (UUID(body['request_id']), grant.intent.expires_at))
+        self.assertEqual(self.submit(body).json()['operation']['id'], operation['id'])
+        self.assertEqual(self.reservation_rows(), before)
+
+    def test_changed_create_envelope_after_lost_reservation_reply_refuses(self):
+        from unittest.mock import patch
+        from mop.server.catalog.models import Node, NodeProject
+        self.ready()
+        body, now = self.body(), timezone.now()
+        other = Node.objects.create(name='another', driver='host', ssh_host='example.invalid',
+            control_origin='https://example.invalid', lan_address='example.invalid', bootstrap_address='example.invalid')
+        NodeProject.objects.create(node=other, project=self.project)
+        # Оба узла допустимы: отказ должен быть по digest, не из-за пинов.
+        from mop.server.controller.createbinding import enroll_node
+        from mop.server.spec import API_LAUNCH_CAPABILITIES
+        from mop.server.catalog.models import NodeImage
+        from mop.server.sessions.models import NodeExecutor
+        original = NodeImage.objects.get(node=self.node, project=self.project)
+        NodeImage.objects.create(node=other, project=self.project, desired_image_id=original.desired_image_id,
+            observed_image_id=original.observed_image_id, available=True)
+        NodeExecutor.objects.create(node=other, executor_epoch=self.boot)
+        enroll_node(other.pk, scheduler_id=self.scheduler.scheduler_id, nomad_node_id=uuid4(),
+                    capabilities=API_LAUNCH_CAPABILITIES)
+        with patch('mop.server.operations.launch.timezone.now', return_value=now):
+            self.lose_reservation_reply(body)
+        before, calls = self.reservation_rows(), list(self.issuer.calls)
+        changed = (dict(body, not_after=(now + timedelta(minutes=3)).isoformat()),
+                   dict(body, params=dict(body['params'], node_id=str(other.pk))))
+        for envelope in changed:
+            # Тот же clock: один лишь другой digest обязан отказать даже
+            # при точном совпадении срока существующего credential intent.
+            with self.subTest(envelope=envelope), \
+                    patch('mop.server.operations.launch.timezone.now', return_value=now):
+                response = self.submit(envelope)
+                self.assertEqual(response.status_code, 409, response.content)
+                self.assertEqual(response.json()['error']['code'], 'request_conflict')
+        self.assertEqual(self.reservation_rows(), before)
+        self.assertEqual(self.issuer.calls, calls)
+        self.assertEqual(self.rows(), (0, 1, 1, 0))
+
+    def test_crash_before_compose_retries_the_original_reservation(self):
+        from unittest.mock import patch
+        from mop.server.access.models import Grant
+        from mop.server.sessions.models import Assignment
+        self.ready()
+        body, now = self.body(), timezone.now()
+        with patch('mop.server.operations.launch.timezone.now', return_value=now), \
+                patch.object(self.ops.creates, '_compose', side_effect=OSError('crash before compose')), \
+                self.assertRaisesRegex(OSError, 'crash before compose'):
+            self.submit(body)
+        grant = Grant.objects.select_related('intent').get()
+        self.assertIsNotNone(grant.credential_version_id)
+        before = self.reservation_rows()
+        with patch('mop.server.operations.launch.timezone.now', return_value=now + timedelta(seconds=30)):
+            response = self.submit(body)
+        self.assertEqual(response.status_code, 202, response.content)
+        row = Assignment.objects.get(pk=response.json()['operation']['target']['id'])
+        self.assertEqual((row.grant_id, row.expires_at), (grant.id, grant.intent.expires_at))
+        self.assertEqual(self.reservation_rows(), before)
+        self.assertEqual(self.rows(), (1, 1, 1, 1))
+
+    def test_overlapping_retry_recovers_a_committed_reservation_without_operation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier, Event, local
+        from unittest.mock import patch
+        from django.db import connections
+        from mop.common.credentials import Credential
+        from mop.server.operations.commands import parse_create
+        from mop.server.sessions.models import Assignment
+        self.ready()
+        body, now = self.body(), timezone.now()
+        command = parse_create(self.project.pk, body)
+        reserve = self.issuer.reserve_grant
+        reached, committed, first_reached, clock = Barrier(2), Event(), Event(), local()
+
+        def overlap(*args, **kwargs):
+            if clock.first:
+                first_reached.set()
+            reached.wait(timeout=5)
+            if clock.first:
+                receipt = reserve(*args, **kwargs)
+                committed.set()
+                raise OSError('reservation reply lost after commit')
+            self.assertTrue(committed.wait(timeout=5))
+            return reserve(*args, **kwargs)
+
+        def submit(first):
+            clock.first, clock.now = first, now + timedelta(seconds=0 if first else 20)
+            try:
+                try:
+                    return self.ops.creates.submit(self.actor, command, credential=Credential('token', self.key))
+                except OSError as error:
+                    self.assertTrue(first)
+                    self.assertEqual(str(error), 'reservation reply lost after commit')
+                    return None
+            finally:
+                connections.close_all()
+
+        with patch('mop.server.operations.launch.timezone.now', side_effect=lambda: getattr(clock, 'now', now)), \
+                patch.object(self.issuer, 'reserve_grant', side_effect=overlap), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(submit, True)
+            self.assertTrue(first_reached.wait(timeout=5))
+            second = pool.submit(submit, False)
+            self.assertIsNone(first.result(timeout=15))
+            operation = second.result(timeout=15)
+        self.assertEqual(self.rows(), (1, 1, 1, 1))
+        from mop.server.access import models as a
+        from rest_framework.authtoken.models import Token
+        grant = a.Grant.objects.select_related('intent').get()
+        row = Assignment.objects.get(pk=operation['target']['id'])
+        self.assertEqual((row.grant_id, row.expires_at), (grant.id, grant.intent.expires_at))
+        self.assertEqual(a.CreationIntent.objects.count(), 1)
+        self.assertEqual(Token.objects.filter(user__kind='agent').count(), 1)
+        self.assertEqual(a.GrantEvent.objects.filter(action='reserve').count(), 1)
+
     def test_create_requires_its_own_permission(self):
         self.ready()
         from mop.server.access import models as a

@@ -160,7 +160,7 @@ class CreatePuppets:
             raise Denied('current human credential required')
         _independent()
         intent = command.intent
-        # 1. Без записей: replay, привязки, права, пины -- отказ ничего не оставляет.
+        # 1. Replay, привязки, права, пины; затем COMMIT неизменного intent до I/O.
         with self.ops._transaction():
             installation = self.ops._installation(intent.epoch)
             current_actor(actor, grants=self.ops.grants)
@@ -168,8 +168,15 @@ class CreatePuppets:
             if old is not None:
                 return self.ops._disclose(actor, old)
             self._admit(actor, command, installation)
+            # Тот же actor/request -- один digest и один срок, даже если reserve
+            # уже зафиксирован, а ответ или процесс потерян до _compose (#704).
+            reservation, _ = m.CreateReservation.objects.get_or_create(
+                actor_id=actor.user_id, request_id=intent.request_id,
+                defaults={'digest': digest(command), 'expires_at': timezone.now() + LIFETIME})
+            if reservation.digest != digest(command):
+                raise Refused('request_conflict')
+            expires_at = reservation.expires_at
         target_id, incarnation_id = identities(actor, intent.request_id)
-        expires_at = timezone.now() + LIFETIME
         # 2. Агент и грант -- идемпотентны по target/request; вне SQL, от имени человека.
         profile = self.grants.register_agent(actor, project_id=intent.project_id, target_id=target_id,
                                              definition_id=command.definition_id)

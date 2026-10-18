@@ -222,6 +222,19 @@ class Evidence(models.Model):
         default_permissions = ()
 
 
+class CreateReservation(Evidence):
+    """Неизменный intent до credential I/O: падение до Operation не теряет
+    digest запроса и серверный срок гранта. Это не допуск к исполнению."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    request_id = models.UUIDField()
+    digest = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+
+    class Meta(Evidence.Meta):
+        constraints = [models.UniqueConstraint(fields=('actor', 'request_id'), name='create_reservation_actor_request')]
+
+
 class EffectReceipt(Evidence):
     step = models.OneToOneField(Step, on_delete=models.PROTECT)
     token = models.UUIDField()
