@@ -749,6 +749,113 @@ class InitialCreatePhases(TransactionTestCase):
         self.assertEqual(claims.count(), 4)
         self.assertEqual(set(claims.values_list('token', flat=True)), set(outcomes)-{None})
 
+    # BUG #753: concurrent claim превращает временный отказ restore fence в
+    # постоянное «maintenance required», хотя guard остаётся ready.
+    # HYPOTHESIS: законный владелец guard может держать SQL admission дольше
+    # lock_timeout конкурента; safe boundary теряет тип и причину SQL-отказа.
+    # Здесь планировщик потоков удерживает уже проверенный первый claim до
+    # исхода второго: настоящий PG lock_timeout, без SQL/HTTP budget overrides.
+    def test_contended_planned_claim_is_bounded_conflict_not_restore_maintenance(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from unittest.mock import patch
+        import time
+        from django.db import connections
+        from mop.server.controller.models import RestoreGuard
+        from mop.server.operations.models import ResourceClaim
+        from mop.server.sessions.models import AssignmentAttempt
+        from mop.server.sessions.services import Conflict
+        row = self.create()
+        execution, actor = self.machine()
+        work, = execution.poll(actor, self.node.pk, executor_epoch=self.boot)
+        fenced, contender_done, guard_started = Event(), Event(), Event()
+        own_pids, waits, failures = {}, [], []
+        config = connections['default'].settings_dict
+        self.assertRegex(config['NAME'], r'^test_mop_[0-9a-f]{32}$')
+        request_id = uuid4()
+        claimed = execution.work.claimed
+        def hold_claim(value, attempt_id):
+            claimed(value, attempt_id)
+            fenced.set()
+            self.assertTrue(contender_done.wait(timeout=5), 'contender exceeded admission bound')
+        def owner():
+            try:
+                connections['default'].ensure_connection()
+                own_pids['owner'] = connections['default'].connection.info.backend_pid
+                return execution.claim(actor, work, request_id=request_id)
+            finally:
+                connections.close_all()
+        def contender():
+            try:
+                self.assertTrue(fenced.wait(timeout=5), 'owner did not reach claimed fence')
+                started = time.monotonic()
+                def diagnostic(execute, sql, params, many, context):
+                    phase = 'restore-guard' if 'controller_restoreguard' in str(sql).lower() else 'admission'
+                    statement_started = time.monotonic()
+                    if phase == 'restore-guard':
+                        own_pids['contender'] = context['connection'].connection.info.backend_pid
+                        guard_started.set()
+                    try:
+                        return execute(sql, params, many, context)
+                    except Exception as error:
+                        # До RuntimeError/Unavailable sanitation; намеренно без
+                        # SQL, params, exception text и credential metadata.
+                        underlying = error.__cause__ or error
+                        failures.append(dict(phase=phase,
+                            pid=context['connection'].connection.info.backend_pid,
+                            elapsed=round(time.monotonic()-statement_started, 3),
+                            category=type(underlying).__name__, sqlstate=getattr(underlying, 'sqlstate', None)))
+                        raise
+                try:
+                    with connections['default'].execute_wrapper(diagnostic):
+                        execution.claim(actor, work, request_id=uuid4())
+                except Exception as error:
+                    return error, time.monotonic()-started
+                self.fail('concurrent claim must not acquire a second attempt')
+            finally:
+                contender_done.set()
+                connections.close_all()
+        import json
+        import psycopg
+        with psycopg.connect(host=config['HOST'], port=config['PORT'], user=config['USER'],
+                password=config['PASSWORD'], dbname=config['NAME'], autocommit=True,
+                connect_timeout=5, options='-c default_transaction_read_only=on -c statement_timeout=1000',
+                **{key: value for key, value in config.get('OPTIONS', {}).items() if key.startswith('ssl')}) as observer, \
+                patch.object(execution.work, 'claimed', side_effect=hold_claim), ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = pool.submit(owner), pool.submit(contender)
+            try:
+                self.assertTrue(guard_started.wait(timeout=5), 'contender did not request restore fence')
+                expires = time.monotonic()+3
+                while time.monotonic() < expires and not contender_done.is_set():
+                    sample = observer.execute('SELECT pid, wait_event_type, wait_event, pg_blocking_pids(pid) '
+                        'FROM pg_stat_activity WHERE datname = current_database() AND pid = %s',
+                        (own_pids['contender'],)).fetchone()
+                    if sample and sample[1] == 'Lock':
+                        waits.append(sample)
+                        break
+                    contender_done.wait(.02)
+                error, elapsed = second.result(timeout=10)
+                attempt = first.result(timeout=10)
+            finally:
+                print('claim owned diagnostic:', json.dumps(dict(failures=failures, waits=waits)), flush=True)
+        self.assertEqual(len(waits), 1, 'fixture must observe the actual PostgreSQL lock wait')
+        self.assertEqual(waits[0][3], [own_pids['owner']])
+        self.assertEqual([(item['phase'], item['category'], item['sqlstate']) for item in failures],
+            [('restore-guard', 'LockNotAvailable', '55P03')])
+        self.assertLess(elapsed, 5, 'real contention must retain the production lock bound')
+        self.assertIsInstance(error, Conflict, str(error))
+        self.assertIn('lock timeout', str(error))
+        self.assertNotIn('maintenance', str(error))
+        self.assertEqual(RestoreGuard.objects.get(pk=1).state, 'ready')
+        self.assertEqual(AssignmentAttempt.objects.filter(operation_id=row.id).count(), 1)
+        claims = ResourceClaim.objects.filter(operation=row, released_at=None)
+        self.assertEqual(claims.count(), 4)
+        self.assertEqual(set(claims.values_list('token', flat=True)), {attempt.id})
+        replay = execution.claim(actor, work, request_id=request_id)
+        self.assertEqual(replay.id, attempt.id)
+        self.assertEqual(AssignmentAttempt.objects.filter(operation_id=row.id).count(), 1)
+        self.assertEqual(set(claims.values_list('token', flat=True)), {attempt.id})
+
     def test_lost_reservation_retry_keeps_its_policy_when_configured_selection_changes(self):
         from mop.server.controller.initialselection import configure
         from mop.server.operations.models import Operation, CreateReservation
