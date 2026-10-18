@@ -259,9 +259,29 @@ test:py3.12:
             self.assertEqual(ids & self.REQUIRED_ROOT_ONLY_IDS, set(),
                              f'{name} still carries root-only cases')
             suite_ids |= ids
-        # Перенос, не потеря: суммарный счёт случаев #669 сохранён.
-        self.assertEqual(len(suite_ids) + len(gate_ids), 66)
+        # #711: перенос, не потеря -- сохраняются точные исходные ID #669,
+        # а не общий счётчик, который запрещал добавлять socket checks.
+        from _credential_inventory import missing_original
+        self.assertEqual(missing_original(suite_ids | gate_ids), set())
         self.assertEqual(suite_ids & gate_ids, set())
+
+    # HYPOTHESIS (#711): exact count66 падал после добавления новых случаев;
+    # замена на >=66 скрыла бы удаление исходной проверки новой с другим ID.
+    # SOLUTION: baseline точных ID из4f60fb0a, проверяется его сохранность.
+    # RESULT: RED94!=66; добавления разрешены, каждое исходное удаление видно.
+    # STATUS: FIXED — see #711
+    def test_uid_inventory_allows_growth_but_detects_every_original_loss(self):
+        from _credential_inventory import ORIGINAL_CREDENTIAL_IDS, RENAMED_CREDENTIAL_IDS, missing_original
+        self.assertEqual(len(ORIGINAL_CREDENTIAL_IDS), 66)
+        added = {('FutureCredentialCases', 'test_new_boundary')}
+        self.assertEqual(missing_original(ORIGINAL_CREDENTIAL_IDS | added), set())
+        for original in ORIGINAL_CREDENTIAL_IDS:
+            with self.subTest(original=original):
+                self.assertEqual(missing_original((ORIGINAL_CREDENTIAL_IDS - {original}) | added), {original})
+        for original, successor in RENAMED_CREDENTIAL_IDS.items():
+            renamed = (ORIGINAL_CREDENTIAL_IDS - {original}) | {successor}
+            self.assertEqual(missing_original(renamed), set())
+            self.assertEqual(missing_original(renamed - {successor}), {original})
 
     # HYPOTHESIS: узкий root gate обязан прогоняться обязательно, иначе
     # непривилегированный CI снова зелёный без реальной UID-проверки (#674).
