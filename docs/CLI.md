@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
+Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -176,20 +176,28 @@ The response describes observed controller readiness, not puppet health.
 #### mop landing
 
 ```text
-landing token of this project: mop landing [take <puppet>|give|show] [--force]
+mop landing <show|take|give|recover-take|recover-give> <project-id> [--epoch id --expected-revision N] [--owner-id N]
 
-  mop landing                   who holds the token, if anyone
-  mop landing take pu-mop-3     grant the token to pu-mop-3 before it lands
-  mop landing give              take it back on the puppet's report
-  mop landing take pu-mop-3 --force
-                                take it from a gone master; says whose it was
-  mop landing give --force      release a gone master's token
+Show one authorized project landing resource over HTTPS. An absent token is
+explicitly unmaterialized at revision 0, not held and not silently created.
+Take and give require an explicit canonical project id, installation epoch
+and exact decimal-string revision. Ownership is the actual current human Actor,
+not a puppet name, delegated owner, git identity or local project context.
+Give releases only that human's own token. There is no force takeover.
 
-Exactly one puppet between merge and push per project: two parallel pushes
-race, and the second bounces non-fast-forward. take refuses while another
-master holds the token, naming who and since when; asking again for the same
-puppet is not an error. The holder is your login on the bus; a holder that
-went away is released with --force.
+A successful SQL CAS response is printed only after the server commit. A lost
+or malformed response triggers only a GET of the same project/epoch. Recovery
+compares the exact successor revision and human owner (or null after give).
+It is a current observation, not a historical command receipt; even a matching
+observation returns exit 3 with command_outcome unknown. Never retake blindly.
+For a later read-only recovery, recover-take/recover-give also require the
+original actual Actor's --owner-id. A later revision, even for that same owner,
+does not match. No Operation/request-id or node anchor is created.
+
+The explicit HTTPS origin/CA and transient Django token follow mop health;
+no .env, legacy server context, bus or local login store is used.
+MCP conservatively requires all three canonical permissions and a human actor;
+the server checks the individual read/acquire/release permission on each call.
 ```
 
 #### mop list
