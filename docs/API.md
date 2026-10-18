@@ -418,6 +418,77 @@ Preserve safe library refusal reasons. Raw untrusted exceptions are translated
 once at their adapter, not repeatedly sanitized into an empty generic error.
 A failed HTTP response is not proof the external effect failed.
 
+## Finite operation audit query (#626)
+
+`GET /api/v1/audit` is a read-only projection of the existing immutable
+`Operations.AuditEvent` evidence. It does not admit operations, repair state,
+create a second journal or run effects. The mounted legacy `/api/journal` is not
+an alias: `coverage` is exactly `["operation_audit"]`, not all historical bus
+messages, terminal traffic or private command contents. The frozen contract is
+also typed in [API.schema.yaml](API.schema.yaml); frontend migration uses this
+contract rather than guessing a legacy-compatible payload.
+
+Only these optional query fields are accepted, once each:
+
+| Field | Contract |
+| --- | --- |
+| `project_id` | Canonical UUID of an explicit project intersection; never grants visibility |
+| `limit` | Canonical decimal integer 1..100, default 100 |
+| `cursor` | Opaque authenticated keyset cursor, 1..4096 characters; use the same filter and limit |
+
+Every read requires the canonical `operations.view_audit` Django permission and
+current credential, identity, RBAC and project scope. Actor kind or `is_staff`
+is not installation-wide authority. Explicit all-project membership or Django
+superuser status can provide current project scope, not a bypass of credential
+checks. With no project filter, at most 100 currently authorized projects may
+be materialized; a larger scope returns 503 `unavailable` asking for an explicit
+project, never a truncated successful history. No current authorized scope is
+403 `permission_denied`; an absent or unauthorized explicit project is 404
+`not_found`. A valid scope with no matching evidence returns an empty page.
+
+Visibility is decided in SQL **before** keyset pagination and `LIMIT`: every
+pinned project of an operation must be currently authorized. A multi-project
+event is disclosed whole, with all sorted `project_ids`, or not at all; a
+project filter does not remove unauthorized project IDs from a visible row.
+Puppet events on a shared node use the puppet operation's projects, not its
+neighbors. Node-wide commands additionally require all current node projects.
+Service enrollment restricts reads to its bound node even when another node
+belongs to the same project. Delegated credentials additionally require the
+current grant/owner/subject chain and exact target/incarnation. A build
+operation's stored `node_id` is only an anchor, not proof of its complete build
+node scope: node-bound service readers do not receive build audit events.
+Project-authorized non-node readers see build targets as the actual project.
+
+A successful response has exactly these fields:
+
+```json
+{"schema_version":1,"epoch":"<uuid>","results":[{"id":"<positive-decimal>","operation_id":"<uuid>","revision":"<positive-decimal>","created_at":"2026-10-18T10:05:00Z","action":"restart","state":"refused","code":"dispatch_declined","reason":"target does not receive dispatch","target":{"kind":"puppet","id":"<uuid>","incarnation":"<uuid>"},"node_id":"<uuid>","project_ids":["<uuid>"]}],"next_cursor":null,"coverage":["operation_audit"]}
+```
+
+`id` identifies immutable audit evidence, not the operation. `revision` is the
+evidence's operation revision, encoded as a decimal string; `created_at` is UTC
+RFC 3339. `target.kind` is `node`, `puppet` or `project`; `incarnation` is a UUID
+for a bound puppet or null. Action/state/code/reason come from safe operation
+evidence, including refusal reasons. No actor binding, request parameters,
+private message plaintext/ciphertext, root/secret references, connection details,
+environment, arbitrary payload or raw provider error is included. DTOs are
+materialized immutable application values, not live ORM objects.
+
+Ordering is descending `(created_at, id)` with an exclusive keyset boundary.
+`next_cursor` is null only when the query has no further authorized matching row.
+This is finite browsing, not a retained snapshot or gap-free realtime replay:
+newer concurrent inserts appear on refreshing the first page, not in later
+older pages; newly committed older evidence can appear below the boundary.
+Cursors expire after 300 seconds and bind the installation epoch, live
+credential/authorization proof, complete allowed scope, selected project and
+limit. Tampering, expiry or a changed binding requires 410 `reset_required`
+with `reset: {"required": true}`; the client restarts without a cursor. A current
+authentication/permission revocation can instead refuse with 401/403. Scope and
+installation/restore authority are checked again after materialization; no stale
+successful page is returned when that check observes a change. Unavailable
+restore/database authority returns 503. All successes and refusals are
+`Cache-Control: no-store`. Mutating methods return 405.
+
 ## Durable operations implementation checkpoint (#625)
 
 The first ORM/DRF vertical is **node drain/enable**, not a production replacement

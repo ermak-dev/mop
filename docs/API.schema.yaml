@@ -8,6 +8,101 @@ info:
     is enforced by tests and docs/API.md. Every operation can refuse with the shared
     error envelope: schema_version plus error{code, message, retryable}.'
 paths:
+  /api/v1/audit:
+    get:
+      operationId: api_v1_audit_retrieve
+      description: Read-only immutable operation audit, authorized before keyset pagination.
+        Requires operations.view_audit and current complete project/node/grant scope.
+        Coverage is operation_audit, not legacy bus messages. Responses are no-store;
+        invalid or stale cursors require a reset (410).
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        description: Opaque descending keyset cursor; expires after 300 seconds.
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 100
+        description: Maximum audit items; the same limit is required on continuation.
+      - in: query
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        description: Optional explicit project intersection; never adds authority.
+      tags:
+      - api-v1-audit
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
   /api/v1/auth/login:
     post:
       operationId: api_v1_auth_login_create
@@ -2328,6 +2423,160 @@ paths:
           description: ''
 components:
   schemas:
+    ActionEnum:
+      enum:
+      - drain
+      - enable
+      - restart
+      - build
+      - stop_job
+      - send
+      - dispatch
+      - wipe
+      - delete
+      - create
+      - update
+      type: string
+      description: |-
+        * `drain` - drain
+        * `enable` - enable
+        * `restart` - restart
+        * `build` - build
+        * `stop_job` - stop_job
+        * `send` - send
+        * `dispatch` - dispatch
+        * `wipe` - wipe
+        * `delete` - delete
+        * `create` - create
+        * `update` - update
+    AuditItem:
+      type: object
+      properties:
+        id:
+          type: string
+          maxLength: 19
+          pattern: ^[1-9][0-9]*$
+        operation_id:
+          type: string
+          format: uuid
+        revision:
+          type: string
+          maxLength: 19
+          pattern: ^[1-9][0-9]*$
+        created_at:
+          type: string
+          format: date-time
+        action:
+          $ref: '#/components/schemas/ActionEnum'
+        state:
+          $ref: '#/components/schemas/AuditItemStateEnum'
+        code:
+          type: string
+          maxLength: 64
+        reason:
+          type: string
+          maxLength: 512
+        target:
+          $ref: '#/components/schemas/AuditTarget'
+        node_id:
+          type: string
+          format: uuid
+        project_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+      required:
+      - action
+      - code
+      - created_at
+      - id
+      - node_id
+      - operation_id
+      - project_ids
+      - reason
+      - revision
+      - state
+      - target
+    AuditItemStateEnum:
+      enum:
+      - accepted
+      - running
+      - reconciling
+      - succeeded
+      - refused
+      - failed
+      - partial
+      - unknown
+      - expired
+      - cancelled
+      type: string
+      description: |-
+        * `accepted` - accepted
+        * `running` - running
+        * `reconciling` - reconciling
+        * `succeeded` - succeeded
+        * `refused` - refused
+        * `failed` - failed
+        * `partial` - partial
+        * `unknown` - unknown
+        * `expired` - expired
+        * `cancelled` - cancelled
+    AuditPage:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditItem'
+        next_cursor:
+          type: string
+          nullable: true
+          maxLength: 4096
+        coverage:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoverageEnum'
+          minItems: 1
+          maxItems: 1
+      required:
+      - coverage
+      - epoch
+      - next_cursor
+      - results
+      - schema_version
+    AuditTarget:
+      type: object
+      properties:
+        kind:
+          $ref: '#/components/schemas/AuditTargetKindEnum'
+        id:
+          type: string
+          format: uuid
+        incarnation:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+      - id
+      - incarnation
+      - kind
+    AuditTargetKindEnum:
+      enum:
+      - node
+      - puppet
+      - project
+      type: string
+      description: |-
+        * `node` - node
+        * `puppet` - puppet
+        * `project` - project
     BuildCommand:
       type: object
       properties:
@@ -2363,6 +2612,10 @@ components:
       - policy_id
       - request_id
       - target_nodes
+    CoverageEnum:
+      type: string
+      enum:
+      - operation_audit
     CreateCommand:
       type: object
       properties:
@@ -2495,7 +2748,7 @@ components:
         user_id:
           type: integer
         kind:
-          $ref: '#/components/schemas/KindEnum'
+          $ref: '#/components/schemas/IdentityReplyKindEnum'
         human_owner_id:
           type: integer
           nullable: true
@@ -2511,7 +2764,7 @@ components:
       - kind
       - node_id
       - user_id
-    KindEnum:
+    IdentityReplyKindEnum:
       enum:
       - human
       - service
@@ -2565,7 +2818,7 @@ components:
         epoch:
           type: string
         state:
-          $ref: '#/components/schemas/StateEnum'
+          $ref: '#/components/schemas/OperationStateEnum'
         revision:
           type: string
         code:
@@ -2616,6 +2869,26 @@ components:
       required:
       - epoch
       - operation
+    OperationStateEnum:
+      enum:
+      - accepted
+      - running
+      - reconciling
+      - succeeded
+      - refused
+      - failed
+      - partial
+      - unknown
+      type: string
+      description: |-
+        * `accepted` - accepted
+        * `running` - running
+        * `reconciling` - reconciling
+        * `succeeded` - succeeded
+        * `refused` - refused
+        * `failed` - failed
+        * `partial` - partial
+        * `unknown` - unknown
     ProjectBody:
       type: object
       properties:
@@ -2888,26 +3161,6 @@ components:
       - next_cursor
       - results
       - snapshot_id
-    StateEnum:
-      enum:
-      - accepted
-      - running
-      - reconciling
-      - succeeded
-      - refused
-      - failed
-      - partial
-      - unknown
-      type: string
-      description: |-
-        * `accepted` - accepted
-        * `running` - running
-        * `reconciling` - reconciling
-        * `succeeded` - succeeded
-        * `refused` - refused
-        * `failed` - failed
-        * `partial` - partial
-        * `unknown` - unknown
     TokenReply:
       type: object
       properties:
