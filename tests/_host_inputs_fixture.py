@@ -442,6 +442,55 @@ class ActualPrivateInputTests(unittest.TestCase):
         self.assertEqual(result['error'], 'Refused')
         self.assertNotIn('execute-root', result['reason'])
 
+    def test_body_checks_selected_bootstrap_digest_after_opaque_root_snapshot(self):
+        # HYPOTHESIS #751: transport hash верен и root копирует bytes, но body
+        # обязан отдельно отказать envelope с чужими tasks при прежнем pin.
+        # SOLUTION: общий strict codec только в body, root не вызывает parser.
+        # RESULT: настоящий UID body принимает original и отказывает mixed
+        # envelope после успешного opaque root snapshot; 25/25 checks GREEN.
+        # STATUS: FIXED — see #751; YAML не разбирается и не исполняется.
+        import base64
+        from mop.common import bootstrap_envelope as codec
+        a, s, value = selected('bootstrap_body')
+        work = replace(a.work, epoch=self.s.epoch, node_id=self.s.node_id, executor_epoch=self.s.executor_epoch)
+        a = replace(a, work=work)
+        s = replace(s, epoch=work.epoch, node_id=work.node_id, executor_epoch=work.executor_epoch)
+        value['work'] = work.wire()
+        descriptor = self.write(a, s, value)
+        with patch('mop.common.initialcreate.parse_delivery', side_effect=AssertionError('root parsed bootstrap')):
+            receipt = self.owner.snapshot(NODE, descriptor, a)
+        original = self.read(descriptor, a)
+        self.assertTrue(original['ok'], original)
+        delivered = original['value']['value']
+        content = codec.decode_base64(delivered['bootstrap']['envelope'], delivered['bootstrap_digest'])
+        self.assertEqual(content.tasks, b'- command: never-root-executed\n')
+        self.assertEqual(content.variables, b'opaque: project-yaml\n')
+        self.assertTrue(self.owner.cleanup_input(receipt))
+        self.assertTrue(self.owner.cleanup_snapshot(receipt))
+        descriptor = self.write(a, s, value)
+        source = self.ingress/descriptor.filename
+        outer = json.loads(source.read_bytes())
+        payload = json.loads(outer['payload'])
+        bootstrap = json.loads(base64.b64decode(payload['bootstrap']['envelope']))
+        bootstrap['tasks'] = base64.b64encode(b'private-unapproved-bootstrap').decode()
+        payload['bootstrap']['envelope'] = base64.b64encode(self.m.canonical_json(bootstrap)).decode()
+        outer['payload'] = self.m.canonical_json(payload).decode()
+        outer['payload_digest'] = hashlib.sha256(outer['payload'].encode()).hexdigest()
+        raw = self.m.canonical_json(outer)
+        source.write_bytes(raw)
+        descriptor = replace(descriptor, sha256=hashlib.sha256(raw).hexdigest())
+        # Другой exact snapshot, не подмена уже удерживаемого receipt.
+        self.owner.close()
+        self.owner = self.store()
+        self.addCleanup(self.owner.close)
+        with patch('mop.common.initialcreate.parse_delivery', side_effect=AssertionError('root parsed bootstrap')):
+            self.owner.snapshot(NODE, descriptor, a)
+        result = self.read(descriptor, a)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error'], 'Refused')
+        self.assertIn('digest mismatch', result['reason'])
+        self.assertNotIn('private-unapproved-bootstrap', result['reason'])
+
     def test_retained_cleanup_after_work_expiry_is_not_body_retirement(self):
         descriptor = self.write()
         receipt = self.owner.snapshot(NODE, descriptor, self.a)
