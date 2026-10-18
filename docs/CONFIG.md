@@ -256,6 +256,59 @@ does not select a user or grant. The service constructs ActorContext through
 Access, never from caller owner/project/actor claims. No new bearer, JWT, shared
 service password, credential file or persisted socket session is introduced.
 
+#### Installer-bound rootless clients (#644)
+
+Fresh `bootstrap --role web|worker` now resolves the explicit
+`identities.credentials` OS account from the installation specification and pins
+its numeric, non-root UID. Both roles receive only these additional nonsecret
+coordinates in their private bootstrap:
+
+```json
+"credential_service": {
+  "path": "/var/lib/fresh-controller/credential-socket/service.sock",
+  "server_uid": 1944
+}
+```
+
+The example path is derived from `paths.state` plus
+`credential-socket/service.sock`, not another configurable registry or an
+environment override. The UID is an example, not a default: the bootstrap command
+requires the declared account to exist. Library renderers must supply its exact
+`credential_uid`; they cannot guess it from the caller UID. The finite bootstrap
+schema allows this field only for web/worker, accepts exactly `path` and
+`server_uid`, and rejects noncanonical/oversized paths, root/invalid UIDs and
+embedded tokens, passwords or root references. Maintenance, credential and
+gateway bootstraps do not receive a client binding. A missing field in an
+isolated/bootstrap fixture remains explicitly unbound; a malformed field fails
+closed. Neither loader nor factory opens the service socket or proves readiness.
+
+The review artifact and explicit OS provisioner use one shared-directory
+definition: `state/credential-socket` is owned by `identities.credentials`, mode
+`0750`, with web/worker as the only additional members of its group. Generated
+web/worker unit artifacts include that supplementary group and hide the private
+credential configuration/state trees along with maintenance/root/backup trees.
+The separate credential private directories stay `0700`; group membership does
+not grant root/bootstrap access. A separately provisioned credential process must
+select its group for socket `0660` and allow the exact web/worker peer UIDs. No
+service is started, no stale socket is removed, and full `apply` remains refused.
+The service's separate DB login/bootstrap, runtime root custody, socket lifecycle
+and enrolled activation-worker credential still require explicit composition.
+In particular the existing four-login PostgreSQL budget does not silently absorb
+a fifth credential service.
+
+`controller.adminservices.credential_client()` constructs the bounded client
+from the validated bootstrap, with a five-second deadline and the exact pinned
+service UID. Existing create admission, protected project-secret replacement
+and addressed-launch consumers of that factory therefore use the real socket transport when bound,
+without importing a crypto provider or reading a root. Construction means
+configured capability, not a reachable/authorized service: per-call endpoint,
+peer, Access and resource checks still decide the result. No human token is
+retained in the factory or copied to worker/unit/node artifacts.
+`GrantActivator` still requires an explicitly supplied enrolled service token;
+this wiring neither mints one nor derives it from a human owner or a DB login.
+It does not bind scheduler, physical node scope, readiness, retirement, node
+observer or worker lifecycle handlers.
+
 Rootless `mop.common.credential_client.CredentialClient(path, server_uid=UID)` is stdlib
 only. It verifies the service peer UID and protected endpoint and exposes typed
 `create`, `stage`, `update`, `issue_addressed`, `issue_rotation`,
@@ -297,14 +350,17 @@ mismatched assignment is refused before provider work and checked again before
 the retained commit. Bundles must be published through Grants, which seals their
 complete normalized sets; manually populated approval rows are not authority.
 
-Activation and transport retirement remain explicitly unbound: a current read
-projection is not a trusted activation or retirement receipt. Addressed and
-rotation issuance also remain denied by `AwaitAssignment`, even for a permitted
-human. They require an authenticated enrolled node, current assignment, exact
-role/digest/incarnation, active grant/ancestors, current owner rights and pinned
-required-name set, not merely the new current-binding adapter. The public
-SecretStore checks full Secrets delivery action/scope before/after crypto; a
-binding alone is not permission. No node-addressed proof or receipt is fabricated.
+#643 supplies a finite `activate_grant` command and `GrantActivator` adapter for
+claimed create, plus `read_launch` for exact current machine Work. The production
+activation worker still needs its explicitly enrolled service credential; a
+current read projection or configured client is not an activation/readiness or
+retirement receipt. Generic addressed and rotation issuance remain closed without
+a concrete current-resource delivery gate. They require an authenticated enrolled
+node, current assignment, exact role/digest/incarnation, active grant/ancestors,
+current owner rights and pinned required-name set, not merely a current-binding
+adapter. The public SecretStore checks full Secrets delivery action/scope
+before/after crypto; a binding alone is not permission. Transport retirement is
+not supplied by this client wiring, and no node-addressed proof is fabricated.
 
 The implemented rootless aggregate boundary publishes/reads exact encrypted role
 and Preparation bytes, approves them, and reserves grants with the real
@@ -316,26 +372,23 @@ epoch / restore-generation fence at prepare, aggregate commit and read release.
 A changed root during crypto cannot merely fail after committing a stale bundle.
 Receipts contain metadata and immutable references, never the grant token.
 
-This initial #669 stage does not wire the production web/worker HTTP routes,
-node-addressed delivery, #643 admissions, or anonymous LDAP service bind / scoped
-Controller integration consumers. Those non-human consumers need explicit
-purpose plus OS-peer authority and a concrete current-resource query; forwarding
-an arbitrary human owner ID as actor authority is not permitted. They remain
-closed rather than weakening admission or giving ordinary roles a CryptoProvider.
-#644 separately owns service identities, units and DB provisioning.
+The initial #669 socket boundary is now consumed by #643 create admissions and
+addressed launch, and #644 binds their rootless production factory as described
+above. This is not full installation acceptance: credential DB/root provisioning,
+scheduler authority, physical node integration, worker startup and retirement
+remain their own explicit gates. Anonymous LDAP service bind and other scoped
+Controller integration consumers also need an accepted named purpose, OS-peer
+authority and a concrete current-resource query; forwarding an arbitrary human
+owner ID is not permitted. They stay closed rather than giving ordinary roles a
+CryptoProvider.
 
-This adapter does not provide a role-create admission workflow. Public
-`Assignments.create` currently takes a grant ID while generating the target ID;
-`Grants.reserve` takes the target/incarnation while generating the grant ID.
-Connecting those identities for a new target still needs an accepted owning
-admission use case. The current Operations vertical is node drain/enable, not a
-generic role-create/stage handler. Socket tests with persisted matching
-assignments prove the binding checks, not that missing end-to-end workflow.
-Grants also requires the registered `execution.create_puppet` permission (the
-execution app installs `execution.*` directly since #685, with no logical
-alias). The socket fixture explicitly supplies it. Production admission must own its
-registration rather than treating a superuser or caller-selected owner as a
-substitute for a missing capability.
+#643 owns the role-create workflow connecting reserved target/incarnation/grant
+identities, scheduler registration and machine steps. Socket tests with persisted
+matching assignments prove the credential binding, not a deployed end-to-end
+installation. Grants also requires the registered `execution.create_puppet`
+permission (the execution app installs `execution.*` directly since #685, with no
+logical alias). A superuser or caller-selected owner is not a substitute for a
+missing capability, scheduler binding or service enrollment.
 
 Owned source-only socket checks can exercise actual distinct OS UIDs with
 `mop dev controller --postgres 17 --check credential_service --cross-uid`

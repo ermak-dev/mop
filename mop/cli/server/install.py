@@ -119,7 +119,13 @@ def _main(argv):
             password = private_bytes(args.password_file).decode('ascii').rstrip('\n')
         except UnicodeError:
             raise RuntimeError('database password file requires ascii text') from None
-        document = install.bootstrap_document(spec, args.role, password=password)
+        credential_uid = None
+        if args.role in install.CREDENTIAL_CLIENT_ROLES:
+            try:
+                credential_uid = pwd.getpwnam(dict(spec.identities)['credentials']).pw_uid
+            except KeyError:
+                raise RuntimeError('credential service OS identity is not provisioned') from None
+        document = install.bootstrap_document(spec, args.role, password=password, credential_uid=credential_uid)
         destination = dict(spec.paths)['configuration'] + '/' + args.role + '/bootstrap.json'
         # Проверяем ключи до записи; signing key копирует защищённый OS provisioner,
         # не runtime и не root из HTTP. Существующие bytes никогда не заменяются.

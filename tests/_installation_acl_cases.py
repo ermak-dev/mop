@@ -97,7 +97,7 @@ class InstallationACL(unittest.TestCase):
         source = Path(__file__).resolve().parents[1]
         for role in installation.RUNTIME_ROLES:
             boot = self.base / ('bootstrap-' + role + '.json')
-            document = installation.bootstrap_document(self.spec, role, password=self.passwords[role])
+            document = installation.bootstrap_document(self.spec, role, password=self.passwords[role], credential_uid=os.geteuid())
             key = Path(document['django_key'])
             key.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             key.write_bytes(b'd' * 64)
