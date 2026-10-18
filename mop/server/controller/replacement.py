@@ -20,6 +20,45 @@ from .runtime import operation_installation_state
 STAGES = ('prepare_launch', 'scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')
 
 
+def validate_plan(row):
+    """Проверка real admission plan; seeded prerequisite не считается планом.
+
+    Не выбирает новые refs/образы/approval. Source не меняется до отдельного
+    scheduler/cutover proof, destination ещё не активная инкарнация.
+    """
+    from mop.server.catalog.models import NodeImage
+    from mop.server.operations.launch import image_pin
+    from mop.server.sessions.models import IncarnationLaunch
+    plan, old, new = row.replacementplan, row.replacementbinding, row.restartbinding
+    assignment = Assignment.objects.filter(pk=row.target_id).first()
+    launch = IncarnationLaunch.objects.filter(incarnation_id=old.source_incarnation_id).first()
+    job = operations.ScheduledPuppet.objects.filter(target_id=row.target_id).first()
+    if assignment is None or launch is None or job is None:
+        return False
+    return (
+        (assignment.current_incarnation_id, assignment.project_id, assignment.node_id, assignment.owner_id,
+         assignment.role, assignment.bundle_digest, assignment.grant_id, assignment.revision, assignment.generation,
+         assignment.expires_at) == (old.source_incarnation_id, plan.project_id, plan.node_id, plan.owner_id,
+         plan.role, plan.bundle_digest, old.source_grant_id, old.source_revision, old.source_generation,
+         old.source_expires_at)
+        and (row.incarnation_id, row.expected_revision, row.node_id, new.project_id, new.executor_epoch,
+             new.owner_id, new.generation, new.role, new.bundle_digest, new.grant_id) ==
+            (plan.destination_incarnation_id, plan.destination_revision, plan.node_id, plan.project_id,
+             plan.source_executor_epoch, plan.owner_id, plan.destination_generation, plan.role, plan.bundle_digest,
+             plan.destination_grant_id)
+        and (plan.destination_revision, plan.destination_generation) == (old.source_revision+1, old.source_generation+1)
+        and (launch.bootstrap_revision, launch.bootstrap_digest, launch.image_revision_id, launch.image_digest) ==
+            (plan.source_bootstrap_revision, plan.source_bootstrap_digest, plan.source_image_id, plan.source_image_digest)
+        and (plan.bootstrap_revision, plan.bootstrap_digest) == (old.policy_version_id, old.policy_digest)
+        and plan.image_digest == image_pin(plan.image_id)
+        and (job.incarnation_id, job.epoch, job.restore_generation, job.scheduler_id, job.job_id,
+             job.namespace, job.modify_index) == (old.source_incarnation_id, row.epoch, row.restore_generation,
+             plan.scheduler_id, plan.job_id, plan.namespace, plan.modify_index)
+        and NodeImage.objects.filter(node_id=plan.node_id, project_id=plan.project_id, available=True,
+            desired_image_id=plan.image_id, observed_image_id=plan.image_id).exists()
+        and not ExecutionIncarnation.objects.filter(pk=plan.destination_incarnation_id).exists())
+
+
 class ReplacementPreparation:
     """Request-local locator proof, перечитываемый до и после provider wait.
 
@@ -57,6 +96,8 @@ class ReplacementPreparation:
             old = operations.ReplacementBinding.objects.filter(operation=row).first()
             new = operations.RestartBinding.objects.filter(operation=row).first()
             assignment = Assignment.objects.get(pk=source.target_id)
+            if operations.ReplacementPlan.objects.filter(operation=row).exists() and not validate_plan(row):
+                raise access.Denied('immutable admitted replacement plan changed')
             if (old is None or new is None
                     or (old.source_incarnation_id, old.source_grant_id, old.source_revision, old.source_generation,
                         old.source_expires_at) != (source.incarnation_id, source.grant_id, source.revision,

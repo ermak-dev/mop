@@ -1975,6 +1975,92 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: ''
+  /api/v1/puppets/{target_id}/commands/update:
+    post:
+      operationId: api_v1_puppets_target_id_commands_update_submit
+      description: Admits an update plan and synchronously prepares its exact replacement
+        grant. Source assignment and agent credentials are unchanged; prepared is
+        not physical completion. Missing replacement or continuation support refuses
+        before effects. Unknown preparation is replay-only.
+      parameters:
+      - in: path
+        name: target_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-puppets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
   /api/v1/puppets/{target_id}/commands/wipe:
     post:
       operationId: api_v1_puppets_target_id_commands_wipe_submit
@@ -2491,6 +2577,12 @@ components:
         target:
           type: object
           additionalProperties: true
+        source:
+          type: object
+          additionalProperties: true
+        destination:
+          type: object
+          additionalProperties: true
         steps:
           type: array
           items:
@@ -2834,6 +2926,40 @@ components:
       description: |-
         * `puppet.changed` - puppet.changed
         * `puppet.deleted` - puppet.deleted
+    UpdateCommand:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        request_id:
+          type: string
+        incarnation:
+          type: string
+        expected_revision:
+          type: string
+        not_after:
+          type: string
+        params:
+          type: object
+          properties:
+            fresh:
+              type: boolean
+              default: false
+            origin:
+              type: string
+              maxLength: 2048
+              description: Optional source origin of the same Catalog project.
+          additionalProperties: false
+      required:
+      - epoch
+      - expected_revision
+      - incarnation
+      - not_after
+      - params
+      - request_id
     Usage:
       type: object
       properties:

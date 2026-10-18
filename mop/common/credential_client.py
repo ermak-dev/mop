@@ -147,6 +147,11 @@ class CredentialClient:
             {'grant_id': str(grant_id), 'expected_revision': expected_revision})
         return self._result(p.GrantReceipt, result)
 
+    def prepare_replacement(self, auth: p.Credential, operation_id: UUID) -> p.GrantReceipt:
+        """Один claimed prepare по locator, без retry и сохранения human credential."""
+        result = self._invoke(auth, p.Command.PREPARE_REPLACEMENT, {'operation_id': str(operation_id)})
+        return self._result(p.GrantReceipt, result)
+
     def activate_grant(self, auth: p.Credential, grant_id: UUID, *, expected_revision: int) -> p.GrantReceipt:
         """Только claimed create: authority service enrollment проверяет сервер."""
         result = self._invoke(auth, p.Command.ACTIVATE_GRANT,
