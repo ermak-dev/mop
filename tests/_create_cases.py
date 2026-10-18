@@ -108,7 +108,7 @@ class CreateVertical(TransactionTestCase):
             # Настройки пула и доверенная привязка узла к планировщику (#643):
             # рендер спеки берёт home/user/datacenter и id узла в Nomad отсюда.
             from mop.server.controller.createbinding import enroll_node
-            from mop.server.spec import API_LAUNCH_CAPABILITIES
+            from mop.server.launch_spec import API_LAUNCH_CAPABILITIES
             catalog = Catalog(authorizer=auth.Access())
             catalog.set_installation_settings(self.actor, {'pool_home': '/srv/mop', 'pool_user': 'mop',
                 'pool_datacenter': 'owned'}, expected_revision=catalog.get_installation_settings(self.actor).revision)
@@ -255,7 +255,7 @@ class CreateVertical(TransactionTestCase):
         NodeProject.objects.create(node=other, project=self.project)
         # Оба узла допустимы: отказ должен быть по digest, не из-за пинов.
         from mop.server.controller.createbinding import enroll_node
-        from mop.server.spec import API_LAUNCH_CAPABILITIES
+        from mop.server.launch_spec import API_LAUNCH_CAPABILITIES
         from mop.server.catalog.models import NodeImage
         from mop.server.sessions.models import NodeExecutor
         original = NodeImage.objects.get(node=self.node, project=self.project)
@@ -708,6 +708,36 @@ class CreateRegistration(TransactionTestCase):
         self.assertEqual(self.peer.posts, [])
         self.assertNotIn(target, self.peer.jobs)
 
+    # HYPOTHESIS (#714): modern composition импортирует старый spec даже
+    # при явных SQL settings; прогретый sys.modules мог спрятать эту связь.
+    # SOLUTION: enrollment и LaunchSpecs берут renderer из launch_spec.
+    # STATUS: FIXED — see #714
+    def test_enrollment_and_registration_do_not_import_legacy_spec(self):
+        import builtins
+        from importlib.util import resolve_name
+        from unittest.mock import patch
+        from mop.common import config
+        from mop.server.controller.createbinding import enroll_node
+        from mop.server.launch_spec import API_LAUNCH_CAPABILITIES
+        operation, target, _ = self.launch()
+        original_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            module = resolve_name('.' * level + name, globals['__package__']) if level else name
+            for imported in (module, *(module + '.' + item for item in fromlist or ())):
+                if imported in ('mop.server.spec', 'mop.server.grants', 'mop.server.nomad', 'nomad'):
+                    raise AssertionError('modern create imported legacy authority: ' + imported)
+            return original_import(name, globals, locals, fromlist, level)
+
+        with (patch.object(config, 'get', side_effect=AssertionError('legacy config.get')),
+              patch.object(config, 'num', side_effect=AssertionError('legacy config.num')),
+              patch.object(builtins, '__import__', guarded_import)):
+            enroll_node(self.node.pk, scheduler_id=self.adapter.scheduler_id,
+                nomad_node_id=self.nomad_node, capabilities=API_LAUNCH_CAPABILITIES)
+            self.ops.launches.run(operation)
+        self.assertEqual(len(self.peer.posts), 1)
+        self.assertIn(target, self.peer.jobs)
+
     def test_register_puts_the_rendered_job_once_and_enrolls_it(self):
         operation, target, incarnation = self.launch()
         self.assertIn(operation, self.ops.pending(limit=8, handlers=('scheduler_register',)))
@@ -800,14 +830,23 @@ class CreateRegistration(TransactionTestCase):
     # STATUS: FIXED — see #707
     def test_register_recovery_uses_dispatched_spec_after_template_change(self):
         from unittest.mock import patch
-        from mop.server import spec
-        from mop.server.operations.models import Operation, ScheduledPuppet
+        from mop.server import launch_spec
+        from mop.server.operations.models import Operation, ScheduledPuppet, Step
         operation, target, _ = self.launch()
         self.peer.lose_post = True
         self.ops.launches.run(operation)
         self.assertEqual(Operation.objects.get(pk=operation).state, 'unknown')
         original = self.peer.jobs[target]['Meta'].copy()
-        with patch.object(spec, 'API_WRAPPER', spec.API_WRAPPER + '\n# updated controller template\n'):
+        # #714: меняем владельца шаблона, не совместимый alias старого spec.
+        with patch.object(launch_spec, 'API_WRAPPER', launch_spec.API_WRAPPER + '\n# updated controller template\n'):
+            row = Operation.objects.get(pk=operation)
+            current = self.ops.launches.specs.render(self.ops.targets.current(UUID(target)),
+                epoch=row.epoch, restore_generation=row.restore_generation, operation_id=row.pk,
+                step_id=Step.objects.get(operation=row, name='apply_identity').pk,
+                not_after=row.not_after, definition_id=row.createbinding.definition_id,
+                scheduler_id=row.createbinding.scheduler_id)['Job']
+            self.assertNotEqual(current['Meta']['mop.launch_template'], original['mop.launch_template'])
+            self.assertEqual(current['TaskGroups'][0]['Tasks'][0]['Config']['args'][-1], launch_spec.API_WRAPPER)
             self.ops.launches.reconcile(self.actor, operation)
         self.assertEqual((self.step(operation).outcome, self.step(operation).evidence),
                          ('succeeded', 'job-registered'))
