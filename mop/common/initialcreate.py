@@ -116,9 +116,12 @@ def parse_delivery(value, work):
     elif role is not None:
         raise p.CredentialError('role bytes outside initial identity or native phase')
     if phase == 'bootstrap_body':
-        p.exact(bootstrap, ('tasks', 'variables'))
-        p.binary(bootstrap['tasks'])
-        p.binary(bootstrap['variables'])
+        from .bootstrap_envelope import BootstrapError, decode_base64
+        p.exact(bootstrap, ('envelope',))
+        try:
+            decode_base64(bootstrap['envelope'], value['bootstrap_digest'])
+        except BootstrapError as error:
+            raise p.CredentialError(str(error)) from None
     elif bootstrap is not None:
         raise p.CredentialError('bootstrap bytes outside bootstrap phase')
     consumers = value['consumers']

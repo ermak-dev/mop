@@ -4,6 +4,8 @@ from datetime import datetime
 import re
 from uuid import UUID
 
+from mop.common.bootstrap_envelope import RevisionContent
+
 
 @dataclass(frozen=True)
 class RunBinding:
@@ -32,15 +34,6 @@ class RevisionInfo:
     digest: str
     task_size: int
     vars_size: int
-
-
-@dataclass(frozen=True)
-class RevisionContent:
-    tasks: bytes = field(repr=False)
-    variables: bytes = field(repr=False)
-    provenance: str = field(repr=False)
-    commit: str
-    secret_refs: tuple[UUID, ...]
 
 
 @dataclass(frozen=True)

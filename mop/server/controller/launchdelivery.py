@@ -161,7 +161,7 @@ def deliver_initial(application, actor, metadata):
             bootstrap_revision=pins[0], bootstrap_digest=pins[1], image_digest=pins[2],
             **gate.layout, selection=selected.public(), git_name=identity.name, git_email=identity.email,
             role=None if content is None else dict(manifest=json.loads(content.manifest), prompt=p.encoded(content.prompt)),
-            bootstrap=None if bootstrap is None else dict(tasks=p.encoded(bootstrap.tasks), variables=p.encoded(bootstrap.variables)),
+            bootstrap=None if bootstrap is None else dict(envelope=p.encoded(bootstrap)),
             consumers=consumers)
     except ObjectDoesNotExist:
         raise access.Denied('current initial launch work is unavailable') from None
