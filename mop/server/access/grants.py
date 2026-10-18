@@ -352,16 +352,15 @@ class Grants:
             raise ValueError('complete launch role binding required')
         scope = RetentionScope(binding.project_id, binding.human_owner_id, definition_id, 'policy')
         gate = _LaunchDefinitionAuthority(self, binding, definition_id, authority)
-        gate.check(actor, scope)
         row = m.AgentDefinitionVersion.objects.get(pk=definition_id)
+        # RetainedSecrets.read сам вызывает полный gate до и после provider.
+        # Повторять эти обходы снаружи -- лишние SQL round trips, не новый fence.
         retained = RetainedSecrets(provider=self.secrets.provider, authority=gate)
         try:
             raw = retained.read(actor, scope, row.content_version_id)
         except SecretCryptoError:
             raise auth.Denied('retained agent definition authentication failed') from None
-        result = self._decode_definition(row, raw)
-        gate.check(actor, scope)
-        return result
+        return self._decode_definition(row, raw)
 
     def _decode_definition(self, row, raw):
         try:
