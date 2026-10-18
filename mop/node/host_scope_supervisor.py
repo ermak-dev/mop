@@ -10,16 +10,26 @@ from pathlib import Path
 import socket
 import stat
 import struct
+from uuid import uuid4
+
+from mop.node.host_backend import BackendRequest, BackendState, Identity, Process
 
 from mop.node.host_scope import (
     FRAME_LIMIT, Facts, Installed, OsAdapter, Refused, Request, StartUnknown, Unknown, decode, encode,
 )
 
 
-def peer_uid(sock):
+def peer_credentials(sock):
     if sock is None or sock.family != socket.AF_UNIX:
         raise Refused('Unix peer credentials required')
-    return struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1]
+    pid, uid, gid = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    if pid <= 0 or uid < 0 or gid < 0:
+        raise Refused('actual Unix peer PID/UID/GID required')
+    return pid, uid, gid
+
+
+def peer_uid(sock):
+    return peer_credentials(sock)[1]
 
 
 async def read_frame(reader):
@@ -41,7 +51,7 @@ class _Action:
 
 
 class Supervisor:
-    def __init__(self, installed: Installed, adapter: OsAdapter, *, capacity=256, timeout=10.):
+    def __init__(self, installed: Installed, adapter: OsAdapter, *, capacity=256, timeout=10., identity=None):
         if (type(installed) is not Installed or type(capacity) is not int
                 or not 1 <= capacity <= 4096 or not .05 <= timeout <= 30):
             raise Refused('bounded installed HOST supervisor required')
@@ -54,6 +64,60 @@ class Supervisor:
         self._fences = set()
         self._closed = False
         self.last_error = None
+        if identity is not None and type(identity) is not Identity:
+            raise Refused('immutable installed HOST identity required')
+        self.identity = identity
+        # Только этот процесс создаёт nonce, никогда request/DB/локальный marker.
+        self._backend_epoch = str(uuid4()) if identity is not None else None
+        self._process = Process.current() if identity is not None else None
+        self._bound_epoch = None
+        self._confirmed = False
+        self._binding = asyncio.Lock()
+        self._owned = {}
+
+    def _state(self, mode='query'):
+        return BackendState(self.identity, self._backend_epoch, self._bound_epoch, self._process, mode)
+
+    async def backend(self, request):
+        """Process-local bind; SQL authority проверяет node bridge, не root."""
+        if self._closed or self.identity is None:
+            raise Refused('installed HOST backend authority is unavailable')
+        if type(request) is not BackendRequest or request.identity != self.identity:
+            raise Refused('HOST installed node/installation identity mismatch')
+        if Process.current() != self._process:
+            raise Refused('HOST backend kernel process identity changed')
+        if request.action == 'backend_query':
+            return self._state()
+        async with self._binding:
+            if self._bound_epoch is not None:
+                if request.epoch != self._bound_epoch or request.executor_epoch != self._backend_epoch:
+                    raise Refused('HOST backend installation/executor epoch mismatch; no automatic rebind or CAS retry')
+                if (self.active or self._receipts or self.last_error or self._fences - self._owned.keys()):
+                    raise Unknown('HOST backend has unresolved action ownership; resume unavailable')
+                self._confirmed = True
+                return self._state('resume')
+            if request.action != 'backend_bind':
+                raise Refused('HOST backend requires one-time live installation binding')
+            if request.empty is not True or self.active or self._receipts or self._fences or self.last_error:
+                raise Unknown('HOST first binding requires empty SQL and physical ownership')
+            inventory = await self.adapter.startup_inventory()
+            if type(inventory) is not tuple or inventory:
+                # Даже empty чужой unit не становится owned по совпавшему имени.
+                raise Unknown('HOST old physical scopes unresolved; no adoption or automatic retirement')
+            self._bound_epoch = request.epoch
+            return self._state('first')
+
+    def _scope_authority(self, request):
+        if self.identity is None:
+            return
+        if request.action == 'start':
+            s = request.scope
+            if (not self._confirmed or s.node_id != self.identity.node_id
+                    or s.epoch != self._bound_epoch or s.executor_epoch != self._backend_epoch):
+                raise Refused('HOST start authority does not match bound node/installation/backend epoch')
+        elif self._owned.get(request.scope) != request.reference:
+            # Cleanup exact old known reference — не право начать новую incarnation.
+            raise Refused('HOST reference is not retained backend ownership')
 
     async def _perform(self, request):
         facts = await self.adapter.inspect(request.scope)
@@ -94,6 +158,8 @@ class Supervisor:
         snapshot = facts.verify(self.installed, request.scope, request.reference)
         if request.action == 'retire' and snapshot.populated:
             raise Unknown('HOST containment still populated; retirement unknown')
+        if request.action == 'start':
+            self._owned[request.scope] = snapshot.reference
         return snapshot
 
     async def execute(self, uid, request, *, receipt=False):
@@ -103,6 +169,7 @@ class Supervisor:
             raise Refused('typed finite HOST request required')
         if self._closed:
             raise Refused('HOST supervisor is closing')
+        self._scope_authority(request)
         pending = self._receipts.get(request.scope)
         if request.scope in self.active or pending is not None and pending.abandoned:
             raise Refused('HOST scope action already active')
@@ -274,15 +341,46 @@ class SocketServer:
         self._handlers.add(task)
         task.add_done_callback(self._handlers.discard)
 
+    async def _handle_backend(self, reader, writer, raw, peer):
+        """Finite authority session: root peer/process stays pinned across bind."""
+        if os.geteuid() != 0 or self.supervisor.identity is None:
+            raise Refused('root installed HOST backend authority is unavailable')
+        process = Process.read(peer[0])
+        for _ in range(4):
+            request = BackendRequest.decode(raw)
+            if (peer_credentials(writer.get_extra_info('socket')) != peer
+                    or Process.read(peer[0]) != process):
+                raise Refused('HOST node peer process changed')
+            try:
+                async with asyncio.timeout(min(5., self.supervisor.timeout)):
+                    state = await self.supervisor.backend(request)
+                value = dict(schema_version=1, request_id=request.request_id,
+                             status='ok', authority=state.wire(), error=None)
+            except (Refused, Unknown) as error:
+                value = dict(schema_version=1, request_id=request.request_id,
+                    status='refused' if isinstance(error, Refused) else 'unknown',
+                    authority=None, error=str(error))
+            async with asyncio.timeout(5.):
+                writer.write(encode(value)+b'\n')
+                await writer.drain()
+                # Disconnect не закрывает backend и не отзывает known ACK scopes.
+                raw = await read_frame(reader)
+
     async def _handle(self, reader, writer):
         request = snapshot = None
         acknowledged = False
         try:
-            uid = peer_uid(writer.get_extra_info('socket'))
+            peer = peer_credentials(writer.get_extra_info('socket'))
+            uid = peer[1]
             if uid != self.supervisor.installed.node_uid:
                 raise Refused('HOST socket peer is not the installed node-service UID')
             async with asyncio.timeout(self.timeout):
-                request = Request.decode(await read_frame(reader))
+                raw = await read_frame(reader)
+            value = decode(raw)
+            if type(value) is dict and value.get('action') in ('backend_query', 'backend_bind', 'backend_confirm'):
+                await self._handle_backend(reader, writer, raw, peer)
+                return
+            request = Request.decode(raw)
             snapshot = await self.supervisor.execute(uid, request, receipt=True)
             async with asyncio.timeout(self.timeout):
                 writer.write(encode(dict(schema_version=1, request_id=request.request_id,

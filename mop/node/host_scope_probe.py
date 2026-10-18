@@ -55,7 +55,7 @@ def snapshot_sources(source, context):
     (context/'package/mop/__init__.py').write_text('')
     (package/'__init__.py').write_text('')
     for filename in ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
-                     'host_scope_systemd.py', 'http_execution.py'):
+                     'host_scope_systemd.py', 'http_execution.py', 'host_backend.py'):
         shutil.copyfile(source/'mop/node'/filename, package/filename)
     common = context/'package/mop/common'
     common.mkdir()

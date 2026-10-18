@@ -1051,7 +1051,7 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
         snapshot = getattr(host_scope_probe, 'snapshot_sources', None)
         self.assertTrue(callable(snapshot), 'scope probe needs a testable explicit source snapshot')
         modules = ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
-                   'host_scope_systemd.py', 'http_execution.py')
+                   'host_scope_systemd.py', 'http_execution.py', 'host_backend.py')
         helpers = (('_host_scope_runner.py', 'runner.py'), ('_host_scope_entry.py', 'entry.py'),
                    ('_host_scope_acceptance.py', 'acceptance.py'))
         source_files = ['mop/node/'+name for name in modules] + ['mop/common/initialcreate.py']
