@@ -62,7 +62,7 @@ class CredentialSocketCases(TransactionTestCase):
         self.path = str(Path(self.directory.name) / 'credential.sock')
         self.bootstrap = {**settings.BOOTSTRAP, 'role': 'credential'}
 
-    async def exercise(self, body, *, application, peers=None, timeout=2):
+    async def exercise(self, body, *, application, peers=None, timeout=2, client_timeout=3):
         from mop.server.controller.runtime import Runtime
         runtime = Runtime(database_limit=2, queue_limit=0)
         # Composition создаётся до event loop; I/O adapter не является DB snapshot.
@@ -70,7 +70,7 @@ class CredentialSocketCases(TransactionTestCase):
             runtime=runtime, allowed_uids=(os.geteuid(),) if peers is None else peers, timeout=timeout)
         await server.start()
         try:
-            client = self.Client(self.path, server_uid=os.geteuid(), timeout=3)
+            client = self.Client(self.path, server_uid=os.geteuid(), timeout=client_timeout)
             await body(client, server)
         finally:
             await server.aclose()
@@ -819,6 +819,8 @@ class ActivationCredentialCases(TransactionTestCase):
         permission = Permission.objects.filter(content_type__app_label='access', codename='activate_grant').first()
         self.assertIsNotNone(permission, 'canonical activation action permission is missing')
         Installation.objects.filter(pk=1).update(effects_enabled=True)
+        self.user.email = 'owner@example.invalid'
+        self.user.save(update_fields=['email'])
         reserved = self.reserved_grant()
         self.assignment = self.grant_assignment(reserved)
         with override_settings(BOOTSTRAP=self.bootstrap):
@@ -835,27 +837,33 @@ class ActivationCredentialCases(TransactionTestCase):
             digest='a'*64, epoch=installation.epoch, restore_generation=RestoreGuard.objects.get(pk=1).generation,
             action='create', node_id=self.assignment.node_id, target_kind='puppet', target_id=self.assignment.id,
             incarnation_id=reserved.incarnation, expected_revision=self.assignment.revision,
-            not_after=now + timedelta(minutes=2), state='running')
+            not_after=now + timedelta(minutes=2), state='running', revision=8)
         self.operation.projects.set((self.project.id,))
         operation.RestartBinding.objects.create(operation=self.operation, project=self.project,
             executor_epoch=self.assignment.current_incarnation.executor_epoch, owner_id=self.user.pk,
             generation=self.assignment.generation, role=reserved.role, bundle_digest=reserved.digest, grant_id=reserved.id)
         self.steps, self.attempts = [], []
-        for ordinal, (action, evidence) in enumerate((('scheduler_register', 'job-registered'),
-                ('apply_identity', 'identity-applied'), ('confirm_ready', 'ready'), ('activate_grant', '')), 1):
+        for ordinal, (action, evidence) in enumerate((('prepare_body', 'body-prepared'),
+                ('bootstrap_body', 'body-bootstrapped'), ('initial_identity', 'initial-identity-applied'),
+                ('scheduler_register', 'job-registered'), ('native_exec', 'native-started'),
+                ('confirm_ready', 'ready'), ('activate_grant', '')), 1):
             token = uuid4()
             step = operation.Step.objects.create(operation=self.operation, ordinal=ordinal, name=action,
-                token=token, attempt_id=token, outcome='succeeded' if ordinal < 4 else '', evidence=evidence,
+                token=token, attempt_id=token, outcome='succeeded' if ordinal < 7 else '', evidence=evidence,
                 started_at=now, dispatched_at=now, lease_until=now + timedelta(seconds=30),
-                quiescent_at=now if ordinal < 4 else None)
+                quiescent_at=now if ordinal < 7 else None)
             self.steps.append(step)
-            if action in ('apply_identity', 'confirm_ready'):
+            if ordinal < 7:
+                operation.EffectReceipt.objects.create(step=step, token=token, epoch=installation.epoch,
+                    node_id=self.assignment.node_id, source_revision=self.assignment.revision,
+                    decision_revision=ordinal, applied=True)
+            if action in ('initial_identity', 'confirm_ready'):
                 # Исполнитель узла отличается от worker активации.
                 if len(self.attempts) == 0:
                     machine_key = self.access.enroll_service('identity-executor', self.assignment.node_id,
                         project_ids=(self.project.id,), permissions=('execution.report_result',))
                     self.machine = self.access.token_context(machine_key)
-                attempt = execution.AssignmentAttempt.objects.create(assignment=self.assignment,
+                attempt = execution.AssignmentAttempt.objects.create(id=token, assignment=self.assignment,
                     incarnation_id=reserved.incarnation, executor_user_id=self.machine.user_id, request_id=uuid4(),
                     epoch=installation.epoch, operation_id=self.operation.id, step_id=step.id,
                     executor_epoch=self.assignment.current_incarnation.executor_epoch, owner=self.user,
@@ -864,14 +872,16 @@ class ActivationCredentialCases(TransactionTestCase):
                     not_after=self.operation.not_after, lease_until=step.lease_until, state='succeeded', revision=2)
                 receipt = execution.ResultReceipt.objects.create(attempt=attempt, expected_revision=1,
                     resulting_revision=2, outcome='succeeded', evidence=evidence)
-                model = execution.IdentityApplication if action == 'apply_identity' else execution.ReadinessReceipt
+                model = execution.IdentityApplication if action == 'initial_identity' else execution.ReadinessReceipt
                 model.objects.create(attempt=attempt, receipt=receipt)
                 self.attempts.append(attempt)
         for key in ('node:'+str(self.assignment.node_id), 'project:'+str(self.project.id),
                     'puppet:'+str(self.assignment.id), 'target:'+str(self.assignment.id)):
             resource = operation.Resource.objects.create(key=key)
             operation.ResourceClaim.objects.create(resource=resource, operation=self.operation,
-                step=self.steps[-1], token=self.steps[-1].token)
+                step=self.steps[0], token=self.steps[0].token)
+        from _launch_delivery_cases import selected_fixture
+        selected_fixture(self, reserved)
         return permission
 
     def activate(self, client, *, auth=None, revision=None):
@@ -1082,7 +1092,7 @@ print(json.dumps({'state': receipt.state, 'revision': receipt.revision}))
         from django.utils import timezone
         from mop.server.operations.models import ResourceClaim
         self.refused(lambda: ResourceClaim.objects.filter(operation=self.operation).update(released_at=timezone.now()),
-            reason='claimed create')
+            reason='current create launch resource fences required')
 
     def test_actual_readiness_is_required_not_only_successful_workflow_steps(self):
         from mop.server.sessions.models import AssignmentAttempt

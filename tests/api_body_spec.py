@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""HYPOTHESIS: прежний spec wrapper опирается на ready/bus и не новый registration.
-SOLUTION: отдельный pure new-job renderer с capability gate и pinned layout.
-RESULT: 3 теста сначала отказали на отсутствии new renderer, затем зелёные;
-настоящий bash wrapper исполнил только owned fixture launcher с exact public pins.
-Проверка не регистрирует Nomad job и не подтверждает production SessionApi.
-STATUS: FIXED — see #643 (new-registration renderer stage)
+"""HYPOTHESIS: прежний spec wrapper опирается на ещё не созданный mutable launcher.
+SOLUTION: pure new-job renderer с явным installed anchor pin и capability gate.
+RESULT: red -- scheduler вызывал shell/runtime launcher; после правки owned
+executable дважды получил только hold и exact public pins, без native startup.
+Проверка не регистрирует Nomad job, не устанавливает production anchor и не
+подтверждает physical SessionApi/readiness.
+STATUS: FIXED — see #721 (initial-create renderer, прежний gate #643 сохранён).
 """
 import hashlib
 import json
@@ -35,7 +36,8 @@ class ApiBodySpecTests(unittest.TestCase):
             '10.20.0.4', '192.0.2.6', 2207, 'host'), bundle=b,
             nomad_node_id=str(uuid4()), datacenter='owned-fixture', user='owned',
             memory_mb=512, cpu=100, restore_generation=uuid4(), capabilities=frozenset(('addressed_launch_v1',
-            'session_scope_v1', 'scope_retirement_v1', 'external_image_v1', 'bootstrap_ssh_v1')))
+            'session_scope_v1', 'scope_retirement_v1', 'external_image_v1', 'bootstrap_ssh_v1',
+            'initial_create_anchor_v1')), anchor_executable='/installed/sha256-'+'a'*64+'/anchor', anchor_digest='a'*64)
 
     def snapshot_arguments(self):
         from uuid import UUID
@@ -81,7 +83,7 @@ renderer = importlib.import_module(sys.argv[1])
 from api_body_spec import ApiBodySpecTests
 args = ApiBodySpecTests().snapshot_arguments()
 job = renderer.api_job_spec(**args)
-assert job['Job']['TaskGroups'][0]['Tasks'][0]['Config']['args'][-1] == renderer.API_WRAPPER
+assert job['Job']['TaskGroups'][0]['Tasks'][0]['Config']['command'] == args['anchor_executable']
 '''
         env = hermetic.child_env({'PYTHONPATH': os.pathsep.join((hermetic.TESTS, hermetic.ROOT))})
         for mode in ('get', 'num', 'imports'):
@@ -91,14 +93,33 @@ assert job['Job']['TaskGroups'][0]['Tasks'][0]['Config']['args'][-1] == renderer
                     capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_registration_bytes_match_the_pre_isolation_renderer(self):
-        # Слепок spec.api_job_spec на 7424a8a7 до переноса (#714), включая
-        # wrapper, Meta hash и Nomad $${...}; JSON кодируется без пробелов.
-        wire = json.dumps(self.renderer()(**self.snapshot_arguments()), sort_keys=True,
-                          separators=(',', ':'), ensure_ascii=False).encode()
-        self.assertEqual(len(wire), 2308)
-        self.assertEqual(hashlib.sha256(wire).hexdigest(),
-                         '0b24c2fdd837f8e2854c175c7559c569d892e8eeff3eca1abf940acb3b4e78c1')
+    def test_registration_captures_the_finite_installed_program_not_shell_bytes(self):
+        # #721 намеренно заменяет старый byte snapshot mutable launcher.
+        args = self.snapshot_arguments()
+        job = self.renderer()(**args)['Job']
+        self.assertEqual(job, self.renderer()(**args)['Job'])
+        self.assertEqual(job['Meta']['mop.launch_template'], hashlib.sha256(launch_spec.API_WRAPPER.encode()).hexdigest())
+        r = args['layout'].registration
+        self.assertEqual(job['TaskGroups'][0]['Tasks'][0]['Config'], dict(command=args['anchor_executable'],
+            args=['hold', '--sha256', args['anchor_digest'], '--target', r.work.target_id,
+                  '--incarnation', r.work.incarnation_id, '--executor-epoch', r.work.executor_epoch,
+                  '--generation', str(r.work.generation), '--bootstrap-revision', r.bootstrap_revision]))
+
+    def test_initial_create_scheduler_never_executes_a_mutable_body_launcher(self):
+        args = self.arguments('/owned')
+        job = self.renderer()(**args)['Job']
+        task = job['TaskGroups'][0]['Tasks'][0]
+        self.assertNotEqual(task['Config']['command'], '/bin/bash',
+            'scheduler must invoke the enrolled immutable finite anchor directly')
+        self.assertNotIn(str(args['layout'].launcher), json.dumps(job))
+        self.assertIn('initial_create_anchor_v1', launch_spec.API_LAUNCH_CAPABILITIES)
+        self.assertEqual(task['Config']['command'], args['anchor_executable'])
+        self.assertEqual(job['Meta']['mop.anchor_digest'], args['anchor_digest'])
+        self.assertEqual(task['Config']['args'][0], 'hold')
+        for change in ({'anchor_executable': ''}, {'anchor_digest': ''}, {'anchor_executable': '/mutable/anchor'},
+                       {'anchor_executable': '/installed/sha256-'+'b'*64+'/anchor'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.renderer()(**{**args, **change})
 
     def renderer(self):
         self.assertTrue(hasattr(launch_spec, 'api_job_spec'), 'new API job registration renderer is missing')
@@ -113,7 +134,8 @@ assert job['Job']['TaskGroups'][0]['Tasks'][0]['Config']['args'][-1] == renderer
         self.assertEqual(job['ID'], r.work.target_id)
         self.assertEqual(job['Constraints'], [dict(LTarget='${node.unique.id}', Operand='=',
                                                  RTarget=args['nomad_node_id'])])
-        self.assertEqual(task['Env']['MOP_REGISTERED_LAUNCHER'], str(args['layout'].launcher))
+        self.assertNotIn('MOP_REGISTERED_LAUNCHER', task['Env'])
+        self.assertEqual(task['Config']['command'], args['anchor_executable'])
         self.assertEqual(task['Env']['MOP_BOOTSTRAP_REVISION'], r.bootstrap_revision)
         self.assertEqual(task['Env']['MOP_GENERATION'], str(r.work.generation))
         self.assertEqual(task['Resources'], dict(CPU=100, MemoryMB=512, MemoryMaxMB=512))
@@ -189,36 +211,27 @@ assert job['Job']['TaskGroups'][0]['Tasks'][0]['Config']['args'][-1] == renderer
         changed = soul.from_manifest(other.manifest.to_dict(), b'not approved')
         with self.assertRaises(ValueError): render(**{**args, 'bundle':changed})
 
-    def test_wrapper_executes_only_registered_launcher_with_public_pin_arguments(self):
-        render = self.renderer()
-        # Короткий собственный корень (#677): во вложенном прогоне наследуемый
-        # TMPDIR удлиняет runtime-путь за sockaddr_un, и RegisteredLayout
-        # отказывает заранее; здесь исполняется launcher, сокет не строится,
-        # но layout обязан быть осуществимым, как настоящий.
-        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
+    def test_allocation_restart_invokes_only_installed_hold_with_public_pins(self):
+        # Собственный executable проверяет argv; это не production anchor,
+        # не supervisor/installer и не native readiness.
+        with tempfile.TemporaryDirectory(prefix='m721-', dir='/tmp') as directory:
             args = self.arguments(directory)
-            layout = args['layout']
-            layout.runtime.mkdir(parents=True, mode=0o700)
-            # HYPOTHESIS (#676): shebang /usr/bin/python3 -- это путь хоста
-            # установки, не образа: в python:3.12-slim интерпретатор живёт в
-            # /usr/local/bin/python3, и bash отдаёт 127 до контракта wrapper.
-            # SOLUTION (#676): fixture launcher называет текущий интерпретатор
-            # (sys.executable) -- образ, в котором идут проверки, сам по себе
-            # источник пути, без пакета хоста или конкретного префикса.
-            layout.launcher.write_text(f'#!{sys.executable}\n'
-                'import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
-            layout.launcher.chmod(0o700)
-            job = render(**args)['Job']
-            task = job['TaskGroups'][0]['Tasks'][0]
-            shell = task['Config']['args'][-1].replace('$${', '${')
-            completed = subprocess.run(['/bin/bash', '-c', shell], env={**os.environ, **task['Env']},
-                text=True, capture_output=True, timeout=5)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            received = json.loads(completed.stdout)
-            r = layout.registration
-            self.assertEqual(received, ['--target', r.work.target_id,
-                '--incarnation', r.work.incarnation_id, '--executor-epoch', r.work.executor_epoch,
-                '--generation', str(r.work.generation), '--bootstrap-revision', r.bootstrap_revision])
+            raw = (f'#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n').encode()
+            digest = hashlib.sha256(raw).hexdigest()
+            anchor = Path(directory)/('sha256-'+digest)/'anchor'
+            anchor.parent.mkdir()
+            anchor.write_bytes(raw)
+            anchor.chmod(0o500)
+            args.update(anchor_executable=str(anchor), anchor_digest=digest)
+            task = self.renderer()(**args)['Job']['TaskGroups'][0]['Tasks'][0]
+            for restart in range(2):
+                completed = subprocess.run([task['Config']['command'], *task['Config']['args']],
+                    env={**os.environ, **task['Env']}, text=True, capture_output=True, timeout=5)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                received = json.loads(completed.stdout)
+                self.assertEqual(received, task['Config']['args'])
+                self.assertEqual(received[:3], ['hold', '--sha256', digest])
+                self.assertNotIn(str(args['layout'].launcher), completed.stdout)
 
 
 if __name__ == '__main__': unittest.main()

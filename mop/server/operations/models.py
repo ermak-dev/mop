@@ -70,7 +70,8 @@ class Step(models.Model):
         default_permissions = ()
         constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
             'restart_session', 'confirm_ready', 'image_build', 'scheduler_stop', 'send_message', 'wipe_clone',
-            'scheduler_delete', 'scheduler_register', 'activate_grant', 'prepare_launch')),
+            'scheduler_delete', 'scheduler_register', 'activate_grant', 'prepare_launch',
+            'prepare_body', 'bootstrap_body', 'initial_identity', 'native_exec')),
             name='step_finite_handler'),
             models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
             models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
@@ -116,6 +117,8 @@ class ScheduledNode(models.Model):
     scheduler_id = models.UUIDField()
     nomad_node_id = models.UUIDField()
     capabilities = models.JSONField()
+    anchor_executable = models.CharField(max_length=512, blank=True)
+    anchor_digest = models.CharField(max_length=64, blank=True)
     enrolled_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -154,6 +157,7 @@ class CreateBinding(models.Model):
     applied_index = models.PositiveBigIntegerField(null=True)
     # #707: точная несекретная spec до dispatch; recovery не рендерит её заново.
     dispatched_job = models.JSONField(null=True)
+    reservation = models.ForeignKey('CreateReservation', null=True, on_delete=models.PROTECT)
 
     class Meta:
         default_permissions = ()
@@ -304,9 +308,30 @@ class CreateReservation(Evidence):
     expires_at = models.DateTimeField()
     epoch = models.UUIDField(null=True)
     project = models.ForeignKey('catalog.Project', null=True, on_delete=models.PROTECT)
+    # До первого credential I/O; retry не читает новый configured pointer.
+    policy_id = models.UUIDField(null=True)
+    policy_digest = models.CharField(max_length=64, blank=True)
+    git_name = models.CharField(max_length=256, blank=True)
+    git_email = models.CharField(max_length=256, blank=True)
 
     class Meta(Evidence.Meta):
         constraints = [models.UniqueConstraint(fields=('actor', 'request_id'), name='create_reservation_actor_request')]
+
+
+class CreateCleanup(models.Model):
+    """Обязательство до первого эффекта; deadline/отзыв его не освобождают.
+
+    Физический cleanup port отдельно: пока он не связан, required и fences
+    остаются видимыми для recovery, а не выдаются за очищенное тело.
+    """
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    armed_at = models.DateTimeField(default=timezone.now)
+    required_at = models.DateTimeField(null=True)
+    confirmed_at = models.DateTimeField(null=True)
+    adopted_at = models.DateTimeField(null=True)
+
+    class Meta:
+        default_permissions = ()
 
 
 class CreateProvisioningAttempt(models.Model):
