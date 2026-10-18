@@ -133,14 +133,20 @@ class BindingsResolver:
         response.check(self.layout.registration)
         if type(response.inputs) is not ActionInput:
             raise Refused('typed addressed action input required')
-        response.inputs.check(work.action)
+        return await self._target(work, response.inputs)
+
+    async def _target(self, work, inputs):
+        # Общая physical часть; purpose-specific source не обязан читать bundle.
+        if type(inputs) is not ActionInput:
+            raise Refused('typed addressed action input required')
+        inputs.check(work.action)
         proof = await self.proof(work)
         target = BoundTarget(work.target_id, work.incarnation_id, work.node_id,
             work.executor_epoch, work.generation, work.role, work.bundle_digest, work.grant_id,
             self.layout.clone, self.layout.tmux_socket, proof.pane, self.layout.launcher,
             proof.session_socket, proof)
         target.check(work)
-        return target, response.inputs
+        return target, inputs
 
     async def reconcile(self, node_id, previous_epoch, new_epoch):
         if node_id != self.layout.registration.work.node_id:

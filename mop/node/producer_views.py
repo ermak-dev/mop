@@ -9,11 +9,18 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from mop.driver.launch import LaunchResponse, RegisteredLayout, Registration
+from mop.driver.launch import RegisteredLayout, Registration
 from mop.node.body_launch import BindingsResolver
 from mop.node.execution_adapters import ActionInput
 from mop.node.http_execution import Admission, HttpsTransport, MachineClient, Refused, Unavailable, Work
 from mop.node.native_observer import NativePhysicalSessions
+
+
+@dataclass(frozen=True)
+class _CurrentLaunchApproval:
+    # Не LaunchResponse: readiness не читает и не кеширует role/consumer bytes.
+    registration: Registration
+    inputs: ActionInput
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,10 @@ class CurrentLaunchAuthority:
                 or r.work.action not in ('apply_identity', 'confirm_ready')):
             raise Refused('exact authenticated current launch admission required')
         w = r.work
+        if w.action == 'apply_identity':
+            # Старый post-launch identity port не имеет отдельного purpose proof.
+            # Initial identity до native exec -- другой action/physical contract.
+            raise Unavailable('post-launch identity current view purpose is not bound')
         if Work.parse(w.wire()) != w:
             raise Refused('canonical current launch work required')
         w.gate(node_id=w.node_id, epoch=w.epoch, executor_epoch=w.executor_epoch)
@@ -62,12 +73,14 @@ class CurrentLaunchAuthority:
             await gate()
             await client.recheck(self.admission)
             await gate()
-            value = await client.read_launch(self.registration.work.wire())
+            value = await client.read_initial_launch(self.registration.work.wire())
             await gate()
-            try:
-                response = LaunchResponse.parse(value, self.registration, input_factory=ActionInput)
-            except ValueError as error:
-                raise Refused(str(error)) from error
+            if any(value[name] != getattr(self.registration, name) for name in
+                    ('bootstrap_revision', 'bootstrap_digest', 'image_digest')):
+                raise Refused('current launch approval changed registration pins')
+            inputs = ActionInput(value['git_name'], value['git_email'])
+            inputs.check(self.registration.work.action)
+            response = _CurrentLaunchApproval(self.registration, inputs)
             await client.recheck(self.admission)
             await gate()
         return response
@@ -133,6 +146,13 @@ class _CurrentProducerView(BindingsResolver):
         except (Refused, Unavailable, TimeoutError) as error:
             self._failure = error
             raise
+
+    async def resolve(self, work):
+        approval = await self.fetch(work)
+        if (type(approval) is not _CurrentLaunchApproval
+                or approval.registration != self.layout.registration):
+            raise Refused('typed current launch approval required')
+        return await self._target(work, approval.inputs)
 
     async def proof(self, work):
         self._check()

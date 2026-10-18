@@ -247,6 +247,16 @@ class MachineClient:
         work = Work.parse(metadata)
         return await self.transport.request('POST', 'work/launch', payload=work.wire())
 
+    async def read_initial_launch(self, metadata):
+        """Отдельная finite phase schema; readiness не получает native bytes."""
+        from mop.common.initialcreate import parse_delivery
+        work = Work.parse(metadata)
+        value = await self.transport.request('POST', 'work/initial-launch', payload=work.wire())
+        try:
+            return parse_delivery(value, work.wire())
+        except ValueError as error:
+            raise Refused(str(error)) from error
+
     async def action_input(self, work):
         value = await self.transport.request('GET','work/input',params=dict(schema_version='1',
             operation_id=work.operation_id,step_id=work.step_id))

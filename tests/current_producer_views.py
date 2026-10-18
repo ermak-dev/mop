@@ -9,6 +9,10 @@ expiry и воскрешении после последнего snapshot. Вс�
 admission/launch policy и native snapshot здесь — контролируемые doubles;
 существующие реальные native/ACK/bootstrap checks проверяются отдельно.
 STATUS: FIXED — see #643 (node view, не production composition).
+
+#733: doubles обновлены на finite initial-launch readiness schema без role bytes.
+Actual server/TLS/PG17 purpose contract проверяет _current_view_purpose_cases;
+post-launch identity теперь unbound, readiness effect guard по-прежнему обязателен.
 """
 import asyncio
 from dataclasses import replace
@@ -35,13 +39,12 @@ from mop.node.native_observer import NativeIdentity, NativePhysicalSessions
 class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from aiohttp import web
-        import base64
         self.directory = tempfile.TemporaryDirectory(prefix='m643v-', dir='/tmp')
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.root.chmod(0o700)
         self.bundle = bundle()
-        self.initial = replace(work(), bundle_digest=self.bundle.digest)
+        self.initial = replace(work(), action='native_exec', bundle_digest=self.bundle.digest)
         self.registration = Registration(self.initial, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
         self.layout = RegisteredLayout(self.root, self.registration)
         self.layout.runtime.mkdir(parents=True, mode=0o700)
@@ -98,11 +101,14 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
             if value != self.server_work.wire():
                 return web.json_response({}, status=409)
             return web.json_response(dict(schema_version=1, work=self.server_work.wire(),
-                bootstrap_revision=self.registration.bootstrap_revision,
+                phase=self.server_work.action, bootstrap_revision=self.registration.bootstrap_revision,
                 bootstrap_digest=self.registration.bootstrap_digest,
-                image_digest=self.registration.image_digest, manifest=self.bundle.manifest.to_dict(),
-                prompt=base64.b64encode(self.bundle.prompt).decode(),
-                git_name='Owner', git_email='owner@example.test', message='', peer_token=None) | self.pin_change)
+                image_digest=self.registration.image_digest, selection=dict(policy_id=self.request,
+                    digest='d'*64, source=dict(origin='https://example.test/owned.git',
+                    commit='e'*40, ref='refs/heads/owned'), desired_model='fixture-model',
+                    model_config_digest='f'*64, consumers=[dict(purpose='model_config', version_id=self.attempt)]),
+                role=None, bootstrap=None, consumers=[],
+                git_name='Owner', git_email='owner@example.test') | self.pin_change)
         key, cert = self.root/'key.pem', self.root/'cert.pem'
         completed = await asyncio.to_thread(subprocess.run, ['openssl', 'req', '-x509',
             '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost',
@@ -115,7 +121,7 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         client_tls = ssl.create_default_context(cafile=str(cert))
         app = web.Application()
         app.router.add_post('/api/v1/machine/work/claim', route)
-        app.router.add_post('/api/v1/machine/work/launch', route)
+        app.router.add_post('/api/v1/machine/work/initial-launch', route)
         runner = web.AppRunner(app)
         await runner.setup()
         self.addAsyncCleanup(runner.cleanup)
@@ -165,7 +171,7 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target.session_proof, proof)
         self.assertEqual(inputs, ActionInput('Owner', 'owner@example.test'))
         self.assertEqual(await NativePhysicalSessions(owner=self.runtime).observe(self.layout), original)
-        self.assertIn('launch', self.calls)
+        self.assertIn('initial-launch', self.calls)
         self.assertIn('claim', self.calls)
         self.assertEqual(len(self.registered), 1, 'per-view producer registration is forbidden')
         self.assertEqual(self.rows, [], 'views must not fabricate hook readiness')
@@ -268,7 +274,7 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_during_launch_api_await_cannot_resurrect_source(self):
         await self.activate()
         authority = self.authority()
-        self.pause_path = 'launch'
+        self.pause_path = 'initial-launch'
         self.http_release.clear()
         task = asyncio.create_task(self.runtime.current_view(authority))
         try:
@@ -324,7 +330,7 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         await self.activate()
         view = await self.view()
         old = self.identity
-        self.pause_path = 'launch'
+        self.pause_path = 'initial-launch'
         self.http_release.clear()
         task = asyncio.create_task(view.resolve(self.current))
         try:
@@ -370,13 +376,15 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         from mop.node.http_execution import EffectGuard
         await self.activate()
         view = await self.view()
-        # Даже успешно proven view не допускает первый Git effect без claim guard.
+        # Успешный readiness view не заменяет независимый machine effect guard.
+        # Post-launch identity честно неподдержан: native-only bytes не fallback.
         identity_work = replace(self.current, action='apply_identity', step_id=str(uuid4()),
                                 revision=self.current.revision+1)
-        self.server_work = identity_work
-        self.current_registration = replace(self.current_registration, work=identity_work)
-        self.admission = replace(self.admission, work=identity_work)
-        view = await self.view()
+        self.calls.clear()
+        with self.assertRaisesRegex(Unavailable, 'identity.*purpose'):
+            await self.view(registration=replace(self.current_registration, work=identity_work),
+                            admission=replace(self.admission, work=identity_work))
+        self.assertEqual(self.calls, [])
         effects = []
         class Runner:
             async def run(inner, argv, *, before_spawn, final_check):
@@ -387,10 +395,13 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
             async def aclose(inner): pass
         async def refused():
             raise Refused('fixture machine admission revoked before effect')
-        executor = LocalExecutor(Runner(), view)
+        class Readiness:
+            async def confirmed(inner, work, target):
+                raise AssertionError('machine guard must precede readiness effect')
+        executor = LocalExecutor(Runner(), view, readiness=Readiness())
         try:
             with self.assertRaisesRegex(Refused, 'admission revoked'):
-                await executor.execute(identity_work, EffectGuard(refused, lambda: None))
+                await executor.execute(self.current, EffectGuard(refused, lambda: None))
         finally:
             await executor.aclose()
         self.assertEqual(effects, [])
