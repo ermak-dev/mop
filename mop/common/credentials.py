@@ -46,6 +46,7 @@ class Command(str, Enum):
     DEFINITION = 'read_definition'
     LAUNCH = 'read_launch'
     INITIAL_LAUNCH = 'read_initial_launch'
+    MANAGEMENT_CONTEXT = 'read_management_context'
     PUBLISH_DEFINITION = 'publish_definition'
     APPROVE_DEFINITION = 'approve_definition'
     RESERVE_GRANT = 'reserve_grant'
@@ -275,6 +276,7 @@ def parse_request(data):
               Command.UPDATE: ('secret_id', 'value', 'expected_revision'),
               Command.ADDRESSED: ('target_id',), Command.ROTATION: ('rotation_id', 'claim_id', 'generation'),
               Command.DEFINITION: ('definition_id',), Command.LAUNCH: ('work',), Command.INITIAL_LAUNCH: ('work',),
+              Command.MANAGEMENT_CONTEXT: ('request',),
               Command.PUBLISH_DEFINITION: ('project_id', 'manifest', 'prompt', 'provenance'),
               Command.APPROVE_DEFINITION: ('definition_id',),
               Command.RESERVE_GRANT: ('project_id', 'definition_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),
@@ -307,6 +309,12 @@ def parse_request(data):
         result['secret_refs'] = identifiers(result['secret_refs'])
     if 'expires_at' in result:
         result['expires_at'] = instant(result['expires_at'])
+    if command is Command.MANAGEMENT_CONTEXT:
+        from .management_context import ManagementRequest
+        try:
+            result['request'] = ManagementRequest.parse(result['request']).wire()
+        except ValueError:
+            raise CredentialError('invalid current runtime management request') from None
     if command is Command.SEND_REPORT:
         for name in ('expected_epoch', 'message_id', 'operation_request_id',
                      'sender_endpoint_id', 'sender_connection_nonce'):

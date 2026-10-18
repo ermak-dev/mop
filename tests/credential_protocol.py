@@ -61,6 +61,32 @@ class ClientBoundary(unittest.TestCase):
             with self.subTest(value=changed), self.assertRaises(p.CredentialError):
                 i.parse_delivery(changed, wire)
 
+    # HYPOTHESIS #742: existing Actor Token не имеет finite post-activation handoff.
+    # SOLUTION: только runtime locators; DTO скрывает token в repr; original auth retained.
+    # RESULT: unsupported command RED на PG17; exact shape GREEN, без Token lookup API.
+    # STATUS: FIXED — see #742.
+    def test_management_context_has_only_current_runtime_locators(self):
+        import copy
+        from mop.common import credentials as p
+        from uuid import uuid4
+        request = dict(schema_version=1, scope=dict(epoch=str(uuid4()), target_id=str(uuid4()),
+            incarnation_id=str(uuid4()), node_id=str(uuid4()), executor_epoch=str(uuid4()),
+            session_id='native-session', producer_epoch=str(uuid4())), generation='1')
+        envelope = dict(version=1, auth=dict(kind='token', value='a'*40),
+            command='read_management_context', args={'request': request})
+        try:
+            _, command, parsed = p.parse_request(envelope)
+        except p.CredentialError as error:
+            self.fail('finite post-activation management read is missing: '+str(error))
+        self.assertEqual(command.value, 'read_management_context')
+        self.assertEqual(parsed['request'], request)
+        for key in ('actor_id', 'token_id', 'owner', 'origin', 'path', 'secret_name', 'work'):
+            with self.subTest(key=key):
+                bad = copy.deepcopy(envelope)
+                bad['args']['request'][key] = 'untrusted'
+                with self.assertRaises(p.CredentialError):
+                    p.parse_request(bad)
+
     def test_transport_is_available_to_all_layers_without_client_import(self):
         path = Path(__file__).resolve().parents[1] / 'mop/common/credential_client.py'
         self.assertTrue(path.is_file(), 'server-compatible common credential transport is missing')
