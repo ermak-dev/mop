@@ -3493,6 +3493,10 @@ def check_fallback_model_183(c):
     # MCP, то есть тоже сообщение наружу. `epic #12` в примере -- формат
     # номера, а не ссылка.
     # STATUS: FIXED — see #255
+    # HYPOTHESIS (#728): новый MCP docstring снова публикует номер задачи.
+    # SOLUTION: убрать только номер и регенерировать справочник, не менять запрет.
+    # RESULT: RED 1/1581 на service/mcp.py; GREEN 1581/1581 после правки текста.
+    # STATUS: FIXED — see #728
     told = []
     for d, _, files in os.walk(cli.PACKAGE):
         for f in files:
