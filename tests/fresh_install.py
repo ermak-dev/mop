@@ -367,6 +367,44 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
                 module.connection_budget(pools, runtime=24, maintenance=8)
 
 class ProtectedArtifacts(unittest.TestCase):
+    # #677: shared fixture владеет коротким runtime до конца каждого test case,
+    # включая исключение. Обычные tempfiles и HOME остаются под hermetic/_lib.
+    def test_fixture_runtime_is_private_canonical_and_cleaned_after_success_or_error(self):
+        import socket
+        from mop.server.controller.bootstrap import credential_endpoint
+        ambient = (os.environ['HOME'], os.environ['TMPDIR'], tempfile.tempdir)
+        for fail in (False, True):
+            made = []
+
+            class OwnedFixture(FreshPlanFixture, unittest.TestCase):
+                def runTest(child):
+                    root = Path(child.tmp.name)
+                    made.append(root)
+                    self.assertEqual(root, root.resolve())
+                    self.assertEqual(root.stat().st_uid, os.geteuid())
+                    self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+                    endpoint = root / 'state' / 'credential-socket' / 'service.sock'
+                    endpoint.parent.mkdir(parents=True, mode=0o700)
+                    data = {'path': str(endpoint), 'server_uid': os.geteuid()}
+                    self.assertEqual(credential_endpoint({'role': 'web', 'credential_service': data}), data)
+                    with socket.socket(socket.AF_UNIX) as listener:
+                        listener.bind(str(endpoint))
+                    self.assertEqual((os.environ['HOME'], os.environ['TMPDIR'], tempfile.tempdir), ambient)
+                    with tempfile.TemporaryDirectory() as ordinary:
+                        self.assertEqual(Path(ordinary).parent, Path(tempfile.tempdir))
+                    if fail:
+                        raise RuntimeError('owned fixture test failure')
+
+            result = unittest.TestResult()
+            OwnedFixture().run(result)
+            self.assertEqual(result.failures, [])
+            self.assertEqual(len(result.errors), int(fail), result.errors)
+            if fail and result.errors:
+                self.assertIn('owned fixture test failure', result.errors[0][1])
+            self.assertEqual(len(made), 1)
+            self.assertFalse(made[0].exists())
+            self.assertEqual((os.environ['HOME'], os.environ['TMPDIR'], tempfile.tempdir), ambient)
+
     def test_new_private_artifact_refuses_replacement_and_unsafe_ancestors(self):
         from mop.server import installation
         self.assertTrue(callable(getattr(installation, 'write_private_artifact', None)),
