@@ -206,13 +206,15 @@ def authority():
     from uuid import UUID
     from django.db import transaction
     from mop.server.sessions.protocol import AuthorityV1
-    from mop.server.sessions.services import Unavailable
-    from .runtime import installation_snapshot, require_restore_ready
+    from mop.server.sessions.services import Conflict, Unavailable
+    from .runtime import installation_snapshot, require_restore_ready, RestoreGuardBusy
     try:
         if transaction.get_connection().in_atomic_block:
             require_restore_ready(lock=True)
         value = installation_snapshot()
         return AuthorityV1(UUID(value['epoch']), value['effects_enabled'])
+    except RestoreGuardBusy as error:
+        raise Conflict(str(error)) from None
     except RuntimeError as error:
         raise Unavailable(str(error)) from None
 

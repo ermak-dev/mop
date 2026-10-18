@@ -276,6 +276,10 @@ def _maintenance_role():
         raise RuntimeError('this action requires the separate maintenance DB principal')
 
 
+class RestoreGuardBusy(RuntimeError):
+    """Блокировка допуска занята, но это не доказательство повреждения guard."""
+
+
 def _guard_row(using, *, lock=False):
     from django.db import DatabaseError
     from .models import RestoreGuard
@@ -289,7 +293,11 @@ def _guard_row(using, *, lock=False):
     except RestoreGuard.DoesNotExist as exc:
         raise RuntimeError('controller restore guard is missing; maintenance required') from exc
     except DatabaseError as exc:
-        raise RuntimeError(f'controller restore guard is unavailable: {type(exc).__name__}; maintenance required') from exc
+        # SELECT FOR UPDATE может законно проиграть короткий lock budget
+        # другому admission. SQLSTATE, не raw driver text, сохраняет причину.
+        if lock and getattr(exc.__cause__, 'sqlstate', None) == '55P03':
+            raise RestoreGuardBusy('controller restore guard lock timeout') from exc
+        raise RuntimeError(f'controller restore guard is unavailable: {type(exc).__name__}') from exc
 
 
 def require_restore_ready(using='default', *, lock=False):

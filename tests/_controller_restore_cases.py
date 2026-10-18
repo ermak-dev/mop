@@ -137,6 +137,23 @@ finally:
             self.assertEqual(RestoreGuard.objects.using(target).get(pk=1).state, 'uninitialized')
             self.assertTrue(get_user_model().objects.using(target).filter(username='not-an-empty-target').exists())
 
+    def test_guard_database_failure_does_not_assert_permanent_maintenance(self):
+        # BUG #753: произвольный отказ SQL объявлялся доказательством сломанного
+        # guard; постоянный maintenance допустим только для проверенного state.
+        # HYPOTHESIS: safe boundary должна скрывать raw details, не выдумывая
+        # причину отказа или необходимость восстановления.
+        # SOLUTION: общий DB refusal остаётся unavailable без permanent
+        # maintenance; missing/not-ready guard по-прежнему требует recovery.
+        # RESULT: red — лишний maintenance suffix у синтетического DB refusal;
+        # 194/194 PG17 concurrency/restore/grant/RBAC checks green.
+        # STATUS: FIXED — see #753.
+        from django.db import DatabaseError
+        from mop.server.controller.runtime import require_restore_ready
+        with patch('django.db.models.query.QuerySet.get', side_effect=DatabaseError('fixture-private-detail')):
+            with self.assertRaises(RuntimeError) as failure:
+                require_restore_ready()
+        self.assertEqual(str(failure.exception), 'controller restore guard is unavailable: DatabaseError')
+
     def test_backup_cannot_export_an_uncommitted_installation(self):
         # pg_dump использует другую connection и не видит initialize до COMMIT.
         with self.target(migrate=True) as using, tempfile.TemporaryDirectory() as directory:
