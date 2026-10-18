@@ -29,6 +29,38 @@ class ClientBoundary(unittest.TestCase):
     # SOLUTION: stdlib transport на common-границе; unreleased старый импорт удалён.
     # RESULT: common transport отсутствовал; после переноса шесть checks green.
     # STATUS: FIXED — see #669.
+    def test_initial_delivery_rejects_malformed_types_and_boolean_work_schema(self):
+        # HYPOTHESIS #721: equality допускает bool == int, set lookup роняет
+        # malformed consumer payload вместо конечного CredentialError.
+        # SOLUTION: exact type/value Work, конечные purpose и отдельная shape.
+        # RESULT: bool/list/ref обходы воспроизведены red; strict parser green.
+        # STATUS: FIXED — see #721.
+        from copy import deepcopy
+        from dataclasses import replace
+        from uuid import uuid4
+        from _body_fixture import work
+        from mop.common import initialcreate as i, credentials as p
+        wire = replace(work(), action='prepare_body').wire()
+        value = dict(schema_version=1, work=wire, phase='prepare_body', bootstrap_revision=str(uuid4()),
+            bootstrap_digest='a'*64, image_digest='b'*64, git_name='Owner', git_email='owner@example.invalid',
+            selection=dict(policy_id=str(uuid4()), digest='c'*64,
+                source=dict(origin='https://example.invalid/repo.git', commit='d'*40, ref='refs/heads/source'),
+                desired_model='desired-only', model_config_digest='e'*64,
+                consumers=[dict(purpose='model_config', version_id=str(uuid4()))]),
+            role=None, bootstrap=None, consumers=[])
+        self.assertEqual(i.parse_delivery(value, wire), value)
+        mutations = (lambda x: x.update(phase=[]),
+            lambda x: x['work'].update(schema_version=True),
+            lambda x: x['selection']['consumers'][0].update(purpose=[]),
+            lambda x: x.update(consumers=[dict(purpose=[], version_id=[], name='x', kind='file', value='')]),
+            lambda x: x['selection']['source'].update(ref='refs/heads/.hidden'),
+            lambda x: x['selection']['source'].update(ref='refs/heads/source.lock'))
+        for mutate in mutations:
+            changed = deepcopy(value)
+            mutate(changed)
+            with self.subTest(value=changed), self.assertRaises(p.CredentialError):
+                i.parse_delivery(changed, wire)
+
     def test_transport_is_available_to_all_layers_without_client_import(self):
         path = Path(__file__).resolve().parents[1] / 'mop/common/credential_client.py'
         self.assertTrue(path.is_file(), 'server-compatible common credential transport is missing')

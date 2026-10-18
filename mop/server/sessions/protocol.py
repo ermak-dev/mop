@@ -5,10 +5,11 @@ import re
 from typing import Protocol, Callable
 from uuid import UUID
 
-ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
+from mop.common.initialcreate import MACHINE as INITIAL_ACTIONS, CONFIRMATIONS as INITIAL_CONFIRMATIONS
+ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone')) | INITIAL_ACTIONS
 OUTCOMES = frozenset(('succeeded', 'failed', 'unknown'))
 EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
-    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
+    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running', *INITIAL_CONFIRMATIONS.values()))
 FACT_FIELDS = {
     'states': frozenset(('running', 'dirty', 'session_count')),
     'clone': frozenset(('clean', 'branch', 'untracked', 'modified')),
@@ -250,6 +251,12 @@ class WorkPort(Protocol):
     def pending(self, *, node_id: UUID, executor_epoch: UUID, project_ids: tuple[UUID, ...],
                 limit: int) -> tuple[WorkV1, ...]: ...
     def current(self, operation_id: UUID, step_id: UUID) -> WorkV1: ...
+    def effect_lease(self, work: WorkV1) -> int:
+        """Конечный бюджет claimed фазы вместе с уборкой, без продления."""
+        ...
+    def initial_native_attempt(self, work: WorkV1) -> UUID | None:
+        """Historical locator для same-producer readiness; не допуск эффекта."""
+        ...
     def claimed(self, work: WorkV1, attempt_id: UUID) -> None: ...
     def completed_result(self, work: WorkV1, attempt_id: UUID, outcome: str, evidence: str) -> None: ...
     def retired(self, target_id: UUID, executor_epoch: UUID) -> None: ...

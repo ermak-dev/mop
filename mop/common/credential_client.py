@@ -181,6 +181,11 @@ class CredentialClient:
             raise p.CredentialError('invalid addressed launch response')
         return result
 
+    def read_initial_launch(self, auth: p.Credential, work: dict) -> dict:
+        """Конечные purpose-specific bytes; старый read_launch не расширяется."""
+        from .initialcreate import parse_delivery
+        return parse_delivery(self._invoke(auth, p.Command.INITIAL_LAUNCH, {'work': work}), work)
+
     def read_definition(self, auth: p.Credential, definition_id: UUID) -> p.DefinitionBytes:
         result = self._invoke(auth, p.Command.DEFINITION, {'definition_id': str(definition_id)})
         return self._result(p.DefinitionBytes, result)
