@@ -454,6 +454,71 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await client.aclose()
 
+    # HYPOTHESIS (#717): transport выбрасывает non-200 до чтения canonical
+    # error envelope, и причина безопасного отказа теряется на HTTP503.
+    # SOLUTION: bounded canonical error body читается под прежним deadline;
+    # safe phrase сохраняется, bearer redacted, raw/invalid body не отражается.
+    # RESULT: RED -- safe reason отсутствует; GREEN -- owned TLS и node checks.
+    # STATUS: FIXED — see #717
+    async def test_owned_https_preserves_safe_drf_reason_without_echoing_token(self):
+        import http.server
+        from _control_fixture import own_tls
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.server.calls += 1
+                raw = self.server.body
+                self.send_response(self.server.status)
+                self.send_header('Content-Type', self.server.content_type)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        token = 'owned-node-secret-not-in-errors'
+        with own_tls(Handler) as (server, origin, cert, _):
+            server.calls, server.content_type = 0, 'application/json'
+            transport = HttpsTransport(origin, token, tls=ssl.create_default_context(cafile=str(cert)), response_limit=1024)
+            try:
+                for status, kind in ((403, Refused), (503, Unavailable)):
+                    server.status = status
+                    server.body = json.dumps({'schema_version': 1, 'error': {
+                        'code': 'authority_unavailable', 'message': 'pinned bootstrap approval was revoked',
+                        'retryable': False}}).encode()
+                    with self.assertRaises(kind) as raised:
+                        await transport.request('GET', 'work')
+                    self.assertIn('pinned bootstrap approval was revoked', str(raised.exception))
+                    self.assertIn('HTTP '+str(status), str(raised.exception))
+                server.body = json.dumps({'schema_version': 1, 'error': {'code': 'authority_unavailable',
+                    'message': 'credential '+token+' is unavailable', 'retryable': False}}).encode()
+                with self.assertRaises(Unavailable) as raised:
+                    await transport.request('GET', 'work')
+                self.assertNotIn(token, str(raised.exception))
+                self.assertIn('[redacted]', str(raised.exception))
+                private = 'private-raw-error-not-in-diagnostics'
+                bad = (
+                    ('text/html', ('<html>'+private+'</html>').encode()),
+                    ('application/json', json.dumps({'schema_version': 2, 'error': {
+                        'code': 'authority_unavailable', 'message': private, 'retryable': True}}).encode()),
+                    ('application/json', ('{"schema_version":1,"error":{"code":"x","message":"'+private+
+                        '","message":"duplicate","retryable":true}}').encode()),
+                    ('application/json', ('{"error":"'+private*100+'"}').encode()),
+                    ('application/json', json.dumps({'schema_version': 1, 'error': {
+                        'code': 'authority_unavailable', 'message': private+'\nraw traceback', 'retryable': True}}).encode()),
+                )
+                for content_type, raw in bad:
+                    server.content_type, server.body = content_type, raw
+                    with self.assertRaises(Unavailable) as raised:
+                        await transport.request('GET', 'work')
+                    self.assertNotIn(private, str(raised.exception))
+                    self.assertNotIn(token, str(raised.exception))
+                    self.assertIn('HTTP 503', str(raised.exception))
+                self.assertEqual(server.calls, 3+len(bad), 'diagnostics must never retry requests')
+            finally:
+                await transport.aclose()
+
     async def test_bounded_json_duplicate_fields_redirect_and_no_raw_error_leak(self):
         class Response:
             status = 200
