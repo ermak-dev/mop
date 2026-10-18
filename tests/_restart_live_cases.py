@@ -27,7 +27,11 @@ from _restart_fixture import https_server, new_layout
 @override_settings(ALLOWED_HOSTS=['testserver','localhost','127.0.0.1'])
 class NativeRestart(TransactionTestCase):
     serialized_rollback = True
-    setUp = vertical.RestartVertical.setUp
+    def setUp(self):
+        vertical.RestartVertical.setUp(self)
+        from mop.server.controller.models import Installation
+        self.installation_id = Installation.objects.get().identity
+
     fixture = vertical.RestartVertical.fixture
     body = vertical.RestartVertical.body
 
@@ -109,7 +113,9 @@ class NativeRestart(TransactionTestCase):
             deadline = time.monotonic()+10
             while True:
                 try:
-                    self.assertEqual(await client.executor_state(str(self.node.id)),str(self.boot))
+                    self.assertEqual(await client.executor_state(str(self.node.id)), dict(
+                        schema_version=1, installation_id=self.installation_id, epoch=str(self.epoch),
+                        node_id=str(self.node.id), executor_epoch=str(self.boot)))
                     break
                 except Unavailable:
                     if time.monotonic() >= deadline:

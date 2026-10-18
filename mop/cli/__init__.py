@@ -482,6 +482,10 @@ def client_command(modname):
 
 
 def main(argv):
+    # Node bootstrap — раньше даже _control/run: те импортируют client/config.
+    # Командлет сам переводит конечные отказы в stderr, без старого environment.
+    if argv[:1] == ["agent"]:
+        return command("mop.cli.service.agent")(argv[1:])
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
     if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"],
                     ["server", "preview"]):

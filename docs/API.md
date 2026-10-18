@@ -806,14 +806,34 @@ trusted BindingResolver, not from these HTTP inputs. Production has no fabricate
 positive capability or fallback path mapping: an unbound support port refuses
 before an Operation is created.
 
-`GET /api/v1/machine/executor?schema_version=1&node_id=...` supplies the previous
-process epoch from server-owned current/replaced incarnations. An absent or
-ambiguous registration refuses; the agent cannot derive it from a puppet name or
-local marker. Restart acknowledgment uses the existing explicit previous/new epoch
+`GET /api/v1/machine/executor?schema_version=1&node_id=...` returns exactly
+`schema_version: 1`, `installation_id`, `epoch`, `node_id`, and `executor_epoch`.
+`installation_id` is the canonical `Installation.identity` string, never its
+numeric primary key; `epoch` and both executor/node coordinates are canonical UUID
+strings. The installation and previous process epoch are read under one short
+restore/installation admission, preserving enrolled-node, claim-work and every
+assignment's project permission checks. This read is `Cache-Control: no-store` and
+has no effects: even with installation effects disabled it neither registers nor
+restarts an executor, reconciles physical scopes, polls nor claims work. An absent
+or ambiguous registration refuses; the agent cannot derive it from a puppet name,
+local marker or bootstrap epoch snapshot. Incomplete executor-only responses are
+not supported. Restart acknowledgment uses the existing explicit previous/new epoch
 CAS. Claim, result and restart acknowledgments cannot escape an outer uncommitted
 caller transaction, including explicit autocommit-off transactions. External
 fact, clone and inspection reads also refuse such a caller transaction. Restore
 guard precedes Assignment and Operation/Step locks, including the expiry worker.
+
+The private node bootstrap consumer validates this complete live response through
+`MachineClient`, then compares its installation identity and node to the private
+transport export. `mop agent --bootstrap /absolute/private/bootstrap.json --check`
+is a bounded read-only check and is silent on success. Neither the export nor a
+local epoch file supplies authority. Its CA is loaded from validated private
+no-follow file bytes, not reopened by path or augmented with system trust;
+redirects and environment proxies are disabled. Startup refusal owns bounded
+executor/client cleanup even under repeated cancellation. Effectful native serve
+still requires a complete explicit physical root: the expanded machine action
+vocabulary does not enable missing physical implementations or bypass the
+`NativeBindings` capability refusal.
 
 Run the disposable native fixture with the worktree launcher:
 `mop dev controller --postgres 17 --label _restart_live_cases`. It uses Python 3.12 and
