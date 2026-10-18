@@ -9,6 +9,7 @@ import errno
 import fcntl
 import http.server
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -126,6 +127,13 @@ def valid_history_argument(value):
 def managed_preflight(present):
     """Любая системная policy — неизвестное переопределение, запуск запрещён."""
     return not present
+
+
+def managed_paths():
+    """Только metadata: organizational policy не читается и не обходится image-ом."""
+    return [str(path) for path in (Path("/etc/claude-code/managed-settings.json"),
+        Path("/etc/claude-code/managed-settings.d"), Path("/etc/claude-code/managed-mcp.json"))
+        if path.exists() or path.is_symlink()]
 
 
 def process_identity(pid):
@@ -756,9 +764,11 @@ def _run_model_hooks(terminal, fixture, report, output, ready, capture_live, sna
     details["strategy"] = ("Require a genuine launch-scoped causal model query/handshake, or an explicitly authorized "
         "real transition away and back with correlated PostModelSwitch. Do not infer readiness from --model, "
         "statusline, registry/socket liveness, or a next fixture request. Same-model reassertion needs its own hook.")
-    unsupported = details["native_bare_skips_hooks"]
+    unsupported = details["native_bare_skips_hooks"] and report["isolation_mode"].startswith("bare;")
     reason = ("installed --help explicitly says --bare skips settings/plugin hooks; isolation retained"
-        if unsupported else "no explicit hook-suppression contract; missing hook evidence remains unknown")
+        if unsupported else "normal mode inside verified offline container; missing hook evidence remains unknown"
+        if report["isolation_mode"].startswith("isolated-normal") else
+        "no explicit hook-suppression contract; missing hook evidence remains unknown")
     details["native_capability_reason"] = reason
     report["scenarios"]["model-hooks-control"] = dict(outcome=outcome(bool(controls), unsupported),
         evidence=dict(projected_prompt_events=len(controls), initial_snapshot="hook-initial", reason=reason))
@@ -772,8 +782,31 @@ def _run_model_hooks(terminal, fixture, report, output, ready, capture_live, sna
         evidence=dict(snapshots=list(report["live_snapshots"])))
 
 
-def run(root, timeout=30, history_module=None, model_hooks=False):
-    """Возвращает независимые наблюдения и пути доказательств; ничего не печатает."""
+def run(root, timeout=30, history_module=None, model_hooks=False, isolated_normal=False):
+    """Normal opt-in всегда создаёт Docker fixture, никогда не host argv."""
+    if isolated_normal:
+        if not model_hooks or history_module:
+            raise ValueError("isolated normal mode requires --model-hooks and no history module")
+        from mop.client import chatprobe_isolation
+        return chatprobe_isolation.run(root, timeout, managed_paths())
+    return _run_fixture(root, timeout, history_module, model_hooks)
+
+
+def _normal_guard():
+    """Импорт только соседнего trusted fixture source, без package/config host-а."""
+    path = Path(__file__).with_name("chatprobe_isolation.py")
+    spec = importlib.util.spec_from_file_location("probe_isolation", path)
+    isolation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(isolation)
+    isolation.verify_normal_runtime()
+
+
+def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _normal=False):
+    """Внутренний normal путь требует kernel proof, не доверяет caller flag."""
+    if _normal:
+        _normal_guard()
+        if not model_hooks or history_module:
+            raise ValueError("normal fixture only supports fixed model hook scenarios")
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
     os.chmod(root, 0o700)
@@ -836,9 +869,7 @@ def run(root, timeout=30, history_module=None, model_hooks=False):
         terminal.text(text or "probe:" + kind)
         return terminal.wait(lambda: completion_seen(fixture.requests, kind, since, terminal.screen()), timeout)
     try:
-        managed = [str(path) for path in (Path("/etc/claude-code/managed-settings.json"),
-            Path("/etc/claude-code/managed-settings.d"), Path("/etc/claude-code/managed-mcp.json"))
-            if path.exists() or path.is_symlink()]
+        managed = managed_paths()
         report["managed_settings_absent"] = managed_preflight(managed)
         if not report["managed_settings_absent"]:
             raise RuntimeError("managed settings could override probe isolation; Claude not started")
@@ -878,6 +909,15 @@ def run(root, timeout=30, history_module=None, model_hooks=False):
             "Temporary runtime is retained privately for inspection; projected key evidence excludes peerToken.",
             "Linux /proc identity and English UI observations; unknown means insufficient evidence."]
         command = probe_command(claude, settings, session_id, str(runtime / "c.sock"))
+        if _normal:
+            # Единственное удаление --bare — после повторного kernel proof в image.
+            _normal_guard()
+            command.remove("--bare")
+            report["isolation_mode"] = "isolated-normal; verified offline nonroot Docker fixture"
+            report["limitations"] = ["Fixture-backed responses only; no paid provider evidence.",
+                "New container, private PID/mount/net/cgroup/IPC; network none, loopback fixture only.",
+                "Normal settings hooks enabled only inside the owned fixture; no host config or credentials copied.",
+                "Initial readiness remains unknown; no production receipt or registration acceptance."]
         report["command"] = command
         terminal = Terminal(tmux, label, env, work, command, root)
         terminal.pump(3)
