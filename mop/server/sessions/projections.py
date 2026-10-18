@@ -5,7 +5,6 @@ Authoritative Assignment/Catalog и correlated observations/receipts/sequence
 Scope/epoch проверяются до и после; смена возвращает reset, не смешанную страницу.
 """
 from datetime import timedelta
-import hashlib
 import json
 from uuid import UUID
 
@@ -16,7 +15,8 @@ from django.db.models import OuterRef, Subquery, Exists, F, Value, Q
 from django.db.models.functions import JSONObject, Cast, Coalesce
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
-from mop.server.access.services import Access, NotVisible, visible_project_ids
+from mop.server.access.services import Denied, NotVisible
+from mop.server.access.readscope import read_scope, ScopeTooWide
 from .models import Assignment, IdentityApplication, ReadinessReceipt
 from .projection_models import (ProjectionClock, ProjectionRuntime, SourceObservation, SourceProducer,
                                 ProjectSequence, ProjectionEvent, ReadSnapshot)
@@ -30,10 +30,6 @@ class SnapshotReset(ValueError):
 
 class SnapshotCapacity(ValueError):
     """Производный снимок превысил разрешённые границы."""
-
-
-def _hash(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',',':')).encode()).hexdigest()
 
 
 def _event_cursor(value):
@@ -121,12 +117,12 @@ def _row(raw, now, epoch):
 
 class PoolQueries:
     """Общий service для DRF/Admin. Память/файлы/старый web не источник данных."""
-    def __init__(self, *, epoch, max_rows=5000, max_bytes=2*1024*1024):
+    def __init__(self, *, epoch, grants=None, max_rows=5000, max_bytes=2*1024*1024):
         if not callable(epoch):
             raise ValueError('current installation authority reader is required')
         if not 1 <= max_rows <= 5000 or not 1024 <= max_bytes <= 2*1024*1024:
             raise ValueError('invalid snapshot bounds')
-        self.epoch = epoch
+        self.epoch, self.grants = epoch, grants
         self.max_rows, self.max_bytes = max_rows, max_bytes
 
     def _epoch(self):
@@ -136,34 +132,43 @@ class PoolQueries:
         return value
 
     def _scope(self, actor, project_id=None):
-        projects = tuple(sorted(visible_project_ids(actor), key=str))
-        Access().authorize(actor, 'catalog.view_pool', project_ids=projects)
-        if project_id is not None:
-            if type(project_id) is not UUID or project_id not in projects:
-                raise NotVisible('resource not found')
-            projects = (project_id,)
-        return projects
+        try:
+            return read_scope(actor, 'catalog.view_pool', project_id=project_id,
+                              grants=self.grants, max_projects=5000)
+        except ScopeTooWide:
+            raise SnapshotCapacity('snapshot project bound exceeded; select a project') from None
+
+    @staticmethod
+    def _rows(authority):
+        projects = (authority.project_id,) if authority.project_id else authority.project_ids
+        rows = _query(projects)
+        if authority.node_id is not None:
+            rows = rows.filter(node_id=authority.node_id)
+        if authority.target_id is not None:
+            rows = rows.filter(pk=authority.target_id, current_incarnation_id=authority.incarnation)
+        return rows
 
     def _collect(self, actor, project_id=None, target_id=None):
-        epoch, projects = self._epoch(), self._scope(actor, project_id)
-        rows = _query(projects)
+        epoch, authority = self._epoch(), self._scope(actor, project_id)
+        rows = self._rows(authority)
         if target_id is not None:
             rows = rows.filter(pk=target_id)
         materialized = list(rows[:self.max_rows+1])
         if len(materialized) > self.max_rows:
             raise SnapshotCapacity('snapshot target bound exceeded; select a project')
-        if epoch != self._epoch() or projects != self._scope(actor, project_id):
+        if epoch != self._epoch() or authority != self._scope(actor, project_id):
             raise SnapshotReset('authority changed while materializing snapshot')
         now = timezone.now()
         values = [_row(row, now, epoch) for row in materialized]
         if len(json.dumps(values, separators=(',',':')).encode()) > self.max_bytes:
             raise SnapshotCapacity('snapshot byte bound exceeded; select a project')
+        projects = (authority.project_id,) if authority.project_id else authority.project_ids
         positions = {str(project):'0' for project in projects}
         for row in materialized:
             positions[str(row['project_id'])] = str(row['project_position'])
         runs = {row['controller_run'] for row in materialized}
         run_id = next(iter(runs)) if runs else ProjectionRuntime.objects.filter(pk=1).values_list('run_id', flat=True).first()
-        return epoch, projects, values, positions, run_id
+        return epoch, authority, values, positions, run_id
 
     def visible_ids(self, actor):
         """Материализованный scoped список для framework Admin adapter."""
@@ -176,15 +181,20 @@ class PoolQueries:
             raise NotVisible('resource not found')
         return {'schema_version':1, 'epoch':str(epoch), 'puppet':rows[0]}
 
-    def _binding(self, actor, projects):
+    def _binding(self, actor, authority):
         return salted_hmac('mop.read.binding.v1', str(actor.credential_id)+':'+str(actor.user_id),
-                           algorithm='sha256').hexdigest(), _hash([str(value) for value in projects])
+                           algorithm='sha256').hexdigest(), authority.proof
 
     def snapshot(self, actor, *, project_id=None, page_size=100, cursor=None):
         if type(page_size) is not int or not 1 <= page_size <= 500:
             raise ValueError('page_size must be within 1..500')
-        projects = self._scope(actor, project_id)
-        binding, scope = self._binding(actor, projects)
+        try:
+            authority = self._scope(actor, project_id)
+        except Denied as error:
+            if cursor is not None:
+                raise SnapshotReset('snapshot authority changed: '+str(error)) from error
+            raise
+        binding, scope = self._binding(actor, authority)
         epoch = self._epoch()
         if cursor is not None:
             if type(cursor) is not str or len(cursor) > 4096:
@@ -202,8 +212,8 @@ class PoolQueries:
             except (signing.BadSignature, KeyError, ValueError, TypeError):
                 raise SnapshotReset('snapshot scope or cursor changed') from None
         else:
-            epoch, projects, rows, positions, run_id = self._collect(actor, project_id)
-            binding, scope = self._binding(actor, projects)
+            epoch, authority, rows, positions, run_id = self._collect(actor, project_id)
+            binding, scope = self._binding(actor, authority)
             event_cursor = _event_cursor({'epoch':str(epoch), 'binding':binding, 'scope':scope,
                                           'positions':positions})
             # Одна страница вообще не пишет в БД. Только многостраничный GET
@@ -219,7 +229,7 @@ class PoolQueries:
                         raise SnapshotCapacity('active snapshot limit reached')
                     saved.save(force_insert=True)
             offset = 0
-        if projects != self._scope(actor, project_id) or epoch != self._epoch():
+        if authority != self._scope(actor, project_id) or epoch != self._epoch():
             raise SnapshotReset('snapshot authority changed')
         following = None
         if offset + page_size < len(saved.rows):
@@ -236,8 +246,9 @@ class PoolQueries:
         """Durable invalidations этого publication owner, не обещание всех Ops events."""
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError('event limit must be within 1..500')
-        epoch, projects = self._epoch(), self._scope(actor, project_id)
-        binding, scope = self._binding(actor, projects)
+        epoch, authority = self._epoch(), self._scope(actor, project_id)
+        binding, scope = self._binding(actor, authority)
+        projects = (authority.project_id,) if authority.project_id else authority.project_ids
         if type(cursor) is not str or len(cursor) > 4096:
             raise SnapshotReset('invalid event cursor')
         try:
@@ -253,9 +264,14 @@ class PoolQueries:
         predicate = Q(pk__in=[])
         for project in projects:
             predicate |= Q(project_id=project, position__gt=int(positions[str(project)]))
-        rows = list(ProjectionEvent.objects.filter(predicate, epoch=epoch).order_by('project_id','position').values(
+        events = ProjectionEvent.objects.filter(predicate, epoch=epoch)
+        if authority.node_id is not None:
+            events = events.filter(target_id__in=Assignment.objects.filter(node_id=authority.node_id).values('pk'))
+        if authority.target_id is not None:
+            events = events.filter(target_id=authority.target_id, incarnation_id=authority.incarnation)
+        rows = list(events.order_by('project_id','position').values(
             'id','project_id','position','target_id','incarnation_id','revision','deleted')[:limit])
-        if projects != self._scope(actor, project_id) or epoch != self._epoch():
+        if authority != self._scope(actor, project_id) or epoch != self._epoch():
             raise SnapshotReset('event authority changed')
         result = []
         for row in rows:

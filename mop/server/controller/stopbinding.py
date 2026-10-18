@@ -1,7 +1,6 @@
 """Точка сборки: scheduler stop и SQL retirement назначения разделены."""
-from .machinebinding import Targets, AssignmentBindings
+from .machinebinding import Targets, local_grants
 from .runtime import operations_service
-from mop.server.access.grants import Grants
 from mop.server.operations.stop import StopJobs
 
 
@@ -20,7 +19,7 @@ class StopTargets(Targets):
 
 
 def service(*, grants=None, scheduler=None):
-    grants = grants or Grants(provider=None,bindings=AssignmentBindings())
+    grants = grants or local_grants()
     targets = StopTargets(grants)
     operations = operations_service(grants=grants.local_authority())
     operations.stops = StopJobs(operations,scheduler=scheduler,targets=targets)

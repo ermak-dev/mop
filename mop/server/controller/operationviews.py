@@ -17,9 +17,8 @@ def operations_api():
 
 
 def operation_grants():
-    from mop.server.access.grants import Grants
-    from .machinebinding import AssignmentBindings
-    return Grants(provider=None, bindings=AssignmentBindings()).local_authority()
+    from .machinebinding import local_grants
+    return local_grants().local_authority()
 
 
 class OperationView(APIView):
@@ -47,7 +46,7 @@ class NodeEnvelope(serializers.Serializer):
 
 
 @method_decorator(never_cache, name='dispatch')
-class DrainNode(APIView):
+class DrainNode(OperationView):
     eligible = False
 
     def post(self, request, node_id):
@@ -66,7 +65,7 @@ class EnableNode(DrainNode):
 
 
 @method_decorator(never_cache, name='dispatch')
-class RestartPuppet(APIView):
+class RestartPuppet(OperationView):
     def post(self, request, target_id):
         try:
             command = parse_restart(target_id, decode_body(request.body))
@@ -80,7 +79,7 @@ class RestartPuppet(APIView):
 
 
 @method_decorator(never_cache, name='dispatch')
-class StopPuppetJob(APIView):
+class StopPuppetJob(OperationView):
     def post(self, request, target_id):
         from ..operations.commands import parse_stop_job
         try:
@@ -97,7 +96,7 @@ def stop_api():
 
 
 @method_decorator(never_cache, name='dispatch')
-class DeletePuppet(APIView):
+class DeletePuppet(OperationView):
     def post(self, request, target_id):
         from ..operations.commands import parse_delete
         try:
@@ -109,7 +108,7 @@ class DeletePuppet(APIView):
 
 
 @method_decorator(never_cache, name='dispatch')
-class CreatePuppet(APIView):
+class CreatePuppet(OperationView):
     def post(self, request, project_id):
         from mop.common.credentials import Credential
         from ..operations.commands import parse_create
@@ -126,7 +125,7 @@ class CreatePuppet(APIView):
 
 
 @method_decorator(never_cache, name='dispatch')
-class UpdatePuppet(APIView):
+class UpdatePuppet(OperationView):
     def post(self, request, target_id):
         from mop.common.credentials import Credential
         from ..operations.commands import parse_update
@@ -159,7 +158,7 @@ def delete_api():
 
 
 @method_decorator(never_cache, name='dispatch')
-class WipePuppet(APIView):
+class WipePuppet(OperationView):
     def post(self, request, target_id):
         from ..operations.commands import parse_wipe
         try:

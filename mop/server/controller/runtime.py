@@ -562,9 +562,8 @@ def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None
     Restart потребляется только machine HTTP, не этим controller poll.
     """
     from ..access.context import ActorContext, ActorKind
-    from ..access.grants import Grants
     from ..operations.worker import Worker
-    from .machinebinding import AssignmentBindings
+    from .machinebinding import local_grants
 
     node_bound = node_executor is not None
     if node_bound != (executor is not None):
@@ -583,7 +582,7 @@ def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None
 
     # Только SQL authority: credential/owner/approval перечитываются каждым
     # use case. Provider secret I/O не вызывается под application transaction.
-    authority = Grants(provider=None, bindings=AssignmentBindings()).local_authority()
+    authority = local_grants().local_authority()
     operations = operations_service(grants=authority, executor=executor)
     builds = None
     if build_bound:
