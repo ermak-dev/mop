@@ -152,6 +152,8 @@ class CreateBinding(models.Model):
     job_id = models.CharField(max_length=128)
     namespace = models.CharField(max_length=128)
     applied_index = models.PositiveBigIntegerField(null=True)
+    # #707: точная несекретная spec до dispatch; recovery не рендерит её заново.
+    dispatched_job = models.JSONField(null=True)
 
     class Meta:
         default_permissions = ()

@@ -326,13 +326,26 @@ class LaunchJobs:
             raise Refused('controller_unavailable', safe_reason='node is not enrolled with the scheduler')
         return target
 
-    def _ticket(self, installation, row, step, target):
+    def _ticket(self, installation, row, step, target, *, capture=False):
         binding = row.createbinding
-        job = self.specs.render(target, epoch=row.epoch, restore_generation=installation.generation,
-            operation_id=row.id, step_id=m.Step.objects.get(operation=row, name='apply_identity').id,
-            not_after=row.not_after, definition_id=binding.definition_id, scheduler_id=binding.scheduler_id)['Job']
-        return RegisterTicket(row.epoch, target, binding.scheduler_id, binding.job_id, binding.namespace,
+        job = binding.dispatched_job
+        if capture:
+            if job is not None:
+                raise Refused('claim_conflict')
+            job = self.specs.render(target, epoch=row.epoch, restore_generation=installation.generation,
+                operation_id=row.id, step_id=m.Step.objects.get(operation=row, name='apply_identity').id,
+                not_after=row.not_after, definition_id=binding.definition_id, scheduler_id=binding.scheduler_id)['Job']
+        elif job is None:
+            # Нет доказательств исходного dispatch -- не подменяем их новым
+            # шаблоном; операция остаётся неизвестной и сохраняет fences (#707).
+            raise Refused('controller_unavailable', safe_reason='dispatched registration spec is unavailable')
+        ticket = RegisterTicket(row.epoch, target, binding.scheduler_id, binding.job_id, binding.namespace,
             installation.generation, 0, job, row.id, step.token, row.not_after)
+        if capture:
+            # В той же транзакции, что claim, до единственного внешнего POST.
+            binding.dispatched_job = job
+            binding.save(update_fields=('dispatched_job',))
+        return ticket
 
     def claim(self, operation_id):
         _independent()
@@ -363,7 +376,7 @@ class LaunchJobs:
             for key in keys:
                 m.ResourceClaim.objects.create(resource_id=key, operation=row, step=step, token=step.token)
             _move(row, State.RUNNING, 'effect_claimed', expected_revision=row.revision)
-            return self._ticket(installation, row, step, target)
+            return self._ticket(installation, row, step, target, capture=True)
 
     def prepare(self, ticket):
         _independent()
