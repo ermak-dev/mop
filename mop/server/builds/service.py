@@ -15,7 +15,7 @@ from ..catalog.models import Project, ProjectPolicySnapshot, Node, NodeProject
 from ..operations import models as op
 from ..operations.lifecycle import State
 from ..operations.requests import resolve_retry, RequestRefused, Retry
-from ..operations.service import _independent, _binding, _actor, _event, _move, Refused, _ACTIVE
+from ..operations.service import _independent, _binding, _actor, _event, _move, Refused
 from ..sessions.models import Assignment, AssignmentAttempt
 from . import models as m
 from .commands import BuildCommand, validate_source
@@ -117,9 +117,7 @@ class Builds:
             if len(nodes) != len(command.target_nodes) or set(NodeProject.objects.filter(node_id__in=command.target_nodes,
                     project=project).values_list('node_id', flat=True)) != set(command.target_nodes):
                 raise Denied('build nodes must belong to current project')
-            active = op.Operation.objects.filter(state__in=_ACTIVE, epoch=state.epoch)
-            if active.count() >= api.queue_limit or active.filter(projects=project).count() >= api.project_limit:
-                raise Refused('admission_limit')
+            api._admission(state, (project.pk,), actor=actor, request_id=command.request_id)
             row = op.Operation.objects.create(actor_id=actor.user_id, actor_binding=_binding(actor),
                 request_id=command.request_id, digest=command.digest(), epoch=command.epoch, restore_generation=state.generation,
                 action='build', node=nodes[0], expected_revision=command.expected_revision, eligible=False, not_after=command.not_after)

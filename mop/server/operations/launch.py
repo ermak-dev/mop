@@ -22,7 +22,7 @@ from .requests import resolve_retry, RequestRefused, Retry
 from .lifecycle import State
 from .puppet import RestartHandler
 from .scheduler import RegisterProof, RegisterTicket
-from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
+from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move
 
 STAGES = ('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')
 REGISTER = frozenset({'conditional_register_job', 'inspect_register_job'})
@@ -170,12 +170,34 @@ class CreatePuppets:
             self._admit(actor, command, installation)
             # Тот же actor/request -- один digest и один срок, даже если reserve
             # уже зафиксирован, а ответ или процесс потерян до _compose (#704).
-            reservation, _ = m.CreateReservation.objects.get_or_create(
-                actor_id=actor.user_id, request_id=intent.request_id,
-                defaults={'digest': digest(command), 'expires_at': timezone.now() + LIFETIME})
-            if reservation.digest != digest(command):
+            reservation = m.CreateReservation.objects.filter(
+                actor_id=actor.user_id, request_id=intent.request_id).first()
+            if reservation is not None and reservation.digest != digest(command):
                 raise Refused('request_conflict')
+            # Доказанно отказавшие попытки отпускают слот, но не immutable
+            # intent. Retry обязан вновь занять capacity; unknown её не терял.
+            if reservation is None or not m.CreateProvisioningAttempt.objects.filter(
+                    reservation=reservation, refused_at=None).exists():
+                self.ops._admission(installation, (intent.project_id,))
+            if reservation is None:
+                reservation = m.CreateReservation.objects.create(
+                    actor_id=actor.user_id, request_id=intent.request_id, digest=digest(command),
+                    expires_at=timezone.now() + LIFETIME, epoch=installation.epoch, project_id=intent.project_id)
+            attempt = m.CreateProvisioningAttempt.objects.create(reservation=reservation)
             expires_at = reservation.expires_at
+        try:
+            return self._provision(actor, command, credential, expires_at)
+        except (PermissionError, Refused):
+            # Только доказанный отказ этого вызова. Остальные незавершённые
+            # попытки (включая погибший процесс) продолжают держать общий слот.
+            with self.ops._transaction():
+                self.ops._installation()
+                m.CreateProvisioningAttempt.objects.filter(pk=attempt.pk, refused_at=None).update(
+                    refused_at=timezone.now())
+            raise
+
+    def _provision(self, actor, command, credential, expires_at):
+        intent = command.intent
         target_id, incarnation_id = identities(actor, intent.request_id)
         # 2. Агент и грант -- идемпотентны по target/request; вне SQL, от имени человека.
         profile = self.grants.register_agent(actor, project_id=intent.project_id, target_id=target_id,
@@ -214,10 +236,8 @@ class CreatePuppets:
             project = Project.objects.select_for_update().get(pk=intent.project_id)
             Node.objects.select_for_update().get(pk=command.node_id)
             epoch, revision, image = self._admit(actor, command, installation)
-            active = m.Operation.objects.filter(epoch=installation.epoch, state__in=_ACTIVE)
-            if (active.count() >= self.ops.queue_limit
-                    or active.filter(projects=project.pk).count() >= self.ops.project_limit):
-                raise Refused('admission_limit')
+            # Слот уже durable до provisioning. Конверсия в Operation в этой
+            # же транзакции не занимает второй слот и не теряет первый.
             row = self.targets.assign(actor, target_id=target_id, incarnation_id=incarnation_id,
                 project_id=project.pk, node_id=command.node_id, receipt=receipt, expires_at=expires_at,
                 epoch=epoch, revision=revision, image=image)

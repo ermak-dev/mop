@@ -15,7 +15,7 @@ from .lifecycle import State
 from .puppet import RestartTarget
 from .requests import resolve_retry, RequestRefused, Retry
 from .scheduler import JobPin, StopTicket, StopProof, SchedulerUnavailable
-from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
+from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move
 
 
 # Конечный набор действий scheduler lane (#625): stop сохраняет тело и клон,
@@ -123,9 +123,7 @@ class StopJobs:
                 raise Refused('deadline_horizon')
             if intent.expected_revision!=target.revision or intent.incarnation!=target.incarnation_id:
                 raise Refused('revision_conflict')
-            active = m.Operation.objects.filter(epoch=installation.epoch,state__in=_ACTIVE)
-            if active.count()>=self.ops.queue_limit or active.filter(projects=target.project_id).count()>=self.ops.project_limit:
-                raise Refused('admission_limit')
+            self.ops._admission(installation, (target.project_id,), actor=actor, request_id=intent.request_id)
             row = m.Operation.objects.create(actor_id=actor.user_id,actor_binding=_binding(actor),request_id=intent.request_id,
                 digest=digest(command,self.action),epoch=intent.epoch,restore_generation=installation.generation,action=self.action,
                 node_id=target.node_id,target_kind='puppet',target_id=target.target_id,incarnation_id=target.incarnation_id,
