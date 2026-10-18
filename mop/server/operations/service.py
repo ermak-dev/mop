@@ -176,6 +176,31 @@ class Operations:
             raise Refused('epoch_conflict')
         return state
 
+    def _pending_creates(self, installation):
+        # Restore/installation lock уже взят caller'ом. Конверсия SQL-атомарна:
+        # один actor/request/digest занимает либо reservation, либо Operation.
+        converted = m.Operation.objects.filter(actor_id=OuterRef('actor_id'),
+            request_id=OuterRef('request_id'), digest=OuterRef('digest'))
+        attempts = m.CreateProvisioningAttempt.objects.filter(reservation_id=OuterRef('pk'))
+        return (m.CreateReservation.objects.filter(Q(epoch=installation.epoch) | Q(epoch=None))
+                .filter(~Exists(converted))
+                .filter(~Exists(attempts) | Exists(attempts.filter(refused_at=None))))
+
+    def _admission(self, installation, projects, *, actor=None, request_id=None):
+        """Общий bound под restore lock: provisioning не обходит другие lanes."""
+        if actor is not None and m.CreateReservation.objects.filter(
+                actor_id=actor.user_id, request_id=request_id).exists():
+            # Общий request journal: другая команда не крадёт ещё не
+            # сконвертированный create intent того же actor/request.
+            raise Refused('request_conflict')
+        active = m.Operation.objects.filter(epoch=installation.epoch, state__in=_ACTIVE)
+        pending = self._pending_creates(installation)
+        if active.count() + pending.count() >= self.queue_limit or any(
+                active.filter(projects=project).count()
+                + pending.filter(Q(project_id=project) | Q(project=None)).count() >= self.project_limit
+                for project in projects):
+            raise Refused('admission_limit')
+
     def _authorize(self, actor, action, node_id, projects=()):
         self.access.authorize(actor, action, node_ids=(node_id,), project_ids=tuple(projects))
 
@@ -279,9 +304,7 @@ class Operations:
                 raise Refused('deadline_horizon')
             if node.revision != command.expected_revision:
                 raise Refused('revision_conflict')
-            active = m.Operation.objects.filter(state__in=_ACTIVE, epoch=installation.epoch)
-            if active.count() >= self.queue_limit or any(active.filter(projects=project).count() >= self.project_limit for project in projects):
-                raise Refused('admission_limit')
+            self._admission(installation, projects, actor=actor, request_id=command.request_id)
             row = m.Operation.objects.create(actor_id=actor.user_id, actor_binding=_binding(actor),
                 request_id=command.request_id, digest=command.digest(), epoch=command.epoch,
                 restore_generation=installation.generation, action=command.action, node=node,

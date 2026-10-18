@@ -225,16 +225,36 @@ class Evidence(models.Model):
 
 
 class CreateReservation(Evidence):
-    """Неизменный intent до credential I/O: падение до Operation не теряет
-    digest запроса и серверный срок гранта. Это не допуск к исполнению."""
+    """Неизменный intent и слот общего admission до credential I/O (#704/#709).
+
+    После конверсии слот учитывается только по Operation. Пустой scope старой
+    записи неизвестен, а не свободен: до recovery он занимает любой scope.
+    Это не допуск к исполнению."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     request_id = models.UUIDField()
     digest = models.CharField(max_length=64)
     expires_at = models.DateTimeField()
+    epoch = models.UUIDField(null=True)
+    project = models.ForeignKey('catalog.Project', null=True, on_delete=models.PROTECT)
 
     class Meta(Evidence.Meta):
         constraints = [models.UniqueConstraint(fields=('actor', 'request_id'), name='create_reservation_actor_request')]
+
+
+class CreateProvisioningAttempt(models.Model):
+    """Незавершённый вызов держит слот reservation, не отдельную очередь.
+
+    Только доказанный отказ закрывает попытку. Потеря ответа/процесса остаётся
+    неизвестной; отказ параллельного retry не освобождает чужую попытку.
+    Успешное завершение доказывает общий Operation, без второго lifecycle.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reservation = models.ForeignKey(CreateReservation, on_delete=models.PROTECT)
+    refused_at = models.DateTimeField(null=True)
+
+    class Meta:
+        default_permissions = ()
 
 
 class EffectReceipt(Evidence):

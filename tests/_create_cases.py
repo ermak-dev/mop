@@ -359,6 +359,242 @@ class CreateVertical(TransactionTestCase):
         self.assertEqual(Token.objects.filter(user__kind='agent').count(), 1)
         self.assertEqual(a.GrantEvent.objects.filter(action='reserve').count(), 1)
 
+    # BUG (#709): полная очередь отказывает после COMMIT identity и гранта.
+    # HYPOTHESIS: CreateReservation хранит intent, но не занимает общий слот;
+    # admission нужен под restore lock до первого provisioning, включая другие lanes.
+    # SOLUTION: scoped reservation занимает общий bound до I/O; конверсия в
+    # Operation не удваивает счёт. Доказанный отказ закрывает только свою
+    # попытку, не неизвестную попытку параллельного или погибшего caller.
+    # RESULT: PG17 -- семь поведенческих RED; после правки 194/194 связанных
+    # проверок с migration drift и 2/2 обязательных cross-UID проверок fixture.
+    # STATUS: FIXED — see #709
+    def test_full_create_queue_refuses_without_provisioning_authority(self):
+        self.ready()
+        self.ops.queue_limit = 1
+        first = self.submit(self.body())
+        self.assertEqual(first.status_code, 202, first.content)
+        before, calls = self.reservation_rows(), list(self.issuer.calls)
+        response = self.submit(self.body())
+        self.assertEqual(response.status_code, 429, response.content)
+        self.assertEqual(response.json()['error']['code'], 'admission_limit')
+        self.assertEqual(self.reservation_rows(), before,
+                         'full admission must not create agents, tokens, intents or grants')
+        self.assertEqual(self.issuer.calls, calls)
+        self.assertEqual(self.rows(), (1, 1, 1, 1))
+
+    def test_full_project_queue_refuses_without_provisioning_authority(self):
+        self.ready()
+        self.ops.project_limit = 1
+        first = self.submit(self.body())
+        self.assertEqual(first.status_code, 202, first.content)
+        before, calls = self.reservation_rows(), list(self.issuer.calls)
+        response = self.submit(self.body())
+        self.assertEqual(response.status_code, 429, response.content)
+        self.assertEqual(response.json()['error']['code'], 'admission_limit')
+        self.assertEqual(self.reservation_rows(), before)
+        self.assertEqual(self.issuer.calls, calls)
+
+    def test_independent_create_requests_cannot_provision_one_free_slot_twice(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from unittest.mock import patch
+        from django.db import connections
+        from mop.common.credentials import Credential
+        from mop.server.controller.createbinding import service
+        from mop.server.operations.commands import parse_create
+        from mop.server.operations.launch import identities
+        from mop.server.operations.service import Refused
+        self.ready()
+        first, second = (parse_create(self.project.pk, self.body()) for _ in range(2))
+        first_target, _ = identities(self.actor, first.intent.request_id)
+        entered, release = Event(), Event()
+        register = self.grants.register_agent
+
+        def pause_first(*args, **kwargs):
+            if kwargs['target_id'] == first_target:
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+            return register(*args, **kwargs)
+
+        def submit(command):
+            try:
+                # Независимый handler и SQL connection, никакого общего счётчика.
+                api = service(grants=self.grants, issuer=self.issuer, scheduler=self.scheduler)
+                api.queue_limit = 1
+                try:
+                    return api.creates.submit(self.actor, command, credential=Credential('token', self.key))
+                except Refused as error:
+                    return error.code
+            finally:
+                connections.close_all()
+
+        with patch.object(self.grants, 'register_agent', side_effect=pause_first), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            winner = pool.submit(submit, first)
+            self.assertTrue(entered.wait(timeout=5))
+            before = self.reservation_rows()
+            try:
+                loser = pool.submit(submit, second).result(timeout=5)
+                after = self.reservation_rows()
+            finally:
+                release.set()
+            accepted = winner.result(timeout=10)
+        self.assertEqual(after, before, 'the competing request must not mint authority')
+        self.assertEqual(loser, 'admission_limit')
+        self.assertIsInstance(accepted, dict)
+        self.assertEqual(accepted['state'], 'accepted')
+        self.assertEqual(self.rows(), (1, 1, 1, 1))
+
+    def test_precompose_reservation_blocks_other_operation_admission(self):
+        from mop.server.controller.runtime import operations_service
+        from mop.server.operations.node import NodeEligibility
+        from mop.server.operations.service import Refused
+        self.ready()
+        self.ops.queue_limit = 1
+        self.lose_reservation_reply(self.body())
+        before = self.reservation_rows()
+        command = NodeEligibility(epoch=self.epoch, request_id=uuid4(), node_id=self.node.pk,
+            expected_revision=1, not_after=timezone.now()+timedelta(minutes=2), eligible=False)
+        with self.assertRaisesRegex(Refused, 'admission_limit'):
+            operations_service(queue_limit=1).submit(self.actor, command)
+        self.assertEqual(self.reservation_rows(), before)
+        self.assertEqual(self.rows(), (0, 1, 1, 0))
+
+    def test_lost_provisioning_reply_retains_the_slot_for_exact_retry(self):
+        from mop.server.controller.createbinding import service
+        self.ready()
+        self.ops.queue_limit = 1
+        body = self.body()
+        self.lose_reservation_reply(body)
+        before = self.reservation_rows()
+        # Новый экземпляр не должен забыть durable reservation после падения.
+        self.ops = service(grants=self.grants, issuer=self.issuer, scheduler=self.scheduler)
+        self.ops.queue_limit = 1
+        refused = self.submit(self.body())
+        self.assertEqual(refused.status_code, 429, refused.content)
+        self.assertEqual(self.reservation_rows(), before)
+        retried = self.submit(body)
+        self.assertEqual(retried.status_code, 202, retried.content)
+        self.assertEqual(self.submit(body).json()['operation']['id'], retried.json()['operation']['id'])
+        self.assertEqual(self.reservation_rows(), before)
+        self.assertEqual(self.rows(), (1, 1, 1, 1))
+
+    def test_definite_precompose_refusal_releases_capacity_but_keeps_intent_pins(self):
+        from mop.server.operations.models import CreateReservation
+        self.ready(approve=False)
+        self.ops.queue_limit = 1
+        body = self.body()
+        denied = self.submit(body)
+        self.assertEqual(denied.status_code, 403, denied.content)
+        pinned = CreateReservation.objects.values().get()
+        self.grants.approve_definition(self.actor, self.definition.id)
+        accepted = self.submit(self.body())
+        self.assertEqual(accepted.status_code, 202, accepted.content)
+        self.assertEqual(CreateReservation.objects.values().get(pk=pinned['id']), pinned)
+        # Освободившийся intent не получает права обходить занятый слот.
+        before = self.reservation_rows()
+        refused = self.submit(body)
+        self.assertEqual(refused.status_code, 429, refused.content)
+        self.assertEqual(self.reservation_rows(), before)
+
+    def test_converted_reservation_is_not_counted_twice_and_terminal_releases_capacity(self):
+        from mop.server.operations.models import Operation
+        self.ready()
+        self.ops.queue_limit = 2
+        first = self.submit(self.body())
+        second = self.submit(self.body())
+        self.assertEqual((first.status_code, second.status_code), (202, 202), second.content)
+        self.ops.cancel(self.actor, UUID(first.json()['operation']['id']), expected_revision=1)
+        third = self.submit(self.body())
+        self.assertEqual(third.status_code, 202, third.content)
+        self.assertEqual(list(Operation.objects.order_by('created_at').values_list('state', flat=True)),
+                         ['cancelled', 'accepted', 'accepted'])
+        self.assertEqual(self.rows(), (3, 3, 3, 3))
+
+    def test_definite_retry_refusal_does_not_release_an_earlier_unknown_attempt(self):
+        from unittest.mock import patch
+        from mop.server.access.services import Denied
+        self.ready()
+        self.ops.queue_limit = 1
+        body = self.body()
+        self.lose_reservation_reply(body)
+        with patch.object(self.grants, 'register_agent', side_effect=Denied('registration refused')):
+            denied = self.submit(body)
+        self.assertEqual(denied.status_code, 403, denied.content)
+        before = self.reservation_rows()
+        full = self.submit(self.body())
+        self.assertEqual(full.status_code, 429, full.content)
+        self.assertEqual(self.reservation_rows(), before)
+        retried = self.submit(body)
+        self.assertEqual(retried.status_code, 202, retried.content)
+        self.assertEqual(self.reservation_rows(), before)
+
+    def test_project_reservation_bound_is_shared_but_not_global(self):
+        from mop.server.catalog.models import Node, NodeProject, Project
+        from mop.server.controller.runtime import operations_service
+        from mop.server.operations.node import NodeEligibility
+        from mop.server.operations.service import Refused
+        self.ready()
+        self.ops.project_limit = 1
+        body = self.body()
+        self.lose_reservation_reply(body)
+        api = operations_service(project_limit=1)
+        command = NodeEligibility(epoch=self.epoch, request_id=uuid4(), node_id=self.node.pk,
+            expected_revision=1, not_after=timezone.now()+timedelta(minutes=2), eligible=False)
+        with self.assertRaisesRegex(Refused, 'admission_limit'):
+            api.submit(self.actor, command)
+        project = Project.objects.create(name='independent', origin='https://example.invalid/independent.git')
+        node = Node.objects.create(name='independent', driver='host', ssh_host='example.invalid',
+            control_origin='https://example.invalid', lan_address='example.invalid', bootstrap_address='example.invalid')
+        NodeProject.objects.create(node=node, project=project)
+        other = NodeEligibility(epoch=self.epoch, request_id=uuid4(), node_id=node.pk,
+            expected_revision=1, not_after=timezone.now()+timedelta(minutes=2), eligible=False)
+        self.assertEqual(api.submit(self.actor, other)['state'], 'accepted')
+        retry = self.submit(body)
+        self.assertEqual(retry.status_code, 202, retry.content)
+
+    def test_precompose_create_request_key_cannot_be_reused_by_another_lane(self):
+        from mop.server.controller.runtime import operations_service
+        from mop.server.operations.node import NodeEligibility
+        from mop.server.operations.service import Refused
+        self.ready()
+        body = self.body()
+        self.lose_reservation_reply(body)
+        before = self.reservation_rows()
+        command = NodeEligibility(epoch=self.epoch, request_id=UUID(body['request_id']), node_id=self.node.pk,
+            expected_revision=1, not_after=timezone.now()+timedelta(minutes=2), eligible=False)
+        with self.assertRaisesRegex(Refused, 'request_conflict'):
+            operations_service().submit(self.actor, command)
+        self.assertEqual(self.reservation_rows(), before)
+        retry = self.submit(body)
+        self.assertEqual(retry.status_code, 202, retry.content)
+
+    def test_legacy_unscoped_reservation_keeps_capacity_until_recovery(self):
+        from importlib import import_module
+        from django.apps import apps
+        from django.db import connection
+        from mop.server.operations.launch import digest
+        from mop.server.operations.commands import parse_create
+        from mop.server.operations.models import CreateReservation
+        self.ready()
+        self.ops.queue_limit = 1
+        body = self.body()
+        reservation = CreateReservation.objects.create(actor_id=self.actor.user_id,
+            request_id=UUID(body['request_id']), digest=digest(parse_create(self.project.pk, body)),
+            expires_at=timezone.now()+timedelta(days=30))
+        # Data transition до появления scope/попыток: старый неизвестный вызов
+        # должен остаться unknown, не стать свободным от нового schema default.
+        migration = import_module('mop.server.operations.migrations.0015_create_admission_capacity')
+        with connection.schema_editor() as editor:
+            migration.retain_unresolved(apps, editor)
+        before = self.reservation_rows()
+        refused = self.submit(self.body())
+        self.assertEqual(refused.status_code, 429, refused.content)
+        self.assertEqual(self.reservation_rows(), before)
+        retry = self.submit(body)
+        self.assertEqual(retry.status_code, 202, retry.content)
+        self.assertEqual(CreateReservation.objects.get(pk=reservation.pk).expires_at, reservation.expires_at)
+
     def test_create_requires_its_own_permission(self):
         self.ready()
         from mop.server.access import models as a
