@@ -58,6 +58,9 @@ for name, path in (('system_manager_denied', '/run/systemd/private'),
     finally:
         sock.close()
 checks['no_user_manager_runtime'] = not os.access('/run/user', os.R_OK)
+# Consumer имеет право менять собственный cwd; retirement не зависит от
+# повторного launch admission этой директории (#725).
+body.chmod(0o755)
 record = dict(pid=os.getpid(), starter=starter, sid=os.getsid(0), uid=os.getuid(), gid=os.getgid(),
               cgroup=Path('/proc/self/cgroup').read_text().strip(), checks=checks)
 (body/'descendant.json').write_text(json.dumps(record))

@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import sys
 from uuid import uuid4
 
@@ -131,9 +133,22 @@ async def acceptance():
         pid = record['pid']
         if Path(f'/proc/{pid}/cgroup').read_text().strip() != '0::'+s.cgroup:
             raise AssertionError('actual detached descendant left its cgroup')
+        if stat.S_IMODE(body.stat().st_mode) != 0o755:
+            raise AssertionError('owned body did not change its consumer cwd permissions')
         observed = await call('inspect', started.reference)
         if observed.reference != started.reference or not observed.populated:
             raise AssertionError('detached descendant was not physically inspected')
+        # Только собственный fixture cwd: root меняет/убирает directory entry,
+        # пока descendant держит старый cwd. Не трогаем чужие units/деревья.
+        moved = body.with_name('moved-'+s.launch_id)
+        body.rename(moved)
+        observed = await call('inspect', started.reference)
+        if observed.reference != started.reference or not observed.populated:
+            raise AssertionError('renamed cwd blocked exact containment inspection')
+        shutil.rmtree(moved)
+        observed = await call('inspect', started.reference)
+        if observed.reference != started.reference or not observed.populated:
+            raise AssertionError('removed cwd blocked exact containment inspection')
         # Wrong InvocationID обязан отказать без cgroup.kill.
         from dataclasses import replace
         try:
@@ -151,6 +166,7 @@ async def acceptance():
         # PID disappearance alone никогда не является positive criterion.
         print(json.dumps(dict(status='accepted', physical='systemd-cgroup-v2',
             double_fork=True, setsid=True, retired_empty=True, negative_checks=record['checks'],
+            cwd_mutations=['body-chmod-0755', 'renamed', 'removed'],
             admission='fixture guard, not HTTP acceptance', native='not tested')), flush=True)
     finally:
         primary = sys.exception()

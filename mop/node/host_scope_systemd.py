@@ -319,9 +319,12 @@ class SystemdCgroupAdapter:
         finally:
             os.close(fd)
 
-    def _body(self, scope):
+    def _runner(self):
         if installed_file(self.installed.runner) != self._runner_identity:
             raise Refused('installed HOST runner identity changed')
+
+    def _body(self, scope):
+        self._runner()
         parent = open_directory(self.installed.body_root, owner=0, immutable=True)
         try:
             fd = os.open(scope.launch_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -438,7 +441,9 @@ class SystemdCgroupAdapter:
     async def inspect(self, scope):
         if type(scope) is not Scope:
             raise Refused('typed HOST scope required')
-        self._body(scope)
+        # Consumer cwd — launch admission, не authority уже созданного scope:
+        # тело может chmod/сменить/удалить его, но не своё containment ownership.
+        self._runner()
         try:
             result = await self._unit(scope)
             if result is None:

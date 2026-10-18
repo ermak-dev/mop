@@ -11,6 +11,7 @@ Fake adapter не OS acceptance; native/real HTTP admission не проверя�
 STATUS: FIXED — see #719
 """
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 import importlib.util
 import json
@@ -408,6 +409,106 @@ class SocketTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SystemdTests(unittest.IsolatedAsyncioTestCase):
+    @contextmanager
+    def directory_adapter(self):
+        """Настоящий consumer cwd, fake manager/kernel; не OS acceptance."""
+        from unittest.mock import AsyncMock, patch
+        from mop.node import host_scope_systemd as systemd
+        with tempfile.TemporaryDirectory(prefix='m725-') as directory:
+            root, s = Path(directory), scope()
+            p = replace(installed(), node_uid=os.getuid()+1, body_uid=os.getuid(),
+                        body_gid=os.getgid(), body_root=root/'bodies')
+            p.body_root.mkdir(mode=0o755)
+            body = p.body(s)
+            body.mkdir(mode=0o700)
+            cgroup = root/'cgroup'
+            cgroup.mkdir()
+            (cgroup/'cgroup.kill').write_bytes(b'')
+            adapter = object.__new__(systemd.SystemdCgroupAdapter)
+            adapter.installed = p
+            adapter._runner_identity = (1, 2, 3, 4)
+            adapter.boot_id = str(uuid4())
+            values = dict(User=str(p.body_uid), Group=str(p.body_gid),
+                          InvocationID=uuid4().hex, ControlGroup=s.cgroup)
+            adapter._unit = AsyncMock(return_value=(values, str(p.runner),
+                                                   (str(p.runner), '--scope', s.unit)))
+            adapter._cgroup = lambda address: os.open(cgroup, os.O_RDONLY | os.O_DIRECTORY)
+            adapter._members = lambda fd, address: None
+            adapter._populated = lambda fd: not (cgroup/'cgroup.kill').read_bytes()
+            original_open = systemd.open_directory
+            def open_fixture(path, **kwargs):
+                if path == p.body_root:
+                    # Только immutable ancestor fixture заменён; consumer leaf
+                    # проходит настоящий no-follow open/fstat production _body.
+                    return original_open(path, owner=os.getuid())
+                return original_open(path, **kwargs)
+            with patch.object(systemd, 'open_directory', side_effect=open_fixture), \
+                    patch.object(systemd, 'installed_file', return_value=adapter._runner_identity), \
+                    patch.object(systemd, 'read_kernel', return_value=adapter.boot_id):
+                yield adapter, s, body, cgroup
+
+    async def test_owned_retirement_ignores_consumer_cwd_mutations(self):
+        # HYPOTHESIS: launch admission _body повторно доверяет mutable cwd
+        # и отказывает до exact unit/invocation/cgroup cleanup (#725).
+        # SOLUTION: cwd admission только перед start; runner/unit/reference
+        # и pinned cgroup fences остаются на inspect/retire.
+        # RESULT: 37 GREEN; private systemd probe принял chmod/rename/remove.
+        # STATUS: FIXED — see #725
+        for mutation in ('chmod', 'rename', 'remove', 'symlink'):
+            with self.subTest(mutation=mutation), self.directory_adapter() as (adapter, s, body, cgroup):
+                reference = (await adapter.inspect(s)).verify(adapter.installed, s).reference
+                if mutation == 'chmod':
+                    body.chmod(0o755)
+                elif mutation == 'rename':
+                    body.rename(body.with_name('moved'))
+                else:
+                    body.rmdir()
+                    if mutation == 'symlink':
+                        body.symlink_to(cgroup, target_is_directory=True)
+                observed = await adapter.inspect(s)
+                self.assertEqual(observed.verify(adapter.installed, s).reference, reference)
+                empty = await adapter.retire(reference)
+                self.assertFalse(empty.verify(adapter.installed, s, reference).populated)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'1')
+
+    async def test_launch_still_requires_original_private_consumer_directory(self):
+        for mutation in ('chmod', 'remove', 'symlink'):
+            with self.subTest(mutation=mutation), self.directory_adapter() as (adapter, s, body, cgroup):
+                if mutation == 'chmod':
+                    body.chmod(0o755)
+                else:
+                    body.rmdir()
+                    if mutation == 'symlink':
+                        body.symlink_to(cgroup, target_is_directory=True)
+                with self.assertRaises((api().Refused, OSError)):
+                    await adapter.start(s)
+                adapter._unit.assert_not_called()
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
+    async def test_mutated_cwd_never_relaxes_executable_or_exact_reference_fences(self):
+        from unittest.mock import patch
+        from mop.node import host_scope_systemd as systemd
+        with self.directory_adapter() as (adapter, s, body, cgroup):
+            reference = (await adapter.inspect(s)).verify(adapter.installed, s).reference
+            body.chmod(0o755)
+            for changes in ({'invocation_id': uuid4().hex}, {'boot_id': str(uuid4())},
+                            {'scope': scope()}):
+                with self.subTest(changes=changes), self.assertRaises(api().Refused):
+                    await adapter.retire(replace(reference, **changes))
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+            values, executable, argv = adapter._unit.return_value
+            for foreign in ((values, '/bin/sh', argv), (values, executable, ('/bin/sh',)),
+                            ({**values, 'ControlGroup': '/foreign'}, executable, argv)):
+                adapter._unit.return_value = foreign
+                with self.assertRaises(api().Refused):
+                    await adapter.retire(reference)
+                self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+            adapter._unit.return_value = values, executable, argv
+            with patch.object(systemd, 'installed_file', return_value=(9, 9, 9, 9)):
+                with self.assertRaisesRegex(api().Refused, 'runner identity'):
+                    await adapter.retire(reference)
+            self.assertEqual((cgroup/'cgroup.kill').read_bytes(), b'')
+
     async def test_production_command_capture_is_bounded_and_cleans_owned_child(self):
         m = api()
         from mop.node.host_scope_systemd import BoundedCommand
