@@ -129,6 +129,9 @@ class CreatePuppets:
             raise Refused('revision_conflict', safe_reason='the selected bootstrap or image is unavailable')
         if reservation is not None and reservation.policy_digest != selected.digest:
             raise Denied('pinned initial launch selection changed')
+        # До durable reservation, register_agent и credential provisioning:
+        # только immutable sizes/public metadata, никаких provider reads.
+        self.selections.require_transfer(selected)
         return epoch, approval.revision, selected.image_id, selected
 
     def _admit(self, actor, command, installation, reservation=None):

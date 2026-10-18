@@ -4,6 +4,11 @@
 в HTTPS/private writer. Aggregate consumers и role payload вообще не проверены
 до register_agent/reserve/provision. RED должен доказать реальные границы,
 а не только сравнить константы. SQL sizing не получает provider/decrypt.
+SOLUTION: общий wire profile применяется к exact selected immutable sizes до
+reservation/register_agent/provision; только bootstrap получает отдельный default.
+RESULT: девять admission/TLS cases проходят, включая base64 quantum до cap и
+следующий raw byte за cap с нулём provisioning/effects и без latest fallback.
+STATUS: FIXED — see #751 (byte overflow; maximum-ref deadline отдельно остаётся RED).
 """
 import hashlib
 from unittest.mock import patch
@@ -41,13 +46,13 @@ class TransferAdmission(TransactionTestCase):
     setUp = create_cases.CreateVertical.setUp
     ready, body, submit = create_cases.CreateVertical.ready, create_cases.CreateVertical.body, create_cases.CreateVertical.submit
 
-    def select(self, *, consumers=None, definition=None, revision=None):
+    def select(self, *, consumers=None, definition=None, revision=None, model_config_digest=None):
         from mop.server.controller.initialselection import configure
         return configure(self.actor, project_id=self.project.pk,
             definition_id=(definition or self.definition).id,
             bootstrap_revision=(revision or self.revision).id, image_id=self.image.id,
             source_origin=self.project.origin, source_commit='d'*40, source_ref='refs/heads/exact-source',
-            desired_model='fixture-model', model_config_digest=hashlib.sha256(b'{"model":"fixture-model"}').hexdigest(),
+            desired_model='fixture-model', model_config_digest=model_config_digest or hashlib.sha256(b'{"model":"fixture-model"}').hexdigest(),
             consumers=consumers or (('model_config', self.model_config.active_version_id),))
 
     def assert_pre_effect_refusal(self, body):
@@ -73,6 +78,7 @@ class TransferAdmission(TransactionTestCase):
 
     def bootstrap_boundary(self, *, over):
         from mop.common.initial_transfer import phase_limit, base64_size
+        from mop.common.credentials import MAX_FRAME
         from mop.server.controller.initialselection import LaunchSelections
         from mop.server.secrets.services import SecretStore
         from mop.server.access.services import Access
@@ -92,10 +98,10 @@ class TransferAdmission(TransactionTestCase):
         cap = phase_limit('bootstrap_body')
         # Base64 квантуется по четыре wire bytes; ни один произвольный
         # overhead не угадывается. Exact public metadata и retained sizes те же.
-        remaining = min(cap-baseline.http, cap-baseline.private, 2097152-baseline.credential) + base64_size(1)
+        remaining = min(cap-baseline.http, cap-baseline.private, MAX_FRAME+4-baseline.credential) + base64_size(1)
         raw_size = (remaining//4)*3
-        version = store.stage(self.actor, item.id, b'x'*(raw_size + int(over)), expected_revision=item.revision)
-        selected = selection(version.id)
+        updated = store.update(self.actor, item.id, b'x'*(raw_size + int(over)), expected_revision=item.revision)
+        selected = selection(updated.active_version_id)
         measured = LaunchSelections().transfer_profile(selected)['bootstrap_body']
         if over:
             self.assertGreater(measured.private, cap)
@@ -131,6 +137,33 @@ class TransferAdmission(TransactionTestCase):
         self.preparation.approve(self.actor, revision.id)
         self.select(revision=revision, consumers=(('model_config', self.model_config.active_version_id),) +
             tuple(('bootstrap_input', version) for version in refs))
+        # Latest меньше и launchable, но exact selected oversized policy не
+        # заменяется ни им, ни частичным набором consumer bytes.
+        latest = self.preparation.publish(self.actor, project_id=self.project.pk,
+            tasks=b'x', variables=b'', provenance='later-small', commit='c'*40)
+        self.preparation.approve(self.actor, latest.id)
+        self.assert_pre_effect_refusal(self.body())
+
+    def test_prepare_consumers_keep_their_256k_aggregate_budget_before_provisioning(self):
+        from mop.server.secrets.services import SecretStore
+        from mop.server.access.services import Access
+        self.ready()
+        store = SecretStore(provider=self.grants.secrets.provider, authorizer=Access())
+        refs = tuple(store.create(self.actor, project_id=self.project.pk, name='source-'+str(i),
+            kind='credential', purpose='git', value=b'x'*75000).active_version_id for i in range(3))
+        self.select(consumers=(('model_config', self.model_config.active_version_id),) +
+            tuple(('source_credential', version) for version in refs))
+        self.assert_pre_effect_refusal(self.body())
+
+    def test_native_model_config_keeps_its_256k_budget_before_provisioning(self):
+        from mop.server.secrets.services import SecretStore
+        from mop.server.access.services import Access
+        self.ready()
+        store = SecretStore(provider=self.grants.secrets.provider, authorizer=Access())
+        raw = b'{"model":"fixture-model"}'+b' '*200000
+        updated = store.update(self.actor, self.model_config.id, raw, expected_revision=self.model_config.revision)
+        self.select(consumers=(('model_config', updated.active_version_id),),
+            model_config_digest=hashlib.sha256(raw).hexdigest())
         self.assert_pre_effect_refusal(self.body())
 
     def test_oversized_retained_role_refuses_before_agent_or_credential_provision(self):

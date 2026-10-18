@@ -66,10 +66,13 @@ def selected_fixture(case, reserved):
         defaults=dict(desired_image_id=pin.image_revision_id, observed_image_id=pin.image_revision_id, available=True))
     config = case.app.store.create(actor, project_id=case.project.pk, name='native-config',
         kind='file', purpose='project', value=b'{}')
+    from mop.server.preparation.models import BootstrapSecretReference
+    refs = tuple(BootstrapSecretReference.objects.filter(revision=revision).values_list('version_id', flat=True))
     selected = configure(actor, project_id=case.project.pk, definition_id=reserved.definition_id,
         bootstrap_revision=revision.id, image_id=pin.image_revision_id, source_origin=case.project.origin,
         source_commit='d'*40, source_ref='refs/heads/exact-source', desired_model='fixture-model',
-        model_config_digest=hashlib.sha256(b'{}').hexdigest(), consumers=(('model_config', config.active_version_id),))
+        model_config_digest=hashlib.sha256(b'{}').hexdigest(), consumers=(('model_config', config.active_version_id),) +
+            tuple(('bootstrap_input', version) for version in refs))
     identity = owner_identity(case.user.pk)
     # HYPOTHESIS (#730): seeded reservation без exact proof отказывает до delivery.
     # SOLUTION: та же approval/content/digest тройка, что у selection и grant.
@@ -103,6 +106,7 @@ def selected_fixture(case, reserved):
     em.NodeExecutor.objects.get_or_create(node_id=case.assignment.node_id,
         defaults=dict(executor_epoch=case.assignment.current_incarnation.executor_epoch))
     case.pin = pin
+    case.selected_launch = selected
 
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -558,10 +562,17 @@ class LaunchDelivery(TransactionTestCase):
         from mop.node.http_execution import MachineClient, HttpsTransport
         import uvicorn
         self.fixture(phase, bootstrap_content=bootstrap_content)
+        from mop.common.initial_transfer import measure
+        from mop.server.controller.initialselection import LaunchSelections
+        budget = LaunchSelections().transfer_profile(self.selected_launch)[phase].require(phase)
         content = bootstrap_content or dict(tasks=b'tasks', variables=b'', provenance='fixture', commit='a'*40)
         expected = codec.encode(codec.bounded_content(content['tasks'], content['variables'],
             content['provenance'], content['commit'], tuple(content.get('secret_refs', ()))))
         def verify(value):
+            actual = measure(value)
+            self.assertLessEqual(actual.http, budget.http)
+            self.assertLessEqual(actual.private, budget.private)
+            self.assertLessEqual(actual.credential, budget.credential)
             self.assertEqual(parse_delivery(value, self.metadata), value)
             self.assertEqual(value['phase'], phase)
             self.assertEqual(value['role'] is not None, phase in ('initial_identity', 'native_exec'))
