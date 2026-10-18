@@ -32,6 +32,203 @@ from django.utils import timezone
 import _launch_delivery_cases as launch_fixture
 
 
+# BUG (#716): producer отвергает настоящую передачу claims scheduler -> machine.
+# HYPOTHESIS: root ошибочно считает владельцем всех fences scheduler_register;
+# apply_identity держит три новых claims, confirm_ready сохраняет их после receipt.
+# SOLUTION: общий create-only launch_definition доказывает точные keys/stage/
+# token/attempt и immutable receipt предшественника; root не дублирует этот gate.
+# RED: PG17 -- обе настоящие передачи дают 409 вместо 200; launch delivery
+# выдаёт байты с чужим token. 8 checks, 24 behavioral failures, без setup errors.
+# RESULT: 99/99 PG17 producer/launch delivery/create; layers/controller_layers 2/2.
+# STATUS: FIXED — see #716
+# Owned HTTP scheduler и claimed machine -- не native body/CLI acceptance.
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class CreateProducerHandoff(TransactionTestCase):
+    serialized_rollback = True
+    from _create_cases import CreateVertical, CreateRegistration
+    setUp = CreateVertical.setUp
+    ready, body, submit = CreateVertical.ready, CreateVertical.body, CreateVertical.submit
+    launch = CreateRegistration.launch
+
+    def fixture(self):
+        from mop.server.access import services as auth
+        from mop.server.controller.createbinding import LaunchSupport
+        from mop.server.controller.machinebinding import compose
+        from mop.server.operations import models as om
+        from mop.server.sessions.models import Assignment, IncarnationLaunch
+        operation, target, incarnation = self.launch()
+        self.ops.launches.run(operation)
+        self.assertEqual(len(self.peer.posts), 1)
+        self.operation = om.Operation.objects.get(pk=operation)
+        self.assignment = Assignment.objects.get(pk=target)
+        self.pin = IncarnationLaunch.objects.get(incarnation_id=incarnation)
+        self.machine_key = auth.enroll_service('producer-handoff', self.node.pk,
+            project_ids=(self.project.pk,), permissions=('execution.poll_work', 'execution.claim_work',
+                'execution.report_result', 'execution.register_producer', 'execution.read_launch'))
+        self.machine = auth.token_context(self.machine_key)
+        self.execution = compose(grants=self.grants, launch_support=LaunchSupport())
+        self.claim_next('apply_identity')
+        from mop.common.telemetry import SessionScope
+        self.scope = SessionScope(self.work.epoch, self.work.target_id, self.work.incarnation_id,
+            self.work.node_id, self.work.executor_epoch, 'owned-handoff', uuid4())
+        self.document = dict(schema_version=1, work=self.metadata, scope=self.scope.wire(),
+            expected_revision='0', expected_prior=None,
+            launch=dict(bootstrap_revision=str(self.pin.bootstrap_revision),
+                bootstrap_digest=self.pin.bootstrap_digest, image_digest=self.pin.image_digest,
+                display_name=self.assignment.display_name),
+            physical=dict(pane='%0', pid='123', process_start=str(uuid4())+':123'))
+
+    def claim_next(self, action):
+        from mop.server.sessions.protocol import work_to_wire
+        self.work, = self.execution.poll(self.machine, self.node.pk, executor_epoch=self.boot)
+        self.assertEqual(self.work.action, action)
+        self.attempt = self.execution.claim(self.machine, self.work, request_id=uuid4())
+        self.metadata = work_to_wire(self.work)
+
+    def post(self):
+        return Client(HTTP_AUTHORIZATION='Token '+self.machine_key).post(
+            '/api/v1/machine/session-producers', self.document,
+            content_type='application/json', secure=True)
+
+    def launch_definition(self):
+        with transaction.atomic():
+            return self.execution.work.launch_definition(self.work, self.attempt.id)
+
+    def test_real_scheduler_machine_handoff_registers_producer(self):
+        from mop.server.operations import models as om
+        self.fixture()
+        claims = om.ResourceClaim.objects.filter(operation=self.operation, released_at=None)
+        self.assertEqual(dict(claims.values_list('resource_id', 'step__name')), {
+            'target:'+str(self.assignment.id): 'scheduler_register',
+            'node:'+str(self.node.id): 'apply_identity',
+            'project:'+str(self.project.id): 'apply_identity',
+            'puppet:'+str(self.assignment.id): 'apply_identity'})
+        self.assertEqual(self.launch_definition(), self.definition.id)
+        response = self.post()
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), dict(schema_version=1, scope=self.scope.wire(), revision='1'))
+        self.assertEqual(response['Cache-Control'], 'no-store')
+        self.assertEqual(len(self.peer.posts), 1, 'registration proof must be SQL-only')
+
+    def confirm_ready(self):
+        self.execution.result(self.machine, self.attempt.id, expected_revision=self.attempt.revision,
+            receipt_id=uuid4(), outcome='succeeded', evidence='identity-applied')
+        self.claim_next('confirm_ready')
+        self.document['work'] = self.metadata
+
+    def assert_fence_refused(self):
+        from mop.server.access.services import Denied
+        from mop.server.operations.service import Refused
+        from mop.server.sessions.producer_models import CurrentProducer, SessionProducer
+        with self.assertRaises((Denied, Refused)):
+            self.launch_definition()
+        response = self.post()
+        self.assertIn(response.status_code, (403, 409), response.content)
+        self.assertFalse(CurrentProducer.objects.exists())
+        self.assertFalse(SessionProducer.objects.exists())
+
+    def changed(self, rows, **values):
+        from contextlib import contextmanager
+        @contextmanager
+        def change():
+            previous = rows.values('pk', *values).get()
+            exact = rows.model.objects.filter(pk=previous.pop('pk'))
+            exact.update(**values)
+            try:
+                yield
+            finally:
+                exact.update(**previous)
+        return change()
+
+    def test_every_real_claim_rejects_foreign_operation_token_attempt_or_release(self):
+        from mop.server.operations import models as om
+        self.fixture()
+        foreign = self.submit(self.body())
+        self.assertEqual(foreign.status_code, 202, foreign.content)
+        foreign_id = UUID(foreign.json()['operation']['id'])
+        for claim in om.ResourceClaim.objects.filter(operation=self.operation, released_at=None):
+            rows = om.ResourceClaim.objects.filter(pk=claim.pk)
+            for changes in ({'operation_id': foreign_id}, {'token': uuid4()}, {'released_at': timezone.now()}):
+                with self.subTest(resource=claim.resource_id, changes=changes), self.changed(rows, **changes):
+                    self.assert_fence_refused()
+            step = om.Step.objects.filter(pk=claim.step_id)
+            with self.subTest(resource=claim.resource_id, field='attempt_id'), self.changed(step, attempt_id=uuid4()):
+                self.assert_fence_refused()
+
+    def test_historical_claim_requires_exact_dispatched_succeeded_quiescent_stage_and_receipt(self):
+        from mop.server.operations import models as om
+        self.fixture()
+        self.confirm_ready()
+        for name in ('scheduler_register', 'apply_identity'):
+            step = om.Step.objects.filter(operation=self.operation, name=name)
+            for changes in ({'outcome': 'unknown'}, {'outcome': 'failed'}, {'quiescent_at': None},
+                    {'dispatched_at': None}, {'name': 'prepare_launch'}, {'ordinal': 5}, {'attempt_id': uuid4()}):
+                with self.subTest(stage=name, changes=changes), self.changed(step, **changes):
+                    self.assert_fence_refused()
+            # Согласованная подмена Step + Claim не подменяет immutable receipt.
+            token = uuid4()
+            claims = om.ResourceClaim.objects.filter(operation=self.operation, step__name=name, released_at=None)
+            with self.subTest(stage=name, changes='matching tokens without their receipt'), \
+                    self.changed(step, token=token, attempt_id=token):
+                previous = list(claims.values_list('pk', 'token'))
+                claims.update(token=token)
+                try:
+                    self.assert_fence_refused()
+                finally:
+                    for pk, old_token in previous:
+                        om.ResourceClaim.objects.filter(pk=pk).update(token=old_token)
+
+    def test_scheduler_and_machine_fences_are_not_interchangeable(self):
+        from mop.server.operations import models as om
+        self.fixture()
+        scheduler = om.Step.objects.get(operation=self.operation, name='scheduler_register')
+        for key, owner, token in (
+                ('target:'+str(self.assignment.id), self.work.step_id, self.attempt.id),
+                ('node:'+str(self.node.id), scheduler.pk, scheduler.token)):
+            claim = om.ResourceClaim.objects.filter(operation=self.operation, resource_id=key, released_at=None)
+            with self.subTest(resource=key), self.changed(claim, step_id=owner, token=token):
+                self.assert_fence_refused()
+
+    def test_future_or_foreign_stage_cannot_own_a_current_machine_fence(self):
+        from mop.server.operations import models as om
+        self.fixture()
+        claim = om.ResourceClaim.objects.filter(operation=self.operation,
+            resource_id='node:'+str(self.node.id), released_at=None)
+        future = om.Step.objects.get(operation=self.operation, name='confirm_ready')
+        # Даже правдоподобные token/receipt не делают будущую stage предшественником.
+        future.token = future.attempt_id = uuid4()
+        future.started_at = future.dispatched_at = future.quiescent_at = timezone.now()
+        future.outcome = 'succeeded'
+        future.save()
+        om.EffectReceipt.objects.create(step=future, token=future.token, epoch=self.operation.epoch,
+            node_id=self.node.id, source_revision=self.operation.expected_revision,
+            decision_revision=self.operation.revision-1, applied=True)
+        with self.changed(claim, step_id=future.pk, token=future.token):
+            self.assert_fence_refused()
+        response = self.submit(self.body())
+        foreign = om.Step.objects.get(operation_id=response.json()['operation']['id'], name='apply_identity')
+        foreign.token = foreign.attempt_id = uuid4()
+        foreign.save()
+        with self.changed(claim, step_id=foreign.pk, token=foreign.token):
+            self.assert_fence_refused()
+
+    def test_confirm_ready_accepts_quiescent_predecessor_claims(self):
+        from mop.server.operations import models as om
+        self.fixture()
+        self.confirm_ready()
+        claims = om.ResourceClaim.objects.filter(operation=self.operation, released_at=None)
+        self.assertEqual(set(claims.values_list('step__name', flat=True)),
+            {'scheduler_register', 'apply_identity'})
+        self.assertFalse(claims.filter(token=self.attempt.id).exists(),
+            'later machine stages retain the earlier quiescent claims, not new tokens')
+        # Историческая lease уже не живая authority; её заменяет receipt quiescence.
+        om.Step.objects.filter(operation=self.operation, name__in=('scheduler_register', 'apply_identity')).update(
+            lease_until=self.operation.created_at)
+        self.assertEqual(self.launch_definition(), self.definition.id)
+        response = self.post()
+        self.assertEqual(response.status_code, 200, response.content)
+
+
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class Producers(TransactionTestCase):
     serialized_rollback = True

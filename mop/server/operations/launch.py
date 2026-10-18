@@ -278,8 +278,11 @@ class CreateMachine(RestartHandler):
     def launch_definition(self, work, attempt_id):
         """SQL-only public locator: только текущая claimed machine стадия create.
 
-        Не возвращает bytes/authority definition. Получатель отдельно проверяет
-        grant, approval и собственный enrolled machine credential.
+        Проверяет четыре fences: target держит scheduler_register, узловые
+        ключи -- текущая стадия либо её succeeded/quiescent предшественник с
+        точным receipt. Токены между стадиями не переносятся. Не возвращает
+        bytes/authority definition: получатель отдельно проверяет grant,
+        approval и собственный enrolled machine credential.
         """
         if work.action not in ('apply_identity', 'confirm_ready'):
             raise Denied('create launch machine step required')
@@ -288,16 +291,37 @@ class CreateMachine(RestartHandler):
         row = m.Operation.objects.get(pk=work.operation_id, action='create', state='running')
         step = m.Step.objects.get(pk=work.step_id, operation=row)
         if (type(attempt_id) is not UUID or step.token != attempt_id or step.attempt_id != attempt_id
+                or (step.ordinal, step.name) not in ((2, 'apply_identity'), (3, 'confirm_ready'))
                 or step.dispatched_at is None or step.quiescent_at is not None or step.outcome
                 or step.lease_until is None or step.lease_until <= timezone.now()):
             raise Denied('current claimed create launch step required')
         keys = sorted(('node:'+str(row.node_id), 'project:'+str(row.restartbinding.project_id),
                        'puppet:'+str(row.target_id), 'target:'+str(row.target_id)))
         tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
-        # Scheduler claim переживает смену стадии: token его, operation общая.
         held = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
-        if held.exclude(operation=row).exists() or set(held.values_list('resource_id', flat=True)) != set(keys):
+        if (held.exclude(operation=row).exists() or set(held.values_list('resource_id', flat=True)) != set(keys)
+                or m.ResourceClaim.objects.filter(operation=row, released_at=None).exclude(resource_id__in=keys).exists()):
             raise Denied('current create launch resource fences required')
+        # Scheduler отпускает три узловых ключа, сохраняя target. Машинные
+        # claims затем остаются за первым взявшим их шагом до конца create.
+        # UUID операции недостаточно: каждый token доказывается своей stage,
+        # исторический -- ещё и immutable receipt после dispatch/quiescence.
+        for claim in held.select_related('step'):
+            owner = claim.step
+            names = ('scheduler_register',) if claim.resource_id == 'target:'+str(row.target_id) else (
+                'apply_identity', 'confirm_ready')
+            if (owner.operation_id != row.id or owner.token != claim.token or owner.attempt_id != claim.token
+                    or owner.name not in names or not 1 <= owner.ordinal <= step.ordinal
+                    or STAGES[owner.ordinal-1] != owner.name):
+                raise Denied('current create launch resource fence token or stage changed')
+            if owner.pk == step.pk:
+                continue
+            if (owner.ordinal >= step.ordinal or owner.dispatched_at is None
+                    or owner.outcome != 'succeeded' or owner.quiescent_at is None
+                    or not m.EffectReceipt.objects.filter(step=owner, token=claim.token,
+                        epoch=row.epoch, node_id=row.node_id, source_revision=row.expected_revision,
+                        decision_revision__lt=row.revision, applied=True).exists()):
+                raise Denied('current create launch predecessor receipt required')
         return row.createbinding.definition_id
 
     def require(self, target, row=None):
