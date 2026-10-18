@@ -43,8 +43,9 @@ class LaunchTargets:
             expires_at=expires_at, display_name=self._name(project))
         assignments_service().activate(actor, row.id, expected_revision=row.revision,
             executor_epoch=epoch, incarnation_id=incarnation_id)
+        from mop.server.operations.launch import image_pin
         IncarnationLaunch.objects.create(incarnation_id=incarnation_id, bootstrap_revision=revision.id,
-            bootstrap_digest=revision.digest, image_digest=image)
+            bootstrap_digest=revision.digest, image_digest=image_pin(image), image_revision_id=image)
         return Assignment.objects.get(pk=row.id)
 
 
@@ -111,8 +112,17 @@ class LaunchSpecs:
         launch = IncarnationLaunch.objects.get(incarnation_id=target.incarnation_id)
         name = Assignment.objects.values_list('display_name', flat=True).get(pk=target.target_id)
         definition = AgentDefinitionVersion.objects.get(pk=definition_id)
-        policy = NodeImage.objects.select_related('observed_image__policy').get(
-            node=node, project_id=target.project_id).observed_image.policy
+        from mop.server.operations.launch import image_pin
+        from mop.server.operations.service import Refused
+        # #708: неизменный образ и его policy -- один пин. Текущий образ узла
+        # не вправе подменять ресурсы admission; смена доступности -- отказ.
+        image = NodeImage.objects.filter(node=node, project_id=target.project_id, available=True,
+            desired_image_id=launch.image_revision_id, observed_image_id=launch.image_revision_id).first()
+        if (launch.image_revision_id is None or image is None
+                or image_pin(launch.image_revision_id) != launch.image_digest
+                or launch.image_revision.policy.project_id != target.project_id):
+            raise Refused('revision_conflict', safe_reason='the pinned node image is no longer available')
+        policy = launch.image_revision.policy
         work = LaunchWork(str(epoch), str(operation_id), str(step_id), str(target.target_id),
             str(target.incarnation_id), str(target.node_id), str(target.executor_epoch), str(target.grant_id),
             target.owner_id, target.generation, target.revision, target.role, target.bundle_digest,

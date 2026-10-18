@@ -445,6 +445,35 @@ class CreateRegistration(TransactionTestCase):
         from mop.server.operations.models import Step
         return Step.objects.get(operation_id=operation, name='scheduler_register')
 
+    # HYPOTHESIS (#708): digest образа закреплён на admission, ресурсы же
+    # рендер брал из текущего NodeImage -- после I1 -> I2 spec смешивала их.
+    # SOLUTION: immutable ImageRevision FK рядом с digest, policy берётся
+    # только из неё; образ уже не доступен на узле -- отказ до POST.
+    # RESULT: RED -- Refused not raised; GREEN -- 20/20 с migration drift.
+    # STATUS: FIXED — see #708
+    def test_replaced_node_image_cannot_supply_resources_for_the_old_pin(self):
+        from mop.server.access import services as auth
+        from mop.server.catalog.models import NodeImage, Project
+        from mop.server.catalog.services import Catalog
+        from mop.server.operations.service import Refused
+        operation, target, incarnation = self.launch()
+        catalog = Catalog(authorizer=auth.Access())
+        policy = catalog.pin_project_policy(self.actor, self.project.pk, b'role: replacement\n',
+            source_commit='d'*40, source_ref='refs/heads/main', provenance='git:replacement',
+            cpu=400, memory_mb=1024, disk_mb=1024,
+            expected_revision=Project.objects.get(pk=self.project.pk).revision)
+        image = catalog.create_image_revision(self.actor, self.project.pk, policy.id, source='builder:replacement')
+        current = NodeImage.objects.get(node=self.node, project=self.project)
+        state = catalog.set_image_intent(self.actor, self.node.pk, self.project.pk, image.id,
+                                         expected_revision=current.revision)
+        catalog.observe_image(self.actor, self.node.pk, self.project.pk, image.id, available=True,
+            source='scheduler:meta', observed_at=timezone.now(), receipt='replacement-1',
+            expected_revision=state.revision)
+        with self.assertRaises(Refused):
+            self.ops.launches.run(operation)
+        self.assertEqual(self.peer.posts, [])
+        self.assertNotIn(target, self.peer.jobs)
+
     def test_register_puts_the_rendered_job_once_and_enrolls_it(self):
         operation, target, incarnation = self.launch()
         self.assertIn(operation, self.ops.pending(limit=8, handlers=('scheduler_register',)))

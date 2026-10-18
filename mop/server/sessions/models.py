@@ -65,6 +65,8 @@ class IncarnationLaunch(models.Model):
     bootstrap_revision = models.UUIDField()
     bootstrap_digest = models.CharField(max_length=64)
     image_digest = models.CharField(max_length=64)
+    # #708: immutable reference нужен для чтения той же resource policy.
+    image_revision = models.ForeignKey('catalog.ImageRevision', null=True, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

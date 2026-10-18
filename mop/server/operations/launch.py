@@ -115,7 +115,7 @@ class CreatePuppets:
         image = NodeImage.objects.filter(node_id=node_id, project_id=project_id, available=True).first()
         if image is None or image.observed_image_id is None or image.observed_image_id != image.desired_image_id:
             raise Refused('revision_conflict', safe_reason='the node image of the project is not ready')
-        return epoch, approval.revision, image_pin(image.observed_image_id)
+        return epoch, approval.revision, image.observed_image_id
 
     def _admit(self, actor, command, installation):
         """Общие проверки admission; повторяются в финальной транзакции."""
