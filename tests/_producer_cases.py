@@ -67,7 +67,7 @@ class CreateProducerHandoff(TransactionTestCase):
                 'execution.report_result', 'execution.register_producer', 'execution.read_launch'))
         self.machine = auth.token_context(self.machine_key)
         self.execution = compose(grants=self.grants, launch_support=LaunchSupport())
-        self.claim_next('apply_identity')
+        self.claim_next('native_exec')
         from mop.common.telemetry import SessionScope
         self.scope = SessionScope(self.work.epoch, self.work.target_id, self.work.incarnation_id,
             self.work.node_id, self.work.executor_epoch, 'owned-handoff', uuid4())
@@ -99,10 +99,10 @@ class CreateProducerHandoff(TransactionTestCase):
         self.fixture()
         claims = om.ResourceClaim.objects.filter(operation=self.operation, released_at=None)
         self.assertEqual(dict(claims.values_list('resource_id', 'step__name')), {
-            'target:'+str(self.assignment.id): 'scheduler_register',
-            'node:'+str(self.node.id): 'apply_identity',
-            'project:'+str(self.project.id): 'apply_identity',
-            'puppet:'+str(self.assignment.id): 'apply_identity'})
+            'target:'+str(self.assignment.id): 'prepare_body',
+            'node:'+str(self.node.id): 'prepare_body',
+            'project:'+str(self.project.id): 'prepare_body',
+            'puppet:'+str(self.assignment.id): 'prepare_body'})
         self.assertEqual(self.launch_definition(), self.definition.id)
         response = self.post()
         self.assertEqual(response.status_code, 200, response.content)
@@ -111,8 +111,10 @@ class CreateProducerHandoff(TransactionTestCase):
         self.assertEqual(len(self.peer.posts), 1, 'registration proof must be SQL-only')
 
     def confirm_ready(self):
+        response = self.post()
+        self.assertEqual(response.status_code, 200, response.content)
         self.execution.result(self.machine, self.attempt.id, expected_revision=self.attempt.revision,
-            receipt_id=uuid4(), outcome='succeeded', evidence='identity-applied')
+            receipt_id=uuid4(), outcome='succeeded', evidence='native-started')
         self.claim_next('confirm_ready')
         self.document['work'] = self.metadata
 
@@ -158,11 +160,10 @@ class CreateProducerHandoff(TransactionTestCase):
     def test_historical_claim_requires_exact_dispatched_succeeded_quiescent_stage_and_receipt(self):
         from mop.server.operations import models as om
         self.fixture()
-        self.confirm_ready()
-        for name in ('scheduler_register', 'apply_identity'):
+        for name in ('prepare_body', 'bootstrap_body', 'initial_identity', 'scheduler_register'):
             step = om.Step.objects.filter(operation=self.operation, name=name)
             for changes in ({'outcome': 'unknown'}, {'outcome': 'failed'}, {'quiescent_at': None},
-                    {'dispatched_at': None}, {'name': 'prepare_launch'}, {'ordinal': 5}, {'attempt_id': uuid4()}):
+                    {'dispatched_at': None}, {'name': 'prepare_launch'}, {'ordinal': 8}, {'attempt_id': uuid4()}):
                 with self.subTest(stage=name, changes=changes), self.changed(step, **changes):
                     self.assert_fence_refused()
             # Согласованная подмена Step + Claim не подменяет immutable receipt.
@@ -206,7 +207,7 @@ class CreateProducerHandoff(TransactionTestCase):
         with self.changed(claim, step_id=future.pk, token=future.token):
             self.assert_fence_refused()
         response = self.submit(self.body())
-        foreign = om.Step.objects.get(operation_id=response.json()['operation']['id'], name='apply_identity')
+        foreign = om.Step.objects.get(operation_id=response.json()['operation']['id'], name='native_exec')
         foreign.token = foreign.attempt_id = uuid4()
         foreign.save()
         with self.changed(claim, step_id=foreign.pk, token=foreign.token):
@@ -218,15 +219,18 @@ class CreateProducerHandoff(TransactionTestCase):
         self.confirm_ready()
         claims = om.ResourceClaim.objects.filter(operation=self.operation, released_at=None)
         self.assertEqual(set(claims.values_list('step__name', flat=True)),
-            {'scheduler_register', 'apply_identity'})
+            {'prepare_body'})
         self.assertFalse(claims.filter(token=self.attempt.id).exists(),
             'later machine stages retain the earlier quiescent claims, not new tokens')
         # Историческая lease уже не живая authority; её заменяет receipt quiescence.
-        om.Step.objects.filter(operation=self.operation, name__in=('scheduler_register', 'apply_identity')).update(
-            lease_until=self.operation.created_at)
+        om.Step.objects.filter(operation=self.operation, ordinal__lt=6).update(lease_until=self.operation.created_at)
         self.assertEqual(self.launch_definition(), self.definition.id)
+        # Положительный Work view не даёт права заново регистрировать producer.
+        from mop.server.sessions.producer_models import CurrentProducer
+        before = CurrentProducer.objects.get().producer_id
         response = self.post()
-        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn(response.status_code, (403, 409), response.content)
+        self.assertEqual(CurrentProducer.objects.get().producer_id, before)
 
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -253,10 +257,9 @@ class Producers(TransactionTestCase):
         binding.applied_index = 1
         binding.save(update_fields=['applied_index'])
         om.ScheduledPuppet.objects.filter(target_id=self.assignment.id).update(scheduler_id=binding.scheduler_id)
-        om.ScheduledNode.objects.create(node_id=self.assignment.node_id, scheduler_id=binding.scheduler_id,
-            nomad_node_id=uuid4(), capabilities=[])
-        NodeExecutor.objects.create(node_id=self.assignment.node_id,
-            executor_epoch=self.assignment.current_incarnation.executor_epoch)
+        self.assertEqual(om.ScheduledNode.objects.get(node_id=self.assignment.node_id).scheduler_id, binding.scheduler_id)
+        self.assertEqual(NodeExecutor.objects.get(node_id=self.assignment.node_id).executor_epoch,
+                         self.assignment.current_incarnation.executor_epoch)
         from mop.common.telemetry import SessionScope
         self.scope = SessionScope(UUID(self.metadata['epoch']), self.assignment.id,
             self.reserved.incarnation, self.assignment.node_id,

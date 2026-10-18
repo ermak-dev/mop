@@ -17,8 +17,8 @@ from .machinebinding import authority, compose
 class CurrentLaunch:
     """Публичные execution/work ports и root-only склейка владельцев SQL.
 
-    Пока доступен только claimed create apply_identity/confirm_ready. Это не
-    разрешение регистрироваться из произвольной рабочей stage или старого job.
+    Регистрация доступна только claimed create native_exec. Это не разрешение
+    регистрироваться из readiness, произвольной рабочей stage или старого job.
     """
     def check(self, actor, work, report):
         from mop.server.operations import models as om
@@ -28,6 +28,8 @@ class CurrentLaunch:
         from .models import RestoreGuard
         if not transaction.get_connection().in_atomic_block:
             raise Unavailable('producer launch proof requires caller transaction')
+        if work.action != 'native_exec':
+            raise Denied('producer registration requires the native exec phase')
         if not om.ScheduledPuppet.objects.filter(target_id=work.target_id, incarnation_id=work.incarnation_id).exists():
             raise Conflict('current fixed launch job incarnation changed')
         execution = compose(launch_support=LaunchSupport())

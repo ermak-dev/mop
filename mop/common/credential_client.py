@@ -142,6 +142,11 @@ class CredentialClient:
             'request_id': str(request_id), 'expires_at': expires_at.astimezone(timezone.utc).isoformat()})
         return self._result(p.GrantReceipt, result)
 
+    def reserve_initial_grant(self, auth: p.Credential, reservation_id: UUID) -> p.GrantReceipt:
+        """Только locator committed initial intent; proof выбирается из SQL, не wire."""
+        result = self._invoke(auth, p.Command.RESERVE_INITIAL_GRANT, {'reservation_id': str(reservation_id)})
+        return self._result(p.GrantReceipt, result)
+
     def provision_grant(self, auth: p.Credential, grant_id: UUID, *, expected_revision: int) -> p.GrantReceipt:
         result = self._invoke(auth, p.Command.PROVISION_GRANT,
             {'grant_id': str(grant_id), 'expected_revision': expected_revision})
@@ -180,6 +185,11 @@ class CredentialClient:
         if type(result) is not dict:
             raise p.CredentialError('invalid addressed launch response')
         return result
+
+    def read_initial_launch(self, auth: p.Credential, work: dict) -> dict:
+        """Конечные purpose-specific bytes; старый read_launch не расширяется."""
+        from .initialcreate import parse_delivery
+        return parse_delivery(self._invoke(auth, p.Command.INITIAL_LAUNCH, {'work': work}), work)
 
     def read_definition(self, auth: p.Credential, definition_id: UUID) -> p.DefinitionBytes:
         result = self._invoke(auth, p.Command.DEFINITION, {'definition_id': str(definition_id)})

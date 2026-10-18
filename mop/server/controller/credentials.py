@@ -130,8 +130,9 @@ class CreateActivation:
             if row is None or set(row.projects.values_list('pk', flat=True)) != {binding.project_id}:
                 raise access.Denied('matching claimed create required for grant activation')
             stages = tuple(operations.Step.objects.select_for_update().filter(operation=row).order_by('ordinal'))
-            if (tuple(step.name for step in stages) != ('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')
-                    or any(step.outcome != 'succeeded' or step.quiescent_at is None for step in stages[:3])):
+            from mop.common.initialcreate import PHASES
+            if (tuple(step.name for step in stages) != PHASES
+                    or any(step.outcome != 'succeeded' or step.quiescent_at is None for step in stages[:-1])):
                 raise access.Denied('matching claimed create required for grant activation')
             step = stages[-1]
             if (step.token is None or step.attempt_id != step.token or step.dispatched_at is None
@@ -140,6 +141,10 @@ class CreateActivation:
                 raise access.Denied('matching claimed create required for grant activation')
             keys = {'node:'+str(binding.node_id), 'project:'+str(binding.project_id),
                     'puppet:'+str(binding.target_id), 'target:'+str(binding.target_id)}
+            from mop.server.operations.launch import validate_claims
+            from .createbinding import LaunchSupport
+            validate_claims(row, step, keys)
+            LaunchSupport().require(binding, row)
             claims = tuple(operations.ResourceClaim.objects.filter(operation=row, released_at=None,
                 resource_id__in=keys).order_by('resource_id').values_list('resource_id', 'step_id', 'token'))
             if {claim[0] for claim in claims} != keys:
@@ -253,6 +258,9 @@ class CredentialApplication:
         elif command is p.Command.LAUNCH:
             from .launchdelivery import deliver
             result = deliver(self, actor, args['work'])
+        elif command is p.Command.INITIAL_LAUNCH:
+            from .launchdelivery import deliver_initial
+            result = deliver_initial(self, actor, args['work'])
         elif command is p.Command.DEFINITION:
             row = self.grants.read_definition(actor, **args)
             result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
@@ -261,6 +269,14 @@ class CredentialApplication:
         elif command is p.Command.PREPARE_REPLACEMENT:
             from .replacement import ReplacementPreparation
             row = self.grants.prepare_replacement(actor, authority=ReplacementPreparation(self, **args))
+            result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
+                row.role, row.digest, row.state, row.revision, row.credential_version_id)
+        elif command is p.Command.RESERVE_INITIAL_GRANT:
+            from .initialselection import InitialReservationApprovals
+            authority = InitialReservationApprovals(self.preparation.approval_query(), actor, **args)
+            grants = Grants(provider=self.store.provider, bindings=CurrentBindings(), approvals=authority)
+            grants.secrets.authority = CurrentRetention(self, grants.secrets.authority)
+            row = grants.reserve(actor, **authority.arguments())
             result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
                 row.role, row.digest, row.state, row.revision, row.credential_version_id)
         elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT, p.Command.ACTIVATE_GRANT):

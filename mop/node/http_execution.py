@@ -40,9 +40,11 @@ def _response_error(status, value, token):
     return Refused(reason) if refused else Unavailable(reason)
 
 
-ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
+# Общий конечный wire vocabulary не связывает physical executor (#721).
+from mop.common.initialcreate import MACHINE as INITIAL_ACTIONS, CONFIRMATIONS as INITIAL_CONFIRMATIONS
+ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone')) | INITIAL_ACTIONS
 EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
-    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
+    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running', *INITIAL_CONFIRMATIONS.values()))
 FACT_TYPES = {
     'states': dict(running=bool, dirty=bool, session_count=int),
     'clone': dict(clean=bool, branch=str, untracked=int, modified=int),
@@ -174,7 +176,7 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('POST','work/launch'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
+                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp

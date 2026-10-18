@@ -56,7 +56,8 @@ class MachineStep:
 STAGES = ('apply_identity', 'restart_session', 'confirm_ready')
 # Шаги, которые исполняет узел (#643): серверные шаги той же операции
 # (scheduler_register, activate_grant) узлу как machine work не раздаются.
-MACHINE_ACTIONS = ('apply_identity', 'restart_session', 'confirm_ready', 'send_message', 'wipe_clone')
+from mop.common.initialcreate import MACHINE as INITIAL_ACTIONS
+MACHINE_ACTIONS = ('apply_identity', 'restart_session', 'confirm_ready', 'send_message', 'wipe_clone', *sorted(INITIAL_ACTIONS))
 
 
 def digest(command, action='restart'):
@@ -84,6 +85,9 @@ class RestartHandler:
         if (self.ops.restart_support is None and (messages is None or messages.support is None)
                 and (wipes is None or wipes.support is None) and getattr(self.ops, 'launch_machine', None) is None):
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
+
+    def effect_lease(self, work):
+        return 30
 
     def _valid(self, command):
         if type(command) is not RestartCommand or command.fresh:
@@ -211,22 +215,36 @@ class RestartHandler:
             if step.attempt_id != attempt_id:
                 raise Refused('claim_conflict')
             return
-        keys = sorted(('node:'+str(row.node_id), 'project:'+str(row.restartbinding.project_id), 'puppet:'+str(row.target_id)))
+        keys = sorted(('node:'+str(row.node_id), 'project:'+str(row.restartbinding.project_id), 'puppet:'+str(row.target_id),
+            *((('target:'+str(row.target_id),) if row.action == 'create' else ()))))
         for key in keys:
             m.Resource.objects.get_or_create(key=key)
         tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
         claims = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
         if claims.exclude(operation=row).exists():
             raise Refused('claim_conflict')
+        if row.action == 'create':
+            if step.ordinal == 1:
+                # Первый эффект не может унаследовать частичный/чужой старый proof.
+                if m.ResourceClaim.objects.filter(operation=row, released_at=None).exists():
+                    raise Refused('claim_conflict')
+            else:
+                from .launch import validate_claims
+                validate_claims(row, step, keys)
         if not claims.exists():
             if m.Operation.objects.filter(state__in=('running','reconciling','unknown'),
                     resourceclaim__released_at=None).distinct().count() >= self.ops.execution_limit:
                 raise Refused('admission_limit')
             for key in keys:
                 m.ResourceClaim.objects.create(resource_id=key, operation=row, step=step, token=attempt_id)
+        if row.action == 'create':
+            m.CreateCleanup.objects.get_or_create(operation=row)
         step.token, step.attempt_id = attempt_id, attempt_id
         step.started_at = step.dispatched_at = timezone.now()
-        step.lease_until = min(work.not_after, timezone.now()+timedelta(seconds=30))
+        seconds = self.ops.machine_handler(row.action).effect_lease(work)
+        if row.action == 'create' and work.not_after < timezone.now()+timedelta(seconds=seconds):
+            raise Refused('deadline_expired', safe_reason='insufficient intent remaining for phase and cleanup')
+        step.lease_until = min(work.not_after, timezone.now()+timedelta(seconds=seconds))
         step.save(update_fields=('token','attempt_id','started_at','dispatched_at','lease_until'))
         if row.state == State.ACCEPTED:
             _move(row, State.RUNNING, 'effect_started', expected_revision=row.revision)
@@ -279,7 +297,8 @@ class RestartHandler:
             m.MessageBinding.objects.filter(operation=row).update(ciphertext=b'')
             _move(row, State.SUCCEEDED if outcome=='succeeded' else State.FAILED,
                 'effect_confirmed' if outcome=='succeeded' else 'effect_failed', expected_revision=row.revision)
-            m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
+            if row.action != 'create':
+                m.ResourceClaim.objects.filter(operation=row, released_at=None).update(released_at=step.quiescent_at)
         elif row.state == State.RECONCILING:
             # Сверка частичного workflow не выдаёт оставшиеся effects автоматически.
             _move(row, State.UNKNOWN, 'outcome_unknown', expected_revision=row.revision)

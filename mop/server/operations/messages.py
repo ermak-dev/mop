@@ -25,6 +25,10 @@ class MessageHandler:
         self.ops, self.cipher, self.support = operations, cipher, support
         self.recipients, self.endpoints = recipients, endpoints
 
+    def effect_lease(self, work):
+        """Прежняя 30s lease send/dispatch; initial-create budgets сюда не переходят."""
+        return 30
+
     def _holder(self, actor, holder, project_id):
         if holder is None:
             return

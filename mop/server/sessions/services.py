@@ -30,6 +30,12 @@ class UnboundWork:
     def current(self, operation_id, step_id):
         raise Unavailable('operation work port is not bound')
 
+    def abort_unstarted(self, work):
+        raise Unavailable('operation work port is not bound')
+
+    def reconcile_expired(self, *, limit):
+        raise Unavailable('operation work port is not bound')
+
     def claimed(self, work, attempt_id):
         raise Unavailable('operation work port is not bound')
 
@@ -183,8 +189,10 @@ class Assignments:
             attempt__state='succeeded', receipt__attempt_id=F('attempt_id'),
             receipt__outcome='succeeded', receipt__resulting_revision=F('attempt__revision'),
             receipt__expected_revision=F('attempt__revision') - 1)
-        identity = m.IdentityApplication.objects.filter(**scope, attempt__action='apply_identity',
-            receipt__evidence='identity-applied').order_by('id').values_list('receipt_id', flat=True).first()
+        identity = m.IdentityApplication.objects.filter(**scope).filter(
+            Q(attempt__action='apply_identity', receipt__evidence='identity-applied') |
+            Q(attempt__action='initial_identity', receipt__evidence='initial-identity-applied')
+        ).order_by('id').values_list('receipt_id', flat=True).first()
         ready = m.ReadinessReceipt.objects.filter(**scope, attempt__action='confirm_ready',
             receipt__evidence='ready').order_by('id').values_list('receipt_id', flat=True).first()
         return None if identity is None or ready is None else (identity, ready)
@@ -529,27 +537,35 @@ class MachineExecution:
                 self._authority(work)
                 row = self._assignment(actor, work, 'claim_work')
                 unclaimed(self.target_fence, row.pk, excluding_operation=work.operation_id)
-                # current обязуется проверить initiating actor/operation и не делать I/O.
-                if self.work.current(work.operation_id, work.step_id) != work:
-                    raise Conflict('admitted operation step changed')
-                self._admit(row, work)
-                previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
-                                                               request_id=request_id).first()
-                if previous:
-                    if (self._work(previous) != work or previous.state != 'claimed'
-                            or previous.lease_until <= timezone.now()):
-                        raise Conflict('claim retry cannot replay or revive an effect')
-                    return snapshot(previous)
-                if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
-                    raise Conflict('unresolved external effect holds resource')
-                values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
-                    'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
-                attempt = m.AssignmentAttempt.objects.create(assignment=row,
-                    incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
-                    request_id=request_id, assignment_revision=work.revision,
-                    lease_until=min(work.not_after, timezone.now()+timedelta(seconds=self.lease_seconds)), **values)
-                self.work.claimed(work, attempt.id)
-                return snapshot(attempt)
+                # Abort без новой attempt должен пережить HTTP-отказ, поэтому
+                # исключение выходит лишь после commit этой короткой транзакции.
+                aborted = self.work.abort_unstarted(work)
+                if not aborted:
+                    # current проверяет initiating actor/operation без I/O.
+                    if self.work.current(work.operation_id, work.step_id) != work:
+                        raise Conflict('admitted operation step changed')
+                    self._admit(row, work)
+                    previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
+                                                                   request_id=request_id).first()
+                    if previous:
+                        if (self._work(previous) != work or previous.state != 'claimed'
+                                or previous.lease_until <= timezone.now()):
+                            raise Conflict('claim retry cannot replay or revive an effect')
+                        return snapshot(previous)
+                    if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
+                        raise Conflict('unresolved external effect holds resource')
+                    values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
+                        'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
+                    seconds = (self.work.effect_lease(work) if hasattr(self.work, 'effect_lease') else self.lease_seconds)
+                    if type(seconds) is not int or not 1 <= seconds <= 320:
+                        raise Unavailable('bounded phase effect lease required')
+                    attempt = m.AssignmentAttempt.objects.create(assignment=row,
+                        incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
+                        request_id=request_id, assignment_revision=work.revision,
+                        lease_until=min(work.not_after, timezone.now()+timedelta(seconds=seconds)), **values)
+                    self.work.claimed(work, attempt.id)
+                    return snapshot(attempt)
+            raise Conflict('insufficient intent remaining for phase and cleanup; create aborted')
         except IntegrityError:
             collision = m.AssignmentAttempt.objects.filter(
                 Q(executor_user_id=actor.user_id, request_id=request_id)
@@ -615,8 +631,30 @@ class MachineExecution:
             confirmations = {'restart_session': ('session-replaced', 'confirmed'),
                 'apply_identity': ('identity-applied',), 'confirm_ready': ('ready',), 'send_message': ('delivered',),
                 'wipe_clone': ('clone-wiped',)}
+            from mop.common.initialcreate import CONFIRMATIONS
+            confirmations.update({name: (code,) for name, code in CONFIRMATIONS.items()})
             if evidence not in confirmations[attempt.action]:
                 raise ValueError('named action confirmation required')
+        if outcome == 'succeeded' and attempt.action in ('native_exec', 'confirm_ready'):
+            from .producer_models import CurrentProducer
+            producer = CurrentProducer.objects.select_related('producer').filter(incarnation_id=attempt.incarnation_id).first()
+            if attempt.action == 'native_exec':
+                if (producer is None or producer.producer.attempt_id != attempt.id
+                        or producer.producer.operation_id != attempt.operation_id or producer.producer.step_id != attempt.step_id
+                        or producer.producer.executor_user_id != attempt.executor_user_id):
+                    raise Conflict('exact native exec producer registration ACK required')
+            elif hasattr(self.work, 'initial_native_attempt'):
+                native_attempt = self.work.initial_native_attempt(self._work(attempt))
+                if native_attempt is not None and (producer is None
+                        or producer.producer.attempt_id != native_attempt
+                        or producer.producer.operation_id != attempt.operation_id):
+                    raise Conflict('same initial native producer required for readiness')
+            if attempt.action == 'confirm_ready' and producer is not None:
+                # Post-launch readiness не превращается в initial-create admission.
+                if (producer.producer.assignment_id != attempt.assignment_id
+                        or producer.producer.owner_id != attempt.owner_id or producer.producer.generation != attempt.generation
+                        or producer.producer.executor_epoch != attempt.executor_epoch):
+                    raise Conflict('current readiness producer binding changed')
         # Результат после deadline подтверждает эффект, но не запускает новый.
         self.work.completed_result(self._work(attempt), attempt.id, outcome, evidence)
         attempt.state = outcome
@@ -624,7 +662,7 @@ class MachineExecution:
         attempt.save(update_fields=('state', 'revision'))
         receipt = m.ResultReceipt.objects.create(id=receipt_id, attempt=attempt,
             expected_revision=revision, resulting_revision=attempt.revision, outcome=outcome, evidence=evidence)
-        if outcome == 'succeeded' and attempt.action == 'apply_identity':
+        if outcome == 'succeeded' and attempt.action in ('apply_identity', 'initial_identity'):
             m.IdentityApplication.objects.create(attempt=attempt, receipt=receipt)
         if outcome == 'succeeded' and attempt.action == 'confirm_ready':
             m.ReadinessReceipt.objects.create(attempt=attempt, receipt=receipt)
@@ -681,6 +719,9 @@ class MachineExecution:
 
     def reconcile_expired(self, *, limit=50):
         bound(limit, 100)
+        # Gaps не создают фиктивных attempt IDs: прежний return остаётся
+        # списком изменённых attempts, а abort публикуется Operation event'ом.
+        self.work.reconcile_expired(limit=limit)
         ids = tuple(m.AssignmentAttempt.objects.filter(state='claimed', lease_until__lte=timezone.now())
                     .order_by('assignment_id').values_list('id', 'assignment_id')[:limit])
         changed = []

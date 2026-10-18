@@ -2,7 +2,7 @@
 
 HYPOTHESIS: AddressedLaunchSource не имеет production route; read_definition
 требует owner credential и не годится как machine launch authority.
-SPEC: конечный read_launch для собственного claimed create/apply_identity;
+SPEC: конечный read_launch для собственного claimed create/native_exec;
 RBAC + node-executor enrollment, exact Work/pins, current approvals/grant.
 Provider вне SQL; после его ожидания все authority/fences проверяются заново.
 Фикстура регистрирует durable scheduler receipt, не запускает живой пул.
@@ -13,6 +13,13 @@ RED: PG17 -- нет route/permission; затем 200 при подмене durab
 RESULT: 24/24 PG17, включая настоящий verified HTTPS + private socket + AEAD;
 отзывы во время provider wait, exact Work, claim/fences и no-store проверены.
 STATUS: FIXED -- see #643 (адресная выдача, не startup/SessionApi/live pool).
+
+HYPOTHESIS #721: planned purpose нельзя провести через прежний native response;
+новые bytes требуют отдельной shape и повторного отбора после provider wait.
+SOLUTION: strict read_initial_launch и отдельный POST; old role-only port native-only.
+RESULT: private socket + verified HTTPS roundtrip green под прежним production
+5s budget; owner-profile change после настоящего decrypt даёт отказ без bytes.
+STATUS: FIXED — see #721; runtime timeouts не повышались, native не запускался.
 """
 import asyncio
 import base64
@@ -28,6 +35,74 @@ from django.test import Client, TransactionTestCase, override_settings
 from django.utils import timezone
 
 import _credential_cases as credential_cases
+
+
+def selected_fixture(case, reserved):
+    """Точные SQL-пины seeded authority fixtures; lifecycle отдельно real HTTP."""
+    import hashlib
+    from mop.server.catalog import models as cm
+    from mop.server.operations import models as om
+    from mop.server.sessions import models as em
+    from mop.server.preparation.models import BootstrapRevision
+    from mop.server.controller.initialselection import configure
+    from mop.server.controller.machinebinding import owner_identity
+    from mop.server.operations.launch import image_pin
+    from mop.server.access.models import AllProjectMembership, IdentitySource
+    # Конфигурирование каталога installation-scoped; только owner этой fixture.
+    AllProjectMembership.objects.get_or_create(user=case.user, source=IdentitySource.objects.get(name='local'))
+    actor = case.access.token_context(case.token)
+    case.user.user_permissions.add(Permission.objects.get(content_type__app_label='catalog', codename='configure_project'))
+    revision = BootstrapRevision.objects.get(project=case.project)
+    pin = em.IncarnationLaunch.objects.filter(incarnation_id=reserved.incarnation).first()
+    if pin is None:
+        policy = cm.ProjectPolicySnapshot.objects.create(project=case.project, sequence=1, content=b'fixture',
+            digest='a'*64, source_commit='a'*40, source_ref='refs/heads/image', provenance='fixture',
+            cpu=100, memory_mb=256, disk_mb=1024)
+        image = cm.ImageRevision.objects.create(policy=policy, source='fixture')
+        pin = em.IncarnationLaunch.objects.create(incarnation_id=reserved.incarnation,
+            bootstrap_revision=revision.id, bootstrap_digest=revision.digest,
+            image_revision=image, image_digest=image_pin(image.id))
+    cm.NodeImage.objects.update_or_create(node_id=case.assignment.node_id, project=case.project,
+        defaults=dict(desired_image_id=pin.image_revision_id, observed_image_id=pin.image_revision_id, available=True))
+    config = case.app.store.create(actor, project_id=case.project.pk, name='native-config',
+        kind='file', purpose='project', value=b'{}')
+    selected = configure(actor, project_id=case.project.pk, definition_id=reserved.definition_id,
+        bootstrap_revision=revision.id, image_id=pin.image_revision_id, source_origin=case.project.origin,
+        source_commit='d'*40, source_ref='refs/heads/exact-source', desired_model='fixture-model',
+        model_config_digest=hashlib.sha256(b'{}').hexdigest(), consumers=(('model_config', config.active_version_id),))
+    identity = owner_identity(case.user.pk)
+    # HYPOTHESIS (#730): seeded reservation без exact proof отказывает до delivery.
+    # SOLUTION: та же approval/content/digest тройка, что у selection и grant.
+    # RESULT: 28 fixture errors RED; combined initial/delivery PG17 92 + UID3 GREEN.
+    # STATUS: FIXED — see #730.
+    from mop.server.access.models import Grant
+    intent = Grant.objects.select_related('intent').get(pk=reserved.id).intent
+    proof = selected.bootstrap_policy
+    case.assertEqual((intent.policy_approval_id, intent.policy_version_id, intent.policy_digest),
+        (proof.approval_id, proof.version_id, proof.digest))
+    reservation = om.CreateReservation.objects.create(actor=case.user, request_id=case.operation.request_id,
+        digest=case.operation.digest, expires_at=case.operation.not_after, epoch=case.operation.epoch,
+        project=case.project, policy_id=selected.policy_id, policy_digest=selected.digest,
+        bootstrap_approval_id=proof.approval_id, bootstrap_version_id=proof.version_id,
+        bootstrap_digest=proof.digest, git_name=identity.name, git_email=identity.email)
+    binding, _ = om.CreateBinding.objects.get_or_create(operation=case.operation, defaults=dict(
+        definition_id=reserved.definition_id, scheduler_id=uuid4(), job_id=str(case.assignment.id), namespace='default'))
+    from mop.server.launch_spec import API_LAUNCH_CAPABILITIES
+    # Trusted SQL fixture -- заявленный owned anchor, не physical acceptance.
+    scheduler_node, _ = om.ScheduledNode.objects.get_or_create(node_id=case.assignment.node_id,
+        defaults=dict(scheduler_id=binding.scheduler_id, nomad_node_id=uuid4(),
+            capabilities=sorted(API_LAUNCH_CAPABILITIES),
+            anchor_executable='/installed/sha256-'+'a'*64+'/anchor', anchor_digest='a'*64))
+    binding.reservation, binding.applied_index = reservation, 1
+    binding.dispatched_job = dict(Constraints=[dict(LTarget='${node.unique.id}', Operand='=', RTarget=str(scheduler_node.nomad_node_id))])
+    binding.save()
+    om.ScheduledPuppet.objects.update_or_create(target_id=case.assignment.id, defaults=dict(
+        incarnation_id=reserved.incarnation, scheduler_id=binding.scheduler_id, job_id=binding.job_id,
+        namespace=binding.namespace, epoch=case.operation.epoch,
+        restore_generation=case.operation.restore_generation, modify_index=1))
+    em.NodeExecutor.objects.get_or_create(node_id=case.assignment.node_id,
+        defaults=dict(executor_epoch=case.assignment.current_incarnation.executor_epoch))
+    case.pin = pin
 
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -70,7 +145,7 @@ class LaunchDelivery(TransactionTestCase):
         self.operation = om.Operation.objects.create(actor=self.user,
             actor_binding=_binding(self.access.token_context(self.token)), request_id=uuid4(), digest='a'*64,
             epoch=installation.epoch, restore_generation=RestoreGuard.objects.get(pk=1).generation,
-            action='create', state='running', revision=3,
+            action='create', state='running', revision=6,
             node_id=self.assignment.node_id, target_kind='puppet', target_id=self.assignment.id,
             incarnation_id=self.reserved.incarnation, expected_revision=self.assignment.revision,
             not_after=timezone.now()+timedelta(minutes=2))
@@ -81,9 +156,17 @@ class LaunchDelivery(TransactionTestCase):
             bundle_digest=self.reserved.digest, grant_id=self.reserved.id)
         om.CreateBinding.objects.create(operation=self.operation, definition_id=self.reserved.definition_id,
             scheduler_id=uuid4(), job_id=str(self.assignment.id), namespace='default')
-        for ordinal, action in enumerate(('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant'), 1):
-            om.Step.objects.create(operation=self.operation, ordinal=ordinal, name=action,
-                outcome='succeeded' if ordinal == 1 else '', quiescent_at=timezone.now() if ordinal == 1 else None)
+        from mop.common.initialcreate import PHASES
+        for ordinal, action in enumerate(PHASES, 1):
+            step = om.Step.objects.create(operation=self.operation, ordinal=ordinal, name=action)
+            if ordinal <= 4:
+                step.token = step.attempt_id = uuid4()
+                step.started_at = step.dispatched_at = step.quiescent_at = timezone.now()
+                step.outcome = 'succeeded'
+                step.save()
+                om.EffectReceipt.objects.create(step=step, token=step.token, epoch=self.operation.epoch,
+                    node_id=self.assignment.node_id, source_revision=self.operation.expected_revision,
+                    decision_revision=ordinal, applied=True)
         om.ScheduledPuppet.objects.create(target_id=self.assignment.id, incarnation_id=self.reserved.incarnation,
             scheduler_id=uuid4(), job_id=str(self.assignment.id), namespace='default',
             epoch=installation.epoch, restore_generation=self.operation.restore_generation, modify_index=1)
@@ -97,20 +180,13 @@ class LaunchDelivery(TransactionTestCase):
         self.pin = em.IncarnationLaunch.objects.create(incarnation_id=self.reserved.incarnation,
             bootstrap_revision=revision.id, bootstrap_digest=revision.digest,
             image_revision=image, image_digest=image_pin(image.id))
-        # После scheduler receipt остаётся только target fence; три machine
-        # claims создаёт настоящий claim ниже. Реальную HTTP-передачу без seeded
-        # scheduler строк проверяет CreateProducerHandoff (#716).
-        scheduler = om.Step.objects.get(operation=self.operation, name='scheduler_register')
-        scheduler.token = scheduler.attempt_id = uuid4()
-        scheduler.started_at = scheduler.dispatched_at = scheduler.quiescent_at
-        scheduler.save(update_fields=['token', 'attempt_id', 'started_at', 'dispatched_at'])
-        om.EffectReceipt.objects.create(step=scheduler, token=scheduler.token,
-            epoch=self.operation.epoch, node_id=self.assignment.node_id,
-            source_revision=self.operation.expected_revision, decision_revision=2, applied=True)
-        key = 'target:'+str(self.assignment.id)
-        om.Resource.objects.get_or_create(key=key)
-        om.ResourceClaim.objects.create(resource_id=key, operation=self.operation,
-            step=scheduler, token=scheduler.token)
+        selected_fixture(self, self.reserved)
+        # #721: все четыре fences остаются у первого prepare, а не scheduler.
+        prepare = om.Step.objects.get(operation=self.operation, name='prepare_body')
+        for key in ('target:'+str(self.assignment.id), 'node:'+str(self.assignment.node_id),
+                    'project:'+str(self.project.id), 'puppet:'+str(self.assignment.id)):
+            om.Resource.objects.get_or_create(key=key)
+            om.ResourceClaim.objects.create(resource_id=key, operation=self.operation, step=prepare, token=prepare.token)
         work = self.execution.poll(self.machine, self.assignment.node_id,
             executor_epoch=self.assignment.current_incarnation.executor_epoch)[0]
         self.attempt = self.execution.claim(self.machine, work, request_id=uuid4())
@@ -118,11 +194,11 @@ class LaunchDelivery(TransactionTestCase):
         self.metadata = work_to_wire(work)
         return permission
 
-    def post(self, *, auth=None, metadata=None):
+    def post(self, *, auth=None, metadata=None, path='/api/v1/machine/work/launch'):
         from django.db import connections
         try:
             return Client(HTTP_AUTHORIZATION='Token '+(auth or self.machine_auth).value).post(
-                '/api/v1/machine/work/launch', metadata or self.metadata,
+                path, metadata or self.metadata,
                 content_type='application/json', secure=True)
         finally:
             # Django Client в owned asyncio worker не имеет request_finished
@@ -135,7 +211,9 @@ class LaunchDelivery(TransactionTestCase):
         async def exercise(client, server):
             with patch('mop.server.controller.adminservices.credential_client', return_value=client):
                 await body(client, server)
-        async_to_sync(self.exercise)(exercise, application=app)
+        # Полный phase proof с provider rechecks проверяется в production 5s
+        # socket budget, не в искусственном 2s deadline коротких wire-тестов.
+        async_to_sync(self.exercise)(exercise, application=app, timeout=5, client_timeout=5)
 
     def test_route_exists_and_unbound_root_refuses_without_provider(self):
         response = Client().post('/api/v1/machine/work/launch', {}, content_type='application/json', secure=True)
@@ -203,6 +281,55 @@ class LaunchDelivery(TransactionTestCase):
         self.assertEqual(content.prompt, b'private')
         self.assertEqual(events, ['authority', 'provider', 'authority'])
 
+    def test_native_initial_delivery_roundtrips_strict_socket_and_http_without_widening_old_response(self):
+        from mop.common.initialcreate import parse_delivery
+        from mop.common import credentials as p
+        self.fixture()
+        async def body(client, server):
+            self.assertEqual((client.timeout, server.timeout), (5, 5))
+            direct = await asyncio.to_thread(client.read_initial_launch, self.machine_auth, self.metadata)
+            response = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch')
+            self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(response['Cache-Control'], 'no-store')
+            value = parse_delivery(response.json(), self.metadata)
+            self.assertEqual(value, direct)
+            self.assertEqual(p.binary(value['role']['prompt']), b'private')
+            self.assertIsNone(value['bootstrap'])
+            self.assertEqual(value['selection']['source']['commit'], 'd'*40)
+            self.assertEqual(value['selection']['desired_model'], 'fixture-model')
+            self.assertEqual([item['purpose'] for item in value['consumers']], ['model_config'])
+            self.assertEqual(p.binary(value['consumers'][0]['value']), b'{}')
+            for field in ('secret_id', 'secret_name', 'owner_id', 'policy_id'):
+                denied = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch',
+                    metadata={**self.metadata, field: str(uuid4())})
+                self.assertEqual(denied.status_code, 400, denied.content)
+                self.assertNotIn(base64.b64encode(b'private'), denied.content)
+        self.run_delivery(body)
+
+    def test_initial_delivery_rechecks_selection_after_real_provider_wait(self):
+        from mop.server.controller import bootstrap
+        from mop.server.controller.models import Installation
+        self.fixture()
+        row = Installation.objects.get(pk=1)
+        real = bootstrap.secret_provider(self.bootstrap, installation_id=row.identity,
+            expected_root_digest=row.root_digest, key_id='root-v1')
+        changed = []
+        class Changing:
+            def decrypt(inner, envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                value = real.decrypt(envelope, context)
+                from django.contrib.auth import get_user_model
+                get_user_model().objects.filter(pk=self.user.pk).update(email='changed@example.invalid')
+                changed.append(True)
+                return value
+        async def body(client, server):
+            response = await asyncio.to_thread(self.post, path='/api/v1/machine/work/initial-launch')
+            self.assertEqual(response.status_code, 403, response.content)
+            self.assertNotIn(base64.b64encode(b'private'), response.content)
+            self.assertNotIn(base64.b64encode(b'{}'), response.content)
+        self.run_delivery(body, provider=Changing())
+        self.assertTrue(changed, 'must execute real decrypt outside SQL before authority changes')
+
     def test_real_verified_https_transport_binds_addressed_launch_source(self):
         self.fixture()
         import socket
@@ -243,6 +370,12 @@ class LaunchDelivery(TransactionTestCase):
                     result = await source.fetch(work)
                     self.assertEqual(result.bundle.prompt, b'private')
                     self.assertEqual(result.registration, registration)
+                    from mop.common.initialcreate import parse_delivery
+                    selected = parse_delivery(await machine.transport.request('POST', 'work/initial-launch',
+                        payload=work.wire()), work.wire())
+                    self.assertEqual(base64.b64decode(selected['role']['prompt']), b'private')
+                    self.assertEqual(selected['phase'], 'native_exec')
+                    self.assertEqual(selected['selection']['source']['ref'], 'refs/heads/exact-source')
                 finally:
                     await machine.aclose()
                     https.should_exit = True

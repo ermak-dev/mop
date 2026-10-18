@@ -39,16 +39,42 @@ class Issuer:
         return p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
             row.role, row.digest, row.state, row.revision, row.credential_version_id)
 
-    def reserve_grant(self, auth, **values):
+    def reserve_initial_grant(self, auth, reservation_id):
         from mop.server.access import services
+        from mop.server.access.grants import Grants
+        from mop.server.controller.initialselection import InitialReservationApprovals
         self.calls.append(('reserve', auth.kind))
-        return self._receipt(self.grants.reserve(services.token_context(auth.value), **values))
+        actor = services.token_context(auth.value)
+        authority = InitialReservationApprovals(self.grants.approvals, actor, reservation_id)
+        grants = Grants(provider=self.grants.secrets.provider, bindings=self.grants.bindings, approvals=authority)
+        return self._receipt(grants.reserve(actor, **authority.arguments()))
 
     def provision_grant(self, auth, grant_id, *, expected_revision):
         from mop.server.access import services
         self.calls.append(('provision', auth.kind))
         return self._receipt(self.grants.provision(services.token_context(auth.value), grant_id,
                                                    expected_revision=expected_revision))
+
+
+def native_ack(case, work, key):
+    """Reference node сообщает producer настоящему HTTP/CAS; не physical proof."""
+    from django.test import Client
+    from mop.common.telemetry import SessionScope
+    from mop.server.sessions.protocol import work_to_wire
+    from mop.server.sessions.models import Assignment, IncarnationLaunch
+    pin = IncarnationLaunch.objects.get(incarnation_id=work.incarnation_id)
+    target = Assignment.objects.get(pk=work.target_id)
+    scope = SessionScope(work.epoch, work.target_id, work.incarnation_id,
+        work.node_id, work.executor_epoch, 'owned-create-reference', uuid4())
+    doc = dict(schema_version=1, work=work_to_wire(work), scope=scope.wire(),
+        expected_revision='0', expected_prior=None,
+        launch=dict(bootstrap_revision=str(pin.bootstrap_revision), bootstrap_digest=pin.bootstrap_digest,
+                    image_digest=pin.image_digest, display_name=target.display_name),
+        physical=dict(pane='%0', pid='123', process_start=str(uuid4())+':123'))
+    response = Client(HTTP_AUTHORIZATION='Token '+key).post('/api/v1/machine/session-producers',
+        doc, content_type='application/json', secure=True)
+    case.assertEqual(response.status_code, 200, response.content)
+    return scope
 
 
 class Scheduler:
@@ -103,6 +129,18 @@ class CreateVertical(TransactionTestCase):
                 dict(schema_version=1, node_id=str(self.node.pk), previous_epoch=str(uuid4()), new_epoch=str(self.boot)),
                 content_type='application/json', secure=True)
             self.assertEqual(declared.status_code, 200, declared.content)
+        if bootstrap and image:
+            # #721: production SQL selection, отдельная от image/provenance source.
+            from mop.server.secrets.services import SecretStore
+            from mop.server.controller.initialselection import configure
+            self.model_config = SecretStore(provider=provider, authorizer=auth.Access()).create(self.actor,
+                project_id=self.project.pk, name='native-model-config', kind='file', purpose='project',
+                value=b'{"model":"fixture-model"}')
+            self.selection = configure(self.actor, project_id=self.project.pk, definition_id=self.definition.id,
+                bootstrap_revision=self.revision.id, image_id=self.image.id, source_origin=self.project.origin,
+                source_commit='d'*40, source_ref='refs/heads/exact-source', desired_model='fixture-model',
+                model_config_digest=hashlib.sha256(b'{"model":"fixture-model"}').hexdigest(),
+                consumers=(('model_config', self.model_config.active_version_id),))
         self.issuer, self.scheduler = Issuer(self.grants), scheduler or Scheduler()
         if enroll:
             # Настройки пула и доверенная привязка узла к планировщику (#643):
@@ -114,7 +152,8 @@ class CreateVertical(TransactionTestCase):
                 'pool_datacenter': 'owned'}, expected_revision=catalog.get_installation_settings(self.actor).revision)
             self.nomad_node = uuid4()
             enroll_node(self.node.pk, scheduler_id=self.scheduler.scheduler_id, nomad_node_id=self.nomad_node,
-                        capabilities=API_LAUNCH_CAPABILITIES)
+                        capabilities=API_LAUNCH_CAPABILITIES,
+                        anchor_executable='/installed/sha256-'+'a'*64+'/anchor', anchor_digest='a'*64)
         from unittest.mock import patch
         from mop.server.controller.createbinding import service
         self.addCleanup(patch.stopall)
@@ -123,7 +162,7 @@ class CreateVertical(TransactionTestCase):
 
     def body(self, **changes):
         value = dict(schema_version=1, epoch=str(self.epoch), request_id=str(uuid4()),
-            not_after=(timezone.now()+timedelta(minutes=2)).isoformat(),
+            not_after=(timezone.now()+timedelta(minutes=10)).isoformat(),
             params={'node_id': str(self.node.pk), 'definition_id': str(self.definition.id)})
         value.update(changes)
         return value
@@ -173,7 +212,8 @@ class CreateVertical(TransactionTestCase):
         self.assertEqual(a.AgentProfile.objects.get(target_id=target_id).agent_id, grant.subject_id)
         self.assertEqual([kind for _, kind in self.issuer.calls], ['token', 'token'])
         steps = list(om.Step.objects.filter(operation_id=operation['id']).order_by('ordinal').values_list('name', flat=True))
-        self.assertEqual(steps, ['scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant'])
+        from mop.common.initialcreate import PHASES
+        self.assertEqual(steps, list(PHASES))
         binding = om.CreateBinding.objects.get(operation_id=operation['id'])
         self.assertEqual((binding.scheduler_id, binding.job_id), (self.scheduler.scheduler_id, str(target_id)))
         # Повтор того же запроса -- тот же Operation, без второго назначения и гранта.
@@ -205,13 +245,13 @@ class CreateVertical(TransactionTestCase):
 
     def lose_reservation_reply(self, body):
         from unittest.mock import patch
-        reserve = self.issuer.reserve_grant
+        reserve = self.issuer.reserve_initial_grant
 
         def lose(*args, **kwargs):
             reserve(*args, **kwargs)
             raise OSError('reservation reply lost after commit')
 
-        with patch.object(self.issuer, 'reserve_grant', side_effect=lose), \
+        with patch.object(self.issuer, 'reserve_initial_grant', side_effect=lose), \
                 self.assertRaisesRegex(OSError, 'reservation reply lost after commit'):
             self.submit(body)
         from mop.server.access.models import Grant
@@ -263,7 +303,8 @@ class CreateVertical(TransactionTestCase):
             observed_image_id=original.observed_image_id, available=True)
         NodeExecutor.objects.create(node=other, executor_epoch=self.boot)
         enroll_node(other.pk, scheduler_id=self.scheduler.scheduler_id, nomad_node_id=uuid4(),
-                    capabilities=API_LAUNCH_CAPABILITIES)
+                    capabilities=API_LAUNCH_CAPABILITIES,
+                        anchor_executable='/installed/sha256-'+'a'*64+'/anchor', anchor_digest='a'*64)
         with patch('mop.server.operations.launch.timezone.now', return_value=now):
             self.lose_reservation_reply(body)
         before, calls = self.reservation_rows(), list(self.issuer.calls)
@@ -313,7 +354,7 @@ class CreateVertical(TransactionTestCase):
         self.ready()
         body, now = self.body(), timezone.now()
         command = parse_create(self.project.pk, body)
-        reserve = self.issuer.reserve_grant
+        reserve = self.issuer.reserve_initial_grant
         reached, committed, first_reached, clock = Barrier(2), Event(), Event(), local()
 
         def overlap(*args, **kwargs):
@@ -340,7 +381,7 @@ class CreateVertical(TransactionTestCase):
                 connections.close_all()
 
         with patch('mop.server.operations.launch.timezone.now', side_effect=lambda: getattr(clock, 'now', now)), \
-                patch.object(self.issuer, 'reserve_grant', side_effect=overlap), \
+                patch.object(self.issuer, 'reserve_initial_grant', side_effect=overlap), \
                 ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(submit, True)
             self.assertTrue(first_reached.wait(timeout=5))
@@ -590,7 +631,11 @@ class CreateVertical(TransactionTestCase):
         self.assertEqual(refused.status_code, 429, refused.content)
         self.assertEqual(self.reservation_rows(), before)
         retry = self.submit(body)
-        self.assertEqual(retry.status_code, 202, retry.content)
+        # #721: неизвестный legacy reservation не содержит trusted selection.
+        # Его нельзя допинить текущими defaults и воспроизвести старый эффект.
+        self.assertEqual(retry.status_code, 503, retry.content)
+        self.assertIn('selection', retry.json()['error']['message'])
+        self.assertEqual(self.reservation_rows(), before)
         self.assertEqual(CreateReservation.objects.get(pk=reservation.pk).expires_at, reservation.expires_at)
 
     def test_create_requires_its_own_permission(self):
@@ -673,6 +718,21 @@ class CreateRegistration(TransactionTestCase):
         response = self.submit(self.body())
         self.assertEqual(response.status_code, 202, response.content)
         value = response.json()['operation']
+        # #721: registration fixtures проходят настоящие planned claims/results,
+        # а не подставляют SQL outcome и не выдают scheduler работу первым.
+        from mop.server.access import services as auth
+        from mop.server.controller.machinebinding import compose
+        from mop.server.controller.createbinding import LaunchSupport
+        from mop.common.initialcreate import CONFIRMATIONS, PHASES
+        key = auth.enroll_service('planned-create-reference', self.node.pk, project_ids=(self.project.pk,),
+            permissions=('execution.poll_work', 'execution.claim_work', 'execution.report_result'))
+        service, actor = compose(grants=self.grants, launch_support=LaunchSupport()), auth.token_context(key)
+        for action in PHASES[:3]:
+            work, = service.poll(actor, self.node.pk, executor_epoch=self.boot)
+            self.assertEqual(work.action, action)
+            attempt = service.claim(actor, work, request_id=uuid4())
+            service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                outcome='succeeded', evidence=CONFIRMATIONS[action])
         return UUID(value['id']), value['target']['id'], value['target']['incarnation']
 
     def step(self, operation):
@@ -703,8 +763,11 @@ class CreateRegistration(TransactionTestCase):
         catalog.observe_image(self.actor, self.node.pk, self.project.pk, image.id, available=True,
             source='scheduler:meta', observed_at=timezone.now(), receipt='replacement-1',
             expected_revision=state.revision)
-        with self.assertRaises(Refused):
-            self.ops.launches.run(operation)
+        self.assertIsNone(self.ops.launches.run(operation))
+        from mop.server.operations.models import Operation
+        refused = Operation.objects.get(pk=operation)
+        self.assertEqual(refused.state, 'refused')
+        self.assertIn('image', refused.reason)
         self.assertEqual(self.peer.posts, [])
         self.assertNotIn(target, self.peer.jobs)
 
@@ -733,7 +796,8 @@ class CreateRegistration(TransactionTestCase):
               patch.object(config, 'num', side_effect=AssertionError('legacy config.num')),
               patch.object(builtins, '__import__', guarded_import)):
             enroll_node(self.node.pk, scheduler_id=self.adapter.scheduler_id,
-                nomad_node_id=self.nomad_node, capabilities=API_LAUNCH_CAPABILITIES)
+                nomad_node_id=self.nomad_node, capabilities=API_LAUNCH_CAPABILITIES,
+                        anchor_executable='/installed/sha256-'+'a'*64+'/anchor', anchor_digest='a'*64)
             self.ops.launches.run(operation)
         self.assertEqual(len(self.peer.posts), 1)
         self.assertIn(target, self.peer.jobs)
@@ -754,7 +818,9 @@ class CreateRegistration(TransactionTestCase):
             hashlib.sha256(('image-revision:'+str(self.image.id)).encode()).hexdigest())
         self.assertEqual(job['Constraints'][0]['RTarget'], str(self.nomad_node))
         self.assertEqual((job['Datacenters'], task['User'], task['Env']['MOP_TARGET_ID']), (['owned'], 'mop', target))
-        self.assertTrue(task['Env']['MOP_REGISTERED_LAUNCHER'].startswith('/srv/mop/runtime/'+incarnation))
+        self.assertEqual(task['Config']['command'], '/installed/sha256-'+'a'*64+'/anchor')
+        self.assertEqual(task['Config']['args'][0], 'hold')
+        self.assertNotIn('MOP_REGISTERED_LAUNCHER', task['Env'])
         step = self.step(operation)
         self.assertEqual((step.outcome, step.evidence), ('succeeded', 'job-registered'))
         from mop.server.operations.models import CreateBinding, Operation, ScheduledPuppet
@@ -842,11 +908,11 @@ class CreateRegistration(TransactionTestCase):
             row = Operation.objects.get(pk=operation)
             current = self.ops.launches.specs.render(self.ops.targets.current(UUID(target)),
                 epoch=row.epoch, restore_generation=row.restore_generation, operation_id=row.pk,
-                step_id=Step.objects.get(operation=row, name='apply_identity').pk,
+                step_id=Step.objects.get(operation=row, name='native_exec').pk,
                 not_after=row.not_after, definition_id=row.createbinding.definition_id,
                 scheduler_id=row.createbinding.scheduler_id)['Job']
             self.assertNotEqual(current['Meta']['mop.launch_template'], original['mop.launch_template'])
-            self.assertEqual(current['TaskGroups'][0]['Tasks'][0]['Config']['args'][-1], launch_spec.API_WRAPPER)
+            self.assertEqual(current['TaskGroups'][0]['Tasks'][0]['Config']['args'][0], 'hold')
             self.ops.launches.reconcile(self.actor, operation)
         self.assertEqual((self.step(operation).outcome, self.step(operation).evidence),
                          ('succeeded', 'job-registered'))
@@ -890,26 +956,28 @@ class CreateMachineSteps(TransactionTestCase):
         if getattr(self, '_executor_key', None) is None:
             self._executor_key = auth.enroll_service('create-executor', self.node.pk, project_ids=(self.project.pk,),
                 permissions=('execution.poll_work', 'execution.claim_work', 'execution.report_result',
-                             'execution.read_facts'))
+                             'execution.read_facts', 'execution.register_producer', 'execution.read_launch'))
         return compose(grants=self.grants, launch_support=LaunchSupport()), auth.token_context(self._executor_key)
 
     def test_node_confirms_identity_and_readiness_under_the_provisioned_grant(self):
         operation, target, _ = self.launch()
         service, actor = self.machine()
-        # До регистрации job у узла нет работы этой цели.
+        # Planned receipts уже записаны; до регистрации native ещё не выдаётся.
         self.assertEqual(service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2), ())
         self.ops.launches.run(operation)
-        for action, evidence in (('apply_identity', 'identity-applied'), ('confirm_ready', 'ready')):
+        for action, evidence in (('native_exec', 'native-started'), ('confirm_ready', 'ready')):
             work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
             self.assertEqual((work.operation_id, work.action), (operation, action))
             attempt = service.claim(actor, work, request_id=uuid4())
+            if action == 'native_exec':
+                native_ack(self, work, self._executor_key)
             service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
                            outcome='succeeded', evidence=evidence)
         from mop.server.operations.models import Operation, Step
         self.assertEqual(service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2), ())
         steps = dict(Step.objects.filter(operation_id=operation).values_list('name', 'outcome'))
-        self.assertEqual(steps, {'scheduler_register': 'succeeded', 'apply_identity': 'succeeded',
-                                 'confirm_ready': 'succeeded', 'activate_grant': ''})
+        from mop.common.initialcreate import PHASES
+        self.assertEqual(steps, {name: '' if name == 'activate_grant' else 'succeeded' for name in PHASES})
         self.assertEqual(Operation.objects.get(pk=operation).state, 'running')
 
     # HYPOTHESIS (#705): успешный scheduler_register снимал target fence,
@@ -935,8 +1003,9 @@ class CreateMachineSteps(TransactionTestCase):
         service, actor = self.machine()
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         attempt = service.claim(actor, work, request_id=uuid4())
+        native_ack(self, work, self._executor_key)
         service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                       outcome='succeeded', evidence='identity-applied')
+                       outcome='succeeded', evidence='native-started')
         cannot_release()
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         attempt = service.claim(actor, work, request_id=uuid4())
@@ -955,10 +1024,11 @@ class CreateMachineSteps(TransactionTestCase):
         values = dict(owner_id=row.owner_id, project_id=row.project_id, target_id=row.id, grant_id=row.grant_id,
                       role=row.role, bundle_digest=row.bundle_digest, incarnation_id=row.current_incarnation_id)
         receiving = ReceivingGrant(self.grants)
-        for action in ('apply_identity', 'confirm_ready'):
+        from mop.common.initialcreate import MACHINE
+        for action in MACHINE:
             with transaction.atomic():
                 receiving.authorize(**values, action=action)
-        for action in ('send_message', 'restart_session', 'wipe_clone'):
+        for action in ('apply_identity', 'send_message', 'restart_session', 'wipe_clone'):
             with self.subTest(action=action), self.assertRaises(Denied), transaction.atomic():
                 receiving.authorize(**values, action=action)
         with self.assertRaises(Denied), transaction.atomic():
@@ -989,7 +1059,7 @@ class CreateMachineSteps(TransactionTestCase):
         self.preparation.revoke(self.actor, self.bootstrap_approval.id)
         with self.assertRaisesRegex(PermissionError, 'revoked'):
             service.claim(actor, work, request_id=uuid4())
-        self.assertFalse(AssignmentAttempt.objects.filter(operation_id=operation).exists())
+        self.assertFalse(AssignmentAttempt.objects.filter(operation_id=operation, action='native_exec').exists())
 
     def test_default_machine_authority_is_bound_without_a_provider(self):
         from mop.server.controller.createbinding import LaunchSupport
@@ -1000,8 +1070,9 @@ class CreateMachineSteps(TransactionTestCase):
         service = compose(launch_support=LaunchSupport())
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         attempt = service.claim(actor, work, request_id=uuid4())
+        native_ack(self, work, self._executor_key)
         service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                       outcome='succeeded', evidence='identity-applied')
+                       outcome='succeeded', evidence='native-started')
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         self.preparation.revoke(self.actor, self.bootstrap_approval.id)
         with self.assertRaisesRegex(PermissionError, 'revoked'):
@@ -1014,8 +1085,9 @@ class CreateMachineSteps(TransactionTestCase):
         service, actor = self.machine()
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         attempt = service.claim(actor, work, request_id=uuid4())
+        native_ack(self, work, self._executor_key)
         service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                       outcome='succeeded', evidence='identity-applied')
+                       outcome='succeeded', evidence='native-started')
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         self.assertEqual(work.action, 'confirm_ready')
         self.preparation.revoke(self.actor, self.bootstrap_approval.id)
@@ -1150,10 +1222,12 @@ class CreateActivation(TransactionTestCase):
     def through_readiness(self, operation, *, ready=True):
         self.ops.launches.run(operation)
         service, actor = self.machine()
-        steps = (('apply_identity', 'identity-applied'), ('confirm_ready', 'ready'))
+        steps = (('native_exec', 'native-started'), ('confirm_ready', 'ready'))
         for action, evidence in steps[:2 if ready else 1]:
             work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
             attempt = service.claim(actor, work, request_id=uuid4())
+            if action == 'native_exec':
+                native_ack(self, work, self._executor_key)
             service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
                            outcome='succeeded', evidence=evidence)
 
@@ -1242,7 +1316,7 @@ class CreateActivation(TransactionTestCase):
         self.through_readiness(operation)
         deadline = Operation.objects.get(pk=operation).not_after
         claim = self.ops.activations.claim
-        clock = [deadline - timedelta(seconds=1)]
+        clock = [deadline - timedelta(seconds=31)]
 
         def cross_deadline(value):
             ticket = claim(value)
