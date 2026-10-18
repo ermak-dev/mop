@@ -1,101 +1,39 @@
-"""send a message to a pool puppet or a session on this machine
+"""mop send <id> <text|-> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-  mop send <target> <text>            send
-  mop send <target> -                 text from stdin
-  mop send <target> <text> --wait[=N] send and wait until the recipient goes free
-  mop send --list                     live sessions on this machine
+Submit one finite remote send through /api/v1/messages. The target is a puppet
+assignment resource id, never a name, pid, directory or socket. Without a full
+explicit binding, authorized detail supplies the epoch, incarnation and desired
+revision, not the projection clock. The request key and UTC --not-after (default
+two minutes) are fixed before context/detail I/O. MCP requires the full binding.
 
-<target> — puppet name (pu-<project>-1), session name, pid, directory, or socket
-path. A puppet is recognized by the pu- prefix and reached over the bus; anything
-else is a local session, reached directly through its uds inbox.
+Text '-' reads bounded stdin; UTF-8 text is limited to 16384 bytes, nonempty and
+without NUL. Newlines are preserved. Text stays in the transient request body, not
+a URL, diagnostic or local store. --priority now|next|later defaults to next.
+--wait-seconds N (0..60) is the server command field; --wait seconds is a bounded
+GET-only operation wait. Neither option proves idle state or message delivery.
 
-  --priority now|next|later   where in the recipient's queue (default next)
-  --mode bypass|prompting     which permission mode to present as (bypass)
-  --quiet                     silent, exit code only
-  --force                     take over a puppet another master leads
-
-Channel protocol — CHANNEL.md, bus subjects — BUS.md.
+accepted/unknown/outstanding operations exit 3, not delivered. Recover with mop
+operation using the original request-id and epoch; a lost reply never reposts.
+Local send/--list, --mode, --force, --local, --reply-to and --notify-when-idle are
+explicitly unsupported before I/O: this client has no trusted holder endpoint.
+An unavailable physical message binding is a server refusal, never bus/UDS/SSH
+fallback. The HTTPS origin/CA and transient Django token follow mop health.
 """
-import argparse
-import sys
+from mop.cli import _control
 
-from mop.cli import lib
-from mop.common import bus, puppets
-from mop.client import channel
-from mop import session
-from mop.common.render import table
-
-
-def show_sessions():
-    rows = [(d.get("name") or "-", str(d.get("pid")),
-             "alive" if session.socket_alive(d["messagingSocketPath"]) else "dead",
-             d.get("status") or "-", d.get("cwd") or "-")
-            for d in session.sessions()]
-    print("\n".join(table(rows)) if rows else "no live sessions")
-
-
-def to_puppet(a, body):
-    """Через шину: сокет папета host-local, до него дотягивается агент узла.
-    Доставка -- mop/client/channel.py (#148), здесь только вывод."""
-    v = channel.send_to_puppet(puppets.node_of(a.target), a.target,
-                               body, a.priority, a.wait, owner=bus.login(), force=a.force)
-    if channel.failure(v):
-        sys.exit(channel.failure(v))
-    if a.quiet:
-        return 0 if (a.wait is None or v["idle"]) else 2
-    print(f"-> {a.target} msg_id={v['msg_id']}"
-          + (f"; {v['owner_note']}" if v["owner_note"] else ""))
-    if a.wait is None:
-        return 0
-    if not v["idle"]:
-        print(f"waited {v['wait']}s — puppet never reported going free")
-        return 2
-    print(f"<- {v['idle']}")
-    return 0
-
-
-def to_session(a, body):
-    v = channel.send_local(session.find(a.target), body, a.priority, a.wait,
-                           mode=a.mode, from_name="mop")
-    if channel.failure(v):
-        sys.exit(channel.failure(v))
-    if a.quiet:
-        return 0 if (a.wait is None or v["idle"]) else 2
-    print(f"-> {v['to']} [{v['pid']}] msg_id={v['msg_id']}")
-    if a.wait is None:
-        return 0
-    if v["idle"] is None:
-        print(f"waited {a.wait}s — session never reported going idle")
-        return 2
-    detail = v["idle"].get("detail")
-    print(f"<- {v['idle'].get('state', '?')}" + (f": {detail}" if detail else ""))
-    return 0
+MCP = {"annotations": "destructive",
+       "actions": ["execution.send_message", "operations.view_operation"], "args": [
+    {"name": "puppet_id", "type": "string", "required": True, "help": "puppet assignment resource id"},
+    {"name": "message", "type": "string", "required": True, "help": "private UTF-8 message, at most 16384 bytes"},
+    {"name": "epoch", "type": "string", "flag": "--epoch", "required": True, "help": "installation epoch"},
+    {"name": "incarnation", "type": "string", "flag": "--incarnation", "required": True, "help": "current execution incarnation"},
+    {"name": "expected_revision", "type": "string", "flag": "--expected-revision", "required": True, "help": "desired assignment revision, not projection clock"},
+    {"name": "priority", "type": "string", "flag": "--priority", "help": "now, next or later; default next"},
+    {"name": "wait_seconds", "type": "integer", "flag": "--wait-seconds", "help": "server send field, 0..60; not idle confirmation"},
+    {"name": "request_id", "type": "string", "flag": "--request-id", "help": "initial command identity"},
+    {"name": "not_after", "type": "string", "flag": "--not-after", "help": "absolute UTC admission deadline"},
+    {"name": "wait", "type": "integer", "flag": "--wait", "help": "bounded GET-only operation wait in seconds"}]}
 
 
 def main(argv):
-    if argv and argv[0] in ("--list", "list"):
-        return show_sessions()
-    if len(argv) < 2:
-        lib.usage(__doc__)
-    p = argparse.ArgumentParser(add_help=False, usage=__doc__)
-    p.add_argument("target")
-    p.add_argument("message")
-    p.add_argument("--priority", choices=session.PRIORITIES, default="next")
-    p.add_argument("--mode", choices=session.MODES, default="bypass")
-    p.add_argument("--quiet", action="store_true")
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--wait", nargs="?", type=int, const=channel.MAX_WAIT, default=None)
-    a = p.parse_args(argv)
-
-    body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
-    if not body.strip():
-        sys.exit("empty message — nothing to send")
-    if not channel.is_puppet(a.target):
-        return to_session(a, body)
-    lib.guard(a.target)
-    return to_puppet(a, body)
-
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+    return _control.invoke('send', argv)

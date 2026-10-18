@@ -155,6 +155,19 @@ class ControlClient(unittest.TestCase):
             with self.assertRaises(api.ClientError):
                 self.restart(**kw)
 
+    # HYPOTHESIS: клиент пропускает пустые/NUL и input сверх границы MessageHandler.
+    # SOLUTION: одинаковая локальная граница для immutable send и CLI stdin.
+    # RESULT: red на whitespace/NUL/oversize; общая проверка дала green 36 checks.
+    # STATUS: FIXED — see #642
+    def test_send_rejects_invalid_private_text_before_io(self):
+        for text in ('', ' \n\t', 'private\x00input', '\ud800', 'я' * 8193, 'x' * 16385):
+            with self.subTest(size=len(text)), self.assertRaises(api.ClientError):
+                self.client.prepare_send(self.target, epoch='e_1', not_after=DEADLINE, message=text)
+        valid = self.client.prepare_send(self.target, epoch='e_1', not_after=DEADLINE,
+                                        message='я' * 8192)
+        self.assertEqual(len(valid.message.encode('utf-8')), 16384)
+        self.assertEqual(self.fixture.calls, [])
+
     # #642: wipe и stop-job -- те же PreparedCommand с пустыми params на свои
     # маршруты; ни сообщения, ни fresh/force в теле нет.
     def test_wipe_and_stop_post_empty_params_to_their_own_routes(self):

@@ -155,6 +155,13 @@ def restart_operation(state='accepted'):
     return value
 
 
+def send_operation(state='accepted'):
+    value = restart_operation(state)
+    value['operation']['steps'] = [{'name': name, 'outcome': '', 'evidence': ''}
+        for name in ('apply_identity', 'send_message')]
+    return value
+
+
 def node_operation(state='accepted'):
     return {'schema_version': 1, 'epoch': EPOCH, 'operation': {
         'id': OP, 'epoch': EPOCH, 'request_id': KEY, 'state': state, 'revision': '1',

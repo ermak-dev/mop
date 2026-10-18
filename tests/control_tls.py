@@ -26,7 +26,8 @@ from types import SimpleNamespace
 import hermetic  # noqa: F401
 from _lib import run_command
 from _control_fixture import (own_tls, KEY, EPOCH, NODE, DEADLINE, TOKEN, PUPPET,
-    node_operation, pool_page, puppet_row, page, PROJECT, DEFINITION, create_operation)
+    node_operation, pool_page, puppet_row, page, PROJECT, DEFINITION, create_operation,
+    INCARNATION, send_operation)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop import cli
 from mop.cli import _control
@@ -75,8 +76,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.reply(409, {'schema_version': 1, 'error': {'code': 'epoch_conflict',
                     'message': 'installation epoch changed', 'retryable': False}})
             elif self.server.admissions:
-                self.reply(200, create_operation('succeeded') if self.server.create_admission
-                           else node_operation('succeeded'))
+                if self.server.send_admission:
+                    # Это receipt fixture, а не исполненная доставка в native session.
+                    self.reply(200, send_operation('accepted'))
+                else:
+                    self.reply(200, create_operation('succeeded') if self.server.create_admission
+                               else node_operation('succeeded'))
             else:
                 self.reply(404, {'schema_version': 1, 'error': {'code': 'not_found',
                     'message': 'resource not found', 'retryable': False}})
@@ -101,6 +106,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.reply(400, {'schema_version': 1, 'error': {'code': 'validation_error',
                     'message': 'create intent must name only node and definition', 'retryable': False}})
                 return
+        elif self.path == '/api/v1/messages':
+            expected.update(target_id=PUPPET, incarnation=INCARNATION, expected_revision='7',
+                params={'message': 'private-send-input\n', 'priority': 'later',
+                        'wait_seconds': 2, 'notify_when_idle': False})
+            if body != expected:
+                self.reply(400, {'schema_version': 1, 'error': {'code': 'validation_error',
+                    'message': 'send intent must match its finite binding', 'retryable': False}})
+                return
+            self.server.send_admission = True
+            # Фикстура проверяет transient bytes, не создавая свой plaintext store.
         elif (self.path != f'/api/v1/nodes/{NODE}/commands/drain' or body != expected):
             self.reply(409, {'schema_version': 1, 'error': {'code': 'request_conflict',
                 'message': 'request key is bound to different intent', 'retryable': False}})
@@ -125,7 +140,7 @@ class TLSConsumers(unittest.TestCase):
 
     def setUp(self):
         self.server.calls, self.server.admissions, self.server.bodies = [], [], []
-        self.server.create_admission = False
+        self.server.create_admission = self.server.send_admission = False
 
     def context(self, token=TOKEN, trust=True):
         return api.ServerContext(self.origin, token, str(self.cert) if trust else None)
@@ -175,6 +190,24 @@ class TLSConsumers(unittest.TestCase):
         self.assertEqual(self.server.bodies, [{'schema_version': 1, 'epoch': EPOCH,
             'request_id': KEY, 'not_after': DEADLINE, 'params': {'node_id': NODE, 'definition_id': DEFINITION}}])
         self.assertNotIn(TOKEN, out+err)
+
+    # HYPOTHESIS: remote send не связан с HTTPS и не восстанавливает lost receipt.
+    # SOLUTION: настоящий TLS, detail CAS и единственный POST, затем GET старого key.
+    # RESULT: unsupported red -> green в Python 3.12/PG17 fixture; 6 TLS checks.
+    # STATUS: FIXED — see #642; fixture не имитирует native delivery.
+    def test_send_real_tls_detail_stdin_and_get_only_recovery(self):
+        from unittest.mock import patch
+        with _control.use(self.context()), patch.object(sys, 'stdin', io.StringIO('private-send-input\n')):
+            out, err, code = run_command(cli.main, ['send', PUPPET, '-', '--priority', 'later',
+                '--wait-seconds', '2', '--request-id', KEY, '--not-after', DEADLINE])
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(out)['operation']['state'], 'accepted')
+        self.assertEqual(self.server.admissions, [KEY])
+        self.assertEqual(self.server.calls, [('GET', '/api/v1/puppets/'+PUPPET),
+            ('POST', '/api/v1/messages'), ('GET', f'/api/v1/operations?request_id={KEY}&epoch={EPOCH}')])
+        self.assertEqual(self.server.bodies, [])
+        for secret in (TOKEN, 'private-send-input'):
+            self.assertNotIn(secret, out+err+repr(self.server.calls))
 
     def test_installed_wheel_client_without_dependencies_or_server_extras(self):
         root = Path(self.directory.name)/'install-fixture'
