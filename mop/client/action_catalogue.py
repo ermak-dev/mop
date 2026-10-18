@@ -5,7 +5,7 @@ Parity с каноническим словарём проверяет tests/mod
 Новый action требует осознанного обновления клиента; неизвестное запрещено.
 """
 ACTIONS_V1 = frozenset('''
-access.activate_grant access.approve_role access.issue_grant access.revoke_grant access.view_role
+access.activate_grant access.approve_role access.issue_grant access.provision_agent_rbac access.revoke_grant access.view_role
 auth.add_group auth.add_user auth.change_group auth.change_user auth.delete_group auth.delete_user auth.view_group auth.view_user
 builds.force_build
 catalog.add_clientregistration catalog.add_imagerevision catalog.add_installationsetting catalog.add_node catalog.add_nodeimage catalog.add_nodesetting catalog.add_project catalog.add_projectpolicysnapshot catalog.add_workspacebinding

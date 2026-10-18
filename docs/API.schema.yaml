@@ -2803,6 +2803,7 @@ components:
       - access.activate_grant
       - access.approve_role
       - access.issue_grant
+      - access.provision_agent_rbac
       - access.revoke_grant
       - access.view_role
       - auth.add_group
@@ -2919,6 +2920,7 @@ components:
         * `access.activate_grant` - access.activate_grant
         * `access.approve_role` - access.approve_role
         * `access.issue_grant` - access.issue_grant
+        * `access.provision_agent_rbac` - access.provision_agent_rbac
         * `access.revoke_grant` - access.revoke_grant
         * `access.view_role` - access.view_role
         * `auth.add_group` - auth.add_group
