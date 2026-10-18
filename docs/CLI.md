@@ -1865,5 +1865,5 @@ catalogue. --check queries that catalogue and reports the private inbox as
 unavailable; it does not register an endpoint or confirm native delivery.
 No scope exposes only authenticated identity/health diagnostics, not all actions.
 Management tools invoke the bound commandlets themselves. The private inbox,
-agent discovery, reports and idle notifications remain unavailable (#649).
+agent discovery, reports and idle notifications remain unavailable.
 ```
