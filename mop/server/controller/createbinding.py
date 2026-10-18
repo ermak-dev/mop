@@ -55,7 +55,7 @@ def enroll_node(node_id, *, scheduler_id, nomad_node_id, capabilities):
     повторная привязка того же узла заменяет их целиком."""
     from uuid import UUID
     from mop.server.operations.models import ScheduledNode
-    from mop.server.spec import API_LAUNCH_CAPABILITIES
+    from mop.server.launch_spec import API_LAUNCH_CAPABILITIES
     if (type(scheduler_id) is not UUID or type(nomad_node_id) is not UUID
             or type(capabilities) not in (set, frozenset) or not set(capabilities) <= API_LAUNCH_CAPABILITIES):
         raise ValueError('typed scheduler identity and known launch capabilities required')
@@ -104,7 +104,7 @@ class LaunchSpecs:
         from mop.server.catalog.models import Node, NodeImage
         from mop.server.operations.models import ScheduledNode
         from mop.server.sessions.models import Assignment, IncarnationLaunch
-        from mop.server.spec import api_job_spec
+        from mop.server.launch_spec import api_job_spec
         node = Node.objects.get(pk=target.node_id)
         enrolled = ScheduledNode.objects.get(node=node, scheduler_id=scheduler_id)
         settings = self._settings()
