@@ -1,0 +1,23 @@
+"""Конечный wire vocabulary v1 из API.schema.yaml, не правила допуска.
+
+Только codec клиента: без Django, соответствия permissions и kind grants.
+Parity с каноническим словарём проверяет tests/modern_mcp.py по публичной схеме.
+Новый action требует осознанного обновления клиента; неизвестное запрещено.
+"""
+ACTIONS_V1 = frozenset('''
+access.activate_grant access.approve_role access.issue_grant access.revoke_grant access.view_role
+auth.add_group auth.add_user auth.change_group auth.change_user auth.delete_group auth.delete_user auth.view_group auth.view_user
+builds.force_build
+catalog.add_clientregistration catalog.add_imagerevision catalog.add_installationsetting catalog.add_node catalog.add_nodeimage catalog.add_nodesetting catalog.add_project catalog.add_projectpolicysnapshot catalog.add_workspacebinding
+catalog.build_project
+catalog.change_clientregistration catalog.change_imagerevision catalog.change_installationsetting catalog.change_node catalog.change_nodeimage catalog.change_nodesetting catalog.change_project catalog.change_projectpolicysnapshot catalog.change_workspacebinding
+catalog.configure_node catalog.configure_project
+catalog.delete_clientregistration catalog.delete_imagerevision catalog.delete_installationsetting catalog.delete_node catalog.delete_nodeimage catalog.delete_nodesetting catalog.delete_project catalog.delete_projectpolicysnapshot catalog.delete_workspacebinding
+catalog.drain_node catalog.enable_node catalog.forget_node catalog.observe_node catalog.pin_project_policy catalog.record_node_application catalog.record_settings_application catalog.recover_build catalog.set_project_limit
+catalog.view_clientregistration catalog.view_imagerevision catalog.view_installationsetting catalog.view_node catalog.view_nodeimage catalog.view_nodesetting catalog.view_pool catalog.view_project catalog.view_projectpolicysnapshot catalog.view_workspacebinding
+controller.manage_proxy controller.view_models
+execution.acquire_landing execution.assign_work execution.change_session_model execution.claim_work execution.control_terminal execution.create_puppet execution.delete_puppet execution.deliver_report execution.dispatch_task execution.ingest_observations execution.ingest_telemetry execution.poll_work execution.read_facts execution.read_history execution.read_launch execution.read_terminal execution.reconcile_work execution.recycle_puppet execution.register_endpoint execution.register_producer execution.release_landing execution.report_result execution.restart_puppet execution.send_message execution.send_session_command execution.stop_allocation execution.update_puppet execution.view_delivery execution.view_history execution.view_landing execution.view_tail execution.view_usage execution.wipe_puppet
+operations.cancel_operation operations.collect_pool_garbage operations.diagnose_pool operations.override_assignment operations.recover_operation operations.stop_puppet_job operations.sweep_pool operations.treat_pool operations.view_audit operations.view_node_disk operations.view_operation
+preparation.approve_bootstrap
+secrets.deliver_secret secrets.manage_project_secret secrets.rotate_proxy_key secrets.view_secret_metadata
+'''.split())
