@@ -755,6 +755,21 @@ class Consumers(unittest.TestCase):
                 self.assertNotIn(TOKEN, out + err)
         self.assertEqual(self.fixture.calls, [])
 
+    # HYPOTHESIS (#713): recursive proxykey leaf не находился в SURFACES и
+    # падал обратно в legacy context вместо отказа неподключённой операции.
+    # SOLUTION: вся recursive группа связана с конечным server proxykey surface.
+    # RESULT: RED3 context trap; GREEN consumer/client/layers/helpers4/4.
+    # STATUS: FIXED — see #713
+    def test_nested_proxykey_commands_refuse_before_legacy_context(self):
+        from mop.common import context
+        for leaf in ('start', 'resume', 'status'):
+            with self.subTest(leaf=leaf), patch.object(context, 'here',
+                    side_effect=AssertionError('legacy rotation context reached')):
+                out, err, code = run_command(cli.main, ['server', 'proxykey', leaf])
+                self.assertEqual(code, 2, (out, err))
+                self.assertIn('unsupported', err)
+        self.assertEqual(self.fixture.calls, [])
+
     def test_role_launcher_cannot_fall_back_to_legacy_context_or_ssh(self):
         from mop.common import context
         with patch.object(context, 'here', side_effect=AssertionError('legacy role launch')):

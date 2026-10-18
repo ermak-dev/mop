@@ -113,6 +113,10 @@ def route(modname, argv):
         if modname.startswith(prefix + '.'):
             name = group + ' ' + modname.rsplit('.', 1)[-1]
             return name if name in SURFACES else None
+    # #713: recursive rotation leaves принадлежат одному ещё неподключённому
+    # surface. Leaf не должен уходить в legacy context через общий server case.
+    if modname == 'mop.cli.server.proxykey' or modname.startswith('mop.cli.server.proxykey.'):
+        return 'server proxykey'
     if modname == 'mop.cli.server.user':
         return 'server user'
     if modname.startswith('mop.cli.server.user.'):
