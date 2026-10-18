@@ -5,7 +5,7 @@ from mop.server.sessions import protocol as p
 from mop.server.sessions.services import Conflict
 # #625 связывает публичные ports здесь, не в sessions import graph.
 # Несвязанный physical/approval port отказывает до admission.
-from .machinebinding import compose, authority
+from .machinebinding import compose, authority, executor_discovery
 # #690: строгий разбор query -- общий strict-модуль; machine-протокол
 # продолжает использовать чистые валидаторы sessions.protocol вне HTTP.
 from .strict import StrictJSONParser, machine_document, query_document as query
@@ -81,8 +81,7 @@ class ExecutorState(MachineView):
     def get(self, request):
         values = query(request.query_params, ('schema_version','node_id'))
         node_id = p.uuid_value(values['node_id'])
-        value = execution.executor_state(request.actor,node_id)
-        return Response({'schema_version':1,'node_id':str(node_id),'executor_epoch':str(value)})
+        return Response(executor_discovery(execution, request.actor, node_id))
 
 
 class Claim(MachineView):

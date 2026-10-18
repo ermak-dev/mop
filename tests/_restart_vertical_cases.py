@@ -149,7 +149,9 @@ class RestartVertical(TransactionTestCase):
         with patch('mop.server.controller.machineviews.execution', service):
             response = self.machine.get('/api/v1/machine/executor', {'schema_version':'1','node_id':str(self.node.id)}, secure=True)
             self.assertEqual(response.status_code,200,response.content)
-            self.assertEqual(response.json()['executor_epoch'],str(self.boot))
+            self.assertEqual(response.json(), dict(schema_version=1,
+                installation_id=Installation.objects.get().identity, epoch=str(self.epoch),
+                node_id=str(self.node.id), executor_epoch=str(self.boot)))
             new = uuid4()
             response = self.machine.post('/api/v1/machine/executor/restarted',dict(schema_version=1,node_id=str(self.node.id),
                 previous_epoch=str(uuid4()),new_epoch=str(new)),content_type='application/json',secure=True)

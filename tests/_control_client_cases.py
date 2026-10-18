@@ -29,6 +29,163 @@ from mop.cli import _control
 from mop.client import control as api
 
 
+# HYPOTHESIS: executor discovery теряет canonical installation identity/epoch,
+# а отдельные SQL reads допускают смешанный снимок при смене установки.
+# SOLUTION: один read-only admission под restore/installation locks, затем
+# прежние node/project permission checks; wire ровно из пяти полей.
+# RESULT: PG17 RED — неполный wire и чтение сквозь admission; GREEN —
+# четыре TLS checks и 41 соседний execution/restart check. Реальный lock wait
+# наблюдается через свежий pg_stat_activity, не задержкой или fake authority.
+# STATUS: FIXED — see #639
+@override_settings(ALLOWED_HOSTS=['localhost', 'testserver'])
+class ExecutorDiscovery(TransactionTestCase):
+    serialized_rollback = True
+
+    def setUp(self):
+        from _restart_vertical_cases import RestartVertical
+        RestartVertical.setUp(self)
+        from mop.server.access import services
+        from mop.server.sessions.models import NodeExecutor
+        self.boot = uuid4()
+        NodeExecutor.objects.create(node=self.node, executor_epoch=self.boot)
+        self.machine_key = services.enroll_service('discovery-executor', self.node.pk,
+            project_ids=(self.project.pk,), permissions=('execution.claim_work',))
+
+    @contextlib.contextmanager
+    def https(self):
+        with own_tls(DjangoTLS) as (server, origin, cert, directory):
+            server.calls = []
+            server.drop_post = server.drop_get = False
+            server.after = lambda method, response: None
+            yield server, origin, cert, directory
+
+    def read(self, origin, cert, *, token=None, node=None, query=''):
+        import http.client
+        import ssl
+        from urllib.parse import urlsplit
+        address = urlsplit(origin)
+        connection = http.client.HTTPSConnection(address.hostname, address.port,
+            context=ssl.create_default_context(cafile=str(cert)), timeout=5)
+        try:
+            connection.request('GET', '/api/v1/machine/executor?schema_version=1&node_id='
+                + str(self.node.pk if node is None else node) + query,
+                headers={'Authorization': 'Token '+(self.machine_key if token is None else token)})
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), json.loads(response.read())
+        finally:
+            connection.close()
+
+    def expected(self, *, epoch=None, executor=None):
+        from mop.server.controller.models import Installation
+        installation = Installation.objects.get()
+        return dict(schema_version=1, installation_id=installation.identity,
+            epoch=str(installation.epoch if epoch is None else epoch), node_id=str(self.node.pk),
+            executor_epoch=str(self.boot if executor is None else executor))
+
+    def test_real_tls_discovery_is_complete_canonical_read_only_and_no_store(self):
+        from mop.server.controller.models import Installation
+        from mop.server.sessions.models import NodeExecutor, AssignmentAttempt, ResultReceipt
+        Installation.objects.update(identity='canonical-fixture', effects_enabled=False)
+        before = list(NodeExecutor.objects.values())
+        with self.https() as (server, origin, cert, _):
+            for _ in range(2):
+                status, headers, body = self.read(origin, cert)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body, self.expected())
+                self.assertEqual(headers['Cache-Control'], 'no-store')
+            self.assertEqual([method for method, _ in server.calls], ['GET', 'GET'])
+        self.assertEqual(list(NodeExecutor.objects.values()), before)
+        self.assertEqual(AssignmentAttempt.objects.count(), 0)
+        self.assertEqual(ResultReceipt.objects.count(), 0)
+
+    def test_real_tls_discovery_keeps_token_node_project_and_permission_admission(self):
+        from mop.server.access import services
+        from mop.server.sessions.models import Assignment
+        from django.contrib.auth.models import Permission
+        Assignment.objects.create(node=self.node, project=self.project, role='worker',
+            bundle_digest='a'*64, grant_id=uuid4(), expires_at=timezone.now()+timedelta(hours=1))
+        with self.https() as (_, origin, cert, _):
+            for token, node in (('0'*40, self.node.pk), (self.key, self.node.pk),
+                                (self.machine_key, uuid4())):
+                status, headers, body = self.read(origin, cert, token=token, node=node)
+                self.assertIn(status, (401, 403, 404), body)
+                self.assertEqual(headers['Cache-Control'], 'no-store')
+                self.assertNotIn('installation_id', body)
+            actor = services.token_context(self.machine_key)
+            from mop.server.access.models import ProjectMembership
+            membership = ProjectMembership.objects.get(user_id=actor.user_id, project=self.project)
+            source_id = membership.source_id
+            membership.delete()
+            self.assertEqual(self.read(origin, cert)[0], 403)
+            ProjectMembership.objects.create(user_id=actor.user_id, project=self.project, source_id=source_id)
+            from django.contrib.auth import get_user_model
+            user = get_user_model().objects.get(pk=actor.user_id)
+            user.user_permissions.remove(Permission.objects.get(
+                content_type__app_label='execution', codename='claim_work'))
+            self.assertEqual(self.read(origin, cert)[0], 403)
+
+    def test_real_tls_discovery_refuses_restore_unregistered_and_unknown_fields(self):
+        from mop.server.controller.models import RestoreGuard
+        from mop.server.sessions.models import NodeExecutor
+        with self.https() as (_, origin, cert, _):
+            status, headers, body = self.read(origin, cert, query='&epoch='+str(uuid4()))
+            self.assertEqual(status, 400, body)
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+            RestoreGuard.objects.update(state='restoring')
+            status, headers, body = self.read(origin, cert)
+            self.assertEqual(status, 503, body)
+            self.assertNotIn('installation_id', body)
+            RestoreGuard.objects.update(state='ready')
+            NodeExecutor.objects.all().delete()
+            status, headers, body = self.read(origin, cert)
+            self.assertEqual(status, 503, body)
+            self.assertNotIn('installation_id', body)
+
+    def test_real_tls_discovery_waits_for_consistent_installation_and_executor_admission(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from django.db import transaction
+        from mop.server.controller.models import Installation
+        from mop.server.sessions.models import NodeExecutor
+        epoch, executor = uuid4(), uuid4()
+        with self.https() as (server, origin, cert, _), ThreadPoolExecutor(max_workers=1) as pool:
+            entered = threading.Event()
+            original = server.RequestHandlerClass.serve_django
+            # Только сигнал приёма настоящего TLS request; response не подменяется.
+            from unittest.mock import patch
+            def observed(handler):
+                entered.set()
+                return original(handler)
+            with patch.object(DjangoTLS, 'do_GET', observed):
+                with transaction.atomic():
+                    Installation.objects.select_for_update().get()
+                    Installation.objects.update(epoch=epoch)
+                    NodeExecutor.objects.update(executor_epoch=executor)
+                    future = pool.submit(self.read, origin, cert)
+                    self.assertTrue(entered.wait(2), 'TLS request did not arrive')
+                    import time
+                    deadline, blocked = time.monotonic()+2, False
+                    while not future.done() and time.monotonic() < deadline:
+                        with connections['default'].cursor() as cursor:
+                            # pg_stat_activity кэширует снимок внутри нашей writer
+                            # transaction: каждый poll обязан видеть текущий wait.
+                            cursor.execute('SELECT pg_stat_clear_snapshot()')
+                            cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                                "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+                                "AND wait_event_type='Lock' AND query LIKE %s)",
+                                ('%controller_installation%',))
+                            blocked, = cursor.fetchone()
+                        if blocked:
+                            break
+                        time.sleep(.01)
+                    self.assertTrue(blocked, 'discovery did not wait on installation admission')
+                    self.assertFalse(future.done(), 'discovery read through installation admission')
+                status, headers, body = future.result(timeout=5)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body, self.expected(epoch=epoch, executor=executor))
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+
+
 class DjangoTLS(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 

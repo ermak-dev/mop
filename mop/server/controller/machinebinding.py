@@ -174,6 +174,26 @@ def operations(*, grants=None, restart_support=None, message_support=None, messa
     return service
 
 
+def executor_discovery(execution, actor, node_id):
+    """Один SQL admission для canonical installation и scoped executor; без effects."""
+    from .models import Installation
+    from .runtime import short_transaction, require_restore_ready
+    from mop.server.sessions.services import Unavailable
+    try:
+        with short_transaction():
+            require_restore_ready(lock=True)
+            installation = Installation.objects.select_for_update().get(pk=1)
+            # Сохраняем весь прежний machine/node/project gate и bounded ambiguity
+            # check. Ни transport export, ни numeric pk не становятся identity.
+            previous = execution.executor_state(actor, node_id)
+            return dict(schema_version=1, installation_id=installation.identity,
+                epoch=str(installation.epoch), node_id=str(node_id), executor_epoch=str(previous))
+    except Installation.DoesNotExist:
+        raise Unavailable('controller installation is not initialized') from None
+    except RuntimeError as error:
+        raise Unavailable(str(error)) from None
+
+
 def authority():
     from uuid import UUID
     from django.db import transaction

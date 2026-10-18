@@ -806,10 +806,18 @@ trusted BindingResolver, not from these HTTP inputs. Production has no fabricate
 positive capability or fallback path mapping: an unbound support port refuses
 before an Operation is created.
 
-`GET /api/v1/machine/executor?schema_version=1&node_id=...` supplies the previous
-process epoch from server-owned current/replaced incarnations. An absent or
-ambiguous registration refuses; the agent cannot derive it from a puppet name or
-local marker. Restart acknowledgment uses the existing explicit previous/new epoch
+`GET /api/v1/machine/executor?schema_version=1&node_id=...` returns exactly
+`schema_version: 1`, `installation_id`, `epoch`, `node_id`, and `executor_epoch`.
+`installation_id` is the canonical `Installation.identity` string, never its
+numeric primary key; `epoch` and both executor/node coordinates are canonical UUID
+strings. The installation and previous process epoch are read under one short
+restore/installation admission, preserving enrolled-node, claim-work and every
+assignment's project permission checks. This read is `Cache-Control: no-store` and
+has no effects: even with installation effects disabled it neither registers nor
+restarts an executor, reconciles physical scopes, polls nor claims work. An absent
+or ambiguous registration refuses; the agent cannot derive it from a puppet name,
+local marker or bootstrap epoch snapshot. Incomplete executor-only responses are
+not supported. Restart acknowledgment uses the existing explicit previous/new epoch
 CAS. Claim, result and restart acknowledgments cannot escape an outer uncommitted
 caller transaction, including explicit autocommit-off transactions. External
 fact, clone and inspection reads also refuse such a caller transaction. Restore
