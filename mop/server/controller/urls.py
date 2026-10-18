@@ -46,6 +46,8 @@ urlpatterns = [
     path('api/v1/machine/work/launch', machine.Launch.as_view()),
     path('api/v1/machine/work/initial-launch', machine.InitialLaunch.as_view()),
     path('api/v1/machine/executor', machine.ExecutorState.as_view()),
+    path('api/v1/machine/executor/host', machine.HostExecutorState.as_view()),
+    path('api/v1/machine/executor/host/bind', machine.HostExecutorBind.as_view()),
     path('api/v1/machine/work/claim', machine.Claim.as_view()),
     path('api/v1/machine/work/result', machine.Result.as_view()),
     path('api/v1/machine/executor/restarted', machine.Restarted.as_view()),
