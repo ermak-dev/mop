@@ -294,20 +294,16 @@ test("#416 out-of-order session answers: the newest request wins", async () => {
   expect(screen.getByRole("button", { name: "Войти" })).toBeInTheDocument();
 });
 
-// #472 -> #627: создание папета контроллер ещё не принимает (#625 ждёт
-// композиции запуска #643), поэтому кнопки «завести папета» нет ни у кого.
-// Админ вместо неё читает честную строку; гостю и user она ни о чём не
-// говорит -- им её не показывают.
-// HYPOTHESIS: строка рисовалась всем, в том числе гостю без права управления.
-// SOLUTION: строка видна только тому, у кого есть управление (hasControls).
+// #627/#643: create API уже принимает конечный intent; вместо устаревшей
+// заглушки оператор открывает форму с явными id. Гостю вход не показывается.
 const NOT_EXPOSED = "Creation is not yet exposed by the new controller.";
-test("#627 nobody gets an add button, only the admin reads why", async () => {
+test("#627 operators get the create form entry instead of the obsolete placeholder", async () => {
   (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =
     () => Promise.resolve({ login: "anton", role: "admin" });
   const box = renderUi(<App />);
   await screen.findByText("anton");
-  expect(screen.queryByRole("button", { name: /завести папета/i })).toBeNull();
-  expect(screen.getByText(NOT_EXPOSED)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /завести папета/i })).toBeInTheDocument();
+  expect(screen.queryByText(NOT_EXPOSED)).toBeNull();
   box.unmount();
 
   (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =

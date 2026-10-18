@@ -9,6 +9,7 @@ import { useJournal } from "./useJournal";
 import { useHashPage } from "./useHashPage";
 import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
+import { CreateBox } from "./components/CreateBox";
 import { DashboardSplit } from "./components/DashboardSplit";
 import { PuppetCard } from "./components/PuppetCard";
 import { NodesPanel } from "./components/NodesPanel";
@@ -147,7 +148,7 @@ export default function App() {
           ) : <Stack gap="md">
             {snapshot && snapshot.errors.length > 0 && <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join('\n')}</Alert>}
             {page === 'main' && <>
-              {hasControls(session) && <Text size="sm" c="dimmed">Creation is not yet exposed by the new controller.</Text>}
+              <CreateBox session={session} />
               {snapshot && <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
                 masters={snapshot.masters} session={session} selected={target}
                 onOpen={hasControls(session) ? setPuppet : undefined} />}

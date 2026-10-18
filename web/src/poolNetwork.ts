@@ -343,6 +343,33 @@ class PoolNetwork {
     await this.load(); await this.refreshInvalidated(); await this.recover();
     if (!this.sockets.size && !this.retry) void this.connect();
   }
+  async create(projectId: string, nodeId: string, definitionId: string, requestId: string) {
+    // Новая цель ещё не имеет incarnation/revision: только конечный create
+    // intent проекта (#627). Исход и recovery принадлежат общему store.
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    if (![projectId, nodeId, definitionId, requestId].every(value => uuid.test(value)))
+      throw new Error('Canonical project, node, definition and request ids are required');
+    if (!this.state.epoch || !this.snapshotReady) throw new Error('Refresh the pool before creating a puppet');
+    if (this.state.pending[requestId]) throw new Error('This create request is already tracked; recover it instead');
+    const body = { schema_version: 1, epoch: this.state.epoch, request_id: requestId,
+      not_after: new Date(Date.now() + 2 * 60_000).toISOString(),
+      params: { node_id: nodeId, definition_id: definitionId } };
+    this.dispatch({ type: 'track', requestId });
+    const token = this.begin({ type: 'detail' });
+    try {
+      const result = this.applyOperation(await this.request(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/commands/create-puppet`, body), token);
+      if (result?.operation) operations.accepted(result.operation.target.id, result.id);
+      await this.recover();
+      return result?.id ?? null;
+    } catch (error) {
+      this.dispatch({ type: 'settled', token });
+      // Потерянный ответ не повод создавать ещё одного папета.
+      await this.recover();
+      if (this.operation(requestId)) return this.operation(requestId)!.id;
+      throw error;
+    }
+  }
   async command(id: string, action: string, params: Record<string, unknown>, requestId: string) {
     const row = this.puppet(id);
     if (!row || this.state.entities[entityKey(row)].invalidated) throw new Error('Refresh the target before submitting');
