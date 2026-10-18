@@ -1,5 +1,4 @@
 """Безопасность диагностики и owned subprocess installed UID seed (#754)."""
-from contextlib import redirect_stdout
 import io
 import json
 import os
@@ -9,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-import _lib  # noqa: F401 — lifetime собственных файлов
+from _lib import run_command
 from _credential_uid_seed import run_seed
 
 
@@ -21,8 +20,9 @@ class InstalledSeedDiagnostics(unittest.TestCase):
     def test_private_stdout_is_returned_without_printing_token(self):
         token = 'fixture-only-private-token-754'
         stream = io.StringIO()
-        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stream):
-            auth = self.invoke('import json; print(json.dumps(' + repr({'token': token}) + '))', directory)
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, auth = run_command(lambda _: self.invoke(
+                'import json; print(json.dumps(' + repr({'token': token}) + '))', directory), out=stream)
         self.assertEqual(auth, {'token': token})
         self.assertNotIn(token, stream.getvalue())
 
@@ -33,9 +33,9 @@ class InstalledSeedDiagnostics(unittest.TestCase):
         code = ('import sys; print(' + repr(token) + '); print(' + repr(token) + ', file=sys.stderr); '
                 'print(' + repr(json.dumps(record)) + ', file=sys.stderr); sys.exit(1)')
         stream = io.StringIO()
-        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stream):
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(AssertionError) as caught:
-                self.invoke(code, directory)
+                run_command(lambda _: self.invoke(code, directory), out=stream)
         self.assertIn('55P03', stream.getvalue())
         self.assertIn('create-user', stream.getvalue())
         self.assertNotIn(token, stream.getvalue() + str(caught.exception))
@@ -49,9 +49,9 @@ class InstalledSeedDiagnostics(unittest.TestCase):
         token = 'fixture-only-private-token-754'
         code = 'import sys; print(' + repr(json.dumps({'phase': token})) + ', file=sys.stderr); sys.exit(1)'
         stream = io.StringIO()
-        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stream):
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(AssertionError) as caught:
-                self.invoke(code, directory)
+                run_command(lambda _: self.invoke(code, directory), out=stream)
         self.assertNotIn(token, stream.getvalue() + str(caught.exception))
 
     def test_observer_failure_does_not_replace_timeout_or_emit_secrets(self):
@@ -59,9 +59,10 @@ class InstalledSeedDiagnostics(unittest.TestCase):
         def unavailable():
             raise RuntimeError(token)
         stream = io.StringIO()
-        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stream):
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(AssertionError, 'time budget') as caught:
-                self.invoke('import time; time.sleep(30)', directory, activity=unavailable, timeout=.1)
+                run_command(lambda _: self.invoke('import time; time.sleep(30)', directory,
+                    activity=unavailable, timeout=.1), out=stream)
         self.assertIn('diagnostic unavailable', stream.getvalue())
         self.assertNotIn(token, stream.getvalue() + str(caught.exception))
 
@@ -84,8 +85,8 @@ Path('owned-pids.json').write_text(json.dumps([os.getpid(), pid]))
 os._exit(0)
 '''
             try:
-                with redirect_stdout(stream), self.assertRaisesRegex(AssertionError, 'time budget'):
-                    self.invoke(code, directory, timeout=.2)
+                with self.assertRaisesRegex(AssertionError, 'time budget'):
+                    run_command(lambda _: self.invoke(code, directory, timeout=.2), out=stream)
                 leader, child = json.loads(marker.read_text())
                 # Завершившийся descendant может ещё ждать reaper как zombie;
                 # это не работающий процесс/открытый pipe/socket.
