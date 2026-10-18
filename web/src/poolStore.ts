@@ -90,6 +90,7 @@ export type Action =
       readonly page?: { readonly snapshotId: string; readonly cursor: string; readonly next: string | null } }
   | { readonly type: 'event'; readonly generation: number; readonly epoch: string; readonly eventId: string; readonly entity: Identity }
   | { readonly type: 'context'; readonly context: Context; readonly epoch: string }
+  | { readonly type: 'bootstrap'; readonly generation: number; readonly epoch: string }
   | { readonly type: 'reset'; readonly generation: number; readonly reason: ResetReason }
   | { readonly type: 'settled'; readonly token: ApplyToken }
   | { readonly type: 'track'; readonly requestId: string }
@@ -267,6 +268,11 @@ export function reducePool(state: PoolState, action: Action): PoolState {
       if (next.generation !== state.generation) return next;
       return freeze({ ...next, eventIds: [...state.eventIds, action.eventId] });
     }
+    case 'bootstrap':
+      if (action.generation !== state.generation || state.epoch === action.epoch) return state;
+      // Пока epoch не связан, фактов нет. Сохраняем read tokens того же
+      // credential: поздний 403 нельзя потерять при первом успешном GET.
+      return state.epoch ? reset(state, 'epoch_mismatch', state.context, action.epoch) : freeze({ ...state, epoch: action.epoch });
     case 'context':
       if (sameAuth(state.context, action.context) && state.context.target === action.context.target && state.epoch === action.epoch) return state;
       return reset(state, 'context_changed', action.context, action.epoch);

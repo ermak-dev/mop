@@ -1,57 +1,43 @@
-// Диалог полного события (#422): всё, что сервер отдал в записи, -- на
-// столе, длинные поля читаются переносом, фокус trapped, Escape закрывает.
-//
-// HYPOTHESIS (#422): запись уже безопасна (сервер #424 фильтрует конверт);
-// диалог перечисляет поля, какие есть, включая неизвестные заранее
-// (контракт расширяется), и ничего не добавляет от себя.
-// RESULT: тесты написаны до реализации (RED).
-import { fireEvent, screen } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
-import { renderUi } from "../test-utils";
-import { JournalModal } from "./JournalModal";
-import type { JournalEntry } from "../types";
+// HYPOTHESIS: arbitrary full_entry раскрывает поля вне frozen audit whitelist.
+// SPEC: только actual operation metadata; никаких actor/name/private payload guesses.
+// SOLUTION: диалог и clipboard используют только frozen audit whitelist.
+// RESULT: RED → GREEN. STATUS: FIXED — see #627
+import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { expect, test, vi } from 'vitest';
+import { renderUi } from '../test-utils';
+import { JournalModal } from './JournalModal';
+import { auditItem } from '../audit-test-utils';
+import { ID, INCARNATION, OP, PROJECT } from '../network-test-utils';
 
-const E: JournalEntry = {
-  at: 1700000000, event: "send", name: "pu-mop-1", node: "hyper", project: "mop",
-  text: "from ermak",
-};
-
-test("shows every field: full time, event, puppet, node, project, phrase", () => {
-  renderUi(<JournalModal entry={E} onClose={() => {}} />);
-  const dlg = screen.getByRole("dialog");
-  expect(dlg.getAttribute("aria-label") ?? dlg.textContent).toContain("send — pu-mop-1");
-  expect(screen.getByText("14.11.2023 22:13:20 UTC")).toBeInTheDocument();
-  expect(screen.getByText("hyper")).toBeInTheDocument();
-  expect(screen.getByText("mop")).toBeInTheDocument();
-  expect(screen.getByText("сообщение от ermak")).toBeInTheDocument();
+test('evidence dialog shows the exact frozen metadata without bus interpretations', () => {
+  renderUi(<JournalModal entry={auditItem()} onClose={() => {}} />);
+  const dialog = screen.getByRole('dialog');
+  for (const value of [ID, OP, INCARNATION, PROJECT, '9007199254740995', '2026-10-18T10:05:00Z', 'dispatch_declined', 'target does not receive dispatch']) expect(dialog.textContent).toContain(value);
+  expect(dialog).toHaveAttribute('aria-label', 'Operation audit evidence 9007199254740993');
+  expect(dialog.textContent).not.toMatch(/from |сообщение|actor:|full_entry|payload/);
 });
 
-test("extra safe fields of #424 appear as their own rows, not dropped", () => {
-  const rich: JournalEntry = { ...E, result: "доставлено", attempts: 3 };
-  renderUi(<JournalModal entry={rich} onClose={() => {}} />);
-  const dlg = screen.getByRole("dialog");
-  // подпись и значение в разных узлах строки -- смотрим текст диалога целиком
-  const all = (re: RegExp) => re.test(dlg.textContent ?? "");
-  expect(all(/result:\s*доставлено/)).toBe(true);
-  expect(all(/attempts:\s*3/)).toBe(true);
+test('long safe reason wraps instead of overflowing; null incarnation is not a fake identity', () => {
+  const entry = { ...auditItem(), reason: 'long safe refusal '.repeat(100).trim(), target: { kind: 'node' as const, id: ID, incarnation: null } };
+  renderUi(<JournalModal entry={entry} onClose={() => {}} />);
+  expect(screen.getByRole('dialog').textContent).not.toContain('undefined');
+  expect(screen.getByText(entry.reason).closest('[style]')?.getAttribute('style')).not.toContain('nowrap');
 });
 
-test("a long text wraps instead of overflowing", () => {
-  const long: JournalEntry = { ...E, text: "from " + "ermak-".repeat(60) };
-  renderUi(<JournalModal entry={long} onClose={() => {}} />);
-  const phrase = screen.getByText(/сообщение от ermak-/);
-  expect(phrase.style.whiteSpace).not.toBe("nowrap");
+test('Escape and the accessible close button dismiss evidence', () => {
+  const close = vi.fn(); renderUi(<JournalModal entry={auditItem()} onClose={close} />);
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' }); expect(close).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: 'Close audit evidence' })); expect(close).toHaveBeenCalledTimes(2);
 });
 
-test("Escape and the close button call onClose", () => {
-  const onClose = vi.fn();
-  renderUi(<JournalModal entry={E} onClose={onClose} />);
-  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
-  expect(onClose).toHaveBeenCalledTimes(1);
-  // крест Mantine -- CloseButton с пустым именем: берём его классом роли
-  // (единственная кнопка закрытия в диалоге)
-  const closeBtn = screen.getByRole("dialog").querySelector("button.mantine-CloseButton-root");
-  expect(closeBtn).not.toBeNull();
-  fireEvent.click(closeBtn!);
-  expect(onClose).toHaveBeenCalledTimes(2);
+test('copies only frozen metadata, no arbitrary fields even if a caller adds them', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('navigator', { clipboard: { writeText } });
+  const entry = { ...auditItem(), payload: { message: 'private' }, full_entry: { secret: 'private' } };
+  renderUi(<JournalModal entry={entry} onClose={() => {}} />);
+  expect(screen.getByRole('dialog').textContent).not.toContain('private');
+  fireEvent.click(screen.getByRole('button', { name: 'Copy audit evidence' }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+  expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(auditItem());
+  vi.unstubAllGlobals();
 });

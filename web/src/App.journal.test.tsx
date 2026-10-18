@@ -1,135 +1,117 @@
-// Интеграция #422 в приложение: журнал -- отдельная страница за хешем,
-// ссылка на неё видна только админу, главная больше не несёт встроенный
-// журнал (он ушёл из публичного снимка, #424). Доступ к #journal без
-// прав показывает отказ, а не пустую страницу.
-//
-// HYPOTHESIS (#422): App держит страницу по useHashPage, журнал грузит
-// useJournal при admin, обе вкладки живут на одном снимке usePool.
-// RESULT: тесты написаны до реализации (RED).
-import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, test, vi } from "vitest";
-import App from "./App";
-import { emptySnapshot, renderUi } from "./test-utils";
-import type { JournalEntry } from "./types";
-import type { Session } from "./useSession";
+// HYPOTHESIS: смонтированный useJournal ещё вызывает неподдержанный /api/journal.
+// SPEC: frozen #626/83b75ffa; настоящий App/hooks, только внешние HTTP/WS заменены.
+// SOLUTION: audit DTO/read tokens принадлежат shared network, UI хранит selection.
+// RESULT: RED → GREEN на mounted network fixture и отдельно в реальном браузере.
+// STATUS: FIXED — see #627; live controller/pool не проверялся.
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import App from './App';
+import { renderUi } from './test-utils';
+import { deferred, networkFixture, reply, OP } from './network-test-utils';
+import { auditError, auditItem, auditPage } from './audit-test-utils';
 
-const SNAP = emptySnapshot({ at: 1 });
-const J: JournalEntry[] = [
-  { at: 1700000000, event: "send", name: "pu-mop-1", node: "hyper", project: "mop", text: "from ermak" },
-];
+function fixture(kind = 'human') {
+  const net = networkFixture(), base = net.http.getMockImplementation()!;
+  let allowed = true;
+  net.http.mockImplementation((url, init) => {
+    if (url === '/api/v1/identity') return Promise.resolve(reply({ schema_version: 1, user_id: 42, kind }));
+    if (url === '/api/v1/auth/logout') return Promise.resolve(reply({ schema_version: 1 }));
+    if (url.startsWith('/api/v1/audit')) return Promise.resolve(allowed ? reply(auditPage()) : reply(auditError(), 403));
+    return base(url, init);
+  });
+  return { ...net, deny: () => { allowed = false; } };
+}
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
-vi.mock("./usePool", () => ({ usePool: () => ({ snapshot: SNAP }) }));
-
-// Сессия и журнал -- управляемые моки: состояние модуля, как в App.test.
-vi.mock("./useSession", async () => {
-  const real = await vi.importActual<typeof import("./useSession")>("./useSession");
-  const state = { current: real.GUEST as Session };
-  return {
-    ...real,
-    fetchSession: () => Promise.resolve(state.current),
-    postLogin: (login: string) => {
-      state.current = { login, role: "admin" };
-      return Promise.resolve(state.current);
-    },
-    postLogout: () => { state.current = real.GUEST; return Promise.resolve(real.GUEST); },
-    __set: (s: Session) => { state.current = s; },
-  };
-});
-vi.mock("./useJournal", () => {
-  const state = { journal: [] as JournalEntry[], error: null as string | null };
-  return {
-    useJournal: (_session: unknown, active: boolean) => (active ? state : { journal: [], error: null }),
-    __setJournal: (j: JournalEntry[], e: string | null) => { state.journal = j; state.error = e; },
-  };
-});
-
-const mocks = async () => ({
-  session: vi.mocked(await import("./useSession")) as unknown as { __set: (s: Session) => void },
-  journal: vi.mocked(await import("./useJournal")) as unknown as {
-    __setJournal: (j: JournalEntry[], e: string | null) => void;
-  },
+test('mounted journal reads v1 operation audit, not bus events, and opens only safe evidence', async () => {
+  const net = fixture(); window.location.hash = '#journal';
+  const store = vi.spyOn(Storage.prototype, 'setItem');
+  const view = renderUi(<App />);
+  await screen.findByText('target does not receive dispatch');
+  expect(net.http.mock.calls.some(([url]) => url === '/api/v1/audit?limit=100')).toBe(true);
+  expect(screen.getByRole('heading', { name: 'Operation audit' })).toBeInTheDocument();
+  expect(screen.getByText(/not all bus events/i)).toBeInTheDocument();
+  expect(screen.queryByText(/сообщение от|дождался простоя|события шины/)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /Open audit evidence/ }));
+  const dialog = await screen.findByRole('dialog');
+  expect(within(dialog).getByText(OP)).toBeInTheDocument();
+  expect(dialog.textContent).toContain('9007199254740995');
+  expect(dialog.textContent).toContain('2026-10-18T10:05:00Z');
+  expect(dialog.textContent).not.toContain('from ermak');
+  expect(net.http.mock.calls.every(([url]) => url.startsWith('/api/v1/'))).toBe(true);
+  expect(net.posts()).toHaveLength(0);
+  expect(store.mock.calls.some(([, value]) => /operation_id|dispatch_declined/.test(value))).toBe(false);
+  store.mockRestore(); view.unmount();
 });
 
-beforeEach(async () => {
-  window.location.hash = "";
-  const m = await mocks();
-  m.session.__set({ login: null, role: null });
-  m.journal.__setJournal([], null);
+test.each(['agent', 'service'])('mounted %s reader defers audit permission to DRF, not actor kind', async kind => {
+  const net = fixture(kind); window.location.hash = '#journal';
+  const view = renderUi(<App />);
+  await screen.findByText('target does not receive dispatch');
+  expect(net.http.mock.calls.some(([url]) => url.startsWith('/api/v1/audit'))).toBe(true);
+  view.unmount();
 });
 
-test("#422 the main page has no embedded journal any more", () => {
-  renderUi(<App />);
-  expect(screen.queryByTestId("journal")).toBeNull();
+test('server permission denial is visible to a human without inventing admin authority', async () => {
+  const net = fixture(); net.deny(); window.location.hash = '#journal';
+  const view = renderUi(<App />);
+  expect(await screen.findByRole('tab', { name: 'Operation audit' })).toBeInTheDocument();
+  expect(await screen.findByText(/Current audit permission is required/)).toHaveAttribute('role', 'alert');
+  expect(screen.queryByText('target does not receive dispatch')).toBeNull();
+  view.unmount();
 });
 
-test("#422 a guest and a plain user see no link to the journal page", async () => {
-  const m = await mocks();
-  renderUi(<App />);
-  expect(screen.queryByRole("tab", { name: "Журнал" })).toBeNull();
-  m.session.__set({ login: "olga", role: "user" });
-  fireEvent.focus(window);
-  await waitFor(() => expect(screen.getByText("olga")).toBeInTheDocument());
-  expect(screen.queryByRole("tab", { name: "Журнал" })).toBeNull();
+test('mounted project intersection and page-size selection replace the query without keeping old evidence', async () => {
+  const net = fixture(), base = net.http.getMockImplementation()!;
+  const project = '00000000-0000-4000-8000-000000000002';
+  net.http.mockImplementation((url, init) => url === `/api/v1/audit?limit=25&project_id=${project}`
+    ? Promise.resolve(reply(auditPage([auditItem('3', 'scoped evidence')]))) : base(url, init));
+  window.location.hash = '#journal'; const view = renderUi(<App />);
+  await screen.findByText('target does not receive dispatch');
+  fireEvent.change(screen.getByRole('textbox', { name: 'Project id (optional)' }), { target: { value: project } });
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Page size (1–100)' }), { target: { value: '25' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply audit scope' }));
+  await screen.findByText('scoped evidence');
+  expect(screen.queryByText('target does not receive dispatch')).toBeNull();
+  expect(net.posts()).toHaveLength(0); view.unmount();
 });
 
-test("#422 admin follows the link to #journal and sees the events", async () => {
-  const m = await mocks();
-  m.session.__set({ login: "anton", role: "admin" });
-  m.journal.__setJournal(J, null);
-  renderUi(<App />);
-  const link = await screen.findByRole("tab", { name: "Журнал" });
-  fireEvent.click(link);
-  await waitFor(() => expect(window.location.hash).toBe("#journal"));
-  expect(await screen.findByText("pu-mop-1")).toBeInTheDocument();
+test('mounted pagination restarts an expired cursor only with GET and does not invent native events', async () => {
+  const net = fixture(), base = net.http.getMockImplementation()!;
+  let first = 0;
+  net.http.mockImplementation((url, init) => {
+    if (url === '/api/v1/audit?limit=100') return Promise.resolve(reply(auditPage([auditItem('9', ++first === 1 ? 'old page' : 'fresh page')], first === 1 ? 'opaque+cursor/=' : null)));
+    if (url.startsWith('/api/v1/audit?')) return Promise.resolve(reply(auditError('reset_required', 'audit cursor expired; restart pagination'), 410));
+    return base(url, init);
+  });
+  window.location.hash = '#journal'; const view = renderUi(<App />);
+  await screen.findByText('old page');
+  fireEvent.click(screen.getByRole('button', { name: 'Load older evidence' }));
+  await screen.findByText('fresh page');
+  expect(screen.queryByText('old page')).toBeNull();
+  expect(net.http.mock.calls.some(([url]) => url === '/api/v1/audit?limit=100&cursor=opaque%2Bcursor%2F%3D')).toBe(true);
+  expect(net.posts()).toHaveLength(0); view.unmount();
 });
 
-test("#422 opening #journal as a guest shows the refusal, not events", async () => {
-  const m = await mocks();
-  // реальный хук ставит отказ сам; здесь его роль играет мок (поведение
-  // хука -- в useJournal.test), поэтому отказ кладём как он бы это сделал
-  m.journal.__setJournal([], "журнал недоступен: прав не хватает");
-  window.location.hash = "#journal";
-  renderUi(<App />);
-  await waitFor(() => expect(screen.getByText(/журнал недоступен/)).toBeInTheDocument());
-  expect(screen.queryByText("pu-mop-1")).toBeNull();
-});
-
-// Ревью 2 (#422): открытый popup не переживает logout/разжалование -- и
-// не эффектом после paint, а тем же рендером: denial проходит в App
-// синхронно, JournalPage скрывает таблицу и модал до первой перерисовки
-// браузера. Здесь -- жизненный путь: admin открыл событие, cookie истекла,
-// опрос ответил 401 и хук положил отказ (мок кладёт его как хук бы).
-test("#422 review2: logout with an open popup clears it without a stale frame", async () => {
-  const m = await mocks();
-  m.session.__set({ login: "anton", role: "admin" });
-  m.journal.__setJournal(J, null);
-  renderUi(<App />);
-  fireEvent.click(await screen.findByRole("tab", { name: "Журнал" }));
-  await waitFor(() => expect(window.location.hash).toBe("#journal"));
-  // открыли полное событие
-  fireEvent.click(screen.getByText(/сообщение от ermak/));
-  await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-  // cookie истекла: опрос ответил 401 -- хук вернул отказ; сессия уже гость
-  m.journal.__setJournal([], "журнал недоступен: прав не хватает");
-  m.session.__set({ login: null, role: null });
-  fireEvent.focus(window);   // App перерисовался -- состояние мока прочитано
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
-  expect(screen.queryByText(/сообщение от ermak/)).toBeNull();
-});
-
-test("#422 back from the journal returns to the main page", async () => {
-  const m = await mocks();
-  m.session.__set({ login: "anton", role: "admin" });
-  m.journal.__setJournal(J, null);
-  renderUi(<App />);
-  fireEvent.click(await screen.findByRole("tab", { name: "Журнал" }));
-  await waitFor(() => expect(window.location.hash).toBe("#journal"));
-  expect(screen.getByRole("tab", { name: "Журнал" })).toHaveAttribute("aria-selected", "true");
-  fireEvent.click(screen.getByRole("tab", { name: "Пул" }));
-  await waitFor(() => expect(window.location.hash).toBe(""));
-  // главная: таблицы пула снова на экране (снимок пуст -- заметка вместо
-  // таблиц, но страница журнала ушла)
-  expect(screen.queryByTestId("journal-page")).toBeNull();
-  expect(screen.getByText("No sessions")).toBeInTheDocument();
+test('logout closes open evidence and a late audit body cannot restore it', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const net = fixture(), base = net.http.getMockImplementation()!, late = deferred();
+  let reads = 0;
+  net.http.mockImplementation((url, init) => {
+    if (url.startsWith('/api/v1/audit') && ++reads > 1) return Promise.resolve({ ok: true, json: () => late.promise.then(r => r.json()) } as Response);
+    return base(url, init);
+  });
+  window.location.hash = '#journal'; const view = renderUi(<App />);
+  await screen.findByText('target does not receive dispatch');
+  fireEvent.click(screen.getByRole('button', { name: /Open audit evidence/ }));
+  expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_001); });
+  await waitFor(() => expect(reads).toBeGreaterThan(1));
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  fireEvent.click(screen.getByRole('button', { name: 'Выйти' }));
+  await waitFor(() => expect(screen.queryByText('target does not receive dispatch')).toBeNull());
+  await act(async () => late.resolve(reply(auditPage())));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.queryByText('target does not receive dispatch')).toBeNull();
+  expect(net.posts().map(([url]) => url)).toEqual(['/api/v1/auth/logout']); view.unmount();
 });
