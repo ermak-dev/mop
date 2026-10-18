@@ -80,7 +80,8 @@ def identities(actor, request_id):
 
 class CreatePuppets:
     action = 'create'
-    permissions = ('operations.view_operation', 'execution.create_puppet', 'execution.assign_work')
+    permissions = ('operations.view_operation', 'execution.create_puppet', 'execution.assign_work',
+                   'access.issue_grant', 'access.provision_agent_rbac')
 
     def __init__(self, operations, *, grants, targets=None, issuer=None, scheduler=None, selections=None, namespace='default'):
         self.ops, self.grants, self.issuer, self.scheduler = operations, grants, issuer, scheduler
@@ -260,6 +261,8 @@ class CreatePuppets:
             reservation = m.CreateReservation.objects.get(actor_id=actor.user_id, request_id=intent.request_id)
             epoch, revision, image, selected = self._admit(actor, command, installation, reservation)
             self.selections.require_grant(selected, receipt.id)
+            self.grants.provision_subject_rbac(actor, receipt.id, expected_revision=receipt.revision,
+                authority=self.selections.rbac_authority(actor, reservation.id))
             # Слот уже durable до provisioning. Конверсия в Operation в этой
             # же транзакции не занимает второй слот и не теряет первый.
             row = self.targets.assign(actor, target_id=target_id, incarnation_id=incarnation_id,
