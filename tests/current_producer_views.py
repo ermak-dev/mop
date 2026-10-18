@@ -15,13 +15,21 @@ Actual server/TLS/PG17 purpose contract проверяет _current_view_purpose
 post-launch identity теперь unbound, readiness effect guard по-прежнему обязателен.
 """
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import json
+import os
 from pathlib import Path
+import shlex
+import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -407,6 +415,167 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(effects, [])
         self.assertEqual(len(self.registered), 1)
         self.assertEqual(self.rows, [])
+
+    # HYPOTHESIS #734: отменённый to_thread теряет позднюю physical ошибку,
+    # а последний успешный snapshot не перепроверяет закрывшегося owner.
+    # Проверки ниже используют настоящий tmux/proc/registry/socket и реальный
+    # worker thread; HTTPS policy fixture по-прежнему controlled, не native CLI.
+    # SOLUTION: синхронная source invalidation на timeout/cancel плюс lookup
+    # владельца после последнего snapshot; никакого нового producer epoch/ACK.
+    # RESULT: 5/5 RED (old proof/active source), затем весь view suite 18/18 GREEN;
+    # ещё 7 native/runtime/binding/client/layer suites GREEN, budget прежний 5s.
+    # STATUS: FIXED — see #734; native CLI/model/retirement не подтверждены.
+    async def native_process(self):
+        if not shutil.which('tmux'):
+            hermetic.skip('current view cancellation', 'tmux is required')
+            self.skipTest('tmux is required')
+        # Убираем snapshot double только для этих физических race-проверок.
+        self.snapshot.stop()
+        self.layout.clone.mkdir(parents=True)
+        config = self.root/'native-config'
+        config.mkdir()
+        base = ['tmux', '-S', str(self.layout.tmux_socket)]
+        environment = dict(HOME=str(self.root), CLAUDE_CONFIG_DIR=str(config), PATH=os.defpath,
+            TERM='xterm-256color', SHELL='/bin/sh', LC_ALL='C.UTF-8', **self.runtime.environment())
+        fixture = Path(__file__).with_name('_native_observer_fixture.py')
+        argv = [sys.executable, '-I', '-u', str(fixture), str(self.layout.runtime/'session.sock')]
+        from mop.node.execution_adapters import process_identity
+        def stop():
+            subprocess.run([*base, 'kill-server'], capture_output=True, timeout=3)
+            if not hasattr(self, 'native_pid'):
+                return
+            deadline = time.monotonic()+2
+            while time.monotonic() < deadline:
+                try:
+                    if process_identity(self.native_pid) != self.native_start:
+                        return
+                except Unavailable:
+                    return
+                time.sleep(.01)
+            raise AssertionError('owned native-shaped fixture survived cleanup')
+        self.addCleanup(stop)
+        result = await asyncio.to_thread(subprocess.run, [*base, '-f', '/dev/null', 'new-session',
+            '-d', '-s', 'owned', '-c', str(self.layout.clone), 'exec '+shlex.join(argv)],
+            env=environment, capture_output=True, text=True, timeout=3)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+        self.native_record = config/'sessions/owned.json'
+        async with asyncio.timeout(3):
+            while not self.native_record.exists():
+                await asyncio.sleep(.01)
+        self.native_bytes = self.native_record.read_bytes()
+        self.native_pid = json.loads(self.native_bytes)['pid']
+        self.native_start = process_identity(self.native_pid)
+
+    @asynccontextmanager
+    async def final_snapshot_barrier(self, layout):
+        from mop.node.native_observer import _snapshot
+        loop = asyncio.get_running_loop()
+        entered, finished, release = asyncio.Event(), asyncio.Event(), threading.Event()
+        outcomes, snapshots = [], 0
+        def snapshot(current):
+            nonlocal snapshots
+            if current == layout:
+                snapshots += 1
+                if snapshots == 3:
+                    loop.call_soon_threadsafe(entered.set)
+                    try:
+                        if not release.wait(8):
+                            raise AssertionError('test did not release owned observation worker')
+                        value = _snapshot(current)
+                        outcomes.append(None)
+                        return value
+                    except BaseException as error:
+                        outcomes.append(type(error))
+                        raise
+                    finally:
+                        loop.call_soon_threadsafe(finished.set)
+            return _snapshot(current)
+        with patch('mop.node.native_observer._snapshot', side_effect=snapshot):
+            try:
+                yield entered, finished, release, outcomes
+            finally:
+                release.set()
+                if entered.is_set():
+                    await asyncio.wait_for(finished.wait(), 3)
+
+    async def assert_no_resurrection(self, view, epoch):
+        with self.assertRaises(Unavailable):
+            await view.proof(self.current)
+        with self.assertRaises(Unavailable):
+            await self.view()
+        with self.assertRaises(Unavailable):
+            await NativePhysicalSessions(owner=self.runtime).observe(self.layout)
+        self.assertEqual(self.runtime._epoch, epoch, 'cancellation must not mint an epoch')
+        self.assertEqual(len(self.registered), 1, 'same-lifetime ACK must never repeat')
+        self.assertEqual(self.rows, [], 'no readiness or hooks may be fabricated')
+
+    async def interrupted_observation(self, *, timeout=False, fail_worker=True):
+        await self.native_process()
+        await self.activate()
+        view, epoch = await self.view(), self.runtime._epoch
+        async with self.final_snapshot_barrier(view.layout) as (entered, finished, release, outcomes):
+            task = asyncio.create_task(view.proof(self.current))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                if timeout:
+                    # Настоящий production 5s timeout, без подмены часов/budget.
+                    with self.assertRaises((TimeoutError, Unavailable)):
+                        await asyncio.wait_for(task, 6)
+                    self.assertEqual(self.runtime._state, 'closed',
+                        'timed-out physical observation must latch the source before late worker completion')
+                else:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                self.assertFalse(finished.is_set(), 'cancel must not pretend the worker stopped')
+                if fail_worker:
+                    record = json.loads(self.native_bytes)
+                    self.native_record.write_text(json.dumps({**record, 'pid': self.native_pid+1}))
+                release.set()
+                await asyncio.wait_for(finished.wait(), 2)
+                self.assertEqual(outcomes, [Unavailable] if fail_worker else [None])
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+                await asyncio.wait_for(finished.wait(), 3)
+                self.native_record.write_bytes(self.native_bytes)
+        # Физическое evidence опять точное; никакой late failure уже не спасти
+        # повторным snapshot. Только сохранённая invalidation запрещает старый ACK.
+        await self.assert_no_resurrection(view, epoch)
+
+    async def test_cancelled_final_snapshot_cannot_resurrect_after_late_physical_failure(self):
+        await self.interrupted_observation()
+
+    async def test_timeout_latches_source_before_late_physical_worker_failure(self):
+        await self.interrupted_observation(timeout=True)
+
+    async def test_cancelled_final_snapshot_cannot_reuse_ack_after_late_worker_success(self):
+        await self.interrupted_observation(fail_worker=False)
+
+    async def direct_close_observation(self, *, current=False):
+        await self.native_process()
+        await self.activate()
+        view, epoch = await self.view(), self.runtime._epoch
+        owner, layout = (view, view.layout) if current else (self.runtime, self.layout)
+        async with self.final_snapshot_barrier(layout) as (entered, finished, release, outcomes):
+            task = asyncio.create_task(NativePhysicalSessions(owner=owner).observe(layout))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                await self.runtime.aclose()
+                release.set()
+                with self.assertRaises(Unavailable):
+                    await task
+                self.assertEqual(outcomes, [None], 'native evidence stayed valid across owner close')
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+        await self.assert_no_resurrection(view, epoch)
+
+    async def test_direct_observe_cannot_return_proof_after_close_during_last_snapshot(self):
+        await self.direct_close_observation()
+
+    async def test_direct_current_observe_cannot_return_proof_after_close_during_last_snapshot(self):
+        await self.direct_close_observation(current=True)
 
     async def test_readiness_still_requires_exact_current_receipt_and_unchanged_proof(self):
         await self.activate()

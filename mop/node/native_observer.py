@@ -211,11 +211,26 @@ class NativePhysicalSessions:
                 if await self._snapshot(layout) != identity:
                     self._changed(layout)
                     raise Unavailable('native physical session changed during owner confirmation')
+                # Последний to_thread тоже await: за это время root мог закрыть
+                # source. Direct observe обязан соблюдать тот же lifetime gate,
+                # что и view.proof, даже при неизменном физическом evidence.
+                if await self.owner.producer_epoch(layout, identity) != epoch:
+                    self._changed(layout)
+                    raise Unavailable('native producer lifecycle owner closed during final observation')
             return SessionProof(layout.registration, identity.pane, identity.session_id, epoch,
                                 layout.runtime/'session.sock', identity.pid, identity.process_start)
+        except asyncio.CancelledError:
+            # to_thread продолжает жить после отмены await. Его поздний успех
+            # или ошибка уже не могут разрешить прежний source/единственный ACK.
+            # Инвалидируем синхронно, прежде чем отдавать отмену caller.
+            self._changed(layout)
+            raise
+        except TimeoutError as error:
+            self._changed(layout)
+            raise Unavailable('native physical session evidence unavailable') from error
         except Refused:
             raise  # Без повторной санитизации безопасной причины lifecycle owner.
-        except (OSError, ValueError, LookupError, subprocess.SubprocessError, TimeoutError) as error:
+        except (OSError, ValueError, LookupError, subprocess.SubprocessError) as error:
             raise Unavailable('native physical session evidence unavailable') from error
 
     async def reconcile(self, node_id, previous_epoch, new_epoch):
