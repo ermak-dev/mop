@@ -585,6 +585,18 @@ class InitialCreatePhases(TransactionTestCase):
         deliver = getattr(launchdelivery, 'deliver_initial', None)
         self.assertIsNotNone(deliver, 'purpose-specific initial launch delivery is missing')
         payload = deliver(self.credential_app(), actor, work_to_wire(work))
+        # HYPOTHESIS #738: prepare не имеет ни job, ни локального name/default
+        # policy; layout metadata обязаны уже приходить из immutable admission.
+        # SOLUTION: тот же launch proof выдаёт assignment name и image.policy.
+        # RESULT: RED — name отсутствовал; GREEN — 171/171 PostgreSQL checks.
+        # STATUS: FIXED — see #738.
+        from mop.server.sessions.models import Assignment
+        from mop.server.catalog.models import ImageRevision
+        self.assertEqual(payload.get('display_name'), Assignment.objects.get(pk=row.target_id).display_name)
+        self.assertEqual(payload.get('image_revision'), str(self.image.id))
+        policy = ImageRevision.objects.select_related('policy').get(pk=self.image.id).policy
+        self.assertEqual(payload.get('image_policy'), dict(policy_id=str(policy.pk),
+            cpu=policy.cpu, memory_mb=policy.memory_mb, disk_mb=policy.disk_mb))
         self.assertEqual(payload['phase'], 'prepare_body')
         self.assertEqual(payload['selection']['source'], dict(origin=self.project.origin, commit='d'*40, ref='refs/heads/exact-source'))
         self.assertIsNone(payload['bootstrap'])
