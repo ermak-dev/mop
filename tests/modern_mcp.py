@@ -55,6 +55,29 @@ class CatalogueClient(unittest.TestCase):
         self.assertEqual(self.fixture.calls[-1][1], '/api/v1/capabilities?schema_version=1&project_id='+PROJECT)
         self.assertNotIn(TOKEN, repr(result))
 
+    # HYPOTHESIS (#720): node binding -- технический enrollment, не
+    # обязательная часть delegated agent или безузлового service Actor.
+    # SOLUTION: nullable node не меняет explicit actions и legacy-shape fences.
+    # RESULT: RED2 codec refusals; GREEN pure + actual default server codec.
+    # STATUS: FIXED — see #720
+    def test_real_delegated_agent_catalogue_accepts_null_node(self):
+        data = catalogue(kind='agent')
+        data['actor'].update(human_owner_id=4, grant_id=KEY, node_id=None)
+        result = self.query(data)
+        self.assertTrue(api.canonical_identity(result.identity))
+        self.assertIsNone(result.identity.node_id)
+        self.assertTrue(_control.allowed({'actions': ['catalog.view_pool']}, result.identity))
+        self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']}, result.identity))
+
+    def test_non_node_service_catalogue_keeps_explicit_permissions(self):
+        data = catalogue(kind='service')
+        data['actor'].update(human_owner_id=None, grant_id=None, node_id=None)
+        result = self.query(data)
+        self.assertTrue(api.canonical_identity(result.identity))
+        self.assertTrue(_control.allowed({'actions': ['catalog.view_pool']}, result.identity))
+        self.assertFalse(_control.allowed({'actions': ['catalog.drain_node']}, result.identity))
+        self.assertFalse(_control.allowed({'actions': ['catalog.view_pool'], 'human_only': True}, result.identity))
+
     def test_unknown_versions_actions_context_and_duplicates_fail_closed(self):
         variants = []
         for key, value in (('catalogue_version', 2), ('catalogue_version', True), ('schema_version', 2),

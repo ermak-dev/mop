@@ -454,10 +454,11 @@ def canonical_identity(identity):
         if identity.kind == 'human':
             return owner == identity.user_id and identity.node_id is None and identity.grant_id is None
         if identity.kind == 'agent':
-            return (owner is not None and identity.node_id is not None if identity.grant_id is not None
+            # #720: token агента не является node enrollment; его scope
+            # доказывает текущий grant на сервере, не наличие node metadata.
+            return (owner is not None if identity.grant_id is not None
                     else owner == identity.user_id and identity.node_id is None)
-        return (identity.kind == 'service' and owner is None and identity.node_id is not None
-                and identity.grant_id is None)
+        return identity.kind == 'service' and owner is None and identity.grant_id is None
     except ClientError:
         return False
 

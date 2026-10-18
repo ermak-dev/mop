@@ -183,6 +183,20 @@ class DefaultDelegationRoots(TransactionTestCase):
         self.preparation.revoke(self.human, self.approval.id)
         self.assert_denied('capabilities', values)
 
+    def test_default_agent_catalogue_is_accepted_by_the_real_client_codec(self):
+        from _control_fixture import Fixture, Response
+        from mop.client import control as api
+        body = self.assert_ok('capabilities', {'project_id': str(self.project.pk)})
+        fixture = Fixture()
+        fixture.responses.append(Response(data=body))
+        with patch.object(api, '_DeadlineHTTPSConnection', fixture.factory):
+            client = api.Client(api.ServerContext('https://controller.example', 'fixture-token'))
+            result = client.capabilities(api.CapabilityScope(project_id=str(self.project.pk)))
+        self.assertEqual((result.identity.user_id, result.identity.kind, result.identity.grant_id),
+                         (self.subject.pk, 'agent', str(self.child.id)))
+        self.assertIsNone(result.identity.node_id)
+        self.assertIn('catalog.view_pool', result.identity.action_permissions)
+
     def test_default_project_queries_preserve_delegated_scope(self):
         value = self.assert_ok('projects')
         self.assertEqual([row['id'] for row in value['results']], [str(self.project.pk)])
