@@ -1,4 +1,4 @@
-"""mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py] [--model-hooks] [--isolated-normal]: probe the installed interactive Claude
+"""mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py] [--model-hooks] [--isolated-normal] [--mcp-activation]: probe the installed interactive Claude
 
 Uses a fresh home/workdir, a private randomly named tmux server and a loopback
 Messages fixture with a dummy key. No existing session is resumed. All responses
@@ -53,6 +53,18 @@ artifacts are copied out privately before owned container/image cleanup; only
 safe hook/identity projections reach report.json. Native version is measured
 inside the container, not inferred from the host installation.
 
+Optional --mcp-activation requires --model-hooks --isolated-normal and no history
+module. Replaces hook/model-switch/inbox scenarios with one native empty-to-active
+MCP discovery experiment. A fixed stdlib toy server is generated only inside the
+owned Python 3.12 container. It initializes with zero tools, then publishes one
+safe no-argument fixture tool after an explicit fixture-only marker and standard
+notifications/tools/list_changed. No policy bypass, real token, Actor/grant or
+management operation is implemented or tested. Native PID/start/session must
+remain unchanged. Missing requery/provider-tool evidence remains unknown, never
+acceptance. Only bounded MCP methods/counts/names and provider tool-name
+projections are retained, not raw protocol, prompts or tokens. Default strict
+empty MCP is unchanged. Native and toy PID/start cleanup is measured separately.
+
 Prints the report path and one verdict per scenario. Exit 1 for runner errors,
 not for unsupported or unknown scenarios. Does not contact the pool or load
 installation credentials.
@@ -70,6 +82,7 @@ def main(argv):
     history_module = None
     model_hooks = False
     isolated_normal = False
+    mcp_activation = False
     args = iter(argv)
     try:
         for arg in args:
@@ -79,6 +92,8 @@ def main(argv):
                 model_hooks = True
             elif arg == "--isolated-normal":
                 isolated_normal = True
+            elif arg == "--mcp-activation":
+                mcp_activation = True
             elif arg == "--history-module":
                 history_module = next(args)
                 if not chatprobe.valid_history_argument(history_module):
@@ -91,9 +106,12 @@ def main(argv):
                 usage(__doc__)
     except (StopIteration, ValueError):
         usage(__doc__)
-    if isolated_normal and (not model_hooks or history_module):
+    if (isolated_normal and (not model_hooks or history_module)
+            or mcp_activation and (not model_hooks or not isolated_normal or history_module)):
         usage(__doc__)
     options = {"history_module": history_module}
+    if mcp_activation:
+        options["mcp_activation"] = True
     if model_hooks:
         options["model_hooks"] = True
     if isolated_normal:
