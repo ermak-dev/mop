@@ -462,6 +462,13 @@ def create_admin(username, password, using='default'):
     return {'username': user.username}
 
 
+def enroll_node(*, node_id, origin, ca_file, file, node_file, enrollment_id=None):
+    """Maintenance-only freshNode issuer; только private OS transport export."""
+    from .nodebootstrap import issue
+    return issue(node_id=node_id, origin=origin, ca_file=ca_file, file=file,
+                 node_file=node_file, enrollment_id=enrollment_id)
+
+
 def close_pools():
     """Вызывается после quiescence на shutdown, не после каждого request."""
     connections.close_all()
