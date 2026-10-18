@@ -848,6 +848,46 @@ class MachineExecution:
                 raise Unavailable('executor epoch requires explicit installation registration or reconciliation')
             return epochs.pop()
 
+    def host_executor_state(self, actor, node_id):
+        """Registry + отсутствие незавершённых scopes; не physical process proof."""
+        from mop.server.catalog.models import Node
+        machine(actor, node_id, 'claim_work')
+        with transaction.atomic():
+            self._installation_state()
+            node = Node.objects.select_for_update().get(pk=node_id)
+            if node.driver != 'host':
+                raise Conflict('HOST backend binding requires the enrolled HOST node')
+            previous = self.executor_state(actor, node_id)
+            # Историческая non-accepting incarnation сама по себе не доказывает
+            # physical retirement. Не превращаем потерю root ownership в adoption.
+            empty = not (m.ExecutionIncarnation.objects.filter(node_id=node_id).exists()
+                or m.AssignmentAttempt.objects.filter(assignment__node_id=node_id,
+                    state__in=('claimed', 'unknown')).exists())
+            return previous, empty
+
+    def host_executor_bound(self, actor, node_id, *, epoch, previous_epoch, new_epoch):
+        """Empty-only CAS без generic restarted/retire и без replay effects."""
+        if any(type(value) is not UUID or value.int == 0 for value in (epoch, previous_epoch, new_epoch)):
+            raise ValueError('nonzero typed HOST binding epochs required')
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
+            raise Unavailable('HOST backend binding requires no surrounding transaction')
+        with transaction.atomic():
+            if self._installation_state().epoch != epoch:
+                raise Conflict('HOST installation epoch changed; no automatic backend rebind')
+            current_epoch, empty = self.host_executor_state(actor, node_id)
+            current = m.NodeExecutor.objects.select_for_update().filter(node_id=node_id).first()
+            if current is None or current.executor_epoch != current_epoch:
+                raise Conflict('HOST backend requires explicit node executor registration')
+            if current.executor_epoch == new_epoch:
+                return new_epoch
+            if not empty:
+                raise Conflict('HOST old incarnation/effect ownership unresolved; no automatic retirement')
+            if current.executor_epoch != previous_epoch:
+                raise Conflict('HOST node executor epoch changed')
+            current.executor_epoch, current.registered_at = new_epoch, timezone.now()
+            current.save(update_fields=('executor_epoch', 'registered_at'))
+        return new_epoch
+
     def executor_restarted(self, actor, node_id, *, previous_epoch, new_epoch):
         if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
             raise Unavailable('executor restart requires no surrounding transaction')

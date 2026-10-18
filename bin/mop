@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash -pe
 # mop — the single entry point into the pool, and the only file in bin/. The
 # subcommands are modules of the package (mop/cli, docs and dispatch there);
 # this launcher only finds the project and hands over.
@@ -7,11 +7,17 @@
 # найти относительно настоящего файла, а не относительно ссылки.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
-    DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
-    SOURCE="$(readlink "$SOURCE")"
+    DIR="$( cd -P "$( /usr/bin/dirname "$SOURCE" )" && pwd )"
+    SOURCE="$(/usr/bin/readlink "$SOURCE")"
     [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
 done
-PROJECT="$( cd -P "$( dirname "$SOURCE" )/.." && pwd )"
+PROJECT="$( cd -P "$( /usr/bin/dirname "$SOURCE" )/.." && pwd )"
+# Root composition не импортирует checkout, PYTHONPATH, usersite или .env.
+# Installer обязан положить весь launcher/release в immutable root-owned tree.
+if [[ "${1:-}" == "host-root" ]]; then
+    shift
+    exec /usr/bin/python3 -I -S -B "$PROJECT/mop/node/host_root.py" "$@"
+fi
 # Пакет находится по PYTHONPATH, а не по текущему каталогу: зовут из любого.
 export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
 # Процессом, а не source: `mop mcp` говорит по stdio, и ему нужен чистый

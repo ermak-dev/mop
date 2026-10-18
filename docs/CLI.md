@@ -1901,6 +1901,21 @@ bound. A transport export is not physical reconciliation or readiness evidence.
 No .env, bus.json, ready.json or previous login fallback is supported.
 ```
 
+#### mop host-root
+
+```text
+mop host-root --physical /absolute/root-owned/physical.json
+
+Installed privileged host supervisor, not an HTTP agent or arbitrary RPC.
+The installed launcher uses an isolated interpreter and immutable root-owned
+release before importing this command. A user checkout is refused. The bounded
+no-follow config contains only installed node/installation IDs, OS UIDs/GID and
+physical paths: no credentials, .env, policy snapshots or saved executor epoch.
+
+This root retains physical ownership across HTTP frontend disconnects. It does
+not enable the incomplete native action graph or install a host service.
+```
+
 #### mop mcp
 
 ```text

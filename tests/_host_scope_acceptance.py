@@ -173,6 +173,11 @@ async def acceptance():
     started = None
     retired = False
     try:
+        import importlib.util
+        backend_spec = importlib.util.spec_from_file_location('host_backend_acceptance', '/opt/hostbackend-acceptance.py')
+        backend_gate = importlib.util.module_from_spec(backend_spec)
+        backend_spec.loader.exec_module(backend_gate)
+        backend_acceptance = await backend_gate.accept(p, adapter, command)
         await server.start()
         async def call(action, reference=None):
             value = dict(action=action, scope=s.wire(), reference=reference.wire() if reference else None)
@@ -417,6 +422,7 @@ async def acceptance():
             raise AssertionError('fixture repeated a physical start instead of exact observation/cleanup')
         # PID disappearance alone никогда не является positive criterion.
         print(json.dumps(dict(status='accepted', physical='systemd-cgroup-v2',
+            backend_epoch=backend_acceptance,
             starter_transition=normal_transition['changes'], starter_exit=normal_transition['starter_exit'],
             signalled_start=signalled_start,
             unknown_start=dict(status='unknown', snapshot=None, cleanup='exact empty cgroup', replay='refused'),

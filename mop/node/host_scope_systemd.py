@@ -481,6 +481,38 @@ class SystemdCgroupAdapter:
             finally:
                 os.close(proc)
 
+    async def startup_inventory(self):
+        """Cold bind не усыновляет даже пустой старый unit; root ничего не kills."""
+        raw = await self.command.run(TOOLS[1], 'list-units', '--all', '--no-pager',
+            '--plain', '--output=json', '--', 'mop-host-*.service')
+        try:
+            rows = json.loads(raw, object_pairs_hook=unique)
+        except (ValueError, UnicodeError, RecursionError) as error:
+            raise Unknown('HOST startup manager inventory unavailable') from error
+        if type(rows) is not list or len(rows) > 256:
+            raise Unknown('HOST startup manager inventory exceeds bound')
+        units = []
+        for row in rows:
+            if type(row) is not dict or 'unit' not in row:
+                raise Refused('HOST startup manager inventory malformed')
+            units.append(Scope.from_unit(row['unit']).unit)
+        try:
+            fd = open_directory(CGROUP_ROOT/'mop.slice/mop-host.slice', owner=0, immutable=True)
+        except FileNotFoundError:
+            return tuple(units)
+        try:
+            with os.scandir(fd) as entries:
+                for i, entry in enumerate(entries):
+                    if i >= 512:
+                        raise Unknown('HOST startup cgroup inventory exceeds bound')
+                    if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
+                        units.append(entry.name)
+            if self._populated(fd) or read_at(fd, 'cgroup.procs', limit=4096):
+                units.append('unresolved-kernel-membership')
+            return tuple(units)
+        finally:
+            os.close(fd)
+
     async def inspect(self, scope):
         return await self._inspect(scope)
 

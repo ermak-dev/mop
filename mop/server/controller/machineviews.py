@@ -97,6 +97,21 @@ class ExecutorState(MachineView):
         return Response(executor_discovery(execution, request.actor, node_id))
 
 
+class HostExecutorState(MachineView):
+    def get(self, request):
+        values = query(request.query_params, ('schema_version', 'node_id'))
+        return Response(executor_discovery(execution, request.actor, p.uuid_value(values['node_id']), host=True))
+
+
+class HostExecutorBind(MachineView):
+    def post(self, request):
+        value = machine_document(request.data, ('schema_version', 'node_id', 'epoch', 'previous_epoch', 'new_epoch'))
+        result = execution.host_executor_bound(request.actor, p.uuid_value(value['node_id']),
+            epoch=p.uuid_value(value['epoch']), previous_epoch=p.uuid_value(value['previous_epoch']),
+            new_epoch=p.uuid_value(value['new_epoch']))
+        return Response(dict(schema_version=1, executor_epoch=str(result), replay_allowed=False))
+
+
 class Claim(MachineView):
     def post(self, request):
         value = machine_document(request.data, ('schema_version', 'request_id', 'work'))

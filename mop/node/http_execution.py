@@ -176,7 +176,9 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('POST','management-context'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
+                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('POST','management-context'),
+                   ('GET','executor'), ('POST','executor/restarted'), ('GET','executor/host'), ('POST','executor/host/bind'),
+                   ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp
@@ -310,6 +312,10 @@ class MachineClient:
 
     async def executor_state(self, node_id):
         value = await self.transport.request('GET','executor',params=dict(schema_version='1',node_id=uuid(node_id)))
+        return self._executor_state(value, node_id)
+
+    @staticmethod
+    def _executor_state(value, node_id):
         exact(value, ('schema_version','installation_id','epoch','node_id','executor_epoch'))
         if (type(value['installation_id']) is not str
                 or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', value['installation_id'])):
@@ -320,6 +326,23 @@ class MachineClient:
         if value['node_id'] != node_id:
             raise Refused('executor discovery changed node')
         return value
+
+    async def host_executor_state(self, node_id):
+        value = await self.transport.request('GET', 'executor/host',
+            params=dict(schema_version='1', node_id=uuid(node_id)))
+        exact(value, ('schema_version', 'installation_id', 'epoch', 'node_id', 'executor_epoch', 'empty'))
+        if type(value['empty']) is not bool:
+            raise Refused('finite HOST SQL empty observation required')
+        self._executor_state({key: item for key, item in value.items() if key != 'empty'}, node_id)
+        return value
+
+    async def host_bound(self, node_id, epoch, previous_epoch, new_epoch):
+        value = await self.transport.request('POST', 'executor/host/bind', dict(
+            schema_version=1, node_id=uuid(node_id), epoch=uuid(epoch),
+            previous_epoch=uuid(previous_epoch), new_epoch=uuid(new_epoch)))
+        exact(value, ('schema_version', 'executor_epoch', 'replay_allowed'))
+        if value['executor_epoch'] != new_epoch or value['replay_allowed'] is not False:
+            raise Refused('HOST backend binding not fenced')
 
     async def restarted(self, node_id, previous_epoch, new_epoch):
         value = await self.transport.request('POST', 'executor/restarted', dict(

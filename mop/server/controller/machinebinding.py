@@ -180,7 +180,7 @@ def operations(*, grants=None, restart_support=None, message_support=None, messa
     return service
 
 
-def executor_discovery(execution, actor, node_id):
+def executor_discovery(execution, actor, node_id, *, host=False):
     """Один SQL admission для canonical installation и scoped executor; без effects."""
     from .models import Installation
     from .runtime import short_transaction, require_restore_ready
@@ -191,9 +191,11 @@ def executor_discovery(execution, actor, node_id):
             installation = Installation.objects.select_for_update().get(pk=1)
             # Сохраняем весь прежний machine/node/project gate и bounded ambiguity
             # check. Ни transport export, ни numeric pk не становятся identity.
-            previous = execution.executor_state(actor, node_id)
-            return dict(schema_version=1, installation_id=installation.identity,
+            previous, empty = execution.host_executor_state(actor, node_id) if host else (
+                execution.executor_state(actor, node_id), None)
+            result = dict(schema_version=1, installation_id=installation.identity,
                 epoch=str(installation.epoch), node_id=str(node_id), executor_epoch=str(previous))
+            return dict(**result, empty=empty) if host else result
     except Installation.DoesNotExist:
         raise Unavailable('controller installation is not initialized') from None
     except RuntimeError as error:
