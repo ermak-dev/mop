@@ -258,6 +258,11 @@ class CredentialApplication:
             result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
         elif command is p.Command.APPROVE_DEFINITION:
             result = self.grants.approve_definition(actor, **args)
+        elif command is p.Command.PREPARE_REPLACEMENT:
+            from .replacement import ReplacementPreparation
+            row = self.grants.prepare_replacement(actor, authority=ReplacementPreparation(self, **args))
+            result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
+                row.role, row.digest, row.state, row.revision, row.credential_version_id)
         elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT, p.Command.ACTIVATE_GRANT):
             if command is p.Command.ACTIVATE_GRANT:
                 authority = CreateActivation(self, actor, args['grant_id'])

@@ -41,11 +41,11 @@ class Operation(models.Model):
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create')),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create', 'update')),
                 name='operation_finite_action'),
             models.CheckConstraint(condition=(Q(target_kind='node', action__in=('drain','enable','build'), eligible__isnull=False,
                 target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet',
-                action__in=('restart', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create'),
+                action__in=('restart', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create', 'update'),
                 eligible__isnull=True, target_id__isnull=False, incarnation_id__isnull=False)), name='operation_typed_target'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
@@ -70,7 +70,7 @@ class Step(models.Model):
         default_permissions = ()
         constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
             'restart_session', 'confirm_ready', 'image_build', 'scheduler_stop', 'send_message', 'wipe_clone',
-            'scheduler_delete', 'scheduler_register', 'activate_grant')),
+            'scheduler_delete', 'scheduler_register', 'activate_grant', 'prepare_launch')),
             name='step_finite_handler'),
             models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
             models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
@@ -222,6 +222,29 @@ class Evidence(models.Model):
     class Meta:
         abstract = True
         default_permissions = ()
+
+
+class ReplacementBinding(Evidence):
+    """Неизменный source/policy pin подготовки замены (#625).
+
+    Destination -- Operation/RestartBinding того же журнала. Это ещё не
+    admission физической замены: source остаётся current до отдельного proof.
+    """
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    source_incarnation_id = models.UUIDField()
+    source_grant_id = models.UUIDField()
+    source_revision = models.PositiveBigIntegerField()
+    source_generation = models.PositiveBigIntegerField()
+    source_expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+    definition_id = models.UUIDField()
+    policy_approval_id = models.UUIDField()
+    policy_version_id = models.UUIDField()
+    policy_digest = models.CharField(max_length=64)
+
+    class Meta(Evidence.Meta):
+        constraints = [models.CheckConstraint(condition=Q(source_revision__gte=1, source_generation__gte=1)
+            & Q(expires_at__lte=models.F('source_expires_at')), name='replacement_source_pins')]
 
 
 class CreateReservation(Evidence):
