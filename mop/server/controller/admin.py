@@ -127,7 +127,7 @@ for model, adapter in ((get_user_model(), ScopedUserAdmin), (Group, ScopedGroupA
         admin.site.unregister(model)
     admin.site.register(model, adapter)
 
-from . import admincatalog, adminevidence  # noqa: E402,F401 — конечный registration set
+from . import admincatalog, adminevidence, adminrbac  # noqa: E402,F401 — конечный registration set
 
 
 # Сохраняем прежнюю owner-scoped evidence view под отдельным адресом;

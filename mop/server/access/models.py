@@ -391,6 +391,42 @@ class Grant(Evidence):
             models.CheckConstraint(condition=~Q(state='active') | Q(credential_version__isnull=False), name='access_active_credential')]
 
 
+class AgentRBACProfile(Evidence):
+    """Утверждённая разовая recipe; UUID/Group IDs — evidence, не cache прав."""
+    definition = models.ForeignKey(AgentDefinitionVersion, on_delete=models.PROTECT)
+    group_ids = models.JSONField()
+    digest = models.CharField(max_length=64)
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def clean(self):
+        from .rbac import canonical_groups, profile_digest
+        if canonical_groups(self.group_ids) != self.group_ids or self.digest != profile_digest(self.definition_id, self.group_ids):
+            raise ValueError('canonical agent RBAC profile required')
+
+    class Meta(Evidence.Meta):
+        permissions = [('provision_agent_rbac', 'Can provision approved initial agent RBAC')]
+
+
+class ProfileRevocation(Evidence):
+    profile = models.OneToOneField(AgentRBACProfile, on_delete=models.PROTECT)
+    revoked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    created_at = models.DateTimeField(default=timezone.now)
+
+
+class AgentRBACProvisioning(Evidence):
+    """Прошлое применение, не desired memberships; profile может быть архивирован."""
+    subject = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='rbac_provisioning')
+    grant = models.OneToOneField(Grant, on_delete=models.PROTECT)
+    profile_id = models.UUIDField()
+    profile_digest = models.CharField(max_length=64)
+    policy_id = models.UUIDField()
+    policy_digest = models.CharField(max_length=64)
+    reservation_id = models.UUIDField()
+    applied_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    created_at = models.DateTimeField(default=timezone.now)
+
+
 class GrantEvent(Evidence):
     grant = models.ForeignKey(Grant, on_delete=models.PROTECT)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT, related_name='+')

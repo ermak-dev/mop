@@ -599,6 +599,49 @@ class Grants:
             return self._profile_info(profile)
 
     @storage_boundary
+    def provision_subject_rbac(self, actor, grant_id, *, expected_revision, authority):
+        """Разовое SQL-применение recipe внутри final compose, никогда standalone.
+
+        Project -> Grant -> stable Actor -> profile -> Groups. Revoke берёт
+        только profile; начальная активация держит тот же Project/profile до
+        COMMIT. Receipt retry не читает/сверяет actual Django memberships.
+        """
+        from .rbac import InitialRBACSelection, require_profile, ordinary_groups
+        if not transaction.get_connection().in_atomic_block or authority is None:
+            raise ValueError('initial RBAC requires caller SQL transaction and trusted selection authority')
+        row = self._row(grant_id)
+        Project.objects.select_for_update().get(pk=row.intent.project_id)
+        m.Grant.objects.select_for_update().get(pk=grant_id)
+        row = self._row(grant_id)
+        subject = get_user_model().objects.select_for_update().get(pk=row.subject_id)
+        selected = authority.resolve(actor, grant_id)
+        if type(selected) is not InitialRBACSelection:
+            raise auth.Denied('exact initial RBAC selection required')
+        wanted = dict(grant_id=row.id, profile_id=selected.profile_id, profile_digest=selected.profile_digest,
+            policy_id=selected.policy_id, policy_digest=selected.policy_digest,
+            reservation_id=selected.reservation_id, applied_by_id=actor.user_id)
+        previous = m.AgentRBACProvisioning.objects.filter(subject=subject).first()
+        if previous is not None:
+            if any(getattr(previous, name) != value for name, value in wanted.items()):
+                raise Conflict('agent RBAC was provisioned from another initial origin')
+            return previous
+        self._expected(row, expected_revision)
+        self._human(actor, 'access.provision_agent_rbac', row.intent.project_id)
+        self._creation_actor(actor, row)
+        self._check_row(row, state='reserved')
+        if row.credential_version_id is None or row.intent.parent_id is not None:
+            raise auth.Denied('provisioned initial reserved grant required for agent RBAC')
+        if not m.AgentProfile.objects.filter(agent=subject, owner_id=row.intent.owner_id,
+                project_id=row.intent.project_id, target_id=row.intent.target_id,
+                definition_id=row.intent.definition_id).exists():
+            raise auth.Denied('exact initial registered agent subject required')
+        profile = require_profile(selected.profile_id, selected.profile_digest, definition_id=row.intent.definition_id,
+            owner_id=row.intent.owner_id, project_id=row.intent.project_id, lock=True)
+        groups = ordinary_groups(profile.group_ids, lock=True)
+        subject.groups.add(*groups)
+        return m.AgentRBACProvisioning.objects.create(subject=subject, **wanted)
+
+    @storage_boundary
     def repin_definition(self, actor, target_id, *, definition_id, expected_revision):
         """Смена программы агента без смены его Actor; CAS по revision профиля."""
         outside_transaction()

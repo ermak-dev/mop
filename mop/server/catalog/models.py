@@ -264,6 +264,9 @@ class InitialCreatePolicy(ImmutableRecord):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     definition_id = models.UUIDField()
     bootstrap_revision = models.UUIDField()
+    # Scalar proof владельца Access; каталог не импортирует его ORM (#747).
+    rbac_profile_id = models.UUIDField(null=True)
+    rbac_profile_digest = models.CharField(max_length=64, default='')
     image = models.ForeignKey(ImageRevision, on_delete=models.PROTECT)
     source_origin = models.CharField(max_length=2048)
     source_commit = models.CharField(max_length=64)
