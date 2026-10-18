@@ -16,7 +16,7 @@ from . import models as m
 from .commands import RestartCommand, WipeCommand, InvalidCommand
 from .lifecycle import State
 from .requests import resolve_retry, RequestRefused, Retry
-from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
+from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,9 @@ class MachineStep:
 
 
 STAGES = ('apply_identity', 'restart_session', 'confirm_ready')
+# Шаги, которые исполняет узел (#643): серверные шаги той же операции
+# (scheduler_register, activate_grant) узлу как machine work не раздаются.
+MACHINE_ACTIONS = ('apply_identity', 'restart_session', 'confirm_ready', 'send_message', 'wipe_clone')
 
 
 def digest(command, action='restart'):
@@ -79,7 +82,7 @@ class RestartHandler:
             raise Refused('controller_unavailable', safe_reason='current target binding is unavailable')
         messages, wipes = self.ops.messages, self.ops.wipes
         if (self.ops.restart_support is None and (messages is None or messages.support is None)
-                and (wipes is None or wipes.support is None)):
+                and (wipes is None or wipes.support is None) and getattr(self.ops, 'launch_machine', None) is None):
             raise Refused('controller_unavailable', safe_reason='physical restart binding is unavailable')
 
     def _valid(self, command):
@@ -134,9 +137,7 @@ class RestartHandler:
                 raise Refused('deadline_horizon')
             if intent.expected_revision != target.revision or intent.incarnation != target.incarnation_id:
                 raise Refused('revision_conflict')
-            active = m.Operation.objects.filter(epoch=installation.epoch, state__in=_ACTIVE)
-            if active.count() >= self.ops.queue_limit or active.filter(projects=target.project_id).count() >= self.ops.project_limit:
-                raise Refused('admission_limit')
+            self.ops._admission(installation, (target.project_id,), actor=actor, request_id=intent.request_id)
             row = m.Operation.objects.create(actor_id=actor.user_id, actor_binding=_binding(actor), request_id=intent.request_id,
                 digest=digest(command, self.action), epoch=intent.epoch, restore_generation=installation.generation, action=self.action,
                 node_id=target.node_id, target_kind='puppet', target_id=target.target_id, incarnation_id=target.incarnation_id,
@@ -163,7 +164,7 @@ class RestartHandler:
             raise ValueError('bounded machine projection required')
         # Текущее разрешённое project scope применяется в SQL до limit.
         rows = m.Step.objects.select_related('operation__restartbinding').filter(
-            operation__node_id=node_id, operation__target_kind='puppet',
+            name__in=MACHINE_ACTIONS, operation__node_id=node_id, operation__target_kind='puppet',
             operation__state__in=('accepted','running'), operation__restartbinding__executor_epoch=executor_epoch,
             operation__restartbinding__project_id__in=project_ids, token=None).exclude(
             operation__step__outcome='unknown').order_by('operation__created_at','operation_id','ordinal')
@@ -181,7 +182,8 @@ class RestartHandler:
             raise Refused('transaction_boundary')
         self._ports()
         installation = self.ops._installation()
-        row = m.Operation.objects.select_for_update().get(pk=operation_id, action__in=('restart', 'send', 'dispatch', 'wipe'), target_kind='puppet')
+        row = m.Operation.objects.select_for_update().get(pk=operation_id,
+            action__in=('restart', 'send', 'dispatch', 'wipe', 'create'), target_kind='puppet')
         step = m.Step.objects.select_for_update().get(pk=step_id, operation=row)
         value = self._value(row, step)
         expected = RestartTarget(value.target_id, row.restartbinding.project_id, value.node_id, value.incarnation_id,

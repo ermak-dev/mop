@@ -24,6 +24,8 @@ class Assignment(Record):
         on_delete=models.PROTECT, related_name='+')
     # #625 delete: закрыто навсегда -- ни владельца, ни инкарнации, ни активации.
     deleted_at = models.DateTimeField(null=True)
+    # Имя папета (#643): назначает create, держится за target, не за инкарнацию.
+    display_name = models.CharField(max_length=64, null=True)
 
     class Meta(Record.Meta):
         # Канонический владелец регистрации execution-прав, кроме view_usage
@@ -36,7 +38,8 @@ class Assignment(Record):
         constraints = Record.Meta.constraints + [models.CheckConstraint(
             condition=Q(generation__gte=1), name='assignment_generation_positive'),
             models.CheckConstraint(condition=Q(deleted_at__isnull=True)
-                | Q(owner__isnull=True, current_incarnation__isnull=True), name='assignment_deleted_is_closed')]
+                | Q(owner__isnull=True, current_incarnation__isnull=True), name='assignment_deleted_is_closed'),
+            models.UniqueConstraint(fields=('project', 'display_name'), name='assignment_project_display_name')]
 
 
 class ExecutionIncarnation(Record):
@@ -51,6 +54,38 @@ class ExecutionIncarnation(Record):
         constraints = Record.Meta.constraints + [models.CheckConstraint(
             condition=Q(accepting=False) | Q(replaced_by_epoch__isnull=True),
             name='incarnation_accepting_not_replaced')]
+
+
+class IncarnationLaunch(models.Model):
+    """Пины запуска инкарнации (#643): одобренный bootstrap и образ узла.
+
+    Принадлежат инкарнации: launch API читает их для любой работы этого
+    запуска, повтор не выбирает их заново."""
+    incarnation = models.OneToOneField(ExecutionIncarnation, primary_key=True, on_delete=models.PROTECT)
+    bootstrap_revision = models.UUIDField()
+    bootstrap_digest = models.CharField(max_length=64)
+    image_digest = models.CharField(max_length=64)
+    # #708: immutable reference нужен для чтения той же resource policy.
+    image_revision = models.ForeignKey('catalog.ImageRevision', null=True, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        default_permissions = ()
+        constraints = [models.CheckConstraint(condition=Q(bootstrap_digest__regex='^[0-9a-f]{64}$',
+            image_digest__regex='^[0-9a-f]{64}$'), name='incarnation_launch_pinned_digests')]
+
+
+class NodeExecutor(models.Model):
+    """Эпоха процесса executor узла, заявленная последним restarted (#643).
+
+    Источник эпохи для новой инкарнации, в том числе на узле без назначений;
+    инкарнации по-прежнему несут свою эпоху -- реестр их не заменяет."""
+    node = models.OneToOneField('catalog.Node', primary_key=True, on_delete=models.PROTECT)
+    executor_epoch = models.UUIDField()
+    registered_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        default_permissions = ()
 
 
 class AssignmentAttempt(Record):

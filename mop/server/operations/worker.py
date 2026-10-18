@@ -13,7 +13,9 @@ class Worker:
         self.handlers = tuple(name for name, port in (
             ('node_eligibility', node_executor), ('image_build', image_builds),
             ('scheduler_stop', getattr(operations, 'stops', None) or False),
-            ('scheduler_delete', getattr(operations, 'deletes', None) or False)) if port is not None)
+            ('scheduler_delete', getattr(operations, 'deletes', None) or False),
+            ('scheduler_register', getattr(operations, 'launches', None) or False),
+            ('activate_grant', getattr(operations, 'activations', None) or False)) if port is not None)
 
     async def run_one(self, operation_id):
         if not self.runtime.accepting:
@@ -26,8 +28,10 @@ class Worker:
         handler = await self.runtime.database(self.operations.handler, operation_id)
         if handler not in self.handlers:
             raise RuntimeError(f'controller worker handler {handler} is not configured')
-        if handler in ('scheduler_stop', 'scheduler_delete'):
-            lane = self.operations.stops if handler == 'scheduler_stop' else self.operations.deletes
+        if handler in ('scheduler_stop', 'scheduler_delete', 'scheduler_register', 'activate_grant'):
+            lane = {'scheduler_stop': self.operations.stops, 'scheduler_delete': self.operations.deletes,
+                    'scheduler_register': getattr(self.operations, 'launches', None),
+                    'activate_grant': getattr(self.operations, 'activations', None)}[handler]
             if lane is None:
                 return None
             return await self.runtime.blocking(self._scheduler, lane, operation_id)

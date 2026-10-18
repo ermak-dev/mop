@@ -14,7 +14,7 @@ from . import models as m
 from .commands import SendCommand, DispatchCommand, InvalidCommand
 from .puppet import RestartTarget
 from .requests import resolve_retry, RequestRefused, Retry
-from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move, _ACTIVE
+from .service import Refused, _independent, _binding, _actor, _snapshot, _event, _move
 from .lifecycle import State
 
 
@@ -93,9 +93,7 @@ class MessageHandler:
             raise Refused('deadline_horizon')
         if intent.expected_revision != target.revision or intent.incarnation != target.incarnation_id:
             raise Refused('revision_conflict')
-        active = m.Operation.objects.filter(epoch=installation.epoch, state__in=_ACTIVE)
-        if active.count() >= self.ops.queue_limit or active.filter(projects=target.project_id).count() >= self.ops.project_limit:
-            raise Refused('admission_limit')
+        self.ops._admission(installation, (target.project_id,), actor=actor, request_id=intent.request_id)
         return None, target, installation
 
     def submit(self, actor, command, *, holder=None):

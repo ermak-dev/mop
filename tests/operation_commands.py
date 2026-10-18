@@ -124,7 +124,55 @@ def main():
     for bad in (None, b"short", bytearray(b"x" * 32)):
         refuses("digest key must be protected key material", lambda bad=bad: commands.intent_digest(parsed, key=bad))
     refuses("direct constructor cannot bypass invariants", lambda: dataclasses.replace(parsed, fresh=1))
+    check_create_643(c, commands, refuses)
     return c.report("operation_commands")
+
+
+# HYPOTHESIS (#643): у журнала нет typed команды создания папета: create не на
+# чем принимать, и admission пришлось бы читать target/owner/shell из тела.
+# SOLUTION: CreateCommand -- проект из URL, в теле только epoch/request_id/
+# not_after и params {node_id, definition_id}; target, инкарнация и владелец
+# назначаются сервером, а не запросом.
+# STATUS: FIXED — see #643
+PROJECT = "5b2f1c1e-35a7-4f0e-8d55-0c1d6b0d7a21"
+NODE = "0f6b1a5e-6c2d-4a4b-9a1e-3b8f7d2c4e10"
+DEFINITION = "7a1d9c3e-2b4f-4e6a-8c5d-1f0e9b8a7c62"
+
+
+def create_body(**changes):
+    result = dict(schema_version=1, epoch=EPOCH, request_id=REQUEST, not_after="2000-01-01T00:00:00Z",
+                  params={"node_id": NODE, "definition_id": DEFINITION})
+    result.update(changes)
+    return result
+
+
+def check_create_643(c, commands, refuses):
+    if not c.check("#643 a typed create command exists", hasattr(commands, "parse_create")):
+        return
+    parsed = commands.parse_create(PROJECT, create_body())
+    c.expect("#643 create names its project from the route", parsed.intent.project_id, UUID(PROJECT))
+    c.expect("#643 create carries the node and the approved definition",
+             (parsed.node_id, parsed.definition_id), (UUID(NODE), UUID(DEFINITION)))
+    c.expect("#643 create keeps the request key", parsed.intent.request_id, UUID(REQUEST))
+    for field in ("target_id", "incarnation", "expected_revision", "owner", "shell", "argv", "spec"):
+        refuses(f"#643 create refuses a client-chosen {field}",
+                lambda field=field: commands.parse_create(PROJECT, create_body(**{field: MESSAGE})), "unknown_fields")
+    for params in ({}, {"node_id": NODE}, {"definition_id": DEFINITION},
+                   {"node_id": NODE, "definition_id": DEFINITION, "origin": "git@h:g/x.git"},
+                   {"node_id": MESSAGE, "definition_id": DEFINITION},
+                   {"node_id": NODE, "definition_id": 1}):
+        refuses("#643 create params are exactly node and definition",
+                lambda params=params: commands.parse_create(PROJECT, create_body(params=params)))
+    for changes in (dict(schema_version=2), dict(epoch=MESSAGE), dict(request_id=MESSAGE),
+                    dict(not_after="2000-01-01T00:00:00+02:00")):
+        refuses("#643 invalid create intent", lambda changes=changes: commands.parse_create(PROJECT, create_body(**changes)))
+    refuses("#643 create project is a UUID", lambda: commands.parse_create(MESSAGE, create_body()))
+    try:
+        parsed.node_id = UUID(PROJECT)
+    except dataclasses.FrozenInstanceError:
+        c.check("#643 create command is immutable", True)
+    else:
+        c.fail("#643 create command is immutable")
 
 
 if __name__ == "__main__":

@@ -69,6 +69,7 @@ urlpatterns = [
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
     path('api/v1/projects/<uuid:project_id>/commands/build', BuildProject.as_view()),
+    path('api/v1/projects/<uuid:project_id>/commands/create-puppet', operations.CreatePuppet.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/drain', operations.DrainNode.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/enable', operations.EnableNode.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/restart', operations.RestartPuppet.as_view()),

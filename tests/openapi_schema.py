@@ -46,6 +46,7 @@ PUBLIC = {
     '/api/v1/projects': {'get', 'post'},
     '/api/v1/projects/{project_id}': {'get', 'put'},
     '/api/v1/projects/{project_id}/commands/build': {'post'},
+    '/api/v1/projects/{project_id}/commands/create-puppet': {'post'},
     '/api/v1/nodes/{node_id}/commands/drain': {'post'},
     '/api/v1/nodes/{node_id}/commands/enable': {'post'},
     '/api/v1/puppets/{target_id}/commands/restart': {'post'},

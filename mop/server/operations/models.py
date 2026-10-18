@@ -41,11 +41,11 @@ class Operation(models.Model):
             models.UniqueConstraint(fields=('actor', 'request_id'), name='operation_actor_request_unique'),
             models.CheckConstraint(condition=Q(revision__gte=1, expected_revision__gte=1), name='operation_positive_revisions'),
             models.CheckConstraint(condition=Q(state__in=tuple(State)), name='operation_finite_state'),
-            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch', 'wipe', 'delete')),
+            models.CheckConstraint(condition=Q(action__in=('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create')),
                 name='operation_finite_action'),
             models.CheckConstraint(condition=(Q(target_kind='node', action__in=('drain','enable','build'), eligible__isnull=False,
                 target_id__isnull=True, incarnation_id__isnull=True) | Q(target_kind='puppet',
-                action__in=('restart', 'stop_job', 'send', 'dispatch', 'wipe', 'delete'),
+                action__in=('restart', 'stop_job', 'send', 'dispatch', 'wipe', 'delete', 'create'),
                 eligible__isnull=True, target_id__isnull=False, incarnation_id__isnull=False)), name='operation_typed_target'),
             models.CheckConstraint(condition=Q(result_pruned=False) | Q(completed_at__isnull=False), name='operation_pruned_terminal'),
         ]
@@ -70,7 +70,7 @@ class Step(models.Model):
         default_permissions = ()
         constraints = [models.CheckConstraint(condition=Q(name__in=('node_eligibility', 'apply_identity',
             'restart_session', 'confirm_ready', 'image_build', 'scheduler_stop', 'send_message', 'wipe_clone',
-            'scheduler_delete')),
+            'scheduler_delete', 'scheduler_register', 'activate_grant')),
             name='step_finite_handler'),
             models.UniqueConstraint(fields=('operation','ordinal'), name='operation_step_ordinal'),
             models.CheckConstraint(condition=Q(outcome__in=('', 'succeeded','failed','unknown')), name='step_finite_outcome')]
@@ -108,6 +108,20 @@ class ScheduledPuppet(models.Model):
             models.CheckConstraint(condition=Q(modify_index__gte=1), name='scheduled_job_positive_index')]
 
 
+class ScheduledNode(models.Model):
+    """Доверенная привязка узла к планировщику (#643): id узла в Nomad и
+    заявленные capabilities запуска. Пишет только trusted enrollment Root,
+    не HTTP payload; рендер спеки нового тела берёт размещение отсюда."""
+    node = models.OneToOneField('catalog.Node', primary_key=True, on_delete=models.PROTECT)
+    scheduler_id = models.UUIDField()
+    nomad_node_id = models.UUIDField()
+    capabilities = models.JSONField()
+    enrolled_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        default_permissions = ()
+
+
 class StopBinding(models.Model):
     operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
     applied_revision = models.PositiveBigIntegerField(null=True)
@@ -122,6 +136,24 @@ class StopBinding(models.Model):
     job_id = models.CharField(max_length=128)
     namespace = models.CharField(max_length=128)
     modify_index = models.PositiveBigIntegerField()
+
+    class Meta:
+        default_permissions = ()
+
+
+class CreateBinding(models.Model):
+    """Снимок допуска create (#643): одобренное определение и адрес будущего job.
+
+    Узловые шаги идут по RestartBinding той же Operation; здесь -- то, что
+    нужно серверным шагам регистрации и активации гранта."""
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    definition_id = models.UUIDField()
+    scheduler_id = models.UUIDField()
+    job_id = models.CharField(max_length=128)
+    namespace = models.CharField(max_length=128)
+    applied_index = models.PositiveBigIntegerField(null=True)
+    # #707: точная несекретная spec до dispatch; recovery не рендерит её заново.
+    dispatched_job = models.JSONField(null=True)
 
     class Meta:
         default_permissions = ()
@@ -189,6 +221,39 @@ class Evidence(models.Model):
 
     class Meta:
         abstract = True
+        default_permissions = ()
+
+
+class CreateReservation(Evidence):
+    """Неизменный intent и слот общего admission до credential I/O (#704/#709).
+
+    После конверсии слот учитывается только по Operation. Пустой scope старой
+    записи неизвестен, а не свободен: до recovery он занимает любой scope.
+    Это не допуск к исполнению."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    request_id = models.UUIDField()
+    digest = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    epoch = models.UUIDField(null=True)
+    project = models.ForeignKey('catalog.Project', null=True, on_delete=models.PROTECT)
+
+    class Meta(Evidence.Meta):
+        constraints = [models.UniqueConstraint(fields=('actor', 'request_id'), name='create_reservation_actor_request')]
+
+
+class CreateProvisioningAttempt(models.Model):
+    """Незавершённый вызов держит слот reservation, не отдельную очередь.
+
+    Только доказанный отказ закрывает попытку. Потеря ответа/процесса остаётся
+    неизвестной; отказ параллельного retry не освобождает чужую попытку.
+    Успешное завершение доказывает общий Operation, без второго lifecycle.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reservation = models.ForeignKey(CreateReservation, on_delete=models.PROTECT)
+    refused_at = models.DateTimeField(null=True)
+
+    class Meta:
         default_permissions = ()
 
 

@@ -36,6 +36,14 @@ class AssignmentBindings:
             value.role, value.bundle_digest, value.grant_id, value.owner_id)
 
 
+def local_grants():
+    """SQL-only композиция живого exact approval; root/provider здесь нет."""
+    from mop.server.access.services import Access
+    from mop.server.preparation.services import Preparation
+    return Grants(provider=None, approvals=Preparation(provider=None, authorizer=Access()).approval_query(),
+                  bindings=AssignmentBindings())
+
+
 class Targets:
     def __init__(self, grants):
         self.grants = grants
@@ -58,6 +66,10 @@ class Targets:
             target.role, target.bundle_digest, target.grant_id, target.owner_id))
         owner_identity(target.owner_id)
 
+    def authorize_launch(self, target):
+        self.grants.authorize_launch(RoleBinding(target.project_id, target.target_id, target.incarnation_id,
+            target.role, target.bundle_digest, target.grant_id, target.owner_id))
+
 
 class ReceivingGrant:
     def __init__(self, grants):
@@ -65,8 +77,15 @@ class ReceivingGrant:
 
     def authorize(self, *, owner_id, project_id, target_id, grant_id, role, bundle_digest, incarnation_id, action):
         # Получатель не обязан иметь исходящую restart/send capability.
-        self.grants.authorize_execution(RoleBinding(project_id, target_id, incarnation_id, role,
-            bundle_digest, grant_id, owner_id))
+        binding = RoleBinding(project_id, target_id, incarnation_id, role, bundle_digest, grant_id, owner_id)
+        # #643: идентичность и готовность новой цели -- по выданному, ещё не
+        # активному гранту; любое другое действие -- только по активному.
+        from mop.server.access.models import Grant
+        if (action in ('apply_identity', 'confirm_ready')
+                and Grant.objects.filter(pk=grant_id, state='reserved').exists()):
+            self.grants.authorize_launch(binding)
+            return
+        self.grants.authorize_execution(binding)
 
 
 class OperationWork:
@@ -93,15 +112,19 @@ class OperationWork:
 
 
 def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,
-               wipe_support=None):
+               wipe_support=None, launch_support=None):
     from mop.server.operations.messages import MessageHandler
     from mop.server.operations.puppet import WipeHandler
     from .messagebinding import MessageRecipients
-    grants = grants or Grants(provider=None, bindings=AssignmentBindings())
+    grants = grants or local_grants()
     service = operations_service(grants=grants.local_authority(), targets=Targets(grants), restart_support=restart_support)
     service.messages = MessageHandler(service, cipher=message_cipher, support=message_support,
         recipients=MessageRecipients(grants), endpoints=endpoints)
     service.wipes = WipeHandler(service, support=wipe_support)
+    # Узловые шаги create (#643) -- только со связанной полосой запуска: без
+    # неё машинный маршрут по-прежнему честно отказывает.
+    from mop.server.operations.launch import CreateMachine
+    service.launch_machine = CreateMachine(service, support=launch_support) if launch_support is not None else None
     return service
 
 
@@ -121,9 +144,9 @@ def authority():
 
 
 def compose(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,
-            wipe_support=None):
-    grants = grants or Grants(provider=None, bindings=AssignmentBindings())
+            wipe_support=None, launch_support=None):
+    grants = grants or local_grants()
     return machine_execution_service(work=OperationWork(operations(grants=grants, restart_support=restart_support,
         message_support=message_support, message_cipher=message_cipher, endpoints=endpoints,
-        wipe_support=wipe_support)),
+        wipe_support=wipe_support, launch_support=launch_support)),
         grants=ReceivingGrant(grants), installation=authority)

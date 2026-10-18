@@ -33,7 +33,7 @@ class ApiBodySpecTests(unittest.TestCase):
         return dict(layout=layout, machine=MachineConfig('https://control.example.test',
             '10.20.0.4', '192.0.2.6', 2207, 'host'), bundle=b,
             nomad_node_id=str(uuid4()), datacenter='owned-fixture', user='owned',
-            memory_mb=512, cpu=100, capabilities=frozenset(('addressed_launch_v1',
+            memory_mb=512, cpu=100, restore_generation=uuid4(), capabilities=frozenset(('addressed_launch_v1',
             'session_scope_v1', 'scope_retirement_v1', 'external_image_v1', 'bootstrap_ssh_v1')))
 
     def renderer(self):
@@ -58,8 +58,58 @@ class ApiBodySpecTests(unittest.TestCase):
                           'MOP_TELEMETRY_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'MOP_BUS_CONFIG'):
             self.assertNotIn(forbidden, wire)
         for name in ('target_id', 'incarnation_id', 'node_id', 'executor_epoch', 'grant_id', 'bundle_digest'):
-            self.assertEqual(job['Meta'][name], getattr(r.work, name))
+            self.assertEqual(job['Meta']['mop.'+name], getattr(r.work, name))
         self.assertNotRegex(task['Config']['args'][-1], r'(?<!\$)\$\{')
+
+    # HYPOTHESIS (#643): новая регистрация пишет Meta без префикса и без
+    # restore_generation/owner_id/revision, а stop/delete (#625) читают job только
+    # по job_metadata(pin): тело, поднятое новым путём, нельзя было бы ни
+    # остановить, ни удалить -- проверка Meta отказывала бы как чужому job.
+    # SOLUTION: одна функция адресных метаданных для запуска и для остановки;
+    # пины запуска -- дополнительные ключи, не замена.
+    # STATUS: FIXED — see #643
+    def test_registered_job_carries_the_stop_path_addressed_metadata(self):
+        from types import SimpleNamespace
+        from uuid import UUID
+        from mop.server.operations.scheduler import JobPin, job_metadata
+        render = self.renderer()
+        args = self.arguments('/owned')
+        restore = uuid4()
+        job = render(**{**args, 'restore_generation': restore})['Job']
+        w = args['layout'].registration.work
+        # Поля RestartTarget без Django-модуля: job_metadata читает только их.
+        target = SimpleNamespace(target_id=UUID(w.target_id), node_id=UUID(w.node_id),
+            incarnation_id=UUID(w.incarnation_id), executor_epoch=UUID(w.executor_epoch),
+            owner_id=w.owner_id, generation=w.generation, revision=w.revision, role=w.role,
+            bundle_digest=w.bundle_digest, grant_id=UUID(w.grant_id))
+        pin = JobPin(UUID(w.epoch), target, uuid4(), w.target_id, 'default', 1, restore)
+        for key, value in job_metadata(pin).items():
+            self.assertEqual(job['Meta'].get(key), value, key)
+        with self.assertRaises(ValueError):
+            render(**{**args, 'restore_generation': str(restore)})
+
+    # HYPOTHESIS (#643): рендер требует soul.Bundle с байтами промпта, а
+    # регистрирующий job контроллер их не видит: определение хранится
+    # зашифрованным, расшифровывает только credential-сервис. Регистрация job
+    # нового тела была бы невозможна без второй копии байтов на сервере.
+    # SOLUTION: рендер принимает и пин одобренного определения (роль, digest,
+    # драйвер) без байтов; байты сверяет узел в LaunchResponse.check.
+    # STATUS: FIXED — see #643
+    def test_registration_renders_from_the_approved_definition_pin_without_bytes(self):
+        from mop.driver.launch import BundlePin
+        render = self.renderer()
+        args = self.arguments('/owned')
+        w = args['layout'].registration.work
+        pin = BundlePin(w.role, w.bundle_digest, 'any')
+        job = render(**{**args, 'bundle': pin})['Job']
+        self.assertEqual(job, render(**args)['Job'])
+        for wrong in (BundlePin('other', w.bundle_digest, 'any'), BundlePin(w.role, 'f'*64, 'any')):
+            with self.subTest(pin=wrong), self.assertRaises(ValueError):
+                render(**{**args, 'bundle': wrong})
+        with self.assertRaises(ValueError):
+            render(**{**args, 'bundle': BundlePin(w.role, w.bundle_digest, 'isolating')})
+        with self.assertRaises(ValueError):
+            BundlePin(w.role, 'not-a-digest', 'any')
 
     def test_known_unsupported_or_mismatched_capability_refuses_before_registration(self):
         render = self.renderer()

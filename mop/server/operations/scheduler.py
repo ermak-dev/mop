@@ -76,6 +76,52 @@ class StopProof:
 
 
 @dataclass(frozen=True)
+class RegisterTicket:
+    """Условная регистрация job тела (#643): create (expected_index 0 -- job
+    нет) или update (текущий индекс). job -- уже отрисованная spec, её Meta
+    обязана нести адресные пины цели; иначе остановка не узнала бы job."""
+    epoch: UUID
+    target: 'RestartTarget'
+    scheduler_id: UUID
+    job_id: str
+    namespace: str
+    restore_generation: UUID
+    expected_index: int
+    job: dict
+    operation_id: UUID
+    token: UUID
+    not_after: datetime
+
+    def __post_init__(self):
+        if (any(type(value) is not UUID for value in (self.epoch, self.scheduler_id, self.restore_generation,
+                                                       self.operation_id, self.token))
+                or any(type(value) is not str or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', value) is None
+                       for value in (self.job_id, self.namespace))
+                or type(self.expected_index) is not int or self.expected_index < 0
+                or type(self.not_after) is not datetime or self.not_after.utcoffset() is None
+                or type(self.job) is not dict or self.job.get('ID') != self.job_id
+                or type(self.job.get('Meta')) is not dict
+                or any(self.job['Meta'].get(key) != value for key, value in
+                       addressed_metadata(self.epoch, self.restore_generation, self.target).items())
+                or any(key.startswith('mop.stop_') for key in self.job['Meta'])
+                or any(key in self.job for key in ('Stop', 'JobModifyIndex', 'Namespace'))):
+            raise ValueError('typed addressed registration required')
+
+
+@dataclass(frozen=True)
+class RegisterProof:
+    outcome: str
+    evidence: str
+    modify_index: int | None = None
+
+    def __post_init__(self):
+        if (self.outcome not in ('succeeded','failed','unknown')
+                or self.evidence not in ('job-registered','conditional-refusal','scheduler-uncertain')
+                or (self.outcome == 'succeeded') != (type(self.modify_index) is int and self.modify_index >= 1)):
+            raise ValueError('finite registration proof required')
+
+
+@dataclass(frozen=True)
 class BodyStopProof:
     operation_id: UUID
     token: UUID
@@ -102,13 +148,22 @@ class StopScheduler(Protocol):
     def inspect_delete(self, ticket: StopTicket) -> StopProof: ...
 
 
+ADDRESSED = ('target_id','incarnation_id','node_id','executor_epoch','owner_id',
+             'generation','revision','role','bundle_digest','grant_id')
+
+
+def addressed_metadata(epoch, restore_generation, target):
+    """Несекретный точный authority binding внешнего job.
+
+    Одна функция для регистрации нового тела и для его остановки/удаления
+    (#643): иначе job, поднятый одним путём, читался бы другим как чужой."""
+    return {'mop.epoch':str(epoch),'mop.restore_generation':str(restore_generation),
+            **{'mop.'+name:str(getattr(target,name)) for name in ADDRESSED}}
+
+
 def job_metadata(pin):
     """Внешняя spec содержит только несекретный точный authority binding."""
-    target = pin.target
-    fields = ('target_id','incarnation_id','node_id','executor_epoch','owner_id',
-              'generation','revision','role','bundle_digest','grant_id')
-    return {'mop.epoch':str(pin.epoch),'mop.restore_generation':str(pin.restore_generation),
-            **{'mop.'+name:str(getattr(target,name)) for name in fields}}
+    return addressed_metadata(pin.epoch, pin.restore_generation, pin.target)
 
 
 class NomadStopScheduler:
@@ -127,8 +182,11 @@ class NomadStopScheduler:
 
     @property
     def capabilities(self):
-        return (frozenset({'conditional_stop_job','inspect_stop_job','conditional_delete_job'})
-                if self.body_inspector is not None else frozenset())
+        # Регистрации инспектор тела не нужен: готовность тела подтверждает узел
+        # своим шагом, планировщик доказывает только запись spec (#643).
+        register = frozenset({'conditional_register_job','inspect_register_job'})
+        return (register | frozenset({'conditional_stop_job','inspect_stop_job','conditional_delete_job'})
+                if self.body_inspector is not None else register)
 
     def _request(self, method, path, namespace, body=None, *, all_allocations=False, purge=False, deadline=None):
         # Без redirects/proxy/env credentials; один bounded socket на вызов.
@@ -244,7 +302,7 @@ class NomadStopScheduler:
             raise SchedulerUnavailable() from None
 
     def stop_job(self, ticket):
-        if (not self.capabilities or type(ticket) is not StopTicket
+        if ('conditional_stop_job' not in self.capabilities or type(ticket) is not StopTicket
                 or ticket.not_after <= datetime.now(timezone.utc)):
             return StopProof('failed','conditional-refusal')
         try:
@@ -328,7 +386,7 @@ class NomadStopScheduler:
         DELETE -- чужая перерегистрация в нём была бы снята; это документировано,
         а не скрыто. Потерянный ответ -- unknown; повтор DELETE не делается.
         """
-        if (not self.capabilities or type(ticket) is not StopTicket
+        if ('conditional_delete_job' not in self.capabilities or type(ticket) is not StopTicket
                 or ticket.not_after <= datetime.now(timezone.utc)):
             return StopProof('failed','conditional-refusal')
         try:
@@ -368,3 +426,63 @@ class NomadStopScheduler:
         except Exception:
             pass
         return StopProof('unknown','scheduler-uncertain')
+
+    def _registered(self, ticket, *, deadline):
+        """Consistent чтение job регистрации -> (status, value | None)."""
+        status, value = self._request('GET','/v1/job/'+quote(ticket.job_id,safe=''),ticket.namespace,deadline=deadline)
+        if status == 404:
+            return 404, None
+        if (status != 200 or type(value) is not dict or value.get('ID') != ticket.job_id
+                or value.get('Namespace') != ticket.namespace or type(value.get('JobModifyIndex')) is not int
+                or type(value.get('Meta')) is not dict):
+            raise SchedulerUnavailable()
+        return 200, value
+
+    def register_job(self, ticket):
+        """#643: одна условная запись spec тела и readback её точной Meta.
+
+        expected_index 0 -- «job нет» (create никогда не перезаписывает),
+        иначе -- текущий индекс (update). 409 -- атомарный отказ условия.
+        Потерянный ответ после возможного COMMIT -- unknown, второй POST
+        не делается; сверка -- inspect_register, только чтение.
+        """
+        if ('conditional_register_job' not in self.capabilities or type(ticket) is not RegisterTicket
+                or ticket.scheduler_id != self.scheduler_id or ticket.not_after <= datetime.now(timezone.utc)):
+            return RegisterProof('failed','conditional-refusal')
+        try:
+            budget = time.monotonic() + self.timeout
+            status, value = self._registered(ticket, deadline=budget)
+            current = 0 if status == 404 else value['JobModifyIndex']
+            if current != ticket.expected_index:
+                return RegisterProof('failed','conditional-refusal')
+            # Preflight занял wall time: intent перепроверяется перед эффектом (#679).
+            if ticket.not_after <= datetime.now(timezone.utc):
+                return RegisterProof('failed','conditional-refusal')
+            status, _ = self._request('POST','/v1/jobs',ticket.namespace,
+                {'Job':{**copy.deepcopy(ticket.job),'Namespace':ticket.namespace},'EnforceIndex':True,
+                 'JobModifyIndex':ticket.expected_index},deadline=budget)
+            if status == 409:
+                return RegisterProof('failed','conditional-refusal')
+            if status != 200:
+                return RegisterProof('unknown','scheduler-uncertain')
+            return self.inspect_register(ticket, deadline=budget)
+        except Exception:
+            # Ответ мог потеряться после внешнего COMMIT; повтор POST запрещён.
+            return RegisterProof('unknown','scheduler-uncertain')
+
+    def inspect_register(self, ticket, *, deadline=None):
+        """Сверка только чтением: наша точная Meta -- succeeded; чужая -- отказ.
+
+        Отсутствие job после возможной записи не доказывает ни успеха, ни
+        отказа: запрос мог ещё не дойти -- unknown."""
+        try:
+            budget = deadline if deadline is not None else time.monotonic() + self.timeout
+            status, value = self._registered(ticket, deadline=budget)
+            if status == 404:
+                return RegisterProof('unknown','scheduler-uncertain')
+            if (value['Meta'] == ticket.job['Meta'] and value.get('Stop') is not True
+                    and value['JobModifyIndex'] > ticket.expected_index):
+                return RegisterProof('succeeded','job-registered',value['JobModifyIndex'])
+            return RegisterProof('failed','conditional-refusal')
+        except Exception:
+            return RegisterProof('unknown','scheduler-uncertain')

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from ..access.context import ActorContext, ActorKind
@@ -176,6 +176,31 @@ class Operations:
             raise Refused('epoch_conflict')
         return state
 
+    def _pending_creates(self, installation):
+        # Restore/installation lock уже взят caller'ом. Конверсия SQL-атомарна:
+        # один actor/request/digest занимает либо reservation, либо Operation.
+        converted = m.Operation.objects.filter(actor_id=OuterRef('actor_id'),
+            request_id=OuterRef('request_id'), digest=OuterRef('digest'))
+        attempts = m.CreateProvisioningAttempt.objects.filter(reservation_id=OuterRef('pk'))
+        return (m.CreateReservation.objects.filter(Q(epoch=installation.epoch) | Q(epoch=None))
+                .filter(~Exists(converted))
+                .filter(~Exists(attempts) | Exists(attempts.filter(refused_at=None))))
+
+    def _admission(self, installation, projects, *, actor=None, request_id=None):
+        """Общий bound под restore lock: provisioning не обходит другие lanes."""
+        if actor is not None and m.CreateReservation.objects.filter(
+                actor_id=actor.user_id, request_id=request_id).exists():
+            # Общий request journal: другая команда не крадёт ещё не
+            # сконвертированный create intent того же actor/request.
+            raise Refused('request_conflict')
+        active = m.Operation.objects.filter(epoch=installation.epoch, state__in=_ACTIVE)
+        pending = self._pending_creates(installation)
+        if active.count() + pending.count() >= self.queue_limit or any(
+                active.filter(projects=project).count()
+                + pending.filter(Q(project_id=project) | Q(project=None)).count() >= self.project_limit
+                for project in projects):
+            raise Refused('admission_limit')
+
     def _authorize(self, actor, action, node_id, projects=()):
         self.access.authorize(actor, action, node_ids=(node_id,), project_ids=tuple(projects))
 
@@ -243,6 +268,8 @@ class Operations:
             return self.messages
         if action == 'wipe' and self.wipes is not None:
             return self.wipes
+        if action == 'create' and getattr(self, 'launch_machine', None) is not None:
+            return self.launch_machine
         raise Refused('controller_unavailable', safe_reason='named puppet handler is unavailable')
 
     def submit_node(self, actor, command):
@@ -277,9 +304,7 @@ class Operations:
                 raise Refused('deadline_horizon')
             if node.revision != command.expected_revision:
                 raise Refused('revision_conflict')
-            active = m.Operation.objects.filter(state__in=_ACTIVE, epoch=installation.epoch)
-            if active.count() >= self.queue_limit or any(active.filter(projects=project).count() >= self.project_limit for project in projects):
-                raise Refused('admission_limit')
+            self._admission(installation, projects, actor=actor, request_id=command.request_id)
             row = m.Operation.objects.create(actor_id=actor.user_id, actor_binding=_binding(actor),
                 request_id=command.request_id, digest=command.digest(), epoch=command.epoch,
                 restore_generation=installation.generation, action=command.action, node=node,
@@ -532,30 +557,34 @@ class Operations:
 
     def handler(self, operation_id):
         self._require_binding()
-        return m.Step.objects.get(operation_id=operation_id).name
+        # Многошаговая операция (#643): следующий незавершённый шаг по порядку.
+        return m.Step.objects.filter(operation_id=operation_id).exclude(outcome='succeeded').order_by(
+            'ordinal').values_list('name', flat=True).first()
 
-    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build'), node_id=None):
+    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete',
+                                            'scheduler_register', 'activate_grant'), node_id=None):
         self._require_binding()
         if type(limit) is not int or not 1 <= limit <= 8:
             raise ValueError('worker batch exceeds controller safety caps')
-    def pending(self, *, limit=8, handlers=('node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete'),
-                node_id=None):
-        self._require_binding()
-        if type(limit) is not int or not 1 <= limit <= 8:
-            raise ValueError('worker batch exceeds controller safety caps')
-        if not handlers or not set(handlers) <= {'node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete'}:
+        if not handlers or not set(handlers) <= {'node_eligibility', 'image_build', 'scheduler_stop', 'scheduler_delete',
+                                                 'scheduler_register', 'activate_grant'}:
             raise ValueError('finite controller worker handlers required')
         # Stop lane (#625) остаётся в общем discovery: worker исполняет её только
-        # с_bound stops портом, что задаёт его handlers tuple.
-        work = Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action__in=('stop_job', 'delete')) | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
+        # с_bound stops портом, что задаёт его handlers tuple. Create (#643) ждёт
+        # регистрации, пока его первый шаг не взят.
+        work = (Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action__in=('stop_job', 'delete'))
+                | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
+                | Q(state=State.ACCEPTED, action='create', step__name='scheduler_register', step__token=None)
+                # Активация -- только после успешных шагов узла (#643).
+                | (Q(state=State.RUNNING, action='create', step__name='activate_grant', step__token=None)
+                   & ~Exists(m.Step.objects.filter(operation=OuterRef('pk'), name__in=(
+                       'scheduler_register', 'apply_identity', 'confirm_ready')).exclude(outcome='succeeded'))))
         work &= Q(step__name__in=handlers)
         if node_id is not None:
             # Service enrollment касается только node-eligibility lane. Build
             # scope — весь pinned plan, не его storage anchor Operation.node_id.
             work &= ~Q(step__name='node_eligibility') | Q(node_id=node_id)
         # Фильтр capability до LIMIT: чужая lane не вытесняет исполнимую работу.
-        # Stale lease разрешает только inspection прежнего token, не новый apply.
-        return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
         # Stale lease разрешает только inspection прежнего token, не новый apply.
         return tuple(m.Operation.objects.filter(work).order_by('created_at', 'id').values_list('pk', flat=True)[:limit])
 

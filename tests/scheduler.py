@@ -53,6 +53,7 @@ import hermetic  # noqa: F401 -- настройки не с этой машин�
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from _lib import Checks  # noqa: E402
 
+from mop.server.operations import scheduler as port  # noqa: E402
 from mop.server.operations.scheduler import (  # noqa: E402
     BodyStopProof, JobPin, NomadStopScheduler, SchedulerUnavailable, StopProof,
     StopTicket, job_metadata)
@@ -119,6 +120,10 @@ class Peer:
                     delay = outer.state['get_delay']
                     outer.state['get_delay'] = 0.0
                     time.sleep(delay)
+                if outer.state['job'] is None:
+                    # #643: отсутствующий job -- 404, как у Nomad.
+                    self._reply({'error': 'job not found'}, 404)
+                    return
                 value = copy.deepcopy(outer.state['job'])
                 if outer.state['replaced_index'] is not None:
                     value['JobModifyIndex'] = outer.state['replaced_index']
@@ -127,13 +132,21 @@ class Peer:
             def do_POST(self):
                 value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 outer.state['posts'].append(value)
-                if (value.get('EnforceIndex') is not True
-                        or value.get('JobModifyIndex') != outer.state['job']['JobModifyIndex']):
+                # #643: JobModifyIndex 0 при EnforceIndex -- «только если job нет».
+                current = outer.state['job']['JobModifyIndex'] if outer.state['job'] else 0
+                if outer.state['replaced_index'] is not None:
+                    current = outer.state['replaced_index']
+                if value.get('EnforceIndex') is not True or value.get('JobModifyIndex') != current:
                     self._reply({'error': 'Enforcing job modify index'}, 409)
                     return
                 outer.state['writes'] += 1
                 outer.state['job'] = copy.deepcopy(value['Job'])
-                outer.state['job']['JobModifyIndex'] += 1
+                outer.state['job']['JobModifyIndex'] = current + 1
+                outer.state['replaced_index'] = None
+                if outer.state.get('lose_post'):
+                    # COMMIT состоялся, ответ потерян.
+                    self.close_connection = True
+                    return
                 self._reply({'JobModifyIndex': outer.state['job']['JobModifyIndex']})
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler, bind_and_activate=False)
@@ -285,6 +298,101 @@ def check_all_addresses_701(c):
         peer.close()
 
 
+# ── #643: условная регистрация нового тела ──────────────────────────────
+# HYPOTHESIS: у порта планировщика есть только stop/delete; job нового тела
+# зарегистрировать нечем, и create/update/recycle не на чем строить.
+# SOLUTION: register_job -- одна условная запись (EnforceIndex: 0 -- «job
+# нет», иначе текущий индекс), readback точной адресной Meta; потерянный ответ
+# -- unknown без второй записи, сверка inspect_register только чтением.
+# STATUS: FIXED — see #643
+def register_ticket(peer, scheduler_id, *, expected=0, seconds=30, meta=None):
+    target = Target(uuid4(), uuid4(), uuid4(), uuid4(), uuid4(), 1, 'role', 'a' * 64, uuid4(), 3, 7)
+    epoch, restore = uuid4(), uuid4()
+    job = {'ID': 'owned-job', 'Name': 'pu-owned-1', 'Type': 'service',
+           'Meta': {**port.addressed_metadata(epoch, restore, target), 'mop.launch_schema': '1',
+                    **(meta or {})}}
+    return port.RegisterTicket(epoch, target, scheduler_id, 'owned-job', 'default', restore, expected,
+                               job, uuid4(), uuid4(), datetime.now(timezone.utc) + timedelta(seconds=seconds))
+
+
+def check_register_643(c):
+    if not c.check("#643 the scheduler port offers conditional registration",
+                   hasattr(port, 'RegisterTicket') and hasattr(NomadStopScheduler, 'register_job')):
+        return
+    peer = Peer()
+    try:
+        scheduler_id = uuid4()
+        peer.state['job'] = None
+        value = register_ticket(peer, scheduler_id)
+        proof = adapter(peer, scheduler_id).register_job(value)
+        c.expect("#643 an absent job is registered once and read back",
+                 (proof.outcome, proof.evidence, proof.modify_index), ('succeeded', 'job-registered', 1))
+        c.expect("#643 registration is one conditional write on index 0",
+                 [(p['EnforceIndex'], p['JobModifyIndex']) for p in peer.state['posts']], [(True, 0)])
+        c.expect("#643 the registered job is exactly the rendered one", peer.state['job']['Meta'], value.job['Meta'])
+        again = adapter(peer, scheduler_id).register_job(value)
+        c.expect("#643 create never overwrites an existing job",
+                 (again.outcome, again.evidence, peer.state['writes']), ('failed', 'conditional-refusal', 1))
+    finally:
+        peer.close()
+    # update: замена только ожидаемого индекса; сдвинутый индекс -- отказ без записи.
+    peer = Peer()
+    try:
+        scheduler_id = uuid4()
+        old = ticket(peer, scheduler_id, 30)
+        value = register_ticket(peer, scheduler_id, expected=7)
+        proof = adapter(peer, scheduler_id).register_job(value)
+        c.expect("#643 update replaces the expected index",
+                 (proof.outcome, proof.modify_index), ('succeeded', 8))
+        peer.state['replaced_index'] = 12
+        stale = register_ticket(peer, scheduler_id, expected=8)
+        proof = adapter(peer, scheduler_id).register_job(stale)
+        c.expect("#643 a moved index refuses without a write",
+                 (proof.outcome, proof.evidence, peer.state['writes']), ('failed', 'conditional-refusal', 1))
+        del old
+    finally:
+        peer.close()
+    # Потерянный ответ после COMMIT: unknown, второй записи нет; сверка чтением.
+    peer = Peer()
+    try:
+        scheduler_id = uuid4()
+        peer.state['job'] = None
+        peer.state['lose_post'] = True
+        value = register_ticket(peer, scheduler_id)
+        proof = adapter(peer, scheduler_id).register_job(value)
+        c.expect("#643 a lost register reply is unknown", (proof.outcome, proof.evidence),
+                 ('unknown', 'scheduler-uncertain'))
+        c.expect("#643 a lost register reply is not reposted", peer.state['writes'], 1)
+        proof = adapter(peer, scheduler_id).inspect_register(value)
+        c.expect("#643 reconciliation reads the committed registration",
+                 (proof.outcome, proof.evidence, proof.modify_index), ('succeeded', 'job-registered', 1))
+        c.expect("#643 reconciliation never writes", peer.state['writes'], 1)
+        foreign = register_ticket(peer, scheduler_id, meta={'mop.launch_schema': '2'})
+        proof = adapter(peer, scheduler_id).inspect_register(foreign)
+        c.expect("#643 a job with other metadata is not ours", (proof.outcome, proof.evidence),
+                 ('failed', 'conditional-refusal'))
+    finally:
+        peer.close()
+    # Истёкший intent и неадресная Meta -- отказ до любого запроса.
+    peer = Peer()
+    try:
+        scheduler_id = uuid4()
+        peer.state['job'] = None
+        proof = adapter(peer, scheduler_id).register_job(register_ticket(peer, scheduler_id, seconds=-1))
+        c.expect("#643 an expired register intent refuses before any request",
+                 (proof.outcome, peer.state['gets'], peer.state['posts']), ('failed', 0, []))
+        bad = register_ticket(peer, scheduler_id)
+        try:
+            port.RegisterTicket(bad.epoch, bad.target, bad.scheduler_id, bad.job_id, bad.namespace,
+                bad.restore_generation, 0, {**bad.job, 'Meta': {'mop.launch_schema': '1'}},
+                bad.operation_id, bad.token, bad.not_after)
+            c.fail("#643 a job without the addressed pins is refused", "ticket accepted")
+        except ValueError:
+            c.check("#643 a job without the addressed pins is refused", True)
+    finally:
+        peer.close()
+
+
 def main():
     c = Checks()
 
@@ -418,6 +526,7 @@ def main():
         peer.close()
 
     check_all_addresses_701(c)
+    check_register_643(c)
     return c.report("scheduler")
 
 

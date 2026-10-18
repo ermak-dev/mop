@@ -108,6 +108,29 @@ class DeletePuppet(APIView):
         return _reply(operation, status=202 if operation['state'] == 'accepted' else 200)
 
 
+@method_decorator(never_cache, name='dispatch')
+class CreatePuppet(APIView):
+    def post(self, request, project_id):
+        from mop.common.credentials import Credential
+        from ..operations.commands import parse_create
+        try:
+            command = parse_create(project_id, decode_body(request.body))
+        except InvalidCommand as error:
+            raise serializers.ValidationError(str(error)) from None
+        # Грант выдаёт credential-сервис от имени того же человека: его
+        # credential пересылается, не сохраняется (#643).
+        credential = (Credential('token', request.auth.key) if request.auth is not None
+                      else Credential('session', request.session.session_key))
+        operation = create_api().creates.submit(request.actor, command, credential=credential)
+        return _reply(operation, status=202 if operation['state'] == 'accepted' else 200)
+
+
+def create_api():
+    # Credential-сервис и планировщик ставит composition установки (#644).
+    from .createbinding import service
+    return service()
+
+
 def delete_api():
     # Порт планировщика ставит composition контроллера; без него -- отказ.
     from .stopbinding import service

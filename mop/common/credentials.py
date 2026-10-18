@@ -20,6 +20,10 @@ class CredentialError(ValueError):
     """Безопасный отказ; transport timeout мутации означает неизвестный исход."""
 
 
+class CredentialRefused(CredentialError, PermissionError):
+    """Явный отказ службы, не потерянный ответ/неизвестный исход мутации."""
+
+
 class Command(str, Enum):
     CREATE = 'create'
     STAGE = 'stage'
@@ -31,6 +35,7 @@ class Command(str, Enum):
     APPROVE_DEFINITION = 'approve_definition'
     RESERVE_GRANT = 'reserve_grant'
     PROVISION_GRANT = 'provision_grant'
+    ACTIVATE_GRANT = 'activate_grant'
     PUBLISH_PREPARATION = 'publish_preparation'
     READ_PREPARATION = 'read_preparation'
     APPROVE_PREPARATION = 'approve_preparation'
@@ -229,6 +234,7 @@ def parse_request(data):
               Command.APPROVE_DEFINITION: ('definition_id',),
               Command.RESERVE_GRANT: ('project_id', 'definition_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),
               Command.PROVISION_GRANT: ('grant_id', 'expected_revision'),
+              Command.ACTIVATE_GRANT: ('grant_id', 'expected_revision'),
               Command.PUBLISH_PREPARATION: ('project_id', 'tasks', 'variables', 'provenance', 'commit', 'secret_refs'),
               Command.READ_PREPARATION: ('revision_id',), Command.APPROVE_PREPARATION: ('revision_id',)}
     exact(args, shapes[command])

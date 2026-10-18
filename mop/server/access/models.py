@@ -83,8 +83,8 @@ class CredentialBinding(Identifier):
 # Технические контексты enrollment (#687): узловой исполнитель и безузловые
 # controller/credential/builder контексты. Словарь конечен; прав он не даёт —
 # операционные права остаются штатным Django RBAC (#685).
-SERVICE_USE_CASES = ('node-executor', 'controller-worker', 'credential-runtime', 'image-builder')
-NODE_ENROLLMENT_USE_CASES = ('node-executor',)
+SERVICE_USE_CASES = ('node-executor', 'controller-worker', 'credential-runtime', 'image-builder', 'grant-activator')
+NODE_ENROLLMENT_USE_CASES = ('node-executor', 'grant-activator')
 
 
 class ServiceEnrollment(Identifier):
@@ -383,7 +383,8 @@ class Grant(Evidence):
         # Владелец регистрации access-прав жизненного цикла делегирования (#685):
         # ровно один ContentType на codename; deprecated Principal их не держит.
         permissions = [('view_role', 'Can view role'), ('approve_role', 'Can approve role'),
-                       ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant')]
+                       ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant'),
+                       ('activate_grant', 'Can activate claimed create grant')]
         constraints = [models.CheckConstraint(condition=Q(state__in=('reserved', 'active', 'revoked', 'expired'), revision__gte=1), name='access_grant_lifecycle'),
             models.CheckConstraint(condition=Q(retirement__in=('pending', 'applied', 'refused', 'unknown')), name='access_grant_retirement'),
             models.CheckConstraint(condition=~Q(state='active') | Q(credential_version__isnull=False), name='access_active_credential')]

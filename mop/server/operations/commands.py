@@ -18,7 +18,11 @@ _MAX_REVISION = 10 ** 128 - 1
 _COMMON = frozenset({"schema_version", "epoch", "request_id", "incarnation",
                      "expected_revision", "not_after", "params"})
 _FIELDS = _COMMON | {"target_id", "body", "fresh", "message", "priority",
-                     "wait_seconds", "notify_when_idle", "digest_key"}
+                     "wait_seconds", "notify_when_idle", "digest_key",
+                     "project_id", "node_id", "definition_id"}
+# Создание (#643): цели ещё нет -- ни incarnation, ни expected_revision; target,
+# инкарнацию и владельца назначает сервер, не тело запроса.
+_CREATE = frozenset({"schema_version", "epoch", "request_id", "not_after", "params"})
 _MESSAGES = {
     "invalid_field": "invalid command input",
     "unknown_fields": "unknown command fields are not allowed",
@@ -189,6 +193,45 @@ def parse_dispatch(body):
     value = parse_send(body)
     return DispatchCommand(value.intent, value.message, value.priority,
                            value.wait_seconds, value.notify_when_idle)
+
+
+@dataclass(frozen=True)
+class CreateIntent:
+    epoch: UUID
+    request_id: UUID
+    project_id: UUID
+    not_after: datetime
+
+    def __post_init__(self):
+        for name in ("epoch", "request_id", "project_id"):
+            _require(type(getattr(self, name)) is UUID, name)
+        _require(type(self.not_after) is datetime and type(self.not_after.tzinfo) is timezone
+                 and self.not_after.utcoffset().total_seconds() == 0, "not_after")
+
+
+@dataclass(frozen=True)
+class CreateCommand:
+    """Новый папет (#643): узел и одобренное определение роли; остальное -- сервера."""
+    intent: CreateIntent
+    node_id: UUID
+    definition_id: UUID
+
+    def __post_init__(self):
+        _require(type(self.intent) is CreateIntent, "body")
+        _require(type(self.node_id) is UUID, "node_id")
+        _require(type(self.definition_id) is UUID, "definition_id")
+
+
+def parse_create(project_id, body):
+    _shape(body, _CREATE, _CREATE, "body")
+    if type(body["schema_version"]) is not int or body["schema_version"] != 1:
+        raise InvalidCommand("unsupported_schema")
+    params = body["params"]
+    _shape(params, {"node_id", "definition_id"}, {"node_id", "definition_id"}, "params")
+    intent = CreateIntent(_uuid(body["epoch"], "epoch"), _uuid(body["request_id"], "request_id"),
+                          _uuid(project_id, "project_id"), _deadline(body["not_after"]))
+    return CreateCommand(intent, _uuid(params["node_id"], "node_id"),
+                         _uuid(params["definition_id"], "definition_id"))
 
 
 def _intent(target_id, body):
