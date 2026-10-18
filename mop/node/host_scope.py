@@ -158,6 +158,15 @@ class Reference:
         return cls(Scope.parse(value['scope']), value['invocation_id'], value['boot_id'])
 
 
+class StartUnknown(Unknown):
+    """Внутренний launch outcome; reference — proof, не успешный snapshot."""
+    def __init__(self, reason, reference=None):
+        if reference is not None and type(reference) is not Reference:
+            raise Refused('typed uncertain HOST start reference required')
+        super().__init__(reason)
+        self.reference = reference
+
+
 @dataclass(frozen=True)
 class Request:
     action: str
@@ -243,6 +252,7 @@ class HostScopes(Protocol):
 
 
 class OsAdapter(Protocol):
+    """Неизвестный start даёт cleanup proof только через StartUnknown.reference."""
     async def inspect(self, scope: Scope) -> Facts | None: ...
     async def start(self, scope: Scope) -> Facts: ...
     async def retire(self, reference: Reference) -> Facts: ...

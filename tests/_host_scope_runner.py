@@ -16,9 +16,18 @@ if len(sys.argv) != 3 or sys.argv[1] != '--scope':
 scope = Scope.from_unit(sys.argv[2])
 body = Path('/var/lib/mop/host-bodies') / scope.launch_id
 consumer = json.loads((body/'consumer.json').read_text())
-if consumer != {'fixture': 'double-fork', 'schema_version': 1}:
+if consumer not in ({'fixture': 'double-fork', 'schema_version': 1},
+                    {'fixture': 'double-fork', 'schema_version': 1, 'hold_starter': True}):
     raise SystemExit(3)
 starter = os.getpid()
+if consumer.get('hold_starter'):
+    # Только owned fixture: root фиксирует первый actual snapshot до double-fork.
+    (body/'starter-ready').write_text(str(starter))
+    deadline = time.monotonic()+5.
+    while not (body/'starter-release').exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('fixture starter barrier deadline expired')
+        time.sleep(.01)
 if os.fork():
     raise SystemExit(0)
 os.setsid()
