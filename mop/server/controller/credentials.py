@@ -269,6 +269,9 @@ class CredentialApplication:
         elif command is p.Command.INITIAL_LAUNCH:
             from .launchdelivery import deliver_initial
             result = deliver_initial(self, actor, args['work'])
+        elif command is p.Command.MANAGEMENT_CONTEXT:
+            from .managementcontext import deliver
+            result = deliver(self, actor, args['request'])
         elif command is p.Command.DEFINITION:
             row = self.grants.read_definition(actor, **args)
             result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)

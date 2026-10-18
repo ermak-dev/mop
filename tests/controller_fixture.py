@@ -215,6 +215,10 @@ test:py3.12:
         ('InstalledCredentialUids', 'test_fresh_installer_starts_rootless_daemon_with_separate_pg_login_and_frontend_uid'),
     })
 
+    # #742: новая actual UID граница — union, не замена исходного #674 набора.
+    MANAGEMENT_ROOT_ONLY_IDS = frozenset({('ManagementContextUids',
+        'test_management_context_actual_frontend_uid_has_no_human_or_generic_token_authority')})
+
     def _test_inventory(self, name):
         import ast
         from pathlib import Path
@@ -236,7 +240,8 @@ test:py3.12:
     def test_uid_gate_holds_exactly_the_moved_root_only_ids(self):
         import ast
         gate_ids, gate_source, tree = self._test_inventory(self.ROOT_GATE_MODULE)
-        self.assertEqual(gate_ids, self.REQUIRED_ROOT_ONLY_IDS)
+        required = self.REQUIRED_ROOT_ONLY_IDS | self.MANAGEMENT_ROOT_ONLY_IDS
+        self.assertEqual(gate_ids, required)
         self.assertNotIn('skipTest', gate_source)
         self.assertIn('os.geteuid() != 0', gate_source)
         # Точечный вход: _credential_uid_fixture.py объявляет метки ровно
@@ -251,7 +256,7 @@ test:py3.12:
                 labels = ast.literal_eval(node.value)
         self.assertTrue(labels, 'the gate entry must declare its exact labels')
         expected = [f'{self.ROOT_GATE_MODULE.removesuffix(".py")}.{cls}.{method}'
-                    for cls, method in self.REQUIRED_ROOT_ONLY_IDS]
+                    for cls, method in required]
         # #669 добавляет application send/take UID, не заменяет ни один из
         # исходных credential IDs и не разрешает wildcard/class discovery.
         private_ids, private_source, _ = self._test_inventory('_endpoint_credential_uid_gate.py')

@@ -77,6 +77,19 @@ class InitialLaunch(MachineView):
         return Response(read_initial(Credential('token', request.auth.key), p.work_to_wire(work)))
 
 
+class ManagementContext(MachineView):
+    def post(self, request):
+        from mop.common.credentials import Credential
+        from mop.common.management_context import ManagementRequest
+        from mop.server.access.services import node_executor, Denied
+        from .managementcontext import read
+        metadata = ManagementRequest.parse(request.data)
+        node_executor(request.actor, metadata.scope.node_id)
+        if request.auth is None:
+            raise Denied('machine token required for management context')
+        return Response(read(Credential('token', request.auth.key), metadata.wire()))
+
+
 class ExecutorState(MachineView):
     def get(self, request):
         values = query(request.query_params, ('schema_version','node_id'))

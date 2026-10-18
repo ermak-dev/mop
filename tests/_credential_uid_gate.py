@@ -19,7 +19,7 @@ import unittest
 from uuid import UUID
 
 from asgiref.sync import async_to_sync
-from django.test import override_settings
+from django.test import TransactionTestCase, override_settings
 
 import _credential_cases as socket_cases
 import _credential_binding_cases as binding_cases
@@ -128,6 +128,74 @@ print('addressed-only')
                         'target': str(self.assignment.id)}).encode())
                 self.assertEqual(process.returncode, 0, error.decode())
                 self.assertEqual(output.strip(), b'addressed-only')
+            finally:
+                await server.aclose()
+                await runtime.aclose()
+        async_to_sync(run)()
+
+
+class ManagementContextUids(TransactionTestCase):
+    """Тот же actual UID gate, original inventory остаётся неизменным."""
+    serialized_rollback = True
+    import _management_context_cases as management
+    setUp = management.ManagementContext.setUp
+    fixture = management.ManagementContext.fixture
+    delivery = management.ManagementContext.delivery
+    reserved_grant = management.ManagementContext.reserved_grant
+    grant_assignment = management.ManagementContext.grant_assignment
+    enroll = management.ManagementContext.enroll
+
+    def test_management_context_actual_frontend_uid_has_no_human_or_generic_token_authority(self):
+        if os.geteuid() != 0:
+            raise AssertionError('cross-UID gate requires the owned root container')
+        import sys
+        from mop.server.controller.runtime import Runtime
+        self.fixture()
+        shared = tempfile.TemporaryDirectory(prefix='mop-management-crossuid-', dir='/tmp')
+        self.addCleanup(shared.cleanup)
+        self.path = str(Path(shared.name) / 'credential.sock')
+        os.chmod(shared.name, 0o750)
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            app = self.service.application()
+        code = '''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from mop.common.credential_client import CredentialClient
+from mop.common.credentials import Credential, CredentialError
+p = json.loads(sys.stdin.read())
+assert os.geteuid() == 65534
+client = CredentialClient(p['path'], server_uid=0)
+value = client.read_management_context(Credential('token', p['machine']), p['request'])
+assert value.token == p['canonical'] and value.subject_id == p['subject']
+assert p['canonical'] not in repr(value)
+for auth, request in ((p['human'], p['request']),
+        (p['machine'], {**p['request'], 'actor_id': p['subject']}),
+        (p['machine'], {**p['request'], 'origin': 'https://foreign.invalid'})):
+    try:
+        client.read_management_context(Credential('token', auth), request)
+    except (CredentialError, ValueError):
+        pass
+    else:
+        raise AssertionError('peer UID supplied management authority')
+assert not any(n.startswith(('django', 'mop.server', 'nacl')) for n in sys.modules)
+print('exact-active-agent-only')
+'''
+        async def run():
+            runtime = Runtime(queue_limit=0)
+            server = self.service.CredentialService(self.path, application=app, runtime=runtime,
+                allowed_uids=(65534,), socket_group=os.getegid())
+            await server.start()
+            try:
+                process = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', code,
+                    str(Path(__file__).resolve().parents[1]), user=65534, group=os.getegid(), extra_groups=(),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    env={k: v for k, v in os.environ.items() if not k.startswith(('MOP_', 'DJANGO_'))})
+                async with asyncio.timeout(10):
+                    output, error = await process.communicate(json.dumps({'path': self.path,
+                        'machine': self.machine_auth.value, 'human': self.token, 'request': self.request,
+                        'canonical': self.subject_token, 'subject': self.subject.id}).encode())
+                self.assertEqual(process.returncode, 0, error.decode())
+                self.assertEqual(output.strip(), b'exact-active-agent-only')
             finally:
                 await server.aclose()
                 await runtime.aclose()

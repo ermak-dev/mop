@@ -12,6 +12,15 @@ def uuid_value(value):
 
 
 @dataclass(frozen=True)
+class AgentManagementCredential:
+    """Существующий credential точного active delegation; не issuance/transport config."""
+    subject_id: int
+    credential_id: UUID
+    expires_at: datetime
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class RoleBinding:
     project_id: UUID
     target_id: UUID
