@@ -48,6 +48,9 @@ class Supervisor:
         self.installed, self.adapter = installed, adapter
         self.capacity, self.timeout = capacity, timeout
         self.active = {}
+        # Завершённый OS start ещё принадлежит root до exact receipt ACK.
+        # Inspect может идти параллельно ожиданию ACK, но не cleanup.
+        self._receipts = {}
         self._fences = set()
         self._closed = False
         self.last_error = None
@@ -88,16 +91,18 @@ class Supervisor:
             raise Unknown('HOST containment still populated; retirement unknown')
         return snapshot
 
-    async def execute(self, uid, request):
+    async def execute(self, uid, request, *, receipt=False):
         if type(uid) is not int or uid != self.installed.node_uid:
             raise Refused('HOST supervisor peer is not the installed node-service UID')
         if type(request) is not Request:
             raise Refused('typed finite HOST request required')
         if self._closed:
             raise Refused('HOST supervisor is closing')
-        if request.scope in self.active:
+        pending = self._receipts.get(request.scope)
+        if request.scope in self.active or pending is not None and pending.abandoned:
             raise Refused('HOST scope action already active')
-        if len(self.active) >= self.capacity:
+        owned_scopes = self.active.keys() | self._receipts.keys()
+        if request.scope not in owned_scopes and len(owned_scopes) >= self.capacity:
             raise Refused('HOST supervisor busy; action capacity exhausted')
         if request.action == 'start':
             if request.scope in self._fences:
@@ -110,7 +115,10 @@ class Supervisor:
         self.active[request.scope] = action
         try:
             async with asyncio.timeout(self.timeout):
-                return await asyncio.shield(action.task)
+                snapshot = await asyncio.shield(action.task)
+                if receipt and request.action == 'start':
+                    self._receipts[request.scope] = action
+                return snapshot
         except (TimeoutError, asyncio.CancelledError) as error:
             self._abandon(action)
             if isinstance(error, asyncio.CancelledError):
@@ -120,13 +128,17 @@ class Supervisor:
             if not action.abandoned:
                 self.active.pop(request.scope, None)
 
-    def _abandon(self, action):
+    def _abandon(self, action, predecessor=None):
         action.abandoned = True
         if action.cleanup is None:
-            action.cleanup = asyncio.create_task(self._cleanup(action))
+            action.cleanup = asyncio.create_task(self._cleanup(action, predecessor))
 
-    async def _cleanup(self, action):
+    async def _cleanup(self, action, predecessor):
         try:
+            if predecessor is not None and predecessor is not action:
+                # Ждём конец уже начатого OS effect, не его успех. Ошибка
+                # inspect не отменяет независимую exact-owned cleanup proof.
+                await asyncio.wait({predecessor.task})
             snapshot = await action.task
             if action.request.action == 'start':
                 facts = await self.adapter.inspect(snapshot.reference.scope)
@@ -138,29 +150,47 @@ class Supervisor:
                     raise Unknown('abandoned HOST start remains populated')
         except (Refused, Unknown) as error:
             self.last_error = str(error)
+        except asyncio.CancelledError:
+            self.last_error = 'HOST cleanup cancelled; outcome unknown'
+            raise
         except Exception as error:
             self.last_error = 'HOST cleanup failed: ' + type(error).__name__
         finally:
-            self.active.pop(action.request.scope, None)
+            address = action.request.scope
+            if self.active.get(address) is action:
+                self.active.pop(address)
+            if self._receipts.get(address) is action:
+                self._receipts.pop(address)
+
+    def _receipt(self, request, snapshot):
+        action = self._receipts.get(request.scope)
+        if (action is None or action.request != request
+                or action.task.result() != snapshot):
+            raise Unknown('HOST start receipt ownership mismatch; cleanup unknown')
+        return action
+
+    def acknowledge(self, request, snapshot):
+        """Только exact peer ACK передаёт ownership успешного start caller."""
+        if request.action == 'start':
+            action = self._receipt(request, snapshot)
+            if action.abandoned:
+                raise Unknown('HOST start receipt already abandoned; cleanup active')
+            self._receipts.pop(request.scope)
 
     async def abandon_started(self, request, snapshot):
-        """Ответ не подтверждён peer ACK; cleanup остаётся у supervisor."""
+        """Ответ не подтверждён peer ACK; exact cleanup ждёт текущий inspect."""
         if request.action != 'start':
             return
-        if request.scope in self.active:
-            raise Unknown('HOST cleanup already active')
-        async def result():
-            return snapshot
-        action = _Action(request, asyncio.create_task(result()))
-        self.active[request.scope] = action
-        self._abandon(action)
+        action = self._receipt(request, snapshot)
+        self._abandon(action, self.active.get(request.scope))
         await asyncio.shield(action.cleanup)
 
     async def aclose(self):
         self._closed = True
-        for action in tuple(self.active.values()):
-            self._abandon(action)
-        tasks = [a.cleanup for a in self.active.values() if a.cleanup is not None]
+        actions = tuple(self.active.values()) + tuple(self._receipts.values())
+        for action in actions:
+            self._abandon(action, self.active.get(action.request.scope))
+        tasks = {a.cleanup for a in actions if a.cleanup is not None}
         if tasks:
             _, pending = await asyncio.wait(tasks, timeout=self.timeout)
             if pending:
@@ -248,7 +278,7 @@ class SocketServer:
                 raise Refused('HOST socket peer is not the installed node-service UID')
             async with asyncio.timeout(self.timeout):
                 request = Request.decode(await read_frame(reader))
-            snapshot = await self.supervisor.execute(uid, request)
+            snapshot = await self.supervisor.execute(uid, request, receipt=True)
             async with asyncio.timeout(self.timeout):
                 writer.write(encode(dict(schema_version=1, request_id=request.request_id,
                     status='ok', snapshot=snapshot.wire(), error=None))+b'\n')
@@ -256,6 +286,7 @@ class SocketServer:
                 ack = decode(await read_frame(reader))
                 if ack != dict(schema_version=1, ack=request.request_id) or type(ack.get('schema_version')) is not int:
                     raise Refused('exact HOST receipt ACK required')
+                self.supervisor.acknowledge(request, snapshot)
                 acknowledged = True
         except (Refused, Unknown) as error:
             self.last_error = str(error)

@@ -355,6 +355,9 @@ class SocketTests(unittest.IsolatedAsyncioTestCase):
         client = Client(self.path, node_uid=os.getuid(), supervisor_uid=os.getuid(), timeout=.5, work=w)
         snap = await client.start(s, EffectGuard(allow, lambda: None))
         self.assertTrue(snap.populated)
+        await self.server.drain()
+        self.assertFalse(self.owner._receipts)
+        self.assertTrue(self.adapter.units[s].populated, 'exact ACK transfers ownership, not retirement')
         empty = await client.retire(snap.reference, EffectGuard(allow, lambda: None))
         self.assertFalse(empty.populated)
 
@@ -370,6 +373,116 @@ class SocketTests(unittest.IsolatedAsyncioTestCase):
         await self.server.drain()
         self.assertFalse(self.adapter.units[s].populated)
         self.assertEqual(sum(c[0] == 'retire' for c in self.adapter.calls), 1)
+
+    async def lost_ack_during_inspection(self, *, loss='disconnect', foreign=False,
+                                         kill_error=False, stalled=False):
+        """Real Unix sockets + barriers; fake OS facts, не containment proof."""
+        s = scope()
+        request = self.m.Request('start', s, str(uuid4()))
+        reader, writer = await asyncio.open_unix_connection(str(self.path))
+        self.addCleanup(writer.close)
+        writer.write(request.encode()+b'\n')
+        await writer.drain()
+        response = self.m.decode((await reader.readline()).rstrip(b'\n'))
+        self.assertEqual(response['status'], 'ok')
+        snapshot = self.m.Snapshot.parse(response['snapshot'])
+        self.assertIn(s, self.owner._receipts, 'successful start stays owned until exact ACK')
+        start_handler, = self.server._handlers
+        entered, release, abandoning = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_inspect = self.adapter.inspect
+        async def held(address):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await original_inspect(address)
+        self.adapter.inspect = held
+        original_abandon = self.owner.abandon_started
+        async def abandon(*args):
+            abandoning.set()
+            return await original_abandon(*args)
+        self.owner.abandon_started = abandon
+        inspect_reader, inspect_writer = await asyncio.open_unix_connection(str(self.path))
+        self.addCleanup(inspect_writer.close)
+        inspection = self.m.Request('inspect', s, str(uuid4()), snapshot.reference)
+        inspect_writer.write(inspection.encode()+b'\n')
+        await inspect_writer.drain()
+        async with asyncio.timeout(1.):
+            await entered.wait()
+            if loss == 'cancel':
+                start_handler.cancel()
+            elif loss == 'malformed':
+                writer.write(self.m.encode(dict(schema_version=1, ack=str(uuid4())))+b'\n')
+                await writer.drain()
+            else:
+                writer.close()
+                await writer.wait_closed()
+            await abandoning.wait()
+        if foreign:
+            self.adapter.units[s] = replace(self.adapter.units[s], invocation_id=uuid4().hex)
+        self.adapter.kill_error = kill_error
+        if stalled:
+            self.owner.timeout = .05
+            self.server.timeout = .05
+            try:
+                async with asyncio.timeout(1.):
+                    with self.assertRaisesRegex(self.m.Unknown, 'active|cleanup|unknown'):
+                        await self.server.aclose()
+                self.assertTrue(self.adapter.units[s].populated)
+            finally:
+                release.set()
+                self.owner.timeout = .5
+                await self.owner.aclose()
+        else:
+            release.set()
+            async with asyncio.timeout(1.):
+                result = self.m.decode((await inspect_reader.readline()).rstrip(b'\n'))
+                if not foreign:
+                    self.assertEqual(result['status'], 'ok')
+                    inspect_writer.write(self.m.encode(dict(schema_version=1, ack=inspection.request_id))+b'\n')
+                    await inspect_writer.drain()
+                inspect_writer.close()
+                await inspect_writer.wait_closed()
+                await self.server.drain()
+                if foreign or kill_error:
+                    with self.assertRaisesRegex(self.m.Unknown, 'mismatch|unavailable|cleanup|unknown'):
+                        await self.server.aclose()
+                    # Ошибка shutdown остаётся наблюдаемой, но повторный cleanup
+                    # unittest не должен маскировать исходный результат.
+                    self.owner.last_error = None
+                else:
+                    await self.server.aclose()
+        writer.close()
+        await writer.wait_closed()
+        self.assertEqual(sum(c[0] == 'start' for c in self.adapter.calls), 1)
+        self.assertEqual(sum(c[0] == 'retire' for c in self.adapter.calls), 0 if foreign else 1)
+        self.assertEqual(self.adapter.units[s].populated, foreign or kill_error)
+        self.assertFalse(self.owner.active)
+        with self.assertRaises(self.m.Refused):
+            await self.owner.execute(self.p.node_uid, request)
+
+    async def test_lost_ack_queues_owned_retirement_behind_active_inspection(self):
+        # HYPOTHESIS: execute(start) снимает owner до ACK, concurrent inspect
+        # занимает active, abandon_started теряет единственный cleanup (#726).
+        # SOLUTION: отдельный bounded receipt owner до exact ACK; cleanup
+        # ждёт уже начатый inspect, новые effects не допускаются.
+        # RESULT: 43 GREEN; actual private systemd lost-ACK overlap retired empty.
+        # STATUS: FIXED — see #726
+        await self.lost_ack_during_inspection()
+
+    async def test_cancelled_receipt_handler_queues_cleanup_behind_inspection(self):
+        await self.lost_ack_during_inspection(loss='cancel')
+
+    async def test_malformed_ack_queues_cleanup_behind_inspection(self):
+        await self.lost_ack_during_inspection(loss='malformed')
+
+    async def test_lost_ack_overlap_never_retires_foreign_invocation_and_shutdown_is_loud(self):
+        await self.lost_ack_during_inspection(foreign=True)
+
+    async def test_lost_ack_overlap_failed_retirement_cannot_be_successful_shutdown(self):
+        await self.lost_ack_during_inspection(kill_error=True)
+
+    async def test_lost_ack_overlap_stuck_inspection_has_bounded_loud_shutdown(self):
+        await self.lost_ack_during_inspection(stalled=True)
 
     async def test_wrong_supervisor_peer_is_rejected_before_request(self):
         from mop.node.host_scope_client import Client

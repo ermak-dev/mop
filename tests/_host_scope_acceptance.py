@@ -43,7 +43,28 @@ async def node():
     async def fixture_admission():
         pass
     guard = EffectGuard(fixture_admission, lambda: None)
-    if request['action'] == 'start':
+    if request['action'] == 'lost-start':
+        # Только fixture barriers; root ждёт reply до concurrent inspect,
+        # затем разрешает разрыв без ACK. Настоящий Unix peer — node UID.
+        from mop.node.host_scope_supervisor import read_frame
+        reader, writer = await asyncio.open_unix_connection(str(client.path))
+        value = m.Request('start', s, str(uuid4()))
+        try:
+            writer.write(value.encode()+b'\n')
+            await writer.drain()
+            reply = m.decode(await read_frame(reader))
+            if reply['status'] != 'ok':
+                raise RuntimeError('fixture lost-start did not receive a successful reply')
+            snap = m.Snapshot.parse(reply['snapshot'])
+            barrier = Path('/var/lib/mop/node-service')/s.launch_id
+            barrier.write_text(json.dumps(snap.wire()))
+            async with asyncio.timeout(20.):
+                while not barrier.with_suffix('.disconnect').exists():
+                    await asyncio.sleep(.02)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    elif request['action'] == 'start':
         snap = await client.start(s, guard)
     elif request['action'] == 'inspect':
         snap = await client.inspect(m.Reference.parse(request['reference']), guard)
@@ -163,10 +184,74 @@ async def acceptance():
         if empty.populated or empty.reference != started.reference:
             raise AssertionError('cgroup retirement did not prove the exact empty subtree')
         retired = True
+
+        # Второй exact owned scope: start reply без ACK + concurrent actual
+        # inspection. Fixture barriers удерживают порядок без OS fact stubs.
+        s = m.Scope(*(str(uuid4()) for _ in range(6)))
+        body = p.body(s)
+        body.mkdir(mode=0o700)
+        os.chown(body, BODY_UID, BODY_UID)
+        consumer = body/'consumer.json'
+        consumer.write_text(json.dumps(dict(schema_version=1, fixture='double-fork')))
+        os.chown(consumer, BODY_UID, BODY_UID)
+        consumer.chmod(0o600)
+        started, retired = None, False
+        lost_task = asyncio.create_task(call('lost-start'))
+        barrier = p.node_private/s.launch_id
+        entered, release, abandoning = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_inspect, original_abandon = adapter.inspect, owner.abandon_started
+        inspection_task = None
+        try:
+            async with asyncio.timeout(10.):
+                while not barrier.exists():
+                    if lost_task.done():
+                        await lost_task
+                        raise AssertionError('lost-start exited before fixture barrier')
+                    await asyncio.sleep(.02)
+            started = m.Snapshot.parse(json.loads(barrier.read_text()))
+            async def held(address):
+                if address == s and not entered.is_set():
+                    entered.set()
+                    await release.wait()
+                return await original_inspect(address)
+            async def abandoning_start(*args):
+                abandoning.set()
+                return await original_abandon(*args)
+            adapter.inspect, owner.abandon_started = held, abandoning_start
+            inspection_task = asyncio.create_task(call('inspect', started.reference))
+            async with asyncio.timeout(10.):
+                await entered.wait()
+                barrier.with_suffix('.disconnect').write_text('fixture-only')
+                lost_snapshot = await lost_task
+                if lost_snapshot != started:
+                    raise AssertionError('lost-start reply reference changed')
+                await abandoning.wait()
+                release.set()
+                await inspection_task
+                await server.drain()
+            empty = await original_inspect(s)
+            if empty is None or empty.verify(p, s, started.reference).populated:
+                raise AssertionError('lost ACK with concurrent inspection leaked actual containment')
+            retired = True
+            try:
+                await owner.execute(NODE_UID, m.Request('start', s, str(uuid4())))
+            except m.Refused:
+                pass
+            else:
+                raise AssertionError('lost ACK replay started a second native body')
+        finally:
+            release.set()
+            for task in (lost_task, inspection_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(*(task for task in (lost_task, inspection_task)
+                                   if task is not None), return_exceptions=True)
+            adapter.inspect, owner.abandon_started = original_inspect, original_abandon
         # PID disappearance alone никогда не является positive criterion.
         print(json.dumps(dict(status='accepted', physical='systemd-cgroup-v2',
             double_fork=True, setsid=True, retired_empty=True, negative_checks=record['checks'],
             cwd_mutations=['body-chmod-0755', 'renamed', 'removed'],
+            lost_ack_concurrent_inspection='retired exact empty cgroup, replay refused',
             admission='fixture guard, not HTTP acceptance', native='not tested')), flush=True)
     finally:
         primary = sys.exception()
