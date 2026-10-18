@@ -1579,6 +1579,22 @@ Rendered units are review artifacts; worker/credential/realtime bindings remain
 separately gated. Full runtime and host/PVE reboot acceptance is a later gate.
 ```
 
+#### mop server preview
+
+```text
+mop server preview --directory PATH [--port 18080]: local isolated Django Admin
+
+Starts a new disposable PostgreSQL 17 container and production Admin over
+loopback HTTPS using the declared server extra of the current interpreter.
+Requires local Docker and openssl. It reads no installation .env or pool data.
+The directory must not exist; generated keys and the initial admin password
+are written there privately, never printed. The localhost certificate is
+self-signed. Username: admin. Stop with Ctrl+C (or stop this owned task).
+The container and its preview database are removed on shutdown; private
+bootstrap/password/log files remain. This is not a ready production pool:
+unbound runtime operations still refuse and effects start disabled.
+```
+
 #### mop server proxykey
 
 ```text
