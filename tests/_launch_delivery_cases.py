@@ -113,7 +113,7 @@ class LaunchDelivery(TransactionTestCase):
     reserved_grant = credential_cases.CredentialSocketCases.reserved_grant
     grant_assignment = credential_cases.CredentialSocketCases.grant_assignment
 
-    def fixture(self, phase='native_exec'):
+    def fixture(self, phase='native_exec', *, bootstrap_content=None):
         from mop.server.controller.models import Installation, RestoreGuard
         from mop.server.operations import models as om
         from mop.server.operations.service import _binding
@@ -127,7 +127,7 @@ class LaunchDelivery(TransactionTestCase):
         self.user.save(update_fields=['email'])
         self.user.user_permissions.add(Permission.objects.get(content_type__app_label='operations', codename='view_operation'))
         Installation.objects.filter(pk=1).update(effects_enabled=True)
-        self.reserved = self.reserved_grant()
+        self.reserved = self.reserved_grant(bootstrap_content=bootstrap_content)
         self.assignment = self.grant_assignment(self.reserved)
         self.assignment.display_name = 'pu-socket-project-1'
         self.assignment.save(update_fields=['display_name'])
@@ -545,7 +545,7 @@ class LaunchDelivery(TransactionTestCase):
     # пять machine purposes прошли actual socket + verified HTTPS. Revocation
     # до/после real provider и same-size corruption отказаны без private bytes.
     # STATUS: FIXED — see #751; 5/10 s и production phase leases неизменны.
-    def initial_phase_roundtrip(self, phase):
+    def initial_phase_roundtrip(self, phase, *, bootstrap_content=None):
         import hashlib
         import socket
         import ssl
@@ -557,10 +557,10 @@ class LaunchDelivery(TransactionTestCase):
         from mop.common.initialcreate import parse_delivery
         from mop.node.http_execution import MachineClient, HttpsTransport
         import uvicorn
-        self.fixture(phase)
-        expected = json.dumps(dict(format=1, tasks=p.encoded(b'tasks'), variables='',
-            provenance='fixture', commit='a'*40, secret_refs=[]), sort_keys=True,
-            separators=(',', ':'), ensure_ascii=True).encode()
+        self.fixture(phase, bootstrap_content=bootstrap_content)
+        content = bootstrap_content or dict(tasks=b'tasks', variables=b'', provenance='fixture', commit='a'*40)
+        expected = codec.encode(codec.bounded_content(content['tasks'], content['variables'],
+            content['provenance'], content['commit'], tuple(content.get('secret_refs', ()))))
         def verify(value):
             self.assertEqual(parse_delivery(value, self.metadata), value)
             self.assertEqual(value['phase'], phase)
@@ -570,8 +570,9 @@ class LaunchDelivery(TransactionTestCase):
                 raw = p.binary(value['bootstrap']['envelope'])
                 self.assertEqual(raw, expected)
                 self.assertEqual(hashlib.sha256(raw).hexdigest(), self.pin.bootstrap_digest)
-                content = codec.decode(raw, value['bootstrap_digest'])
-                self.assertEqual((content.tasks, content.variables, content.secret_refs), (b'tasks', b'', ()))
+                decoded = codec.decode(raw, value['bootstrap_digest'])
+                self.assertEqual((decoded.tasks, decoded.variables, decoded.secret_refs),
+                    (content['tasks'], content['variables'], tuple(content.get('secret_refs', ()))))
             else:
                 self.assertIsNone(value['bootstrap'])
         async def body(client, server):

@@ -120,6 +120,45 @@ class ActualPrivateInputTests(unittest.TestCase):
         self.assertEqual(result['uid'], NODE)
         return self.m.Descriptor.parse(result['value'])
 
+    # BUG/HYPOTHESIS #751: strict codec принимает retained maximum, но
+    # default writer/root copy отказывают после admission на старых 256 KiB.
+    # Actual UID + hashes не подменяются mocked stat или большим pipe budget.
+    def bootstrap_budget_roundtrip(self, tasks, variables=b'', provenance='fixture', refs=()):
+        from mop.common.bootstrap_envelope import bounded_content, encode
+        import base64
+        _, _, self.value = selected('bootstrap_body')
+        self.a = replace(self.a, work=replace(self.a.work, action='bootstrap_body'))
+        self.value['work'] = self.a.work.wire()
+        raw = encode(bounded_content(tasks, variables, provenance, 'a'*64, refs))
+        self.value['bootstrap'] = dict(envelope=base64.b64encode(raw).decode())
+        self.value['bootstrap_digest'] = hashlib.sha256(raw).hexdigest()
+        descriptor = self.write()
+        receipt = self.owner.snapshot(NODE, descriptor, self.a)
+        def consume():
+            from mop.common.bootstrap_envelope import decode_base64
+            with self.f.BodyReader(self.snapshots, body_uid=BODY, body_gid=BODY,
+                    backend_epoch=self.s.epoch, node_id=self.s.node_id, executor_epoch=self.s.executor_epoch) as reader:
+                result = reader.read(descriptor, self.a)
+                decoded = decode_base64(result.value['bootstrap']['envelope'], result.value['bootstrap_digest'])
+                return dict(tasks=hashlib.sha256(decoded.tasks).hexdigest(),
+                    variables=hashlib.sha256(decoded.variables).hexdigest(), refs=len(decoded.secret_refs))
+        result = as_uid(BODY, consume)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uid'], BODY)
+        self.assertEqual(result['value'], dict(tasks=hashlib.sha256(tasks).hexdigest(),
+            variables=hashlib.sha256(variables).hexdigest(), refs=len(refs)))
+        self.owner.cleanup_input(receipt)
+        self.owner.cleanup_snapshot(receipt, quiescent=True)
+        self.assertEqual(data_entries(self.ingress), [])
+        self.assertEqual(data_entries(self.snapshots), [])
+
+    def test_150k_bootstrap_crosses_default_actual_node_root_body_transport(self):
+        self.bootstrap_budget_roundtrip(b'x'*150000)
+
+    def test_maximum_retained_envelope_crosses_actual_node_root_body_transport(self):
+        self.bootstrap_budget_roundtrip(b'x'*262144, b'y'*131072, '\U0001f600'*1024,
+            tuple(uuid4() for _ in range(32)))
+
     def read(self, descriptor, admission=None):
         def consume():
             with self.f.BodyReader(self.snapshots, body_uid=BODY, body_gid=BODY,
