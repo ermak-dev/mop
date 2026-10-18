@@ -220,8 +220,9 @@ class SessionRuntime:
     обязан передать environment в native exec, затем вызвать attach. Startup
     hooks тихо теряются обычным stdlib hook, не буферизуются как readiness.
     Observer только ищет explicit attachment; epoch создаётся здесь один раз.
-    Нет authority-файла, native scope API, model/retirement capability или
-    перехода между work DTO: новый operation/step требует отдельной root wiring.
+    Нет authority-файла, native scope API или model/retirement capability.
+    Current Work view подключает root отдельной authenticated capability;
+    исходные registration ACK/scope и native identity остаются lifetime anchor.
     """
     def __init__(self, registration: ProducerRegistration, telemetry):
         self.registration, self.telemetry = registration, telemetry
@@ -268,6 +269,11 @@ class SessionRuntime:
             self._begin_close()
             return None
         return self._epoch
+
+    def producer_changed(self, layout):
+        """Physical observer инвалидирует только свой исходный source slot."""
+        if layout == self._layout:
+            self._begin_close()
 
     async def attach(self):
         if self._state != 'prepared':
@@ -329,6 +335,11 @@ class SessionRuntime:
         except (Refused, Unavailable):
             self._begin_close()
             raise
+
+    async def current_view(self, authority):
+        """Root явно доказывает текущую фазу; observe никогда не создаёт вид."""
+        from mop.node.producer_views import current_view
+        return await current_view(self, authority)
 
     def _begin_close(self):
         # Немедленный gate для accept/lookup, cleanup не ждёт caller/worker,
