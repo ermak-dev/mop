@@ -358,6 +358,197 @@ def main():
         _, _, code = run_command(command.main, ["--output", "/private", "--model-hooks"])
         c.expect("#643 CLI opt-in accepted", code, 0)
         c.expect("#643 CLI forwards explicit hook mode", hook_calls, [("/private", 20, None, True)])
+    # HYPOTHESIS: --bare отключает settings hooks; снять его на host небезопасно.
+    # SOLUTION: отдельный local-only Docker fixture, whitelist snapshot и две
+    # независимые проверки: inspect до старта и kernel proof до native exec.
+    # RESULT: RED на отсутствующих mode/isolation воротах, не import failure.
+    # STATUS: FIXED — see #643
+    normal_calls = []
+    def fake_normal(root, timeout, history_module=None, model_hooks=False, isolated_normal=False):
+        normal_calls.append((model_hooks, isolated_normal))
+        return {"report_path": "/private/report.json", "scenarios": {}, "errors": []}
+    with patched(p, run=fake_normal):
+        _, _, code = run_command(command.main, ["--model-hooks", "--isolated-normal"])
+        c.expect("#643 explicit isolated normal CLI accepted", code, 0)
+        c.expect("#643 normal mode delegated, never host flag", normal_calls, [(True, True)])
+        count = len(normal_calls)
+        for args in (["--isolated-normal"], ["--isolated-normal", "--model-hooks",
+                     "--history-module", "/explicit/session.py"]):
+            _, _, code = run_command(command.main, args)
+            c.check("#643 isolated normal only accepts fixed hook experiment", bool(code))
+        c.expect("#643 invalid mode never launches", len(normal_calls), count)
+    name = "mop.client.chatprobe_isolation"
+    if not c.check("#643 isolated normal boundary exists", importlib.util.find_spec(name) is not None):
+        return c.report("chatprobe")
+    d = importlib.import_module(name)
+    required = ("fixture_sources", "local_docker_endpoint", "container_create_args",
+                "container_config_errors", "runtime_isolation_errors", "runtime_projection")
+    if not all([c.check("#643 boundary function " + name, callable(getattr(d, name, None)))
+                for name in required]):
+        return c.report("chatprobe")
+    sources = ("mop/client/chatprobe.py", "mop/client/chatprobe_isolation.py")
+    c.expect("#643 snapshot copies only two tracked fixture modules", d.fixture_sources(
+        [*sources, ".env", "mop/session.py", "CLAUDE.md", ".claude/settings.json", "inventory.yaml"]), sources)
+    try:
+        d.fixture_sources([sources[0]])
+        c.fail("#643 missing tracked fixture refused", "accepted")
+    except ValueError:
+        c.check("#643 missing tracked fixture refused", True)
+    c.expect("#643 local Unix daemon accepted", d.local_docker_endpoint("unix:///var/run/docker.sock"),
+             "unix:///var/run/docker.sock")
+    for endpoint in ("", "tcp://127.0.0.1:2375", "ssh://localhost", "unix://remote/run/docker.sock",
+                     "unix:///run/../run/docker.sock", "unix:///run/docker.sock?x=y", "unix:///run/s\n"):
+        try:
+            d.local_docker_endpoint(endpoint)
+            c.fail("#643 remote or ambiguous Docker refused", endpoint)
+        except ValueError:
+            c.check("#643 remote or ambiguous Docker refused", True)
+    built = d.container_create_args("sha256:image", "mop-chatprobe-owned", "nonce", 26430)
+    for key, value in (("--network", "none"), ("--cgroupns", "private"), ("--ipc", "private"),
+                       ("--user", "26430:26430"), ("--cap-drop", "ALL"),
+                       ("--security-opt", "no-new-privileges=true")):
+        c.expect("#643 container isolation argument " + key, built[built.index(key) + 1], value)
+    c.check("#643 no bind/socket/host namespace flags", not any(arg in built for arg in
+            ("-v", "--volume", "--mount", "--volumes-from", "--privileged", "--pid", "--device", "--env-file")))
+    c.check("#643 fixture UID is unprivileged", "0:0" not in built)
+    info = {"Id": "owned-id", "Image": "sha256:image", "Mounts": [],
+        "Config": {"User": "26430:26430", "Labels": {d.OWNER_LABEL: "nonce"}, "Volumes": None},
+        "HostConfig": {"NetworkMode": "none", "PidMode": "", "CgroupnsMode": "private", "IpcMode": "private",
+            "Privileged": False, "CapDrop": ["ALL"], "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges=true"], "Binds": None, "Mounts": None,
+            "Devices": [], "DeviceRequests": None, "VolumesFrom": None}}
+    c.expect("#643 independent inspect accepts owned fixture", d.container_config_errors(info, "sha256:image", "nonce", 26430), [])
+    import copy
+    mutations = [("NetworkMode", "host"), ("PidMode", "host"), ("PidMode", "container:other"),
+        ("CgroupnsMode", "host"), ("IpcMode", "host"), ("Privileged", True),
+        ("CapAdd", ["SYS_ADMIN"]), ("CapDrop", []), ("SecurityOpt", []),
+        ("Binds", ["/home:/host:ro"]), ("Mounts", [{"Source": "/run"}]),
+        ("Devices", [{"PathOnHost": "/dev/sda"}]), ("VolumesFrom", ["other"])]
+    for key, value in mutations:
+        bad = copy.deepcopy(info)
+        bad["HostConfig"][key] = value
+        c.check("#643 unsafe inspect refused " + key, bool(d.container_config_errors(bad, "sha256:image", "nonce", 26430)))
+    for changed in ({"Mounts": [{"Source": "/var/run/docker.sock"}]}, {"Image": "other"},
+                    {"Config": {**info["Config"], "User": "0"}},
+                    {"Config": {**info["Config"], "Labels": {d.OWNER_LABEL: "foreign"}}},
+                    {"Config": {**info["Config"], "Volumes": {"/host": {}}}}):
+        c.check("#643 foreign/mounted/root fixture refused", bool(d.container_config_errors(
+            {**info, **changed}, "sha256:image", "nonce", 26430)))
+    namespaces = {name: name + ":[100]" for name in ("pid", "mnt", "net", "cgroup", "ipc")}
+    evidence = dict(uid=26430, euid=26430, groups=[26430], cap_eff="0000000000000000", no_new_privs=1,
+        namespaces={name: name + ":[200]" for name in namespaces}, interfaces=["lo"],
+        proc_private=True, cgroup_readonly=True, cgroup_root="/", run_sockets_absent=True,
+        external_network_unreachable=True)
+    c.expect("#643 kernel evidence proves distinct namespaces", d.runtime_isolation_errors(evidence, namespaces, 26430), [])
+    for key, value in (("uid", 0), ("euid", 0), ("groups", [0, 26430]), ("cap_eff", "1"),
+            ("no_new_privs", 0), ("interfaces", ["lo", "eth0"]), ("proc_private", False),
+            ("cgroup_readonly", False), ("cgroup_root", "/host/cgroup"), ("run_sockets_absent", False),
+            ("external_network_unreachable", False), ("namespaces", namespaces), ("namespaces", {})):
+        c.check("#643 incomplete/unsafe kernel proof refused " + key,
+            bool(d.runtime_isolation_errors({**evidence, key: value}, namespaces, 26430)))
+    projected = d.runtime_projection({**evidence, "environ": "secret", "mountinfo": "secret", "token": "secret"})
+    c.expect("#643 runtime projection exact allowlist", projected, evidence)
+    c.check("#643 runtime projection contains no raw secrets", "secret" not in json.dumps(projected))
+    nested = {**evidence, "namespaces": {**evidence["namespaces"], "unknown_token": "secret"}}
+    c.check("#643 nested runtime metadata also whitelisted", "secret" not in json.dumps(d.runtime_projection(nested)))
+    default_calls = []
+    with patched(p, _run_fixture=lambda *args: default_calls.append(args)):
+        p.run("/private", 7, model_hooks=True)
+    c.expect("#643 default still delegates to bare without normal override", default_calls, [("/private", 7, None, True)])
+    with tempfile.TemporaryDirectory() as directory:
+        normal_calls = []
+        if c.check("#643 internal normal guard exists", callable(getattr(p, "_normal_guard", None))):
+            with patched(p, _normal_guard=lambda: (_ for _ in ()).throw(RuntimeError("kernel blocker"))):
+                try:
+                    p._run_fixture(Path(directory) / "unsafe", model_hooks=True, _normal=True)
+                    c.fail("#643 internal normal mode refuses missing kernel proof", "accepted")
+                except RuntimeError as error:
+                    c.expect("#643 kernel blocker reaches caller", str(error), "kernel blocker")
+        c.check("#643 kernel refusal happens before output/native fixture", not (Path(directory) / "unsafe").exists())
+    # HYPOTHESIS: обычный tracked source имеет 0664 в shared worktree;
+    # это не metadata доверия native install и не повод ослаблять ELF guard.
+    # SOLUTION: source whitelist разрешает group-write, native — никогда.
+    # RESULT: RED после реального отказа до build; host CLI не запущен.
+    # STATUS: FIXED — see #643
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "source.py"
+        source.write_text("trusted fixture code")
+        source.chmod(0o664)
+        try:
+            result = d._copy_regular(source, Path(directory) / "copied.py")
+            c.expect("#643 tracked nonsensitive source permits ordinary worktree mode", result["size"], source.stat().st_size)
+        except RuntimeError as error:
+            c.fail("#643 tracked nonsensitive source permits ordinary worktree mode", str(error))
+        for data, mode in ((b"#!/bin/sh\n", 0o755), (b"\x7fELFnative", 0o775)):
+            source.write_bytes(data)
+            source.chmod(mode)
+            try:
+                d._copy_regular(source, Path(directory) / ("native-" + str(mode)), native=True)
+                c.fail("#643 script/group-writable native refused", "accepted")
+            except RuntimeError:
+                c.check("#643 script/group-writable native refused", True)
+    # Host managed policy должна останавливать даже metadata/copy/build.
+    with tempfile.TemporaryDirectory() as directory:
+        actions = []
+        with patched(p, managed_paths=lambda: ["/etc/claude-code/managed-settings.json"]), patched(d,
+                _docker_endpoint=lambda *args: actions.append("docker")):
+            report = p.run(Path(directory) / "refused", model_hooks=True, isolated_normal=True)
+        c.check("#643 host managed policy refuses normal fixture", bool(report["errors"]))
+        c.expect("#643 policy checked before Docker/copy", actions, [])
+    # HYPOTHESIS: policy может появиться, пока проверяется Docker/build;
+    # проверки лишь при входе недостаточно для copy и actual start.
+    # SOLUTION: повторные ворота непосредственно перед snapshot и start.
+    # RESULT: backend ниже синтетический, native/daemon не запускаются.
+    # STATUS: FIXED — see #643
+    from types import SimpleNamespace
+    for policy_phase in ("after-version", "after-inspect"):
+        actions = []
+        state = {"policy": False, "owner": None, "created": False, "removed": False, "image": False}
+        cid = "c" * 64
+        def fake_docker(argv, **kwargs):
+            if argv[0] == "git":
+                return SimpleNamespace(returncode=0, stdout=("\0".join(sources) + "\0").encode(), stderr=b"")
+            words = argv[3:]
+            actions.append(tuple(words[:2]))
+            output = ""
+            if words[0] == "version":
+                state["policy"] = policy_phase == "after-version"
+            elif words[0] == "build":
+                state["owner"] = words[words.index("--label") + 1].split("=", 1)[1]
+                state["image"] = True
+            elif words[:2] == ["image", "inspect"]:
+                output = json.dumps([{"Id": "sha256:image", "Config": {"Labels": {d.OWNER_LABEL: state["owner"]}}}])
+            elif words[0] == "create":
+                state["created"] = True
+                output = cid
+            elif words[:2] == ["container", "inspect"]:
+                config = copy.deepcopy(info)
+                config.update(Id=cid, State={"Running": False, "Pid": 0})
+                config["Config"]["Labels"][d.OWNER_LABEL] = state["owner"]
+                output = json.dumps([config])
+                state["policy"] = policy_phase == "after-inspect"
+            elif words[0] == "start":
+                raise RuntimeError("fake backend refuses native execution")
+            elif words[:2] == ["image", "ls"]:
+                if state["image"] and not state["removed"]:
+                    output = "sha256:image"
+            elif words[:2] == ["image", "rm"]:
+                state["removed"] = True
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
+        def fake_copy(*args, **kwargs):
+            actions.append(("copy",))
+            return {"sha256": "synthetic-test-only"}
+        with tempfile.TemporaryDirectory() as directory, patched(p,
+                managed_paths=lambda: ["managed"] if state["policy"] else []), patched(d,
+                _docker_endpoint=lambda *args: "unix:///var/run/docker.sock", _copy_regular=fake_copy), patched(
+                d.shutil, which=lambda name: "/usr/bin/" + name), patched(d.subprocess, run=fake_docker):
+            report = p.run(Path(directory) / "report", model_hooks=True, isolated_normal=True)
+        c.check("#643 late policy reports refusal " + policy_phase, bool(report["errors"]))
+        c.check("#643 late policy never starts native " + policy_phase, not any(a[0] == "start" for a in actions))
+        if policy_phase == "after-version":
+            c.check("#643 late policy refuses before source/native copy", ("copy",) not in actions)
+        else:
+            c.check("#643 refused created fixture is cleaned", report["cleanup"].get("container_removed"))
     return c.report("chatprobe")
 
 
