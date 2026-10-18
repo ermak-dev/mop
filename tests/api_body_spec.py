@@ -88,6 +88,29 @@ class ApiBodySpecTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             render(**{**args, 'restore_generation': str(restore)})
 
+    # HYPOTHESIS (#643): рендер требует soul.Bundle с байтами промпта, а
+    # регистрирующий job контроллер их не видит: определение хранится
+    # зашифрованным, расшифровывает только credential-сервис. Регистрация job
+    # нового тела была бы невозможна без второй копии байтов на сервере.
+    # SOLUTION: рендер принимает и пин одобренного определения (роль, digest,
+    # драйвер) без байтов; байты сверяет узел в LaunchResponse.check.
+    # STATUS: FIXED — see #643
+    def test_registration_renders_from_the_approved_definition_pin_without_bytes(self):
+        from mop.driver.launch import BundlePin
+        render = self.renderer()
+        args = self.arguments('/owned')
+        w = args['layout'].registration.work
+        pin = BundlePin(w.role, w.bundle_digest, 'any')
+        job = render(**{**args, 'bundle': pin})['Job']
+        self.assertEqual(job, render(**args)['Job'])
+        for wrong in (BundlePin('other', w.bundle_digest, 'any'), BundlePin(w.role, 'f'*64, 'any')):
+            with self.subTest(pin=wrong), self.assertRaises(ValueError):
+                render(**{**args, 'bundle': wrong})
+        with self.assertRaises(ValueError):
+            render(**{**args, 'bundle': BundlePin(w.role, w.bundle_digest, 'isolating')})
+        with self.assertRaises(ValueError):
+            BundlePin(w.role, 'not-a-digest', 'any')
+
     def test_known_unsupported_or_mismatched_capability_refuses_before_registration(self):
         render = self.renderer()
         args = self.arguments('/owned')

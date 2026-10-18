@@ -102,6 +102,25 @@ class Registration:
 
 
 @dataclass(frozen=True)
+class BundlePin:
+    """Метаданные одобренного определения без байтов (#643).
+
+    Регистрирующий job контроллер байтов не видит -- они зашифрованы и
+    расшифровываются только credential-сервисом; спеке хватает роли, digest и
+    драйвера, а байты сверяет узел в LaunchResponse.check."""
+    role: str
+    digest: str
+    driver: str
+
+    def __post_init__(self):
+        if type(self.role) is not str or not re.fullmatch('[a-z][a-z0-9_-]{0,63}', self.role):
+            raise ValueError('pinned role required')
+        _digest(self.digest)
+        if self.driver not in ('any', 'isolating'):
+            raise ValueError('known runtime driver required')
+
+
+@dataclass(frozen=True)
 class RegisteredLayout:
     home: Path
     registration: Registration

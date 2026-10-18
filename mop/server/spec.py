@@ -813,15 +813,22 @@ def api_job_spec(*, layout, machine, bundle, nomad_node_id, datacenter, user,
     Пока Root не связан, default gate отказывает ещё до регистрации задания.
     """
     from uuid import UUID
-    from mop.driver.launch import MachineConfig, RegisteredLayout, LaunchResponse
+    from mop.driver.launch import BundlePin, MachineConfig, RegisteredLayout, LaunchResponse
     from mop.server.operations.scheduler import addressed_metadata
     if (type(capabilities) is not frozenset or not API_LAUNCH_CAPABILITIES <= capabilities):
         raise ValueError('new body launch capabilities are not bound')
     if type(layout) is not RegisteredLayout or type(machine) is not MachineConfig:
         raise ValueError('trusted registered layout and machine configuration required')
     registration = layout.registration
-    LaunchResponse(registration, bundle, None).check(registration)
-    if bundle.manifest.runtime.driver == 'isolating' and machine.driver != 'pve':
+    if type(bundle) is BundlePin:
+        # Пин одобренного определения: байты сверит узел (#643).
+        if (bundle.role, bundle.digest) != (registration.work.role, registration.work.bundle_digest):
+            raise ValueError('approved definition pin does not match registration')
+        driver = bundle.driver
+    else:
+        LaunchResponse(registration, bundle, None).check(registration)
+        driver = bundle.manifest.runtime.driver
+    if driver == 'isolating' and machine.driver != 'pve':
         raise ValueError('isolating role requires a separate body namespace')
     if type(nomad_node_id) is not str or str(UUID(nomad_node_id)) != nomad_node_id:
         raise ValueError('explicit enrolled scheduler node identity required')
