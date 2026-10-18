@@ -20,9 +20,14 @@ def authority(*, lock=False):
         raise s.Unavailable(str(error)) from None
 
 
-# #628/#642 устанавливают root-owned transport/grant/cipher. Без cipher private
-# send отказывает, а registration/query уже работают через стандартный Auth.
-endpoints = s.Endpoints(authority=authority)
+# SQL grant root общий с command/read composition. Transport/cipher по-прежнему
+# связывает installation root: без cipher private send отказывает, metadata — нет.
+def default_endpoints():
+    from .machinebinding import local_grants
+    return s.Endpoints(authority=authority, grants=local_grants().local_authority())
+
+
+endpoints = default_endpoints()
 
 
 # #690: приватные exact/uid заменены общими строгими полями strict-модуля;
@@ -42,8 +47,10 @@ def presence(value):
 
 
 class EndpointView(APIView):
-    # Grant resolver назначается доверенной root composition, не request JSON.
-    grant_resolver = None
+    # Тот же SQL-only root для authentication и subject service, не request JSON.
+    @property
+    def grant_resolver(self):
+        return endpoints.grants
     # #691: сырой ValueError конечных парсеров (exact/uid) -- клиентский 400;
     # доменные отказы переводит глобальный handler по реестру errors.
     value_error_is_input = True

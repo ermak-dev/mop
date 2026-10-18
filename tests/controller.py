@@ -10,7 +10,7 @@ if __name__ == '__main__':
         '_ldap_cases', '_access_cases', '_controller_cases', '_controller_restore_cases',
         '_catalog_cases', '_catalog_http_cases.CatalogHTTP', '_catalog_retirement_cases',
         '_secret_cases', '_secret_recovery_cases.SecretRecovery', '_grant_cases',
-        '_delegation_cases',
+        '_delegation_cases', '_default_delegation_cases',
         '_operation_cases', '_worker_root_cases', '_execution_cases', '_landing_cases',
         '_service_enrollment_cases',
         '_restart_vertical_cases', '_send_dispatch_cases.SendDispatch', '_wipe_cases.WipeVertical',

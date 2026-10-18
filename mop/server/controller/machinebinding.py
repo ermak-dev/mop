@@ -36,12 +36,32 @@ class AssignmentBindings:
             value.role, value.bundle_digest, value.grant_id, value.owner_id)
 
 
+class PreparationApprovals:
+    """Реальный SQL query Preparation; его отказ получает тип границы Access."""
+    def __init__(self, query):
+        self.query = query
+
+    def pin(self, binding):
+        from mop.server.access.services import Denied
+        try:
+            return self.query.pin(binding)
+        except PermissionError as error:
+            raise Denied(str(error)) from error
+
+    def validate(self, proof, binding):
+        from mop.server.access.services import Denied
+        try:
+            return self.query.validate(proof, binding)
+        except PermissionError as error:
+            raise Denied(str(error)) from error
+
+
 def local_grants():
     """SQL-only композиция живого exact approval; root/provider здесь нет."""
     from mop.server.access.services import Access
     from mop.server.preparation.services import Preparation
-    return Grants(provider=None, approvals=Preparation(provider=None, authorizer=Access()).approval_query(),
-                  bindings=AssignmentBindings())
+    query = Preparation(provider=None, authorizer=Access()).approval_query()
+    return Grants(provider=None, approvals=PreparationApprovals(query), bindings=AssignmentBindings())
 
 
 class Targets:
