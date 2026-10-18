@@ -30,6 +30,19 @@ from django.utils import timezone
 # RESULT: PG16 — 24/24 green до добавления autonomous receiver-loop acceptance.
 # STATUS: FIXED — see #649; итоговые PG16/17 и exact-SHA CI указаны в отчёте.
 
+
+def socket_directory(prefix):
+    """Каталог настоящих UDS одного случая: external.sock и callback bridge.
+
+    Короткий собственный корень прямо в /tmp (#702), как фикстуры #677:
+    наследуемый TMPDIR во вложенном прогоне hermetic удлиняет путь, и
+    callback LocalBridge (<pid>-<32 hex>.sock рядом с external.sock) выходит
+    за sockaddr_un. mkdtemp уникален на случай и безопасен для параллельных
+    прогонов; удаляет каталог сам случай, выходя из with.
+    """
+    return tempfile.TemporaryDirectory(prefix=prefix, dir='/tmp')
+
+
 @override_settings(ALLOWED_HOSTS=['testserver'])
 class EndpointBoundary(TransactionTestCase):
     serialized_rollback = True
@@ -362,12 +375,63 @@ class Endpoints(TransactionTestCase):
             '/api/v1/deliveries/'+report['id'], secure=True)
         self.assertEqual(neighbor.status_code, 404)
 
+    # BUG (#702): вложенный прогон hermetic (дети наследуют TMPDIR, _lib
+    # вкладывает в него свой корень процесса) красил 10 случаев с настоящим
+    # UDS: OSError: AF_UNIX path too long, с обоими HOME; обычный прогон зелёный.
+    # HYPOTHESIS: каталог сокетов случая наследует длину корней процессов, а
+    # LocalBridge.start кладёт callback <pid>-<32 hex>.sock рядом с
+    # собственным CLI socket: до 46 байт сверх каталога, и путь выходит за
+    # 107 байт полезной нагрузки sun_path (108 с NUL).
+    # RED: tempdir 48 байт (/tmp/mop-test-run-…/mop-test-run-…) -- 10 ERROR,
+    # bind callback в local_bridge.start; external.sock (84 байта) привязывался.
+    # Эта проверка до правки: ERROR тем же bind callback при корне 48 байт.
+    # SOLUTION: socket_directory -- короткий собственный корень прямо в /tmp,
+    # как фикстуры #677: уникальный mkdtemp на случай, удаляет его сам случай.
+    # Production не меняется: каталог сокета задаёт вызывающий.
+    # RESULT: 43/43 зелёные и в обычном прогоне, и с вложенным TMPDIR.
+    # STATUS: FIXED — see #702
+    def test_case_socket_root_fits_sockaddr_un_under_nested_inherited_tmpdir(self):
+        from unittest.mock import patch
+        from mop.client.local_bridge import OwnSession, LocalBridge
+        # Наследуемый корень, как во вложенном hermetic: корень процесса внутри
+        # корня родителя.
+        outer = tempfile.TemporaryDirectory(prefix='mop-test-run-')
+        self.addCleanup(outer.cleanup)
+        inherited = outer.name
+        # Худший callback LocalBridge.start: pid до 2**22 (7 цифр) и uuid4().hex.
+        callback = len(f'/{2**22}-{uuid4().hex}.sock')
+        prefix = 'mop-endpoint-accept-'  # самый длинный префикс этого файла
+        # Посылка не пустая: каталог из наследуемого корня callback не вмещает.
+        self.assertGreater(len(os.fsencode(inherited)) + len(f'/{prefix}XXXXXXXX') + callback, 107)
+        async def scenario():
+            with socket_directory(prefix) as directory:
+                os.chmod(directory, 0o700)
+                path = str(Path(directory)/'external.sock')
+                async def external(reader, writer):
+                    writer.close()
+                    await writer.wait_closed()
+                server = await asyncio.start_unix_server(external, path=path)
+                os.chmod(path, 0o600)
+                bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.05)
+                try:
+                    await bridge.start()
+                    self.assertTrue(Path(bridge._callback).is_socket())
+                finally:
+                    await bridge.aclose()
+                    server.close()
+                    await server.wait_closed()
+            return directory
+        with patch.object(tempfile, 'tempdir', inherited):
+            directory = asyncio.run(scenario())
+        self.assertLessEqual(len(os.fsencode(directory)) + callback, 107)
+        self.assertFalse(Path(directory).exists(), 'the case owns and removes its socket root')
+
     def test_real_unix_bridge_loop_acceptance_unknown_idle_and_shutdown(self):
         from mop.client.local_bridge import OwnSession, LocalBridge
         from mop.server.sessions.delivery import DeliveryGateway
         from mop.server.controller.runtime import Runtime
         async def scenario():
-            with tempfile.TemporaryDirectory(prefix='mop-endpoint-') as directory:
+            with socket_directory('mop-endpoint-') as directory:
                 os.chmod(directory, 0o700)
                 path = str(Path(directory)/'external.sock')
                 received = []
@@ -423,7 +487,7 @@ class Endpoints(TransactionTestCase):
         from mop.client.local_bridge import OwnSession, LocalBridge
         from mop.common.endpoint import DeliveryFrame
         async def scenario():
-            with tempfile.TemporaryDirectory(prefix='mop-endpoint-') as directory:
+            with socket_directory('mop-endpoint-') as directory:
                 os.chmod(directory, 0o700)
                 path = str(Path(directory)/'external.sock')
                 frames = []
@@ -454,7 +518,7 @@ class Endpoints(TransactionTestCase):
         from mop.client.local_bridge import OwnSession, LocalBridge
         from mop.common.endpoint import DeliveryFrame
         async def scenario():
-            with tempfile.TemporaryDirectory(prefix='mop-endpoint-') as directory:
+            with socket_directory('mop-endpoint-') as directory:
                 os.chmod(directory, 0o700)
                 path = str(Path(directory)/'external.sock')
                 frames = []
@@ -516,7 +580,7 @@ class Endpoints(TransactionTestCase):
         from mop.client.local_bridge import OwnSession, LocalBridge
         from mop.server.controller.endpointroot import create_endpoint_runtime
         async def scenario():
-            with tempfile.TemporaryDirectory(prefix='mop-endpoint-') as directory:
+            with socket_directory('mop-endpoint-') as directory:
                 os.chmod(directory, 0o700)
                 path = str(Path(directory)/'external.sock')
                 frames = []
@@ -693,7 +757,7 @@ class Endpoints(TransactionTestCase):
     async def _late_native_write(self, action):
         from mop.client.local_bridge import OwnSession, LocalBridge
         from mop.server.controller.endpointroot import create_endpoint_runtime
-        with tempfile.TemporaryDirectory(prefix='mop-endpoint-fence-') as directory:
+        with socket_directory('mop-endpoint-fence-') as directory:
             os.chmod(directory, 0o700)
             path = str(Path(directory)/'external.sock')
             frames, arrived = [], asyncio.Event()
@@ -843,7 +907,7 @@ class Endpoints(TransactionTestCase):
         from mop.client.local_bridge import OwnSession, LocalBridge
         from mop.server.controller.endpointroot import create_endpoint_runtime
         async def scenario():
-            with tempfile.TemporaryDirectory(prefix='mop-endpoint-accept-') as directory:
+            with socket_directory('mop-endpoint-accept-') as directory:
                 os.chmod(directory, 0o700)
                 path = str(Path(directory)/'external.sock')
                 frames, received, control = [], asyncio.Event(), asyncio.Event()
