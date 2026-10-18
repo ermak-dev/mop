@@ -12,8 +12,11 @@ RESULT: RED — missing permission/unsupported command; GREEN — PG17/socket/HT
 STATUS: FIXED — see #742 (не physical HOST/MCP/body startup acceptance).
 """
 import asyncio
+from contextlib import contextmanager, ExitStack
+from dataclasses import replace
 import importlib
 import json
+import os
 from datetime import timedelta
 from uuid import uuid4
 from unittest.mock import patch
@@ -401,6 +404,243 @@ class ManagementContext(TransactionTestCase):
         with patch.object(type(provider), 'decrypt', side_effect=change):
             self.run_delivery(body, provider=provider)
         self.assertTrue(changed)
+
+
+class ManagementAvailability(TransactionTestCase):
+    # BUG/HYPOTHESIS (#742): новый read проходит общий refused mapper, а
+    # _read_definition стирает различие между недоступным ключом и плохим tag.
+    # Проверяем настоящий provider после binding службы, raw DB после decrypt,
+    # protected UDS, rootless composition и verified HTTPS, не готовый wire verdict.
+    # Политика/approval/permission остаются отказом, не эвристикой по тексту.
+    # SOLUTION: узкий SecretCryptoUnavailable проходит _read_definition; только
+    # management command сохраняет его и типизированные storage verdicts.
+    # RESULT: настоящий RED (20 assertions, включая HTTP 403 вместо 503);
+    # GREEN: 47 PG17/socket/HTTPS cases, включая исходные 43 и fail-closed controls.
+    # STATUS: FIXED — see #742 (без physical HOST/MCP acceptance и live rollout).
+    serialized_rollback = True
+    setUp = ManagementContext.setUp
+    fixture = ManagementContext.fixture
+    exercise = ManagementContext.exercise
+    reserved_grant = ManagementContext.reserved_grant
+    grant_assignment = ManagementContext.grant_assignment
+    enroll = ManagementContext.enroll
+    delivery = ManagementContext.delivery
+
+    failures = (
+        ('missing_key', 'secret encryption key is unavailable'),
+        ('provider', 'secret decryption failed'),
+        ('raw_provider', 'secret decryption failed'),
+        ('secret_storage', 'secret storage is unavailable'),
+        ('grant_storage', 'delegated access storage is unavailable'),
+    )
+
+    @contextmanager
+    def failure(self, kind):
+        from django.db import DatabaseError, connection
+        from mop.server.access.models import Grant
+        from mop.server.secrets.crypto import Envelope, Keyring, XChaCha20Provider
+        from mop.server.secrets.models import SecretVersion
+        provider = self.app.store.provider
+        decrypt = type(provider).decrypt
+        missing = XChaCha20Provider(Keyring('unavailable-fixture', {'unavailable-fixture': b'x'*32}))
+        self.crossings = []
+        raw = ' '.join((self.subject_token, self.machine_auth.value, self.token, 'private-provider-detail',
+            *(key.hex() for key in provider.keyring.keys.values())))
+        with ExitStack() as stack:
+            def call(envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                self.assertIs(type(envelope), Envelope)
+                self.crossings.append(kind)
+                if kind == 'missing_key':
+                    return decrypt(missing, envelope, context)
+                if kind == 'raw_provider':
+                    raise RuntimeError(raw)
+                value = decrypt(provider, envelope, context)
+                if kind == 'secret_storage':
+                    stack.enter_context(patch.object(SecretVersion.objects, 'select_related',
+                        side_effect=DatabaseError(raw)))
+                elif kind == 'grant_storage':
+                    stack.enter_context(patch.object(Grant.objects, 'select_for_update',
+                        side_effect=DatabaseError(raw)))
+                return value
+            stack.enter_context(patch.object(type(provider), 'decrypt', side_effect=call))
+            if kind == 'provider':
+                stack.enter_context(patch('nacl.bindings.crypto_aead_xchacha20poly1305_ietf_decrypt',
+                    side_effect=RuntimeError(raw)))
+            yield
+        self.assertTrue(self.crossings, 'must reach the bound real provider before failure')
+
+    def run_rootless(self, body):
+        from django.conf import settings
+        with override_settings(BOOTSTRAP=self.bootstrap):
+            self.app = self.service.application(provider=self.app.store.provider)
+        counts = get_user_model().objects.count(), Token.objects.count()
+        boot = {**settings.BOOTSTRAP, 'role': 'web',
+            'credential_service': dict(path=self.path, server_uid=os.geteuid())}
+        with override_settings(BOOTSTRAP=boot, ALLOWED_HOSTS=['127.0.0.1']), \
+                patch('mop.server.controller.bootstrap.private_bytes', side_effect=AssertionError('web root read')), \
+                patch('mop.server.controller.bootstrap.secret_provider', side_effect=AssertionError('web provider')):
+            async_to_sync(self.exercise)(body, application=self.app, timeout=5, client_timeout=5)
+        self.assertEqual((get_user_model().objects.count(), Token.objects.count()), counts)
+
+    def redacted(self, value):
+        for secret in (self.subject_token, self.machine_auth.value, self.token, 'private-provider-detail',
+                *(key.hex() for key in self.app.store.provider.keyring.keys.values())):
+            self.assertNotIn(secret, str(value))
+
+    async def raw(self):
+        from mop.common import credentials as p
+        reader, writer = await asyncio.open_unix_connection(self.path)
+        try:
+            writer.write(p.frame(dict(version=1, command=p.Command.MANAGEMENT_CONTEXT.value,
+                auth=dict(kind='token', value=self.machine_auth.value), args=dict(request=self.request))))
+            await writer.drain()
+            return p.loads(await reader.readexactly(p.frame_size(await reader.readexactly(4))))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    def test_bound_crypto_and_post_decrypt_storage_outages_keep_unavailable_wire_reason(self):
+        self.fixture()
+        async def body(client, server):
+            value = await asyncio.to_thread(client.read_management_context, self.machine_auth, self.request)
+            self.assertEqual(value.token, self.subject_token)
+            for kind, reason in self.failures:
+                with self.subTest(kind=kind), self.failure(kind):
+                    response = await self.raw()
+                    self.redacted(response)
+                    self.assertEqual(response, dict(ok=False, error=dict(code='unavailable', message=reason)))
+        self.run_rootless(body)
+
+    def test_rootless_outages_are_not_credential_refused_or_access_denied(self):
+        from mop.common import credentials as p
+        from mop.server.controller.managementcontext import read
+        from mop.server.sessions.services import Unavailable
+        self.fixture()
+        async def body(client, server):
+            for kind, reason in self.failures:
+                with self.subTest(kind=kind, boundary='client'), self.failure(kind):
+                    with self.assertRaises(p.CredentialError) as caught:
+                        await asyncio.to_thread(client.read_management_context, self.machine_auth, self.request)
+                    self.assertIs(type(caught.exception), p.CredentialError)
+                    self.assertEqual(str(caught.exception), reason)
+                    self.redacted(caught.exception)
+                with self.subTest(kind=kind, boundary='rootless'), self.failure(kind):
+                    with self.assertRaises(Exception) as caught:
+                        await asyncio.to_thread(read, self.machine_auth, self.request)
+                    self.assertIs(type(caught.exception), Unavailable)
+                    self.assertEqual(str(caught.exception), reason)
+                    self.redacted(caught.exception)
+        self.run_rootless(body)
+
+    def https(self, body):
+        import http.client
+        import socket
+        import ssl
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from django.core.asgi import get_asgi_application
+        import uvicorn
+        async def exercise(client, server):
+            with tempfile.TemporaryDirectory(prefix='mop-management-availability-tls-') as directory:
+                cert, key = Path(directory)/'cert.pem', Path(directory)/'key.pem'
+                subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                    '-keyout', str(key), '-out', str(cert), '-subj', '/CN=localhost',
+                    '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                listener = socket.socket()
+                listener.bind(('127.0.0.1', 0))
+                listener.listen(8)
+                context = ssl.create_default_context(cafile=str(cert))
+                https = uvicorn.Server(uvicorn.Config(get_asgi_application(), lifespan='off', log_level='error',
+                    access_log=False, ssl_certfile=str(cert), ssl_keyfile=str(key)))
+                task = asyncio.create_task(https.serve(sockets=[listener]))
+                def post(payload=None):
+                    connection = http.client.HTTPSConnection('127.0.0.1', listener.getsockname()[1],
+                        context=context, timeout=5)
+                    try:
+                        connection.request('POST', '/api/v1/machine/management-context',
+                            json.dumps(self.request if payload is None else payload),
+                            {'Authorization': 'Token '+self.machine_auth.value, 'Content-Type': 'application/json'})
+                        response = connection.getresponse()
+                        return response.status, json.loads(response.read()), response.getheader('Cache-Control')
+                    finally:
+                        connection.close()
+                try:
+                    async with asyncio.timeout(5):
+                        while not https.started:
+                            if task.done(): await task
+                            await asyncio.sleep(.01)
+                    await body(post, server)
+                finally:
+                    https.should_exit = True
+                    await asyncio.wait_for(task, 5)
+                    listener.close()
+        self.run_rootless(exercise)
+
+    def test_verified_https_availability_is_exact_503_safe_reason_and_no_store(self):
+        self.fixture()
+        async def body(post, server):
+            status, data, cache = await asyncio.to_thread(post)
+            self.assertEqual(status, 200, data)
+            self.assertEqual(data['token'], self.subject_token)
+            self.assertEqual(cache, 'no-store')
+            for kind, reason in self.failures:
+                with self.subTest(kind=kind), self.failure(kind):
+                    status, data, cache = await asyncio.to_thread(post)
+                    self.redacted(data)
+                    self.assertEqual(status, 503, data)
+                    self.assertEqual(data['error']['code'], 'authority_unavailable')
+                    self.assertEqual(data['error']['message'], reason)
+                    self.assertEqual(cache, 'no-store')
+        self.https(body)
+
+    def test_verified_https_integrity_denials_and_malformed_input_are_not_outages(self):
+        from mop.server.access.models import AgentDefinitionVersion, AgentDefinitionApproval
+        from mop.server.secrets.crypto import Envelope, Keyring, XChaCha20Provider, SecretCryptoError
+        from mop.server.secrets.models import SecretVersion
+        self.fixture()
+        definition = AgentDefinitionVersion.objects.get(creationintent__grant__id=self.grant_id)
+        version = SecretVersion.objects.get(pk=definition.content_version_id)
+        original = bytes(version.envelope)
+        envelope = Envelope.from_bytes(original)
+        damaged = replace(envelope, ciphertext=envelope.ciphertext[:-1]+bytes([envelope.ciphertext[-1]^1])).to_bytes()
+        async def denied(post, reason):
+            status, data, cache = await asyncio.to_thread(post)
+            self.redacted(data)
+            self.assertEqual(status, 403, data)
+            self.assertEqual(data['error']['code'], 'access_denied')
+            self.assertEqual(data['error']['message'], reason)
+            self.assertEqual(cache, 'no-store')
+        async def body(post, server):
+            for name, changed in (('tag', damaged), ('envelope', b'invalid-envelope')):
+                with self.subTest(kind=name):
+                    await server.runtime.database(lambda: SecretVersion._base_manager.filter(pk=version.pk).update(envelope=changed))
+                    await denied(post, 'retained agent definition authentication failed')
+            await server.runtime.database(lambda: SecretVersion._base_manager.filter(pk=version.pk).update(envelope=original))
+            provider = self.app.store.provider
+            decrypt = type(provider).decrypt
+            wrong = XChaCha20Provider(Keyring(envelope.key_id, {envelope.key_id: b'z'*32}))
+            with patch.object(type(provider), 'decrypt', side_effect=lambda value, context: decrypt(wrong, value, context)):
+                await denied(post, 'retained agent definition authentication failed')
+            with patch.object(type(provider), 'decrypt', side_effect=SecretCryptoError('secret encryption key is unavailable')):
+                await denied(post, 'retained agent definition authentication failed')
+            with patch.object(type(provider), 'decrypt', return_value=None):
+                await denied(post, 'retained agent definition authentication failed')
+            # Недоступность нельзя определять по фразе Denied: тип и authority
+            # важнее похожего текста, даже для внутреннего Access отказа.
+            from mop.server.access.services import Denied
+            with patch.object(type(self.app.grants), '_decode_definition',
+                    side_effect=Denied('secret encryption key is unavailable')):
+                await denied(post, 'secret encryption key is unavailable')
+            status, data, cache = await asyncio.to_thread(post, {**self.request, 'actor_id': self.subject.pk})
+            self.assertEqual(status, 400, data)
+            self.redacted(data)
+            self.assertEqual(cache, 'no-store')
+            await server.runtime.database(lambda: AgentDefinitionApproval._base_manager.filter(definition=definition).delete())
+            await denied(post, 'agent definition is not human approved')
+        self.https(body)
 
 
 class ActivatedManagementContext(TransactionTestCase):

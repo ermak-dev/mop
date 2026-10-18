@@ -26,7 +26,7 @@ from mop.server.access.delegation import RoleBinding
 from mop.server.sessions.services import Assignments
 from mop.server.secrets import services as secrets
 from mop.server.preparation import services as preparation
-from mop.server.secrets.crypto import SecretCryptoError
+from mop.server.secrets.crypto import SecretCryptoError, SecretCryptoUnavailable
 from . import bootstrap
 from .models import Installation
 from .runtime import Runtime, Backpressure, require_restore_ready, verify_installation, maintenance, close_pools
@@ -371,7 +371,10 @@ def compose(*, key_id):
         close_pools()
 
 
-def _failure(exc, *, private=False):
+def _failure(exc, *, private=False, management=False):
+    if management and isinstance(exc, (SecretCryptoUnavailable, secrets.StorageUnavailable, GrantUnavailable)):
+        # Только типизированная недоступность, не любой crypto/auth отказ.
+        return {'ok': False, 'error': {'code': 'unavailable', 'message': str(exc)}}
     if private:
         # Конечные send/take сохраняют domain verdict, а не схлопывают
         # conflict/capacity/not-found/unavailable в отказ authority (403).
@@ -499,7 +502,8 @@ class CredentialService:
                     wire = p.frame(response)
                 except Exception as exc:
                     wire = p.frame(_failure(exc,
-                        private=command in (p.Command.SEND_REPORT, p.Command.TAKE_DELIVERY)))
+                        private=command in (p.Command.SEND_REPORT, p.Command.TAKE_DELIVERY),
+                        management=command is p.Command.MANAGEMENT_CONTEXT))
                 writer.write(wire)
                 await writer.drain()
         except p.CredentialError as exc:

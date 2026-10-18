@@ -22,7 +22,7 @@ from mop.common import soul
 from ..catalog.models import Project
 from ..secrets.services import (RetainedSecrets, RetentionScope, outside_transaction,
                                 Refused as SecretRefused, Conflict as SecretConflict)
-from ..secrets.crypto import SecretCryptoError
+from ..secrets.crypto import SecretCryptoError, SecretCryptoUnavailable
 from . import models as m, services as auth
 from .context import ActorContext, ActorKind
 from .delegation import (ApprovedPolicy, RoleBinding, DefinitionContent, DefinitionMetadata, AgentProfileInfo,
@@ -335,6 +335,8 @@ class Grants:
         self._require_seal(row)
         try:
             raw = self.secrets.read(actor, RetentionScope(row.project_id, row.owner_id, row.id, 'policy'), row.content_version_id)
+        except SecretCryptoUnavailable:
+            raise
         except SecretCryptoError:
             raise auth.Denied('retained agent definition authentication failed') from None
         return self._decode_definition(row, raw)

@@ -22,7 +22,7 @@ import struct
 from types import MappingProxyType
 from typing import Protocol
 
-from nacl import bindings, utils
+from nacl import bindings, exceptions, utils
 
 MAX_PLAINTEXT_BYTES = 1024 * 1024
 MAX_CONTEXT_BYTES = 1024
@@ -36,6 +36,10 @@ _MAX_ENVELOPE_BYTES = 7 + MAX_KEY_ID_BYTES + _NONCE_BYTES + MAX_PLAINTEXT_BYTES 
 
 class SecretCryptoError(ValueError):
     """Безопасная категория отказа без входных значений и исключения провайдера."""
+
+
+class SecretCryptoUnavailable(SecretCryptoError):
+    """Ключ/provider недоступен; не ошибка подлинности envelope или AAD."""
 
 
 def _key_id(value):
@@ -198,10 +202,17 @@ class XChaCha20Provider:
         aad = _aad(context, envelope.version, envelope.key_id)
         key = self.keyring.keys.get(envelope.key_id)
         if key is None:
-            raise SecretCryptoError("secret encryption key is unavailable")
+            raise SecretCryptoUnavailable("secret encryption key is unavailable")
+        failure, reason = SecretCryptoUnavailable, "secret decryption failed"
         try:
             return bindings.crypto_aead_xchacha20poly1305_ietf_decrypt(
                 envelope.ciphertext, aad, envelope.nonce, key)
+        except exceptions.RuntimeError:
+            # В PyNaCl runtime/unavailable тоже наследуют CryptoError.
+            pass
+        except exceptions.CryptoError:
+            failure, reason = SecretCryptoError, "secret authentication failed"
         except Exception:
             pass
-        raise SecretCryptoError("secret authentication failed")
+        # Вне except: raw ошибка provider не остаётся даже в __context__.
+        raise failure(reason)

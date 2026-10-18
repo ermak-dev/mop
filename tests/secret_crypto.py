@@ -175,6 +175,44 @@ class CryptoTests(unittest.TestCase):
                 error = self.rejected(operation)
                 self.assertIsNone(error.__context__)
 
+    # BUG/HYPOTHESIS (#742): один SecretCryptoError смешивает bad tag и
+    # недоступность provider/key; Access превращает оба в policy Denied.
+    # Отдельный тип availability обязан по-прежнему наследовать безопасный
+    # SecretCryptoError, но не включать raw exception/cause/context.
+    # SOLUTION: unavailable -- отдельный subtype; PyNaCl authentication остаётся
+    # базовым отказом, raw provider errors санитизируются вне except.
+    # RESULT: RED для key/runtime/UnavailableError, GREEN с прежними tamper checks.
+    # STATUS: FIXED — see #742.
+    def test_missing_key_and_provider_outage_have_typed_safe_availability_not_authentication_failure(self):
+        c = self.c
+        envelope = self.provider.encrypt(self.plaintext, self.context)
+        missing = c.XChaCha20Provider(c.Keyring('root-v2', {'root-v2': b'b'*32}))
+        with self.subTest(provider_error='missing_key'):
+            error = self.rejected(lambda: missing.decrypt(envelope, self.context))
+            self.assertEqual(type(error).__name__, 'SecretCryptoUnavailable')
+            self.assertEqual(str(error), 'secret encryption key is unavailable')
+        from nacl import exceptions
+        for failure in (RuntimeError, exceptions.RuntimeError, exceptions.UnavailableError):
+            with self.subTest(provider_error=failure), patch(
+                    'nacl.bindings.crypto_aead_xchacha20poly1305_ietf_decrypt',
+                    side_effect=failure(self.plaintext.decode())):
+                error = self.rejected(lambda: self.provider.decrypt(envelope, self.context))
+                self.assertEqual(type(error).__name__, 'SecretCryptoUnavailable')
+                self.assertEqual(str(error), 'secret decryption failed')
+                self.assertIsNone(error.__context__)
+
+    def test_bad_tag_wrong_key_and_invalid_context_are_not_crypto_availability(self):
+        c = self.c
+        envelope = self.provider.encrypt(self.plaintext, self.context)
+        wrong = c.XChaCha20Provider(c.Keyring('root-v1', {'root-v1': b'b'*32}))
+        for decrypt in (
+                lambda: wrong.decrypt(envelope, self.context),
+                lambda: self.provider.decrypt(envelope, replace(self.context, record=b'wrong')),
+                lambda: self.provider.decrypt(replace(envelope,
+                    ciphertext=envelope.ciphertext[:-1]+bytes([envelope.ciphertext[-1]^1])), self.context),
+                lambda: self.provider.decrypt(envelope, None)):
+            self.assertIs(type(self.rejected(decrypt)), c.SecretCryptoError)
+
     def test_root_keyrings_with_different_material_are_not_equal(self):
         # Сравнение только active_key_id скрывает ошибочно подменённый bootstrap.
         other = self.c.Keyring("root-v1", {"root-v1": b"b" * 32})
