@@ -365,7 +365,8 @@ def _failure(exc, *, private=False):
         # Конечные send/take сохраняют domain verdict, а не схлопывают
         # conflict/capacity/not-found/unavailable в отказ authority (403).
         for kind, code in ((EndpointConflict, 'conflict'), (EndpointCapacity, 'capacity'),
-                           (access.NotVisible, 'not_found'), (EndpointUnavailable, 'unavailable')):
+                           (access.NotVisible, 'not_found'),
+                           ((EndpointUnavailable, SecretCryptoError, secrets.StorageUnavailable), 'unavailable')):
             if isinstance(exc, kind):
                 return {'ok': False, 'error': {'code': code, 'message': str(exc)}}
         # Untyped ValueError может прийти и из crypto/driver: не передаём его

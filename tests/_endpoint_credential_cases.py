@@ -12,6 +12,7 @@ raw provider leak получили отдельные red. Итоговый PG17
 STATUS: FIXED — see #669 (finite private ports; WS/native production binding отдельно).
 """
 import asyncio
+from contextlib import contextmanager, ExitStack
 from datetime import timedelta
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.db import connection, transaction
+from django.db import connection, transaction, DatabaseError
 from django.test import TransactionTestCase, Client, override_settings
 from django.utils import timezone
 
@@ -35,7 +36,7 @@ from mop.server.catalog.models import Project, ClientRegistration, NodeProject
 from mop.server.controller import credentials as service, endpointviews
 from mop.server.controller.models import Installation
 from mop.server.controller.runtime import Runtime, initialize
-from mop.server.secrets.crypto import XChaCha20Provider, Keyring
+from mop.server.secrets.crypto import XChaCha20Provider, Keyring, SecretCryptoError
 from mop.server.sessions import endpoint_models as m
 
 
@@ -144,6 +145,202 @@ class EndpointCredentialFixture(TransactionTestCase):
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+class PrivateAvailabilityCases(EndpointCredentialFixture):
+    # BUG: typed crypto/storage проходят socket как refused и превращаются в 403.
+    # HYPOTHESIS: _failure(private=True) не отличает инфраструктуру от authority.
+    # Проверяем настоящие UDS/client/rootless/HTTP; storage_errors получает сырой
+    # DatabaseError в installation fence после crypto, не готовый wire verdict.
+    # SOLUTION: только private _failure относит typed crypto/storage к unavailable;
+    # safe library reason не фильтруется снова, общий credential protocol прежний.
+    # RED: 21 subcase — refused/CredentialRefused/Denied/HTTP403 вместо unavailable.
+    # RESULT: private suite 41/41 green; safe reason сохранён, raw errors generic,
+    # настоящий Denied остаётся 403, postclaim attempting не допускает replay.
+    # STATUS: FIXED — see #739.
+    failures = (
+        ('crypto', 'secret encryption failed'),
+        ('crypto', 'secret encryption key is unavailable'),
+        ('storage', 'secret storage is unavailable'),
+    )
+
+    @contextmanager
+    def private_failure(self, kind, reason, *, take=False):
+        method = 'decrypt' if take else 'encrypt'
+        hook = 'after_' + method
+        with ExitStack() as stack:
+            if kind == 'crypto':
+                stack.enter_context(patch.object(self.provider, method, side_effect=SecretCryptoError(reason)))
+            else:
+                def break_storage():
+                    stack.enter_context(patch.object(service.Installation.objects, 'values',
+                        side_effect=DatabaseError(self.auth.value+' '+self.values['text'])))
+                setattr(self, hook, break_storage)
+            try:
+                yield
+            finally:
+                setattr(self, hook, lambda: None)
+
+    async def no_replay(self, client, server, sent):
+        state = await server.runtime.database(lambda: m.MessageDelivery.objects.values_list(
+            'state', flat=True).get(pk=sent.id))
+        self.assertEqual(state, 'attempting')
+        self.assertIsNone(await asyncio.to_thread(self.take, client))
+        await server.runtime.database(self.metadata.disconnect, self.context)
+        self.context = await server.runtime.database(self.metadata.connect, self.actor,
+            self.endpoint.id, gateway_id=uuid4())
+        self.assertIsNone(await asyncio.to_thread(self.take, client))
+
+    def test_typed_availability_wire_send_preserves_safe_reason(self):
+        async def body(client, server):
+            for kind, reason in self.failures:
+                with self.subTest(kind=kind, reason=reason):
+                    with self.private_failure(kind, reason):
+                        response = await self.raw(self.request('send_private_report', self.send_args()))
+                    self.assertFalse(await server.runtime.database(m.MessageDelivery.objects.exists))
+                    self.assertEqual(response, dict(ok=False, error=dict(code='unavailable', message=reason)))
+        self.run_socket(body)
+
+    def test_typed_availability_wire_take_preserves_claim_without_replay(self):
+        async def body(client, server):
+            for kind, reason in self.failures:
+                with self.subTest(kind=kind, reason=reason):
+                    sent = await asyncio.to_thread(self.send, client, message_id=uuid4())
+                    with self.private_failure(kind, reason, take=True):
+                        response = await self.raw(dict(version=1, command='take_private_delivery',
+                            args=dict(endpoint_id=str(self.endpoint.id), connection_nonce=str(self.context.nonce)),
+                            auth=dict(kind='token', value=self.auth.value)))
+                    await self.no_replay(client, server, sent)
+                    self.assertEqual(response, dict(ok=False, error=dict(code='unavailable', message=reason)))
+        self.run_socket(body)
+
+    def test_typed_availability_client_is_not_credential_refused(self):
+        async def body(client, server):
+            for take in (False, True):
+                for kind, reason in self.failures:
+                    with self.subTest(take=take, kind=kind, reason=reason):
+                        if take:
+                            sent = await asyncio.to_thread(self.send, client, message_id=uuid4())
+                        with self.private_failure(kind, reason, take=take):
+                            with self.assertRaises(p.CredentialError) as caught:
+                                await asyncio.to_thread(self.take if take else self.send, client)
+                        if take:
+                            await self.no_replay(client, server, sent)
+                        self.assertEqual(str(caught.exception), reason)
+                        self.assertIs(type(caught.exception), p.CredentialError)
+        self.run_socket(body)
+
+    def test_typed_availability_rootless_send_and_take_are_unavailable(self):
+        from mop.server.sessions.endpoints import Unavailable
+        async def body(client, server):
+            boot = {**settings.BOOTSTRAP, 'role': 'web',
+                'credential_service': dict(path=self.path, server_uid=os.geteuid())}
+            with override_settings(BOOTSTRAP=boot), \
+                    patch('mop.server.controller.bootstrap.secret_provider', side_effect=AssertionError('web provider')):
+                api = endpointviews.default_endpoints()
+                for take in (False, True):
+                    for kind, reason in self.failures:
+                        with self.subTest(take=take, kind=kind, reason=reason):
+                            if take:
+                                sent = await asyncio.to_thread(self.send, client, message_id=uuid4())
+                            with self.private_failure(kind, reason, take=take):
+                                try:
+                                    if take:
+                                        await asyncio.to_thread(api.take_private_delivery, self.auth,
+                                            endpoint_id=self.endpoint.id, connection_nonce=self.context.nonce)
+                                    else:
+                                        await asyncio.to_thread(api.send_private_report, self.sender_auth, **self.values)
+                                except Exception as error:
+                                    caught = error
+                                else:
+                                    self.fail('private infrastructure failure returned success')
+                            if take:
+                                await self.no_replay(client, server, sent)
+                            self.assertIs(type(caught), Unavailable)
+                            self.assertEqual(str(caught), reason)
+        self.run_socket(body)
+
+    def test_raw_provider_errors_stay_generic_and_never_replay_claim(self):
+        from mop.server.sessions.endpoints import Unavailable
+        reason = 'private delivery cryptography unavailable; mutation outcome unknown, do not replay'
+        async def body(client, server):
+            boot = {**settings.BOOTSTRAP, 'role': 'web',
+                'credential_service': dict(path=self.path, server_uid=os.geteuid())}
+            with override_settings(BOOTSTRAP=boot):
+                api = endpointviews.default_endpoints()
+                for take in (False, True):
+                    for kind in (RuntimeError, PermissionError):
+                        with self.subTest(take=take, kind=kind):
+                            if take:
+                                sent = await asyncio.to_thread(self.send, client, message_id=uuid4())
+                            with patch.object(self.provider, 'decrypt' if take else 'encrypt',
+                                    side_effect=kind(self.auth.value+' '+self.sender_auth.value+' '+self.values['text'])):
+                                with self.assertRaises(Unavailable) as caught:
+                                    if take:
+                                        await asyncio.to_thread(api.take_private_delivery, self.auth,
+                                            endpoint_id=self.endpoint.id, connection_nonce=self.context.nonce)
+                                    else:
+                                        await asyncio.to_thread(api.send_private_report, self.sender_auth, **self.values)
+                            if take:
+                                await self.no_replay(client, server, sent)
+                            self.assertEqual(str(caught.exception), reason)
+        self.run_socket(body)
+
+    def test_actual_authority_denied_take_stays_denied_before_claim(self):
+        permission_id = Permission.objects.get_by_natural_key('register_endpoint', 'execution', 'assignment').pk
+        async def body(client, server):
+            boot = {**settings.BOOTSTRAP, 'role': 'web',
+                'credential_service': dict(path=self.path, server_uid=os.geteuid())}
+            with override_settings(BOOTSTRAP=boot):
+                api = endpointviews.default_endpoints()
+                sent = await asyncio.to_thread(self.send, client)
+                await server.runtime.database(self.user.user_permissions.remove, permission_id)
+                with self.assertRaises(access.Denied):
+                    await asyncio.to_thread(api.take_private_delivery, self.auth,
+                        endpoint_id=self.endpoint.id, connection_nonce=self.context.nonce)
+                state = await server.runtime.database(lambda: m.MessageDelivery.objects.values_list(
+                    'state', flat=True).get(pk=sent.id))
+                self.assertEqual(state, 'queued')
+                await server.runtime.database(self.user.user_permissions.add, permission_id)
+                self.assertEqual((await asyncio.to_thread(self.take, client)).id, sent.id)
+        self.run_socket(body)
+
+    def test_typed_availability_http_is_503_with_safe_reason_not_denied(self):
+        async def body(client, server):
+            boot = {**settings.BOOTSTRAP, 'role': 'web',
+                'credential_service': dict(path=self.path, server_uid=os.geteuid())}
+            with override_settings(BOOTSTRAP=boot, ALLOWED_HOSTS=['testserver']), \
+                    patch('mop.server.controller.bootstrap.private_bytes', side_effect=AssertionError('web root read')), \
+                    patch('mop.server.controller.bootstrap.secret_provider', side_effect=AssertionError('web provider')):
+                http = Client(HTTP_AUTHORIZATION='Token '+self.sender_auth.value)
+                args = dict(schema_version=1, epoch=str(self.values['expected_epoch']),
+                    address=self.values['address'], message_id=str(self.values['message_id']), text=self.values['text'],
+                    not_after=self.values['not_after'].isoformat())
+                def post(args):
+                    response = http.post('/api/v1/reports', args, content_type='application/json', secure=True)
+                    return response.status_code, response.json(), response['Cache-Control']
+                for kind, reason in self.failures:
+                    with self.subTest(kind=kind, reason=reason):
+                        with self.private_failure(kind, reason):
+                            status, data, cache = await server.runtime.database(post, args)
+                        self.assertEqual(status, 503, data)
+                        self.assertEqual(data['error']['code'], 'delivery_unavailable')
+                        self.assertEqual(data['error']['message'], reason)
+                        self.assertEqual(cache, 'no-store')
+                        self.assertNotIn(self.auth.value, str(data))
+                        self.assertNotIn(self.sender_auth.value, str(data))
+                        self.assertNotIn(self.values['text'], str(data))
+                status, _, _ = await server.runtime.database(post, {**args, 'text': None})
+                self.assertEqual(status, 400)
+                status, _, _ = await server.runtime.database(post, args)
+                self.assertEqual(status, 202)
+                status, _, _ = await server.runtime.database(post, {**args, 'text': 'conflicting report'})
+                self.assertEqual(status, 409)
+                await server.runtime.database(self.sender_user.user_permissions.clear)
+                status, data, _ = await server.runtime.database(post, {**args, 'message_id': str(uuid4())})
+                self.assertEqual(status, 403, data)
+                self.assertEqual(data['error']['code'], 'access_denied')
+        self.run_socket(body)
 
 
 class EndpointCredentialCases(EndpointCredentialFixture):
