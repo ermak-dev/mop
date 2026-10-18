@@ -142,6 +142,11 @@ finally:
         # guard; постоянный maintenance допустим только для проверенного state.
         # HYPOTHESIS: safe boundary должна скрывать raw details, не выдумывая
         # причину отказа или необходимость восстановления.
+        # SOLUTION: общий DB refusal остаётся unavailable без permanent
+        # maintenance; missing/not-ready guard по-прежнему требует recovery.
+        # RESULT: red — лишний maintenance suffix у синтетического DB refusal;
+        # 194/194 PG17 concurrency/restore/grant/RBAC checks green.
+        # STATUS: FIXED — see #753.
         from django.db import DatabaseError
         from mop.server.controller.runtime import require_restore_ready
         with patch('django.db.models.query.QuerySet.get', side_effect=DatabaseError('fixture-private-detail')):

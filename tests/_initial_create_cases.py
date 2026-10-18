@@ -755,6 +755,13 @@ class InitialCreatePhases(TransactionTestCase):
     # lock_timeout конкурента; safe boundary теряет тип и причину SQL-отказа.
     # Здесь планировщик потоков удерживает уже проверенный первый claim до
     # исхода второго: настоящий PG lock_timeout, без SQL/HTTP budget overrides.
+    # SOLUTION: root сохраняет typed contention для SQLSTATE 55P03, machine
+    # authority возвращает Conflict до domain locks/effects; без retry/cache.
+    # RESULT: PG17 red — LockNotAvailable 55P03 за 2.001 s, Lock/transactionid
+    # на PID владельца; ready guard ошибочно превращался в maintenance.
+    # 194/194 concurrency/restore/grant/RBAC checks green: один attempt,
+    # четыре исходных fences и идемпотентный replay без потери authority.
+    # STATUS: FIXED — see #753.
     def test_contended_planned_claim_is_bounded_conflict_not_restore_maintenance(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event
