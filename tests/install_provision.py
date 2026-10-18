@@ -164,9 +164,9 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertEqual(len(root.read_bytes()), 32)
         self.assertEqual(root.stat().st_mode & 0o777, 0o600)
         keys = [(Path(paths['configuration']) / role / 'django.key').read_bytes()
-                for role in ('maintenance', 'web', 'worker', 'gateway')]
+                for role in ('maintenance', 'web', 'worker', 'gateway', 'credentials')]
         self.assertEqual(len(set(keys)), 1, 'auth signatures require shared signing material')
-        for role in ('web', 'worker', 'gateway', 'builder', 'credentials'):
+        for role in ('web', 'worker', 'gateway', 'builder'):
             self.assertFalse((Path(paths['configuration']) / role / 'root.key').exists())
         self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends', 'postgresql-client-16'], calls)
         self.assertFalse(any('systemctl' in argv or 'ansible-playbook' in argv for argv in calls))
@@ -279,6 +279,103 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertNotIn('AmbientCapabilities=CAP_NET_BIND_SERVICE', privileged_port['units']['worker'])
         with self.assertRaisesRegex(ValueError, 'HTTPS'):
             renderer(spec, {**values, 'public_origin': 'http://public.example.invalid'})
+
+    # HYPOTHESIS: socket ACL есть, но private material и daemon unit отсутствуют.
+    # SPEC: два purpose-owned root экземпляра, одна signing trust; daemon использует
+    # существующий credentials entrypoint, точный path/group/peer UID, без readiness receipt.
+    # SOLUTION: installer provisions private material и finite service composition.
+    # RESULT: RED — нет private root/unit/resolver; pure GREEN, OS actions fake, не host apply.
+    # STATUS: FIXED — see #644.
+    def test_credential_private_keys_are_provisioned_without_granting_frontend_root_access(self):
+        module = self.module()
+        spec = self.document()
+        data = module.document(spec)
+        calls = []
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError):
+            module.prepare(data, execute=lambda argv, **kw: (calls.append(argv) or subprocess.CompletedProcess(argv, 0)))
+        paths, users = data['paths'], data['identities']
+        private = Path(paths['configuration']) / 'credentials'
+        self.assertTrue((private / 'root.key').is_file(), 'credential root custody is missing')
+        self.assertEqual((private / 'root.key').read_bytes(), (Path(paths['root_trust']) / 'root.key').read_bytes())
+        self.assertEqual((private / 'django.key').read_bytes(),
+                         (Path(paths['configuration']) / 'web' / 'django.key').read_bytes())
+        for name in ('root.key', 'django.key'):
+            path = private / name
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertIn(['chown', users['credentials'] + ':' + users['credentials'], str(path)], calls)
+        for role in ('web', 'worker', 'gateway', 'builder'):
+            self.assertFalse((Path(paths['configuration']) / role / 'root.key').exists())
+        self.assertFalse(any('systemctl' in argv for argv in calls))
+
+    def test_bound_credential_unit_uses_exact_os_peers_and_existing_daemon_lifecycle(self):
+        from mop.server import installation
+        import inspect
+        self.assertIn('frontend_uids', inspect.signature(installation.service_artifact).parameters,
+                      'service artifact cannot bind exact frontend OS peers')
+        spec = self.document()
+        values = {'public_origin': 'https://public.example.invalid', 'http_bind': '127.0.0.1',
+                  'http_port': 9443, 'db_pool_max': 8, 'instance_db_connections': 24, 'admin_db_headroom': 8}
+        peers = {'web': 1945, 'worker': 1946}
+        result = installation.service_artifact(spec, values, credential_uid=1944,
+                                               credential_gid=1944, frontend_uids=peers)
+        self.assertEqual(set(result['units']), {'web', 'worker', 'credentials'})
+        self.assertNotIn('credentials', result['blocked_services'])
+        self.assertEqual(result['blocked_services'], {'worker': [625], 'builder': [648], 'gateway': [628]})
+        self.assertFalse(result['runtime_bound'])
+        self.assertFalse(result['services_started'])
+        unit = result['units']['credentials']
+        config = self.spec['paths']['configuration'] + '/credentials'
+        socket_dir = self.spec['paths']['state'] + '/credential-socket'
+        self.assertIn('User=' + self.spec['identities']['credentials'], unit)
+        self.assertIn('Group=' + self.spec['identities']['credentials'], unit)
+        self.assertIn('/bin/mop server credentials --bootstrap ' + config + '/bootstrap.json', unit)
+        self.assertIn('--socket ' + socket_dir + '/service.sock --key-id root-v1', unit)
+        self.assertIn('--socket-group 1944 --peer-uid 1945 --peer-uid 1946', unit)
+        self.assertIn('ReadWritePaths=' + self.spec['paths']['state'] + '/credentials ' + socket_dir, unit)
+        self.assertIn('TimeoutStopSec=30', unit)
+        self.assertIn('KillSignal=SIGTERM', unit)
+        self.assertIn('NoNewPrivileges=true', unit)
+        self.assertNotIn('EnvironmentFile', unit)
+        self.assertNotIn('ExecStartPre', unit, 'startup must not delete stale sockets')
+        self.assertEqual(result['required_artifacts']['credentials'], ['bootstrap.json', 'django.key', 'root.key'])
+        for role in ('web', 'worker'):
+            self.assertIn(config, result['units'][role])
+            self.assertNotIn('--key-id', result['units'][role])
+        for bad in ({'web': 1944, 'worker': 1946}, {'web': 0, 'worker': 1946},
+                    {'web': 1945}, {'web': 1945, 'worker': 1945},
+                    {'web': True, 'worker': 1946}, {**peers, 'gateway': 1947}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'credential.*identit|frontend'):
+                installation.service_artifact(spec, values, credential_uid=1944,
+                                              credential_gid=1944, frontend_uids=bad)
+        with self.assertRaisesRegex(ValueError, 'credential.*identit|frontend'):
+            installation.service_artifact(spec, values, credential_uid=1944, frontend_uids=peers)
+
+    def test_daemon_composition_resolves_only_declared_os_accounts_without_fallback(self):
+        from mop.server import installation
+        from types import SimpleNamespace
+        import pwd
+        import grp
+        resolver = getattr(installation, 'credential_os_coordinates', None)
+        self.assertTrue(callable(resolver), 'installer render has no exact OS peer resolver')
+        spec = self.document()
+        users = dict(spec.identities)
+        accounts = {users[role]: SimpleNamespace(pw_uid=uid, pw_gid=uid)
+                    for role, uid in (('credentials', 1944), ('web', 1945), ('worker', 1946))}
+        with patch.object(pwd, 'getpwnam', side_effect=accounts.__getitem__) as lookup, \
+             patch.object(grp, 'getgrnam', return_value=SimpleNamespace(gr_gid=1944)):
+            coordinates = resolver(spec)
+        self.assertEqual(coordinates, {'credential_uid': 1944, 'credential_gid': 1944,
+                                      'frontend_uids': {'web': 1945, 'worker': 1946}})
+        self.assertEqual({call.args[0] for call in lookup.call_args_list}, set(accounts))
+        with patch.object(pwd, 'getpwnam', side_effect=KeyError):
+            with self.assertRaisesRegex(RuntimeError, 'OS identit'):
+                resolver(spec)
+        with patch.object(pwd, 'getpwnam', side_effect=accounts.__getitem__), \
+             patch.object(grp, 'getgrnam', return_value=SimpleNamespace(gr_gid=2000)):
+            with self.assertRaisesRegex(RuntimeError, 'group'):
+                resolver(spec)
 
     def test_safe_preflight_reason_survives_the_privileged_boundary(self):
         module = self.module()

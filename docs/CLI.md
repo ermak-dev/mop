@@ -759,7 +759,7 @@ Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
 checks start their own native TLS broker with fixture-only principals and ACLs.
 --cross-uid runs only the narrow root UID gate (_credential_uid_gate.py,
-the two real cross-peer cases) as root inside the owned container,
+the two real cross-peer cases and the fresh-installer daemon case) as root inside the owned container,
 after the setup builds the uid pair; the default suite still runs as
 unprivileged ci.
 --web adds the frontend gates — the dashboard build check, full TypeScript
@@ -1551,9 +1551,9 @@ mop server install <action> --spec PATH: independent fresh-install preparation
   plan          validate protected topology and show ordered prerequisites (stdlib)
   provisioning  review OS accounts/directories and explicit PostgreSQL topology
     --apply     prepare a new local Debian host/PVE guest (sudo, external DB only)
-  database      create a new DB and four least-privilege roles over verified TLS
+  database      create a new DB and five least-privilege roles over verified TLS
     --provision-bootstrap PATH  separate protected database-only admin document
-    --passwords-file PATH       protected JSON of four new DB role passwords
+    --passwords-file PATH       protected JSON: web, worker, gateway, credential, maintenance
   database-check --provision-bootstrap PATH  verify an external DB as maintenance
   bootstrap --role NAME --password-file PATH  write a new private role bootstrap
   prepare --bootstrap PATH    direct maintenance: migrations then trust initialization
@@ -1575,8 +1575,12 @@ It refuses existing trees/accounts and provisioned-DB topology: PostgreSQL serve
 TLS/network provisioning needs its own explicit operator input. It starts no service,
 does not connect to the DB, does not invoke PVE and never claims runtime readiness.
 The same local command can run inside a host or an explicitly created PVE guest.
-Rendered units are review artifacts; worker/credential/realtime bindings remain
-separately gated. Full runtime and host/PVE reboot acceptance is a later gate.
+Rendered units are review artifacts. Credential composition resolves the declared
+credentials OS account and exact web/worker peer UIDs; its bootstrap purpose is
+credential. Worker/realtime bindings and native lifecycle acceptance remain gated.
+The separate credential pool adds 8 connections to 24 ordinary plus 8 maintenance;
+PostgreSQL needs 40 ordinary slots plus its reserved capacity. No unit is installed
+or started by rendering. Full runtime and host/PVE reboot acceptance is a later gate.
 ```
 
 #### mop server proxykey

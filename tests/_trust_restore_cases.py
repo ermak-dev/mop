@@ -42,7 +42,7 @@ class TrustRestoreBoundary(unittest.TestCase):
             env=env, capture_output=True, text=True, timeout=90)
         self.assertEqual(backup.returncode, 0, backup.stderr)
         target = self.dbname + '_trust_restore'
-        self.admin.execute(sql.SQL('CREATE DATABASE {} OWNER {} CONNECTION LIMIT 32').format(
+        self.admin.execute(sql.SQL('CREATE DATABASE {} OWNER {} CONNECTION LIMIT 40').format(
             sql.Identifier(target), sql.Identifier(self.users['maintenance'])))
         self.addCleanup(lambda: self.admin.execute(sql.SQL('DROP DATABASE {}').format(sql.Identifier(target))))
         db = dict(self.spec.database)
@@ -52,7 +52,7 @@ class TrustRestoreBoundary(unittest.TestCase):
                              password=self.passwords['maintenance']) as maintenance:
             maintenance.execute(sql.SQL('REVOKE ALL ON DATABASE {} FROM PUBLIC').format(sql.Identifier(target)))
             maintenance.execute('REVOKE ALL ON SCHEMA public FROM PUBLIC')
-            for role in installation.RUNTIME_ROLES:
+            for role in installation.DATABASE_RUNTIME_ROLES:
                 user = sql.Identifier(self.users[role])
                 maintenance.execute(sql.SQL('GRANT CONNECT ON DATABASE {} TO {}').format(sql.Identifier(target), user))
                 maintenance.execute(sql.SQL('GRANT USAGE ON SCHEMA public TO {}').format(user))

@@ -60,7 +60,7 @@ class InstallationACL(unittest.TestCase):
             installation.verify_database(self.spec, connection)
 
     def alias(self, *, login=True):
-        name = self.users['credentials']
+        name = self.users['credentials'] + '_alias'
         self.admin.execute(sql.SQL('CREATE ROLE {} {} PASSWORD {}').format(
             sql.Identifier(name), sql.SQL('LOGIN' if login else 'NOLOGIN'),
             sql.Literal('isolated-acl-negative-only-644')))
@@ -72,7 +72,7 @@ class InstallationACL(unittest.TestCase):
         with self.connect('maintenance') as maintenance:
             self.assertTrue(installation.verify_database(self.spec, maintenance)['verified'])
             maintenance.execute("UPDATE controller_restoreguard SET state='restoring' WHERE id=1")
-        for role in installation.RUNTIME_ROLES:
+        for role in installation.DATABASE_RUNTIME_ROLES:
             with self.connect(role) as runtime:
                 with self.subTest(role=role), runtime.transaction(force_rollback=True), self.assertRaises(psycopg.errors.InsufficientPrivilege):
                     runtime.execute("UPDATE controller_restoreguard SET state='ready' WHERE id=1")
@@ -95,13 +95,17 @@ class InstallationACL(unittest.TestCase):
             self.assertEqual(maintenance.execute('SELECT state FROM controller_restoreguard').fetchone(), ('restoring',))
             maintenance.execute("UPDATE controller_restoreguard SET state='ready' WHERE id=1")
         source = Path(__file__).resolve().parents[1]
-        for role in installation.RUNTIME_ROLES:
+        for role in installation.DATABASE_RUNTIME_ROLES:
             boot = self.base / ('bootstrap-' + role + '.json')
             document = installation.bootstrap_document(self.spec, role, password=self.passwords[role], credential_uid=os.geteuid())
             key = Path(document['django_key'])
             key.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             key.write_bytes(b'd' * 64)
             key.chmod(0o600)
+            if role == 'credential':
+                root = Path(document['root_key'])
+                root.write_bytes(b'r' * 64)
+                root.chmod(0o600)
             boot.write_text(json.dumps(document))
             boot.chmod(0o600)
             code = '''
@@ -125,7 +129,7 @@ close_pools()
             env=env, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stderr)
         target = self.dbname + '_restore'
-        self.admin.execute(sql.SQL('CREATE DATABASE {} OWNER {} CONNECTION LIMIT 32').format(
+        self.admin.execute(sql.SQL('CREATE DATABASE {} OWNER {} CONNECTION LIMIT 40').format(
             sql.Identifier(target), sql.Identifier(self.users['maintenance'])))
         self.addCleanup(lambda: self.admin.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(target))))
         self.admin.execute(sql.SQL('REVOKE ALL ON DATABASE {} FROM PUBLIC').format(sql.Identifier(target)))
@@ -138,7 +142,7 @@ close_pools()
 
         with connect('maintenance') as maintenance:
             maintenance.execute('REVOKE ALL ON SCHEMA public FROM PUBLIC')
-            for role in installation.RUNTIME_ROLES:
+            for role in installation.DATABASE_RUNTIME_ROLES:
                 user = sql.Identifier(self.users[role])
                 maintenance.execute(sql.SQL('GRANT CONNECT ON DATABASE {} TO {}').format(sql.Identifier(target), user))
                 maintenance.execute(sql.SQL('GRANT USAGE ON SCHEMA public TO {}').format(user))
@@ -153,7 +157,7 @@ close_pools()
         result = subprocess.run([*command, 'restore', '--file', str(dump)], cwd=self.base,
             env=env, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for role in installation.RUNTIME_ROLES:
+        for role in installation.DATABASE_RUNTIME_ROLES:
             with connect(role) as runtime:
                 for statement in ["UPDATE controller_restoreguard SET state='restoring'",
                                   "UPDATE controller_installation SET root_digest='forged'"]:
@@ -224,7 +228,7 @@ close_pools()
                 sql.Identifier(self.users['web'])))
             self.assertTrue(installation.verify_database(self.spec, maintenance)['verified'])
             maintenance.execute('CREATE TABLE combined_acl (id bigserial PRIMARY KEY)')
-        for role in installation.RUNTIME_ROLES:
+        for role in installation.DATABASE_RUNTIME_ROLES:
             with self.connect(role) as runtime:
                 runtime.execute('INSERT INTO combined_acl DEFAULT VALUES')
                 self.assertGreater(runtime.execute('SELECT count(*) FROM combined_acl').fetchone()[0], 0)

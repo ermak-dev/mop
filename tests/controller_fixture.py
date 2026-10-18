@@ -212,6 +212,7 @@ test:py3.12:
     REQUIRED_ROOT_ONLY_IDS = frozenset({
         ('CredentialSocketUids', 'test_distinct_frontend_uid_uses_only_group_protected_socket'),
         ('AddressedCredentialUids', 'test_addressed_delivery_uses_actual_frontend_uid_without_rights_inference'),
+        ('InstalledCredentialUids', 'test_fresh_installer_starts_rootless_daemon_with_separate_pg_login_and_frontend_uid'),
     })
 
     def _test_inventory(self, name):
