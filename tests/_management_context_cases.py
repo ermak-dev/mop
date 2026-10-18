@@ -134,7 +134,7 @@ class ManagementContext(TransactionTestCase):
         async def body(client, server):
             response = await asyncio.to_thread(self.post, payload() if payload else None,
                 token=token() if token else None)
-            self.assertIn(response.status_code, (400, 401, 403, 409, 503), response.content)
+            self.assertEqual(response.status_code, 403, response.content)
             self.assertEqual(response['Cache-Control'], 'no-store')
             self.assertNotIn(self.subject_token, response.content.decode())
             self.assertNotIn(self.machine_auth.value, response.content.decode())
