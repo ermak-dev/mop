@@ -481,7 +481,8 @@ def client_command(modname):
 
 def main(argv):
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
-    if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"]):
+    if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"],
+                    ["server", "preview"]):
         return run(command("mop.cli.server." + argv[1]), argv[2:])
     # Новый путь выбирается до legacy context/.env: даже отсутствующая capability
     # не должна открывать старый login store или импортировать NATS.

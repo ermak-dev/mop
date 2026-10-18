@@ -12,13 +12,26 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import hermetic  # noqa: F401
-from _lib import Checks
+from _lib import Checks, patched, run_command
 
 
 def main():
     c = Checks()
     if not c.check('preview composition exists', importlib.util.find_spec('mop.server.controller.preview') is not None):
         return c.report('admin_preview')
+    from mop import cli
+    from mop.common import context
+
+    def old_context(*args, **kwargs):
+        raise AssertionError('preview reached installation context')
+
+    try:
+        with patched(context, here=old_context):
+            out, error, code = run_command(cli.main, ['server', 'preview', '--help'])
+        c.check('preview enters before installation context', code == 0 and 'local isolated Django Admin' in ' '.join(out.split()),
+                (code, error))
+    except AssertionError as error:
+        c.fail('preview enters before installation context', str(error))
     from mop.server.controller.preview import PreviewPlan, prepare_files
     for directory, port in ((Path('/'), 18080), (Path('relative'), 18080), (Path('/tmp/../bad'), 18080),
                             (Path('/tmp/preview'), True), (Path('/tmp/preview'), 0),
