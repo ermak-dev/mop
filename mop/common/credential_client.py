@@ -29,7 +29,12 @@ class CredentialClient:
             raise p.CredentialError('current token or session credential required')
         request = {'version': 1, 'auth': {'kind': auth.kind, 'value': auth.value},
                    'command': command.value, 'args': args}
-        p.parse_request(request)
+        try:
+            p.parse_request(request)
+        except p.CredentialError as error:
+            if command in (p.Command.SEND_REPORT, p.Command.TAKE_DELIVERY):
+                raise p.CredentialInput(str(error)) from None
+            raise
         wire = p.frame(request)
         fd = p.directory_fd(self.path, self.server_uid)
         deadline = time.monotonic() + self.timeout
@@ -75,6 +80,9 @@ class CredentialClient:
                 raise p.CredentialError('invalid credential service response')
             if result['error']['code'] == 'refused':
                 raise p.CredentialRefused(message)
+            if (command in (p.Command.SEND_REPORT, p.Command.TAKE_DELIVERY)
+                    and result['error']['code'] in ('conflict', 'capacity', 'not_found', 'invalid')):
+                raise p.PrivateDeliveryError(result['error']['code'], message)
             raise p.CredentialError(message)
         p.exact(result, ('ok', 'result'))
         return result['result']
@@ -93,6 +101,44 @@ class CredentialClient:
         if 'secret_refs' in value:
             value['secret_refs'] = p.identifiers(value['secret_refs'])
         return kind(**value)
+
+    def send_private_report(self, auth: p.Credential, *, expected_epoch: UUID, address: str,
+                            message_id: UUID, text: str, not_after: datetime,
+                            operation_request_id: UUID | None = None, notify_when_idle: bool = False,
+                            priority: str = 'next', sender_endpoint_id: UUID | None = None,
+                            sender_connection_nonce: UUID | None = None):
+        """Конечный send: daemon сам резолвит actor и optional conversation holder."""
+        from .endpoint import DeliveryResult
+        if type(not_after) is not datetime or not_after.utcoffset() is None:
+            raise p.CredentialInput('aware delivery deadline required')
+        result = self._invoke(auth, p.Command.SEND_REPORT, dict(expected_epoch=str(expected_epoch),
+            address=address, message_id=str(message_id), text=text, not_after=not_after.isoformat(),
+            operation_request_id=str(operation_request_id) if operation_request_id is not None else None,
+            notify_when_idle=notify_when_idle, priority=priority,
+            sender_endpoint_id=str(sender_endpoint_id) if sender_endpoint_id is not None else None,
+            sender_connection_nonce=str(sender_connection_nonce) if sender_connection_nonce is not None else None))
+        p.exact(result, (f.name for f in fields(DeliveryResult)))
+        if (type(result['state']) is not str or result['state'] not in
+                ('queued', 'attempting', 'accepted', 'unknown', 'unavailable') or type(result['idle']) is not bool):
+            raise p.CredentialError('invalid private delivery receipt')
+        return DeliveryResult(p.identifier(result['id']), p.identifier(result['message_id']),
+            p.identifier(result['operation_request_id']) if result['operation_request_id'] is not None else None,
+            result['state'], result['idle'])
+
+    def take_private_delivery(self, auth: p.Credential, *, endpoint_id: UUID, connection_nonce: UUID):
+        """Один take current receiver: неизвестный ответ не разрешает replay."""
+        from .endpoint import DeliveryFrame
+        result = self._invoke(auth, p.Command.TAKE_DELIVERY,
+            dict(endpoint_id=str(endpoint_id), connection_nonce=str(connection_nonce)))
+        if result is None:
+            return None
+        p.exact(result, (f.name for f in fields(DeliveryFrame)))
+        p.delivery_options(result)
+        if result['reply_address'] is not None:
+            p.private_address(result['reply_address'])
+        return DeliveryFrame(p.identifier(result['id']), p.identifier(result['message_id']),
+            p._text(result['external_session_id'], 256), p._text(result['text'], 65536),
+            result['priority'], result['notify_when_idle'], result['reply_address'])
 
     def create(self, auth: p.Credential, *, project_id: UUID | None, name: str,
                kind: str, purpose: str, value: bytes) -> p.SecretInfo:

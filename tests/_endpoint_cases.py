@@ -87,6 +87,16 @@ class Endpoints(TransactionTestCase):
         from mop.server.controller.endpointcrypto import EndpointCipher
         self.api = s.Endpoints(authority=authority,
             cipher=EndpointCipher(XChaCha20Provider(Keyring('test', {'test': b'k'*32})), 'isolated-ci'))
+        # #669: старые domain/HTTP contracts сохраняют локальный real-AEAD
+        # fixture; новый protected composition/socket проверяет отдельный
+        # _endpoint_credential_cases. Port получает credential, не actor claims.
+        def send_private_report(credential, *, sender_endpoint_id, sender_connection_nonce, **message):
+            actor = (auth.token_context(credential.value) if credential.kind == 'token'
+                     else auth.session_context(credential.value))
+            sender = (self.api.trusted_context(actor, sender_endpoint_id, sender_connection_nonce)
+                      if sender_endpoint_id is not None else None)
+            return self.api.send(actor, **message, sender=sender)
+        self.api.send_private_report = send_private_report
         from unittest.mock import patch
         binding = patch('mop.server.controller.endpointviews.endpoints', self.api)
         binding.start()

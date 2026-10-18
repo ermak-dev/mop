@@ -5,8 +5,8 @@
 `mop dev controller --check credential_service --cross-uid` -- той же
 командой как TESTS. Проверяет реальную пару UID (root и nobody/65534 --
 ровно те два пира, между которыми случаи #669 проверяют SO_PEERCRED),
-отказывает вне root и гоняет два перенесённых случая и один fresh-install
-startup через общий Django runner: настоящий PostgreSQL, разные UID, не мок.
+отказывает вне root и гоняет исходные три случая плюс private send/take
+через общий Django runner: настоящий PostgreSQL, разные UID, не мок.
 Новый startup использует только существующих пользователей owned контейнера,
 не host users, pool или секреты установки.
 """
@@ -23,6 +23,8 @@ GATE_LABELS = (
     '.test_addressed_delivery_uses_actual_frontend_uid_without_rights_inference',
     '_credential_uid_gate.InstalledCredentialUids'
     '.test_fresh_installer_starts_rootless_daemon_with_separate_pg_login_and_frontend_uid',
+    '_endpoint_credential_uid_gate.EndpointCredentialUids'
+    '.test_private_reports_cross_real_uid_without_root_or_caller_authority',
 )
 
 

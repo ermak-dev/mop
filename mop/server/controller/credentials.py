@@ -18,6 +18,8 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 
 from mop.common import credentials as p
+from mop.common.endpoint import DeliveryFrame, DeliveryResult
+from mop.server.sessions.endpoints import Conflict as EndpointConflict, Capacity as EndpointCapacity, Unavailable as EndpointUnavailable
 from mop.server.access import services as access
 from mop.server.access.grants import Grants, Conflict as GrantConflict, StorageUnavailable as GrantUnavailable
 from mop.server.access.delegation import RoleBinding
@@ -219,6 +221,8 @@ class CredentialApplication:
         self.grants.secrets.authority = CurrentRetention(self, self.grants.secrets.authority)
         self.store = secrets.SecretStore(provider=provider, authorizer=CurrentAccess(self),
             delivery_gate=delivery_gate if delivery_gate is not None else AwaitAssignment(self))
+        from .endpointcommands import PrivateCommands
+        self.private = PrivateCommands(self)
 
     @secrets.storage_errors
     def fence(self):
@@ -238,7 +242,11 @@ class CredentialApplication:
         self.fence()
         actor = (access.token_context(credential.value, grants=self.local_grants)
                  if credential.kind == 'token' else access.session_context(credential.value))
-        if command is p.Command.CREATE:
+        if command is p.Command.SEND_REPORT:
+            result = self.private.send(actor, **args)
+        elif command is p.Command.TAKE_DELIVERY:
+            result = self.private.take(actor, **args)
+        elif command is p.Command.CREATE:
             result = self.store.create(actor, **args)
         elif command is p.Command.STAGE:
             result = self.store.stage(actor, **args)
@@ -325,7 +333,7 @@ def _wire(value):
         return [_wire(item) for item in value]
     if type(value) in (secrets.SecretMetadata, secrets.VersionMetadata, secrets.AddressedSecret,
                        p.DefinitionBytes, p.DefinitionInfo, p.GrantReceipt, p.PreparationInfo,
-                       p.PreparationBytes, p.ApprovalReceipt):
+                       p.PreparationBytes, p.ApprovalReceipt, DeliveryFrame, DeliveryResult):
         return {f.name: _wire(getattr(value, f.name)) for f in fields(value)}
     if value is None or type(value) in (str, int, bool):
         return value
@@ -360,11 +368,27 @@ def compose(*, key_id):
         close_pools()
 
 
-def _failure(exc):
+def _failure(exc, *, private=False):
+    if private:
+        # Конечные send/take сохраняют domain verdict, а не схлопывают
+        # conflict/capacity/not-found/unavailable в отказ authority (403).
+        for kind, code in ((EndpointConflict, 'conflict'), (EndpointCapacity, 'capacity'),
+                           (access.NotVisible, 'not_found'),
+                           ((EndpointUnavailable, SecretCryptoError, secrets.StorageUnavailable), 'unavailable')):
+            if isinstance(exc, kind):
+                return {'ok': False, 'error': {'code': code, 'message': str(exc)}}
+        # Untyped ValueError может прийти и из crypto/driver: не передаём его
+        # целиком. Только фиксированные input verdicts публичного Sessions port;
+        # сами правила (UTF-8 bound/deadline) остаются у domain owner.
+        if type(exc) is ValueError and str(exc) in (
+                'canonical UUID required', 'invalid private message', 'invalid delivery options',
+                'aware delivery deadline required', 'delivery deadline must be within 24 hours'):
+            return {'ok': False, 'error': {'code': 'invalid', 'message': str(exc)}}
     # Library phrases этих категорий уже безопасны: не обрезаем их второй раз.
     if isinstance(exc, (p.CredentialError, access.Denied, secrets.Refused, secrets.Conflict,
                         secrets.StorageUnavailable, secrets.TransactionBoundary, SecretCryptoError,
-                        preparation.Conflict, preparation.StorageUnavailable, GrantConflict, GrantUnavailable)):
+                        preparation.Conflict, preparation.StorageUnavailable, GrantConflict, GrantUnavailable,
+                        EndpointConflict, EndpointCapacity, EndpointUnavailable)):
         return {'ok': False, 'error': {'code': 'refused', 'message': str(exc)}}
     if type(exc) is PermissionError:
         return {'ok': False, 'error': {'code': 'refused', 'message': str(exc)}}
@@ -471,7 +495,8 @@ class CredentialService:
                     response = {'ok': True, 'result': result}
                     wire = p.frame(response)
                 except Exception as exc:
-                    wire = p.frame(_failure(exc))
+                    wire = p.frame(_failure(exc,
+                        private=command in (p.Command.SEND_REPORT, p.Command.TAKE_DELIVERY)))
                 writer.write(wire)
                 await writer.drain()
         except p.CredentialError as exc:
