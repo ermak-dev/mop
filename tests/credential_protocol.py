@@ -153,6 +153,24 @@ class ClientBoundary(unittest.TestCase):
                     with self.assertRaises(p.CredentialError):
                         p.parse_request({**request, 'args': {**args, name: identity}})
 
+    # HYPOTHESIS #730: generic reserve заново выбирает latest, а raw proof
+    # превратил бы wire в authority. Начальный reserve принимает только locator.
+    # SOLUTION: отдельный finite command принимает только reservation UUID.
+    # RESULT: unsupported command red; exact shape и запрет caller proof green.
+    # STATUS: FIXED — see #730.
+    def test_initial_grant_reservation_accepts_only_durable_reservation_locator(self):
+        from mop.common import credentials as p
+        from uuid import uuid4
+        reservation = uuid4()
+        request = dict(version=1, auth=dict(kind='token', value='a'*40),
+            command='reserve_initial_grant', args=dict(reservation_id=str(reservation)))
+        _, command, args = p.parse_request(request)
+        self.assertEqual(command.value, 'reserve_initial_grant')
+        self.assertEqual(args, dict(reservation_id=reservation))
+        for name in ('owner_id', 'actor_id', 'approval_id', 'version_id', 'digest', 'policy', 'project_id'):
+            with self.subTest(name=name), self.assertRaises(p.CredentialError):
+                p.parse_request({**request, 'args': {**request['args'], name: str(uuid4())}})
+
     # HYPOTHESIS: адресная выдача без target не выбирает конкретную инкарнацию.
     # SOLUTION: target UUID обязателен; только сервер выбирает остальные refs.
     # RESULT: red — invalid fields для target, затем пустая форма не была отказана.

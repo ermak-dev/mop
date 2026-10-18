@@ -13,7 +13,7 @@ from uuid import UUID, uuid4, uuid5
 from django.db import IntegrityError
 from django.utils import timezone
 
-from mop.common.credentials import Credential
+from mop.common.credentials import Credential, CredentialRefused
 from mop.server.access.context import ActorKind
 from mop.server.access.services import Denied, current_actor
 from . import models as m
@@ -198,6 +198,9 @@ class CreatePuppets:
                     actor_id=actor.user_id, request_id=intent.request_id, digest=digest(command),
                     expires_at=timezone.now() + LIFETIME, epoch=installation.epoch, project_id=intent.project_id,
                     policy_id=selected.policy_id, policy_digest=selected.digest,
+                    bootstrap_approval_id=selected.bootstrap_policy.approval_id,
+                    bootstrap_version_id=selected.bootstrap_policy.version_id,
+                    bootstrap_digest=selected.bootstrap_policy.digest,
                     git_name=selected.git_name, git_email=selected.git_email)
             attempt = m.CreateProvisioningAttempt.objects.create(reservation=reservation)
             expires_at = reservation.expires_at
@@ -219,9 +222,12 @@ class CreatePuppets:
         profile = self.grants.register_agent(actor, project_id=intent.project_id, target_id=target_id,
                                              definition_id=command.definition_id)
         self._agent_credential(profile.agent_id, intent.project_id)
-        receipt = self.issuer.reserve_grant(credential, project_id=intent.project_id,
-            definition_id=command.definition_id, target_id=target_id, incarnation=incarnation_id,
-            request_id=intent.request_id, expires_at=expires_at)
+        reservation_id = m.CreateReservation.objects.values_list('id', flat=True).get(
+            actor_id=actor.user_id, request_id=intent.request_id)
+        try:
+            receipt = self.issuer.reserve_initial_grant(credential, reservation_id)
+        except CredentialRefused as error:
+            raise Denied(str(error)) from error
         if (receipt.target_id, receipt.incarnation, receipt.project_id) != (target_id, incarnation_id, intent.project_id):
             raise Denied('credential service returned a foreign grant')
         if receipt.credential_version_id is None:
@@ -253,6 +259,7 @@ class CreatePuppets:
             Node.objects.select_for_update().get(pk=command.node_id)
             reservation = m.CreateReservation.objects.get(actor_id=actor.user_id, request_id=intent.request_id)
             epoch, revision, image, selected = self._admit(actor, command, installation, reservation)
+            self.selections.require_grant(selected, receipt.id)
             # Слот уже durable до provisioning. Конверсия в Operation в этой
             # же транзакции не занимает второй слот и не теряет первый.
             row = self.targets.assign(actor, target_id=target_id, incarnation_id=incarnation_id,

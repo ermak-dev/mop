@@ -271,6 +271,14 @@ class CredentialApplication:
             row = self.grants.prepare_replacement(actor, authority=ReplacementPreparation(self, **args))
             result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
                 row.role, row.digest, row.state, row.revision, row.credential_version_id)
+        elif command is p.Command.RESERVE_INITIAL_GRANT:
+            from .initialselection import InitialReservationApprovals
+            authority = InitialReservationApprovals(self.preparation.approval_query(), actor, **args)
+            grants = Grants(provider=self.store.provider, bindings=CurrentBindings(), approvals=authority)
+            grants.secrets.authority = CurrentRetention(self, grants.secrets.authority)
+            row = grants.reserve(actor, **authority.arguments())
+            result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
+                row.role, row.digest, row.state, row.revision, row.credential_version_id)
         elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT, p.Command.ACTIVATE_GRANT):
             if command is p.Command.ACTIVATE_GRANT:
                 authority = CreateActivation(self, actor, args['grant_id'])

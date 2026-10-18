@@ -14,6 +14,7 @@ from django.db import transaction
 
 from mop.common.initialcreate import CONSUMERS, source_ref as valid_source_ref
 from mop.server.access.services import Access, Denied
+from mop.server.access.delegation import ApprovedPolicy
 from mop.server.operations.service import Refused
 from .machinebinding import owner_identity
 
@@ -26,6 +27,7 @@ class SelectedLaunch:
     owner_id: int
     definition_id: UUID
     bootstrap_revision: UUID
+    bootstrap_policy: ApprovedPolicy
     image_id: UUID
     source_origin: str
     source_commit: str
@@ -98,7 +100,27 @@ class LaunchSelections:
         if (result.project_id, result.owner_id, result.definition_id) != (
                 command.intent.project_id, actor.human_owner_id, command.definition_id):
             raise Denied('initial launch selection belongs to another owner, project or definition')
+        if reservation is not None:
+            self.require_reservation(result, reservation)
         return result
+
+    def require_reservation(self, selected, reservation):
+        if ((selected.project_id, selected.owner_id, selected.digest) !=
+                (reservation.project_id, reservation.actor_id, reservation.policy_digest)
+                or (selected.bootstrap_policy.approval_id, selected.bootstrap_policy.version_id,
+                    selected.bootstrap_policy.digest) != (reservation.bootstrap_approval_id,
+                    reservation.bootstrap_version_id, reservation.bootstrap_digest)):
+            raise Denied('pinned initial bootstrap approval, content or digest changed')
+
+    def require_grant(self, selected, grant_id):
+        from mop.server.access.models import Grant
+        row = Grant.objects.select_related('intent').filter(pk=grant_id).first()
+        proof = selected.bootstrap_policy
+        if (row is None or (row.intent.owner_id, row.intent.project_id, row.intent.definition_id,
+                row.intent.policy_approval_id, row.intent.policy_version_id, row.intent.policy_digest) !=
+                (selected.owner_id, selected.project_id, selected.definition_id,
+                 proof.approval_id, proof.version_id, proof.digest)):
+            raise Denied('initial grant and selected bootstrap proof differ')
 
     def read(self, policy_id, *, git_name=None, git_email=None):
         from mop.server.catalog.models import InitialCreatePolicy, InitialCreateConsumer
@@ -119,9 +141,70 @@ class LaunchSelections:
         identity = owner_identity(policy.owner_id)
         if (git_name is not None or git_email is not None) and (git_name, git_email) != (identity.name, identity.email):
             raise Denied('pinned owner Git profile changed')
+        from mop.server.preparation.models import BootstrapApproval, ApprovalRevocation
+        approval = BootstrapApproval.objects.select_related('revision').filter(
+            revision_id=policy.bootstrap_revision, human_id=policy.owner_id,
+            revision__project_id=policy.project_id).first()
+        if approval is None:
+            raise Denied('selected initial bootstrap approval is unavailable')
+        if ApprovalRevocation.objects.filter(approval=approval).exists():
+            raise Denied('selected initial bootstrap approval is revoked')
+        proof = ApprovedPolicy(approval.id, approval.revision.content_version_id, approval.revision.digest,
+            approval.human_id, approval.revision.project_id)
         return SelectedLaunch(policy.id, policy.digest, policy.project_id, policy.owner_id, policy.definition_id,
-            policy.bootstrap_revision, policy.image_id, policy.source_origin, policy.source_commit, policy.source_ref,
+            policy.bootstrap_revision, proof, policy.image_id, policy.source_origin, policy.source_commit, policy.source_ref,
             policy.desired_model, policy.model_config_digest, refs, identity.name, identity.email)
+
+
+class InitialReservationApprovals:
+    """Request-local SQL authority initial reserve, не передаваемый по wire proof.
+
+    Generic Grants.reserve сохраняет все owner/issuer/spawn проверки; только
+    его approval port получает exact committed selection вместо latest.
+    """
+    def __init__(self, query, actor, reservation_id):
+        self.query, self.actor, self.reservation_id = query, actor, reservation_id
+
+    def resolve(self):
+        from mop.server.access.context import ActorKind
+        from mop.server.access.services import current_actor
+        from mop.server.controller.models import Installation
+        from mop.server.operations.models import CreateReservation
+        from mop.server.operations.launch import identities
+        current_actor(self.actor)
+        if self.actor.kind is not ActorKind.HUMAN or self.actor.grant_id is not None:
+            raise Denied('initial reservation requires its current human owner')
+        row = CreateReservation.objects.filter(pk=self.reservation_id, actor_id=self.actor.user_id).first()
+        installation = Installation.objects.get(pk=1)
+        if row is None or row.epoch != installation.epoch or not installation.effects_enabled:
+            raise Denied('current initial create reservation is unavailable')
+        selected = LaunchSelections().read(row.policy_id, git_name=row.git_name, git_email=row.git_email)
+        LaunchSelections().require_reservation(selected, row)
+        target, incarnation = identities(self.actor, row.request_id)
+        return row, selected, target, incarnation
+
+    def arguments(self):
+        row, selected, target, incarnation = self.resolve()
+        return dict(project_id=row.project_id, definition_id=selected.definition_id, target_id=target,
+            incarnation=incarnation, request_id=row.request_id, expires_at=row.expires_at)
+
+    def _proof(self, binding):
+        row, selected, target, incarnation = self.resolve()
+        if ((binding.owner_id, binding.actor_id, binding.project_id, binding.definition_id,
+                binding.parent_id, binding.target_id, binding.incarnation) !=
+                (row.actor_id, row.actor_id, row.project_id, selected.definition_id, None, target, incarnation)):
+            raise Denied('initial reservation policy binding changed')
+        return selected.bootstrap_policy
+
+    def pin(self, binding):
+        proof = self._proof(binding)
+        self.query.validate(proof, binding)
+        return proof
+
+    def validate(self, proof, binding):
+        if proof != self._proof(binding):
+            raise Denied('initial reservation requires its exact selected bootstrap proof')
+        return self.query.validate(proof, binding)
 
 
 def configure(actor, *, project_id, definition_id, bootstrap_revision, image_id,

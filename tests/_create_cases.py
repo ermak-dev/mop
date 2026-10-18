@@ -39,10 +39,15 @@ class Issuer:
         return p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
             row.role, row.digest, row.state, row.revision, row.credential_version_id)
 
-    def reserve_grant(self, auth, **values):
+    def reserve_initial_grant(self, auth, reservation_id):
         from mop.server.access import services
+        from mop.server.access.grants import Grants
+        from mop.server.controller.initialselection import InitialReservationApprovals
         self.calls.append(('reserve', auth.kind))
-        return self._receipt(self.grants.reserve(services.token_context(auth.value), **values))
+        actor = services.token_context(auth.value)
+        authority = InitialReservationApprovals(self.grants.approvals, actor, reservation_id)
+        grants = Grants(provider=self.grants.secrets.provider, bindings=self.grants.bindings, approvals=authority)
+        return self._receipt(grants.reserve(actor, **authority.arguments()))
 
     def provision_grant(self, auth, grant_id, *, expected_revision):
         from mop.server.access import services
@@ -240,13 +245,13 @@ class CreateVertical(TransactionTestCase):
 
     def lose_reservation_reply(self, body):
         from unittest.mock import patch
-        reserve = self.issuer.reserve_grant
+        reserve = self.issuer.reserve_initial_grant
 
         def lose(*args, **kwargs):
             reserve(*args, **kwargs)
             raise OSError('reservation reply lost after commit')
 
-        with patch.object(self.issuer, 'reserve_grant', side_effect=lose), \
+        with patch.object(self.issuer, 'reserve_initial_grant', side_effect=lose), \
                 self.assertRaisesRegex(OSError, 'reservation reply lost after commit'):
             self.submit(body)
         from mop.server.access.models import Grant
@@ -349,7 +354,7 @@ class CreateVertical(TransactionTestCase):
         self.ready()
         body, now = self.body(), timezone.now()
         command = parse_create(self.project.pk, body)
-        reserve = self.issuer.reserve_grant
+        reserve = self.issuer.reserve_initial_grant
         reached, committed, first_reached, clock = Barrier(2), Event(), Event(), local()
 
         def overlap(*args, **kwargs):
@@ -376,7 +381,7 @@ class CreateVertical(TransactionTestCase):
                 connections.close_all()
 
         with patch('mop.server.operations.launch.timezone.now', side_effect=lambda: getattr(clock, 'now', now)), \
-                patch.object(self.issuer, 'reserve_grant', side_effect=overlap), \
+                patch.object(self.issuer, 'reserve_initial_grant', side_effect=overlap), \
                 ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(submit, True)
             self.assertTrue(first_reached.wait(timeout=5))

@@ -49,6 +49,99 @@ class InitialCreatePhases(TransactionTestCase):
         self.machine_key = key
         return compose(grants=self.grants, launch_support=LaunchSupport()), auth.token_context(key)
 
+    # HYPOTHESIS #730: после durable selection A credential reserve выбирает
+    # latest B; независимые проверки допускают policy B рядом с launch A.
+    # SPEC: настоящий protected socket должен закреплять approval/content/digest
+    # A; отзыв A не заменяется B и отказывает до provision/creation intent.
+    # SOLUTION: committed reservation хранит exact proof; protected command берёт
+    # только его UUID и связывает обычный Grants.reserve с SQL approval query.
+    # RESULT: оба socket/PG17 checks red (grant B рядом с A; grant после отзыва A),
+    # затем 233 create/initial/credential/grant/schema checks и pure boundaries green.
+    # STATUS: FIXED — see #730.
+    def protected_submit(self, body, before_reserve):
+        import asyncio
+        import os
+        import tempfile
+        from pathlib import Path
+        from asgiref.sync import async_to_sync
+        from unittest.mock import patch
+        from mop.common.credential_client import CredentialClient
+        from mop.server.controller.credentials import CredentialService
+        from mop.server.controller.runtime import Runtime
+        app = self.credential_app()
+        original = self.ops.creates._agent_credential
+        def boundary(*args):
+            original(*args)
+            before_reserve()
+        async def exercise(path):
+            runtime = Runtime(database_limit=2, queue_limit=0)
+            service = CredentialService(path, application=app, runtime=runtime,
+                allowed_uids=(os.geteuid(),), timeout=5)
+            await service.start()
+            try:
+                issuer = CredentialClient(path, server_uid=os.geteuid(), timeout=5)
+                with patch.object(self.ops.creates, 'issuer', issuer), \
+                        patch.object(self.ops.creates, '_agent_credential', side_effect=boundary):
+                    def submit():
+                        from django.db import connections
+                        try:
+                            return self.submit(body)
+                        finally:
+                            connections.close_all()
+                    return await asyncio.to_thread(submit)
+            finally:
+                await service.aclose()
+                await runtime.aclose()
+        with tempfile.TemporaryDirectory(prefix='mop-initial-pin-') as directory:
+            return async_to_sync(exercise)(str(Path(directory)/'credential.sock'))
+
+    def later_bootstrap(self):
+        revision = self.preparation.publish(self.actor, project_id=self.project.pk,
+            tasks=b'- debug: msg=later\n', variables=b'later: true\n',
+            provenance='concurrent-approved-fixture', commit='f'*40, secret_refs=())
+        self.later_approval = self.preparation.approve(self.actor, revision.id)
+        return revision
+
+    def test_initial_reservation_pins_selected_approval_across_protected_service_race(self):
+        from mop.server.access.models import Grant
+        from mop.server.operations.models import Operation
+        from mop.server.sessions.models import IncarnationLaunch
+        self.ready()
+        response = self.protected_submit(self.body(), self.later_bootstrap)
+        self.assertEqual(response.status_code, 202, response.content)
+        row = Operation.objects.get(pk=response.json()['operation']['id'])
+        intent = Grant.objects.select_related('intent').get(pk=row.restartbinding.grant_id).intent
+        self.assertEqual((intent.policy_approval_id, intent.policy_version_id, intent.policy_digest),
+            (self.bootstrap_approval.id, self.revision.content_version_id, self.revision.digest))
+        launch = IncarnationLaunch.objects.get(incarnation_id=row.incarnation_id)
+        self.assertEqual((launch.bootstrap_revision, launch.bootstrap_digest), (self.revision.id, self.revision.digest))
+        reservation = row.createbinding.reservation
+        self.assertEqual((reservation.bootstrap_approval_id, reservation.bootstrap_version_id, reservation.bootstrap_digest),
+            (intent.policy_approval_id, intent.policy_version_id, intent.policy_digest))
+        # Отзыв невыбранного latest B не должен отнимать authority у A.
+        self.preparation.revoke(self.actor, self.later_approval.id)
+        execution, actor = self.machine()
+        work, attempt = self.claim_next(execution, actor, row, 'prepare_body')
+        from mop.common.credentials import Credential, Command
+        from mop.server.access.services import Denied
+        from mop.server.sessions.protocol import work_to_wire
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        with self.assertRaisesRegex(Denied, 'revoked'):
+            self.credential_app().execute(Credential('token', self.machine_key), Command.INITIAL_LAUNCH,
+                dict(work=work_to_wire(work)))
+
+    def test_revoked_selected_approval_is_not_replaced_by_latest_in_protected_reserve(self):
+        from mop.server.access.models import Grant
+        from mop.server.operations.models import Operation
+        self.ready()
+        def revoke():
+            self.later_bootstrap()
+            self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        response = self.protected_submit(self.body(), revoke)
+        self.assertNotEqual(response.status_code, 202, response.content)
+        self.assertFalse(Grant.objects.exists(), 'revoked A must be refused before reserving or provisioning B')
+        self.assertFalse(Operation.objects.exists())
+
     def test_admission_captures_the_fixed_initial_create_sequence(self):
         row = self.create()
         self.assertEqual(tuple(row.step_set.order_by('ordinal').values_list('name', flat=True)), PHASES)

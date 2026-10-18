@@ -311,6 +311,9 @@ class CreateReservation(Evidence):
     # До первого credential I/O; retry не читает новый configured pointer.
     policy_id = models.UUIDField(null=True)
     policy_digest = models.CharField(max_length=64, blank=True)
+    bootstrap_approval_id = models.UUIDField(null=True)
+    bootstrap_version_id = models.UUIDField(null=True)
+    bootstrap_digest = models.CharField(max_length=64, blank=True)
     git_name = models.CharField(max_length=256, blank=True)
     git_email = models.CharField(max_length=256, blank=True)
 

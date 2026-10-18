@@ -176,10 +176,13 @@ class LaunchSupport:
         if reservation is None or reservation.policy_id is None:
             raise Denied('pinned initial launch selection is unavailable')
         selected = LaunchSelections().read(reservation.policy_id, git_name=reservation.git_name, git_email=reservation.git_email)
+        LaunchSelections().require_reservation(selected, reservation)
+        LaunchSelections().require_grant(selected, target.grant_id)
         launch = IncarnationLaunch.objects.get(incarnation_id=target.incarnation_id)
         if ((selected.project_id, selected.owner_id, selected.definition_id, selected.digest) !=
                 (target.project_id, target.owner_id, operation.createbinding.definition_id, reservation.policy_digest)
-                or selected.bootstrap_revision != launch.bootstrap_revision or selected.image_id != launch.image_revision_id
+                or selected.bootstrap_revision != launch.bootstrap_revision
+                or selected.bootstrap_policy.digest != launch.bootstrap_digest or selected.image_id != launch.image_revision_id
                 or image_pin(selected.image_id) != launch.image_digest
                 or not NodeImage.objects.filter(node_id=target.node_id, project_id=target.project_id, available=True,
                     desired_image_id=selected.image_id, observed_image_id=selected.image_id).exists()):
