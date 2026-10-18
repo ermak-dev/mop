@@ -33,7 +33,7 @@ _OPERATIONS = ('stop_puppet_job', 'override_assignment', 'recover_operation', 'c
     'view_operation', 'view_audit', 'diagnose_pool', 'treat_pool', 'collect_pool_garbage',
     'sweep_pool', 'view_node_disk')
 _SECRETS = ('view_secret_metadata', 'manage_project_secret', 'deliver_secret', 'rotate_proxy_key')
-_ACCESS = ('view_role', 'approve_role', 'issue_grant', 'revoke_grant', 'activate_grant')
+_ACCESS = ('view_role', 'approve_role', 'issue_grant', 'revoke_grant', 'activate_grant', 'provision_agent_rbac')
 
 
 def _identity(prefix, codes):
