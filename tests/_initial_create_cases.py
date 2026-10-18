@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 from django.test import TransactionTestCase, override_settings
 
-from _create_cases import CreateVertical
+from _create_cases import CreateVertical, ready_evidence
 
 
 PHASES = ('prepare_body', 'bootstrap_body', 'initial_identity', 'scheduler_register',
@@ -461,10 +461,11 @@ class InitialCreatePhases(TransactionTestCase):
         from mop.server.sessions.services import Conflict
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
+        proof = ready_evidence(self, execution, actor, work, attempt, self.machine_key)
         CurrentProducer.objects.filter(incarnation_id=work.incarnation_id).delete()
         with self.assertRaisesRegex(Conflict, 'producer'):
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence='ready')
+                outcome='succeeded', evidence='ready', ready_evidence=proof)
 
     def test_reference_lifecycle_activates_only_after_all_seven_exact_phases(self):
         from mop.server.access import services as auth
@@ -474,7 +475,8 @@ class InitialCreatePhases(TransactionTestCase):
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
         execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready',
+            ready_evidence=ready_evidence(self, execution, actor, work, attempt, self.machine_key))
         key = auth.enroll_service('phase-activator', self.node.pk, project_ids=(self.project.pk,),
             permissions=('access.activate_grant',), use_case='grant-activator')
         from _create_cases import CreateActivation as Fixture
@@ -518,7 +520,8 @@ class InitialCreatePhases(TransactionTestCase):
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
         execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready',
+            ready_evidence=ready_evidence(self, execution, actor, work, attempt, self.machine_key))
         self.ops.activations.activator = Fixture.activator(self)
         om.ResourceClaim.objects.filter(operation=row, resource_id='target:'+str(row.target_id)).update(released_at=timezone.now())
         self.assertIsNone(self.ops.activations.claim(row.id))
@@ -531,7 +534,8 @@ class InitialCreatePhases(TransactionTestCase):
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
         execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready',
+            ready_evidence=ready_evidence(self, execution, actor, work, attempt, self.machine_key))
         self.ops.activations.activator = Fixture.activator(self)
         with patch('mop.server.operations.launch.timezone.now', return_value=row.not_after-timedelta(seconds=29)):
             self.assertIsNone(self.ops.activations.claim(row.id))
@@ -697,7 +701,9 @@ class InitialCreatePhases(TransactionTestCase):
             if phase == 'native_exec':
                 native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence='ready' if phase == 'confirm_ready' else CONFIRMATIONS[phase])
+                outcome='succeeded', evidence='ready' if phase == 'confirm_ready' else CONFIRMATIONS[phase],
+                ready_evidence=(ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if phase == 'confirm_ready' else None))
 
     def test_unknown_preparation_keeps_cleanup_and_never_replays_even_after_late_confirmation(self):
         from datetime import timedelta

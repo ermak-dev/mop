@@ -419,6 +419,32 @@ class CreateMachine(RestartHandler):
         validate_claims(row, step, keys)
         return row.createbinding.definition_id
 
+    def initial_native_attempt(self, work):
+        """Historical locator без нового admission; native token уже succeeded."""
+        row = m.Operation.objects.get(pk=work.operation_id)
+        if row.action != 'create':
+            return None
+        stages = tuple(row.step_set.order_by('ordinal'))
+        if tuple(step.name for step in stages) != STAGES:
+            raise Denied('fixed initial create phases required for readiness producer')
+        native = stages[STAGES.index('native_exec')]
+        if (native.token is None or native.attempt_id != native.token or native.outcome != 'succeeded'
+                or native.dispatched_at is None or native.quiescent_at is None
+                or not m.EffectReceipt.objects.filter(step=native, token=native.token, epoch=row.epoch,
+                    node_id=row.node_id, source_revision=row.expected_revision, applied=True).exists()):
+            raise Denied('confirmed initial native producer attempt required')
+        return native.attempt_id
+
+    def ready_launch(self, work, attempt_id):
+        """Public SQL-only proof текущей ready стадии и immutable selection."""
+        if work.action != 'confirm_ready':
+            raise Denied('initial confirm-ready purpose required')
+        self.launch_definition(work, attempt_id)
+        row = m.Operation.objects.get(pk=work.operation_id, action='create')
+        target = self.ops.targets.current(work.target_id)
+        self.require(target, row)
+        return self.support.ready_pins(target, row), self.initial_native_attempt(work)
+
     def require(self, target, row=None):
         if self.support is None:
             raise Refused('controller_unavailable', safe_reason='launch binding is unavailable')

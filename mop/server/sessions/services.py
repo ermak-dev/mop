@@ -644,19 +644,25 @@ class MachineExecution:
     def _receipt(self, row):
         return ReceiptV1(row.id, row.attempt_id, row.resulting_revision, row.outcome, row.evidence)
 
-    def result(self, actor, attempt_id, *, expected_revision, receipt_id, outcome, evidence):
+    def ready_receipt(self, actor, request):
+        """Короткая read-only транзакция без mint/эффекта; result повторяет proof."""
+        from .readiness import query
+        with transaction.atomic():
+            return query(self, actor, request)
+
+    def result(self, actor, attempt_id, *, expected_revision, receipt_id, outcome, evidence, ready_evidence=None):
         if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
             raise Unavailable('machine result requires no surrounding transaction')
         try:
             return self._result(actor, attempt_id, expected_revision=expected_revision,
-                receipt_id=receipt_id, outcome=outcome, evidence=evidence)
+                receipt_id=receipt_id, outcome=outcome, evidence=evidence, ready_evidence=ready_evidence)
         except IntegrityError:
             # Другой target имеет другой row lock, но receipt UUID общая identity.
             if m.ResultReceipt.objects.filter(pk=receipt_id).exists():
                 raise Conflict('receipt identity already committed') from None
             raise
 
-    def _result(self, actor, attempt_id, *, expected_revision, receipt_id, outcome, evidence):
+    def _result(self, actor, attempt_id, *, expected_revision, receipt_id, outcome, evidence, ready_evidence=None):
         if type(receipt_id) is not UUID:
             raise ValueError('receipt UUID required')
         current_actor(actor)
@@ -681,10 +687,13 @@ class MachineExecution:
             self._assignment(actor, work, 'report_result')
             if attempt.state not in ('claimed', 'unknown'):
                 raise Conflict('attempt is already terminal')
-            return self._record_result(attempt, expected_revision, receipt_id, outcome, evidence)
+            return self._record_result(attempt, expected_revision, receipt_id, outcome, evidence,
+                actor=actor, ready_evidence=ready_evidence)
 
-    def _record_result(self, attempt, revision, receipt_id, outcome, evidence):
+    def _record_result(self, attempt, revision, receipt_id, outcome, evidence, *, actor=None, ready_evidence=None):
         result_codes(outcome, evidence)
+        if ready_evidence is not None and (attempt.action != 'confirm_ready' or outcome != 'succeeded'):
+            raise ValueError('readiness evidence is only valid for successful confirm-ready')
         if outcome == 'failed' and evidence not in ('not-started', 'failed-before-effect', 'confirmed'):
             raise ValueError('failure requires confirmed effect boundary')
         if outcome == 'succeeded':
@@ -705,10 +714,18 @@ class MachineExecution:
                     raise Conflict('exact native exec producer registration ACK required')
             elif hasattr(self.work, 'initial_native_attempt'):
                 native_attempt = self.work.initial_native_attempt(self._work(attempt))
-                if native_attempt is not None and (producer is None
-                        or producer.producer.attempt_id != native_attempt
-                        or producer.producer.operation_id != attempt.operation_id):
-                    raise Conflict('same initial native producer required for readiness')
+                if native_attempt is not None:
+                    from mop.common.readiness import ReadyEvidence
+                    from .readiness import query
+                    if (actor is None or type(ready_evidence) is not ReadyEvidence
+                            or ready_evidence.request.attempt_id != attempt.id
+                            or ready_evidence.request.revision != revision):
+                        raise Conflict('exact initial ready query evidence required for result')
+                    # Не достаточно найти какое-то новое valid evidence: нужен тот
+                    # же snapshot query. Assignment lock держит telemetry/producer
+                    # до completed_result и COMMIT, время проверяется заново.
+                    if query(self, actor, ready_evidence.request) != ready_evidence:
+                        raise Conflict('initial readiness evidence changed before result commit')
             if attempt.action == 'confirm_ready' and producer is not None:
                 # Post-launch readiness не превращается в initial-create admission.
                 if (producer.producer.assignment_id != attempt.assignment_id
