@@ -175,6 +175,30 @@ class IdentityReply(serializers.Serializer):
     grant_id = serializers.CharField(allow_null=True)
 
 
+class CapabilityScope(serializers.Serializer):
+    project_id = serializers.UUIDField(allow_null=True)
+    node_id = serializers.UUIDField(allow_null=True)
+    client_id = serializers.UUIDField(allow_null=True)
+
+
+class CapabilityActor(serializers.Serializer):
+    user_id = serializers.IntegerField(min_value=1)
+    kind = choices('human', 'agent', 'service')
+    human_owner_id = serializers.IntegerField(allow_null=True, min_value=1)
+    node_id = serializers.UUIDField(allow_null=True)
+    grant_id = serializers.UUIDField(allow_null=True)
+
+
+class CapabilitiesReply(serializers.Serializer):
+    from mop.server.access.permissions import ACTION_PERMISSIONS
+    schema_version = free({'type': 'integer', 'enum': [1]}, required=True)
+    catalogue_version = free({'type': 'integer', 'enum': [1]}, required=True)
+    epoch = serializers.UUIDField()
+    actor = CapabilityActor()
+    scope = CapabilityScope()
+    actions = serializers.ListField(child=serializers.ChoiceField(choices=sorted(ACTION_PERMISSIONS)))
+
+
 class ProjectFields(serializers.Serializer):
     id = serializers.CharField()
     name = serializers.CharField()
@@ -360,7 +384,7 @@ def _param(name, required=False, description='', pattern=None):
 
 def parameters():
     """{класс view: query-параметры реального адаптера} (#696)."""
-    from . import auditviews, operationviews, projectionviews, usageviews, landingviews
+    from . import auditviews, catalogueviews, operationviews, projectionviews, usageviews, landingviews
     return {
         auditviews.Audit: (
             OpenApiParameter('project_id', OpenApiTypes.UUID, OpenApiParameter.QUERY,
@@ -373,6 +397,11 @@ def parameters():
                              description='Maximum audit items; the same limit is required on continuation.')),
         landingviews.LandingDetail: (
             _param('epoch', description='Optional exact installation epoch; mismatch refuses without a mutation.'),),
+        catalogueviews.Capabilities: (
+            _param('schema_version', description='wire version, always 1'),
+            _param('project_id', description='explicit project UUID; absent scope grants no actions'),
+            _param('node_id', description='explicit node UUID; enrollment and project membership still apply'),
+            _param('client_id', description='explicit owned client UUID')),
         usageviews.Usage: (
             _param('schema_version', description='wire version, always 1'),
             _param('start', description='inclusive ISO date of the period'),
@@ -402,7 +431,7 @@ def annotations():
     urlpatterns и держится рядом с реальными адаптерами. Вызывается
     лениво: модуль urls импортируется только при генерации.
     """
-    from . import auditviews, authviews, buildviews, operationviews, projectionviews, usageviews, views, landingviews
+    from . import auditviews, authviews, buildviews, catalogueviews, operationviews, projectionviews, usageviews, views, landingviews
     return {
         auditviews.Audit: {'get': (None, AuditPage, 200,
             'Read-only immutable operation audit, authorized before keyset pagination. '
@@ -419,6 +448,9 @@ def annotations():
         landingviews.ReleaseLanding: {'post': (LandingCommand, LandingReply, 200,
             'Human-only release of the current actor own token by exact epoch/revision; requires '
             'execution.release_landing. A late old release cannot touch a newer acquisition.')},
+        catalogueviews.Capabilities: {'get': (None, CapabilitiesReply, 200,
+            'Current canonical action permissions for one explicit scope. Advisory only; '
+            'commands reauthorize the actual resource. Absent or unknown scope grants no actions.')},
         views.Health: {'get': (None, Health, 200,
             'Liveness and installation identity of the controller.')},
         usageviews.Usage: {'get': (None, Usage, 200,

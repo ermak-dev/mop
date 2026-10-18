@@ -306,6 +306,31 @@ recall bytes already sent; record in-flight outcome and deny later stages. A
 read-after-wait reauthorizes before returning data. No secret or private transcript
 is broadcast while waiting for a best-effort revocation notification.
 
+### Scoped action catalogue (#633)
+
+`GET /api/v1/capabilities` requires the current token or browser session and returns
+`Cache-Control: no-store`. Its finite query accepts only `schema_version=1` and
+optional canonical UUIDs `project_id`, `node_id`, `client_id`, once each. No scope
+means no actions; unknown, retired or foreign scopes never imply installation-wide
+access. Combined scopes are conjunctive, including current client ownership and
+service enrollment. Malformed, repeated and unknown query fields are refused.
+
+The v1 reply contains `schema_version`, `catalogue_version=1`, the installation
+`epoch`, current `actor` facts (`user_id`, `kind`, `human_owner_id`, `node_id`,
+`grant_id`), the exact requested `scope` (nullable UUID fields), and sorted unique
+`actions`. Actions come only from Access's canonical `ACTION_PERMISSIONS`, through
+the same Access/Grants evaluator as commands, including directory freshness,
+current group/direct permissions, delegation issuer/ancestry and assignment.
+Actor kind and approved program content do not grant actions. Actor and permission
+checks are repeated while materializing the response; an epoch change refuses it.
+
+This is advisory discovery, not an authority token or physical-effect promise.
+Consumers reject unknown catalogue versions/action IDs, refresh before each call,
+and retain the explicit context. Commands still authorize their actual resources
+and business prerequisites. `/api/v1/identity` remains identity facts only, not an
+unscoped permission catalogue. Private inbox registration/delivery is a separate
+contract (#649), not implied by management discovery.
+
 ## Identity and wire versioning
 
 * `schema_version` is the wire schema major, initially 1, not a row revision.
