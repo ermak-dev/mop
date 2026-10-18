@@ -30,6 +30,12 @@ class UnboundWork:
     def current(self, operation_id, step_id):
         raise Unavailable('operation work port is not bound')
 
+    def abort_unstarted(self, work):
+        raise Unavailable('operation work port is not bound')
+
+    def reconcile_expired(self, *, limit):
+        raise Unavailable('operation work port is not bound')
+
     def claimed(self, work, attempt_id):
         raise Unavailable('operation work port is not bound')
 
@@ -531,30 +537,35 @@ class MachineExecution:
                 self._authority(work)
                 row = self._assignment(actor, work, 'claim_work')
                 unclaimed(self.target_fence, row.pk, excluding_operation=work.operation_id)
-                # current обязуется проверить initiating actor/operation и не делать I/O.
-                if self.work.current(work.operation_id, work.step_id) != work:
-                    raise Conflict('admitted operation step changed')
-                self._admit(row, work)
-                previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
-                                                               request_id=request_id).first()
-                if previous:
-                    if (self._work(previous) != work or previous.state != 'claimed'
-                            or previous.lease_until <= timezone.now()):
-                        raise Conflict('claim retry cannot replay or revive an effect')
-                    return snapshot(previous)
-                if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
-                    raise Conflict('unresolved external effect holds resource')
-                values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
-                    'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
-                seconds = (self.work.effect_lease(work) if hasattr(self.work, 'effect_lease') else self.lease_seconds)
-                if type(seconds) is not int or not 1 <= seconds <= 320:
-                    raise Unavailable('bounded phase effect lease required')
-                attempt = m.AssignmentAttempt.objects.create(assignment=row,
-                    incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
-                    request_id=request_id, assignment_revision=work.revision,
-                    lease_until=min(work.not_after, timezone.now()+timedelta(seconds=seconds)), **values)
-                self.work.claimed(work, attempt.id)
-                return snapshot(attempt)
+                # Abort без новой attempt должен пережить HTTP-отказ, поэтому
+                # исключение выходит лишь после commit этой короткой транзакции.
+                aborted = self.work.abort_unstarted(work)
+                if not aborted:
+                    # current проверяет initiating actor/operation без I/O.
+                    if self.work.current(work.operation_id, work.step_id) != work:
+                        raise Conflict('admitted operation step changed')
+                    self._admit(row, work)
+                    previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
+                                                                   request_id=request_id).first()
+                    if previous:
+                        if (self._work(previous) != work or previous.state != 'claimed'
+                                or previous.lease_until <= timezone.now()):
+                            raise Conflict('claim retry cannot replay or revive an effect')
+                        return snapshot(previous)
+                    if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
+                        raise Conflict('unresolved external effect holds resource')
+                    values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
+                        'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
+                    seconds = (self.work.effect_lease(work) if hasattr(self.work, 'effect_lease') else self.lease_seconds)
+                    if type(seconds) is not int or not 1 <= seconds <= 320:
+                        raise Unavailable('bounded phase effect lease required')
+                    attempt = m.AssignmentAttempt.objects.create(assignment=row,
+                        incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
+                        request_id=request_id, assignment_revision=work.revision,
+                        lease_until=min(work.not_after, timezone.now()+timedelta(seconds=seconds)), **values)
+                    self.work.claimed(work, attempt.id)
+                    return snapshot(attempt)
+            raise Conflict('insufficient intent remaining for phase and cleanup; create aborted')
         except IntegrityError:
             collision = m.AssignmentAttempt.objects.filter(
                 Q(executor_user_id=actor.user_id, request_id=request_id)
@@ -708,6 +719,9 @@ class MachineExecution:
 
     def reconcile_expired(self, *, limit=50):
         bound(limit, 100)
+        # Gaps не создают фиктивных attempt IDs: прежний return остаётся
+        # списком изменённых attempts, а abort публикуется Operation event'ом.
+        self.work.reconcile_expired(limit=limit)
         ids = tuple(m.AssignmentAttempt.objects.filter(state='claimed', lease_until__lte=timezone.now())
                     .order_by('assignment_id').values_list('id', 'assignment_id')[:limit])
         changed = []

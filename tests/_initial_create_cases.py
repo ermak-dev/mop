@@ -221,6 +221,174 @@ class InitialCreatePhases(TransactionTestCase):
         self.assertLessEqual(claimed.lease_until, timezone.now()+timedelta(seconds=320))
         self.assertLessEqual(claimed.lease_until, work.not_after)
 
+    # HYPOTHESIS #731: rollback недостаточного phase budget стирает abort, а
+    # expired-attempt recovery не видит gap после quiescent prepare_body.
+    # SPEC: definite abort durable без новой attempt; настоящие receipts/claims
+    # неизменны, cleanup required, ни release по времени, ни replay/renewal.
+    # SOLUTION: SQL-only abort commit до отказа claim; bounded frontier recovery
+    # вызывается и обычным machine reconciler, и каждым controller worker poll.
+    # RESULT: PG17 — четыре gap checks red, затем отдельный limit=1 starvation red;
+    # 292 create/execution/worker/operation/replacement/build/schema checks green,
+    # шесть pure contract/layer modules green. Physical cleanup не исполнялся.
+    # STATUS: FIXED — see #731.
+    def prepared_gap(self):
+        row = self.create()
+        execution, actor = self.machine()
+        work, attempt = self.claim_next(execution, actor, row, 'prepare_body')
+        execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+            outcome='succeeded', evidence='body-prepared')
+        work, = execution.poll(actor, self.node.pk, executor_epoch=self.boot)
+        self.assertEqual(work.action, 'bootstrap_body')
+        return row, execution, actor, work
+
+    def gap_evidence(self, row):
+        from mop.server.operations import models as om
+        from mop.server.sessions import models as sm
+        return (tuple(row.step_set.order_by('ordinal').values()),
+            tuple(om.ResourceClaim.objects.filter(operation=row).order_by('resource_id').values()),
+            tuple(om.EffectReceipt.objects.filter(step__operation=row).order_by('pk').values()),
+            tuple(sm.AssignmentAttempt.objects.filter(operation_id=row.id).order_by('pk').values()),
+            tuple(sm.ResultReceipt.objects.filter(attempt__operation_id=row.id).order_by('pk').values()),
+            om.CreateCleanup.objects.get(operation=row).armed_at)
+
+    def assert_aborted_gap(self, row, execution, actor, evidence):
+        from mop.server.operations import models as om
+        row.refresh_from_db()
+        self.assertEqual((row.state, row.code), ('failed', 'deadline_expired'))
+        self.assertIsNotNone(row.completed_at)
+        cleanup = om.CreateCleanup.objects.get(operation=row)
+        self.assertIsNotNone(cleanup.required_at)
+        self.assertIsNone(cleanup.confirmed_at)
+        self.assertIsNone(cleanup.adopted_at)
+        self.assertEqual(self.gap_evidence(row), evidence)
+        self.assertEqual(om.ResourceClaim.objects.filter(operation=row, released_at=None).count(), 4)
+        self.assertEqual(execution.poll(actor, self.node.pk, executor_epoch=self.boot), ())
+        revision = row.revision
+        execution.reconcile_expired()
+        row.refresh_from_db()
+        self.assertEqual(row.revision, revision)
+        self.assertEqual(om.AuditEvent.objects.filter(operation=row, code='deadline_expired').count(), 1)
+        self.assertEqual(om.OutboxEvent.objects.filter(operation=row, code='deadline_expired').count(), 1)
+
+    def test_insufficient_between_phase_budget_commits_abort_without_an_attempt(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from mop.server.operations.service import Refused
+        from mop.server.sessions.services import Conflict
+        row, execution, actor, work = self.prepared_gap()
+        evidence = self.gap_evidence(row)
+        with patch('django.utils.timezone.now', return_value=row.not_after-timedelta(seconds=319)):
+            with self.assertRaises((Refused, Conflict)):
+                execution.claim(actor, work, request_id=uuid4())
+            self.assert_aborted_gap(row, execution, actor, evidence)
+
+    def test_expired_between_phase_gap_is_found_without_an_active_attempt(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        row, execution, actor, work = self.prepared_gap()
+        evidence = self.gap_evidence(row)
+        with patch('django.utils.timezone.now', return_value=row.not_after+timedelta(seconds=1)):
+            execution.reconcile_expired()
+            self.assert_aborted_gap(row, execution, actor, evidence)
+
+    def test_gap_recovery_filters_stale_installations_before_its_limit(self):
+        # HYPOTHESIS: stale epoch/generation либо отсутствие predecessor
+        # занимают весь batch, и настоящий gap снова никогда не обнаруживается.
+        from datetime import timedelta
+        from unittest.mock import patch
+        from mop.server.operations import models as om
+        row, execution, actor, work = self.prepared_gap()
+        evidence = self.gap_evidence(row)
+        source = om.Operation.objects.filter(pk=row.id).values().get()
+        stale = []
+        for field in ('epoch', 'restore_generation', 'unstarted'):
+            values = {**source, 'id': uuid4(), 'request_id': uuid4(),
+                'not_after': row.not_after-timedelta(seconds=10)}
+            if field != 'unstarted':
+                values[field] = uuid4()
+            other = om.Operation.objects.create(**values)
+            # Только исторические locators: не выдумываем receipts или cleanup.
+            om.Step.objects.create(operation=other, name='prepare_body', ordinal=1,
+                outcome='' if field == 'unstarted' else 'succeeded')
+            om.Step.objects.create(operation=other, name='bootstrap_body', ordinal=2)
+            stale.append(other)
+        with patch('django.utils.timezone.now', return_value=row.not_after+timedelta(seconds=1)):
+            execution.reconcile_expired(limit=1)
+            self.assert_aborted_gap(row, execution, actor, evidence)
+        self.assertEqual(om.Operation.objects.filter(pk__in=[item.pk for item in stale], state='running').count(), 3)
+
+    def test_controller_worker_discovers_expired_machine_phase_gap(self):
+        import asyncio
+        from datetime import timedelta
+        from unittest.mock import patch
+        from asgiref.sync import async_to_sync
+        from mop.server.controller.runtime import Runtime
+        from mop.server.operations.worker import Worker
+        row, execution, actor, work = self.prepared_gap()
+        evidence = self.gap_evidence(row)
+        async def recover():
+            runtime = Runtime(database_limit=1, queue_limit=0)
+            try:
+                return await asyncio.wait_for(Worker(runtime, self.ops, None).run_pending(limit=2), 5)
+            finally:
+                await runtime.aclose()
+        with patch('django.utils.timezone.now', return_value=row.not_after+timedelta(seconds=1)):
+            self.assertEqual(async_to_sync(recover)(), [])
+            self.assert_aborted_gap(row, execution, actor, evidence)
+
+    def concurrent_gap_claim_and_recovery(self, execution, actor, work):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from django.db import connections
+        from mop.server.operations.service import Refused
+        from mop.server.sessions.services import Conflict
+        barrier = Barrier(2)
+        def run(claim):
+            connections.close_all()
+            try:
+                barrier.wait(timeout=5)
+                if claim:
+                    try:
+                        return execution.claim(actor, work, request_id=uuid4())
+                    except (Refused, Conflict):
+                        return None
+                execution.reconcile_expired()
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claimed, recovered = tuple(pool.map(run, (True, False)))
+        return claimed
+
+    def test_concurrent_claim_and_gap_recovery_commit_only_one_abort(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        row, execution, actor, work = self.prepared_gap()
+        evidence = self.gap_evidence(row)
+        with patch('django.utils.timezone.now', return_value=row.not_after-timedelta(seconds=319)):
+            self.assertIsNone(self.concurrent_gap_claim_and_recovery(execution, actor, work))
+            self.assert_aborted_gap(row, execution, actor, evidence)
+
+    def test_concurrent_recovery_does_not_abort_a_fully_budgeted_claim(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from mop.server.operations import models as om
+        from mop.server.sessions.models import AssignmentAttempt
+        row, execution, actor, work = self.prepared_gap()
+        held = tuple(om.ResourceClaim.objects.filter(operation=row).order_by('resource_id').values())
+        now = row.not_after-timedelta(seconds=320)
+        with patch('django.utils.timezone.now', return_value=now):
+            attempt = self.concurrent_gap_claim_and_recovery(execution, actor, work)
+            self.assertIsNotNone(attempt)
+            execution.reconcile_expired()
+        row.refresh_from_db()
+        self.assertEqual(row.state, 'running')
+        self.assertIsNone(om.CreateCleanup.objects.get(operation=row).required_at)
+        self.assertEqual(tuple(om.ResourceClaim.objects.filter(operation=row).order_by('resource_id').values()), held)
+        claimed = AssignmentAttempt.objects.get(pk=attempt.id)
+        self.assertEqual(claimed.lease_until, now+timedelta(seconds=320))
+        self.assertEqual(claimed.state, 'claimed')
+        self.assertEqual(AssignmentAttempt.objects.filter(operation_id=row.id).count(), 2)
+
     def test_next_machine_claim_requires_all_retained_prepare_fences(self):
         from mop.server.operations.models import ResourceClaim
         from mop.server.operations.service import Refused

@@ -115,6 +115,8 @@ class WorkerLifecycle(TestCase):
             stop = asyncio.Event()
             runtime = Runtime()
             class Operations:
+                def reconcile_expired_creates(inner, *, limit):
+                    return ()
                 def pending(inner, **options):
                     entered.set()
                     if not release.wait(2):

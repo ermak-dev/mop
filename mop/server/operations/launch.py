@@ -307,6 +307,76 @@ def validate_claims(row, step, keys):
             raise Denied('current create launch resource fence token or stage changed')
 
 
+class CreateExpiry:
+    """Definite abort только между quiescent фазами; не cleanup и не inspection."""
+    def __init__(self, operations):
+        self.ops = operations
+
+    def _abort(self, row, step):
+        if (row.state != State.RUNNING or step is None or step.ordinal <= 1
+                or step.token is not None or step.attempt_id is not None or step.outcome
+                or row.not_after >= timezone.now()+timedelta(seconds=lease_seconds(step.name))):
+            return False
+        # Ни активный, ни неизвестный эффект нельзя объявлять definite abort.
+        if row.step_set.filter(ordinal__gte=step.ordinal).exclude(
+                token=None, attempt_id=None, outcome='', dispatched_at=None, quiescent_at=None).exists():
+            return False
+        if not m.CreateCleanup.objects.filter(operation=row, confirmed_at=None, adopted_at=None).exists():
+            raise Refused('claim_conflict')
+        keys = ('node:'+str(row.node_id), 'project:'+str(row.restartbinding.project_id),
+                'puppet:'+str(row.target_id), 'target:'+str(row.target_id))
+        validate_claims(row, step, keys)
+        _move(row, State.FAILED, 'deadline_expired', expected_revision=row.revision,
+            safe_reason='insufficient intent remaining for phase and cleanup; next phase never claimed')
+        return True
+
+    def abort_unstarted(self, work):
+        """Caller держит restore -> Assignment locks; commit до ответа-отказа."""
+        from django.db import transaction
+        if not transaction.get_connection().in_atomic_block:
+            raise Refused('transaction_boundary')
+        installation = self.ops._installation()
+        row = m.Operation.objects.select_for_update().filter(pk=work.operation_id, action='create',
+            state=State.RUNNING, epoch=installation.epoch, restore_generation=installation.generation).first()
+        if row is None:
+            return False
+        step = row.step_set.exclude(outcome='succeeded').order_by('ordinal').first()
+        if step is None or RestartHandler(self.ops)._value(row, step) != work:
+            return False
+        return self._abort(row, step)
+
+    def reconcile(self, *, limit):
+        from django.db.models import Exists, OuterRef, Q, Subquery
+        _independent()
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('bounded initial create recovery required')
+        next_step = m.Step.objects.filter(operation=OuterRef('pk')).exclude(outcome='succeeded').order_by('ordinal')
+        unresolved = m.Step.objects.filter(operation=OuterRef('pk'), token__isnull=False, quiescent_at=None)
+        due = Q()
+        now = timezone.now()
+        for phase in STAGES[1:]:
+            due |= Q(next_phase=phase, not_after__lt=now+timedelta(seconds=lease_seconds(phase)))
+        # Frontier, installation и budget фильтруются до LIMIT: история restore
+        # и активная/неистёкшая lane не вытесняют gap. Receipts не меняются.
+        with self.ops._transaction():
+            installation = self.ops._installation()
+            ids = tuple(m.Operation.objects.filter(action='create', state=State.RUNNING,
+                epoch=installation.epoch, restore_generation=installation.generation)
+                .annotate(next_phase=Subquery(next_step.values('name')[:1]))
+                .filter(due).filter(~Exists(unresolved)).order_by('not_after', 'pk').values_list('pk', flat=True)[:limit])
+        changed = []
+        for operation_id in ids:
+            with self.ops._transaction():
+                installation = self.ops._installation()
+                row = m.Operation.objects.select_for_update().get(pk=operation_id)
+                if row.epoch != installation.epoch or row.restore_generation != installation.generation:
+                    continue
+                step = row.step_set.exclude(outcome='succeeded').order_by('ordinal').first()
+                if self._abort(row, step):
+                    changed.append(row.id)
+        return tuple(changed)
+
+
 class CreateMachine(RestartHandler):
     """Конечные узловые фазы create (#721): planned подготовка, native, readiness.
 

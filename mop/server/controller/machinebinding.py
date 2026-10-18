@@ -119,6 +119,12 @@ class OperationWork:
     def current(self, operation_id, step_id):
         return WorkV1(**asdict(self.operations.current_machine(operation_id, step_id)))
 
+    def abort_unstarted(self, work):
+        return self.operations.abort_unstarted_create(MachineStep(**asdict(work)))
+
+    def reconcile_expired(self, *, limit):
+        return self.operations.reconcile_expired_creates(limit=limit)
+
     def claimed(self, work, attempt_id):
         self.operations.claimed_machine(MachineStep(**asdict(work)), attempt_id)
 

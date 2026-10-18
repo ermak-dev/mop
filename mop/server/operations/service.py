@@ -613,6 +613,14 @@ class Operations:
         from .puppet import RestartHandler
         return RestartHandler(self).current(operation_id, step_id)
 
+    def abort_unstarted_create(self, work):
+        from .launch import CreateExpiry
+        return CreateExpiry(self).abort_unstarted(work)
+
+    def reconcile_expired_creates(self, *, limit=50):
+        from .launch import CreateExpiry
+        return CreateExpiry(self).reconcile(limit=limit)
+
     def effect_lease(self, work):
         row = m.Operation.objects.get(pk=work.operation_id)
         return self.machine_handler(row.action).effect_lease(work)
