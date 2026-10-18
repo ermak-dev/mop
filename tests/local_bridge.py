@@ -477,19 +477,123 @@ class NativeReceipts(unittest.IsolatedAsyncioTestCase):
                 if action != 'close':
                     self.assertEqual((await self.bridge.deliver(frame)).outcome, 'unknown')
 
+    async def test_silence_deadline_cleans_pending_without_replaying(self):
+        frame, task = await self.begin()
+        self.assertEqual(set(self.bridge._pending), {str(frame.message_id)})
+        self.assertEqual((await asyncio.wait_for(task, 1)).outcome, 'unknown')
+        self.assertFalse(self.bridge._pending)
+        self.assertFalse(self.bridge._outbound)
+        self.assertFalse(self.bridge._writers)
+        self.assertEqual(len(self.bridge._seen), 1)
+        await self.status(frame.message_id, 'delivered')
+        self.assertEqual((await self.bridge.deliver(frame)).outcome, 'unknown')
+        self.assertTrue(self.frames.empty(), 'silence deadline must not replay a possible write')
+
+    # HYPOTHESIS: #737 короткий silence budget fixture истекает ещё в ready/write
+    # при 64 полных physical proofs; очередь путает отсутствие bytes с утечкой.
+    # RED: PYTHONTRACEMALLOC=1, настоящий Unix peer: ready:unavailable=64,
+    # делегирующий observer ready поймал TimeoutError=64, не physical refusal.
+    # Без tracing общий guard barrier пересекает прежние 80 ms deadlines:
+    # guard:unknown=64, received=0, pending/writers/outbound/callbacks=0,
+    # seen=64, cancel=0. Детерминированный RED даже на быстрой машине.
+    # SOLUTION: capacity — штатный default budget и общий prewrite barrier;
+    # короткий silence deadline проверяется отдельно, не 64-way latency SLA.
+    # RESULT: 24 bridge checks, 6 strict файлов и actual PostgreSQL endpoint
+    # gate 45 + cross-UID 3 green. Capacity прошла также с tracing; весь traced
+    # suite не green из-за отдельного malformed-envelope check. Production
+    # fences/bounds не изменены; Unix fixture не равна native acceptance.
+    # STATUS: FIXED — see #737
     async def test_pending_and_replay_memory_are_bounded(self):
+        silence_budget = self.bridge.timeout
+        await self.bridge.aclose()
+        self.bridge = LocalBridge(own_session(self.path, 'own-conversation'))
+        await self.bridge.start()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        phases = {}
+        entered, release = asyncio.Event(), asyncio.Event()
         frames = [self.frame() for _ in range(64)]
-        tasks = [asyncio.create_task(self.bridge.deliver(frame)) for frame in frames]
+        ids = {str(frame.message_id) for frame in frames}
+        async def deliver(frame):
+            async def guard():
+                phases[frame.message_id] = 'guard'
+                if sum(phase == 'guard' for phase in phases.values()) == 64:
+                    entered.set()
+                await release.wait()
+            phases[frame.message_id] = 'ready'
+            try:
+                result = await self.bridge.deliver_guarded(frame, guard)
+                phases[frame.message_id] += ':'+result.outcome
+                return result
+            except BaseException as error:
+                phases[frame.message_id] += ':'+type(error).__name__
+                raise
+        tasks = [asyncio.create_task(deliver(frame)) for frame in frames]
+        received = set()
+        def diagnostic():
+            from collections import Counter
+            return (f'elapsed={loop.time()-started:.3f}, timeout={self.bridge.timeout}, '
+                f'phases={dict(Counter(phases.values()))}, received={len(received)}, '
+                f'pending={len(self.bridge._pending)}, seen={len(self.bridge._seen)}, '
+                f'outbound={len(self.bridge._outbound)}, writers={len(self.bridge._writers)}, '
+                f'callbacks={len(self.bridge._tasks)}, '
+                f'tasks_done={sum(task.done() for task in tasks)}, '
+                f'tasks_cancelled={sum(task.cancelled() for task in tasks)}')
         try:
-            for _ in frames:
-                await asyncio.wait_for(self.frames.get(), 1)
-            self.assertLessEqual(len(self.bridge._pending), 64)
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(set(self.bridge._pending), ids)
+            self.assertEqual(len(self.bridge._seen), 64)
+            self.assertEqual(len(self.bridge._outbound), 64)
+            self.assertEqual(len(self.bridge._writers), 64)
+            self.assertTrue(all(not task.done() for task in tasks))
+            self.assertTrue(self.frames.empty(), 'prewrite barrier must hold every user frame')
             with self.assertRaisesRegex(ConnectionError, 'capacity'):
                 await self.bridge.deliver(self.frame())
-            results = await asyncio.gather(*tasks)
-            self.assertEqual({r.outcome for r in results}, {'unknown'})
+            self.assertEqual(set(self.bridge._pending), ids)
+            # Барьер намеренно пересекает короткий silence budget: capacity
+            # должна наблюдаться без предположения «64 proofs быстрее 80 ms».
+            # До этого timer все 64 _write deadlines уже запущены: прежняя
+            # fixture гарантированно теряет pending даже на быстрой машине.
+            boundary = loop.create_future()
+            timer = loop.call_later(silence_budget, boundary.set_result, None)
+            try:
+                await boundary
+            finally:
+                timer.cancel()
+            self.assertEqual(set(self.bridge._pending), ids, diagnostic())
+            self.assertEqual(set(phases.values()), {'guard'}, diagnostic())
+            release.set()
+            for _ in frames:
+                wire = await asyncio.wait_for(self.frames.get(), 1)
+                self.assertEqual(wire['type'], 'user')
+                self.assertEqual(wire['session_id'], 'own-conversation')
+                self.assertIn(wire['msg_id'], ids)
+                self.assertNotIn(wire['msg_id'], received)
+                received.add(wire['msg_id'])
+            self.assertEqual(received, ids)
+            self.assertEqual(set(self.bridge._pending), ids)
+            # Один настоящий native terminal receipt завершает точные 64 IDs;
+            # unknown по таймеру не доказывает, что capacity вообще достигнута.
+            await self.status(uuid4(), 'dropped', dropped_msg_ids=sorted(ids))
+            results = await asyncio.wait_for(asyncio.gather(*tasks), 1)
+            self.assertEqual({r.outcome for r in results}, {'unavailable'})
+            self.assertFalse(self.bridge._pending)
+            self.assertFalse(self.bridge._outbound)
+            self.assertFalse(self.bridge._writers)
             self.assertEqual(len(self.bridge._seen), 64)
+            for frame in frames:
+                self.assertEqual((await self.bridge.deliver(frame)).outcome, 'unavailable')
+            with self.assertRaisesRegex(ConnectionError, 'capacity'):
+                await self.bridge.deliver(self.frame())
+            self.assertEqual(len(self.bridge._seen), 64)
+            self.assertTrue(self.frames.empty(), 'capacity refusal and replay must emit no bytes')
+        except TimeoutError:
+            self.fail('capacity fixture did not reach its controlled phase: '+diagnostic())
         finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
