@@ -11,20 +11,67 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import struct
 from uuid import uuid4
 
+from mop import session
 from mop.common.endpoint import ApplicationAcceptance, DeliveryFrame
 
 
 @dataclass(frozen=True, repr=False)
 class OwnSession:
+    """Полный proof от trusted launcher, не конструктор из входящего JSON.
+
+    Native conversation подтверждает launcher, не legacy registry. Physical
+    snapshot сам по себе conversation не доказывает: /clear сохраняет PID/start.
+    Неполная прежняя форма намеренно не поддерживается. Production root пока
+    отсутствует; наличие этого типа не включает private inbox capability.
+    """
     socket_path: str
     pid: int
     external_session_id: str
+    process_start: str
+    uid: int
+    namespaces: tuple[tuple[str, int], ...]
+    cwd: Path
     token: str | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        if (type(self.socket_path) is not str or not os.path.isabs(self.socket_path)
+                or '\x00' in self.socket_path or os.path.normpath(self.socket_path) != self.socket_path
+                or type(self.pid) is not int or self.pid <= 0
+                or type(self.external_session_id) is not str
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', self.external_session_id)
+                or type(self.process_start) is not str
+                or not re.fullmatch(r'[0-9a-f-]{36}:[0-9]+', self.process_start)
+                or type(self.uid) is not int or self.uid < 0
+                or type(self.namespaces) is not tuple or len(self.namespaces) != 3
+                or any(type(pair) is not tuple or len(pair) != 2
+                    or pair[0] != name or type(pair[1]) is not int or pair[1] <= 0
+                    for pair, name in zip(self.namespaces, ('mnt', 'pid', 'user')))
+                or not isinstance(self.cwd, Path) or not self.cwd.is_absolute()
+                or '..' in self.cwd.parts):
+            raise ValueError('complete trusted own physical session proof required')
+
+    def check_process(self, pid, uid):
+        """Проверка текущего процесса из connected SO_PEERCRED, не новый connect."""
+        if pid != self.pid or uid != self.uid or uid != os.getuid():
+            raise PermissionError('own CLI peer identity changed')
+        try:
+            # Stdlib helper окружает process snapshot повторным start/namespace
+            # чтением. Он не вызывает discovery/history и не верит файлам сессий.
+            current = session.native_process(pid)
+            local_namespaces = tuple((kind, Path(f'/proc/self/ns/{kind}').stat().st_ino)
+                                     for kind in ('mnt', 'pid', 'user'))
+            if (current['start'] != self.process_start or current['uid'] != self.uid
+                    or current['cwd'] != str(self.cwd) or current['namespaces'] != self.namespaces
+                    or self.namespaces != local_namespaces):
+                raise PermissionError('own CLI process start, namespace or cwd changed')
+        except (OSError, LookupError, ValueError) as error:
+            raise PermissionError('own CLI physical session proof is unavailable or changed') from error
 
 
 def _unique_object(pairs):
@@ -78,8 +125,7 @@ class LocalBridge:
         if not hasattr(socket, 'SO_PEERCRED') or sock is None:
             raise PermissionError('own CLI peer identity is unavailable')
         pid, uid, _ = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')))
-        if uid != os.getuid() or pid != self.own.pid:
-            raise PermissionError('own CLI peer identity changed')
+        self.own.check_process(pid, uid)
 
     async def ready(self):
         if self._stopped:
@@ -120,6 +166,11 @@ class LocalBridge:
             async with asyncio.timeout(self.timeout):
                 line = await reader.readline()
                 frame = json.loads(line, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+            # Callback мог ждать bytes уже после ухода own process из scope.
+            # До изменения pending/idle больше нет await.
+            if self._stopped:
+                return
+            self._peer(writer)
             if (type(frame) is not dict or type(frame.get('msgV')) is not int or frame['msgV'] != 1
                     or frame.get('type') != 'control' or type(frame.get('orig_msg_id')) is not str
                     or not 0 < len(frame['orig_msg_id']) <= 256):
@@ -168,7 +219,6 @@ class LocalBridge:
             _, writer = await asyncio.open_unix_connection(str(path))
             self._writers.add(writer)
             try:
-                self._peer(writer)
                 data = []
                 if self.own.token is not None:
                     data.append({'type': 'auth', 'token': self.own.token})
@@ -179,8 +229,16 @@ class LocalBridge:
                 # под сетью. От результата guard до write нет другого await.
                 if guard is not None:
                     await guard()
+                if asyncio.current_task().cancelling():
+                    # Cleanup trusted guard не отменяет исходный cancel/deadline.
+                    raise asyncio.CancelledError
                 if self._stopped:
                     raise ConnectionError('local bridge is stopped')
+                # Guard мог уступить event loop: pathname probe до него ничего
+                # не говорит о текущем connected peer. Проверка proof и write
+                # выполняются синхронно в этом task, без нового yield.
+                self._path()
+                self._peer(writer)
                 writer.write(encoded)
                 await writer.drain()
             finally:
@@ -230,6 +288,7 @@ class LocalBridge:
             # Probe доказывает только текущий peer, не application acceptance.
             await self.ready()
             user = {'msgV': 1, 'msg_id': str(frame.message_id), 'type': 'user',
+                'session_id': self.external_session_id,
                 'message': {'role': 'user', 'content': frame.text}, 'priority': frame.priority, 'from': callback}
             # Private reply address — непрозрачный pool address, не callback path.
             if frame.reply_address:
@@ -245,6 +304,7 @@ class LocalBridge:
                 self._idle[frame.message_id] = (subscription, asyncio.get_running_loop().create_future())
                 try:
                     await self._write({'msgV': 1, 'type': 'control', 'msg_id': subscription,
+                        'session_id': self.external_session_id,
                         'action': 'notify_when_idle', 'from': callback}, guard)
                 except (OSError, TimeoutError, PermissionError, ValueError):
                     # Принятие user-frame уже подтверждено, но idle неизвестен.

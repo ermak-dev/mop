@@ -23,11 +23,27 @@ import sys
 import tempfile
 import unittest
 from uuid import uuid4
+from unittest.mock import patch
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def changed_cwd(path):
+    """Настоящая смена cwd с обязательным восстановлением процесса теста."""
+    previous = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.chdir(path)
+        yield
+    finally:
+        os.fchdir(previous)
+        os.close(previous)
 
 import hermetic  # noqa: F401
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mop.client.local_bridge import LocalBridge, OwnSession
 from mop.common.endpoint import DeliveryFrame
+from _own_session_fixture import own_session
 
 
 class NativeReceipts(unittest.IsolatedAsyncioTestCase):
@@ -53,7 +69,7 @@ class NativeReceipts(unittest.IsolatedAsyncioTestCase):
                 self.connections.discard(task)
         self.server = await asyncio.start_unix_server(external, path=self.path)
         os.chmod(self.path, 0o600)
-        self.bridge = LocalBridge(OwnSession(self.path, os.getpid(), 'own-conversation'), timeout=.08)
+        self.bridge = LocalBridge(own_session(self.path, 'own-conversation'), timeout=.08)
         await self.bridge.start()
 
     async def asyncTearDown(self):
@@ -270,6 +286,196 @@ class NativeReceipts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(reader.read(), 1), b'')
         writer.close()
         await writer.wait_closed()
+
+    # HYPOTHESIS: #735 равные PID/path до await guard не защищают physical
+    # scope после него; /clear меняет conversation без смены процесса/сокета.
+    # SPEC: connected SO_PEERCRED + полный process proof после последнего await;
+    # user и idle control несут точный native session_id. Никакой file authority.
+    # RED: 8 behavioral failures: bytes после start/namespace/uid/cwd barrier,
+    # stale callback принят, отсутствуют полный proof и native frame fence.
+    # SOLUTION: обязательный frozen OwnSession с process_start/uid/namespaces/cwd;
+    # stdlib native_process на connected peer после guard/read, без await до write.
+    # Второй RED: guard проглотил CancelledError и write продолжился. Последний
+    # gate сохраняет task.cancelling(): cleanup guard не возвращает authority.
+    # RESULT: все прежние #729 statuses/idle/replay/bounds/cleanup сохранены;
+    # /clear проверен captured frames, start/namespace/uid — инъекцией snapshot,
+    # cwd — настоящим chdir; это не реальный kernel PID reuse и не native green.
+    # STATUS: FIXED — see #735 (client boundary; production root не включён).
+    async def test_partial_or_untyped_own_session_is_not_an_authority_fallback(self):
+        import dataclasses
+        from mop import session
+        fields = {f.name for f in dataclasses.fields(OwnSession)}
+        self.assertTrue({'process_start', 'uid', 'namespaces', 'cwd'} <= fields,
+            'trusted launcher must supply complete physical proof, not only PID/path')
+        with self.assertRaises(TypeError):
+            OwnSession(self.path, os.getpid(), 'own-conversation')
+        snapshot = session.native_process(os.getpid())
+        values = dict(socket_path=self.path, pid=os.getpid(), external_session_id='own-conversation',
+            process_start=snapshot['start'], uid=snapshot['uid'], namespaces=snapshot['namespaces'],
+            cwd=Path(snapshot['cwd']))
+        for field, invalid in (('pid', True), ('uid', True), ('process_start', ''),
+                ('namespaces', ()), ('namespaces', dict(snapshot['namespaces'])),
+                ('cwd', Path('relative')), ('socket_path', 'relative.sock'),
+                ('external_session_id', ''), ('external_session_id', 'x'*129)):
+            with self.subTest(field=field, invalid=invalid):
+                with self.assertRaises((ValueError, TypeError)):
+                    LocalBridge(OwnSession(**{**values, field: invalid}))
+        with self.assertRaises(ValueError):
+            LocalBridge(values)
+        with self.assertRaises(ValueError):
+            LocalBridge(OwnSession(**values), timeout=5.001)
+
+    async def test_connected_peer_is_checked_after_guard_and_without_another_await(self):
+        guarded = False
+        checks = []
+        original = self.bridge._peer
+        def checked(writer):
+            checks.append((guarded, writer.get_extra_info('socket').fileno()))
+            return original(writer)
+        async def guard():
+            nonlocal guarded
+            await asyncio.sleep(0)
+            guarded = True
+        with patch.object(self.bridge, '_peer', checked):
+            task = asyncio.create_task(self.bridge.deliver_guarded(self.frame(), guard))
+            await asyncio.wait_for(self.frames.get(), 1)
+            self.assertTrue(any(after for after, _ in checks), 'no connected peer check after guard')
+            self.assertEqual((await task).outcome, 'unknown')
+
+    async def test_user_and_idle_control_pin_exact_native_conversation_after_clear(self):
+        frame = self.frame(True)
+        task = asyncio.create_task(self.bridge.deliver(frame))
+        user = await asyncio.wait_for(self.frames.get(), 1)
+        self.assertEqual(user.get('session_id'), 'own-conversation')
+        await self.status(frame.message_id, 'delivered')
+        self.assertEqual((await task).outcome, 'accepted')
+        control = await asyncio.wait_for(self.frames.get(), 1)
+        self.assertEqual(control.get('session_id'), 'own-conversation')
+        # Модель dispatcher для /clear: тот же PID/start/socket, новый ID.
+        # Это captured-frame assertion, не эксперимент над native dispatcher.
+        current_native_id = 'conversation-after-clear'
+        self.assertFalse(any(wire.get('session_id') == current_native_id for wire in (user, control)))
+        fresh = self.frame()
+        task = asyncio.create_task(self.bridge.deliver(fresh))
+        wire = await asyncio.wait_for(self.frames.get(), 1)
+        self.assertEqual(wire.get('session_id'), 'own-conversation')
+        self.assertNotEqual(wire['session_id'], current_native_id)
+        self.assertEqual((await task).outcome, 'unknown')
+
+    async def test_real_cwd_change_while_guard_waits_blocks_all_bytes(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def guard():
+            entered.set()
+            await release.wait()
+        task = asyncio.create_task(self.bridge.deliver_guarded(self.frame(), guard))
+        await asyncio.wait_for(entered.wait(), 1)
+        try:
+            with changed_cwd(self.directory.name):
+                release.set()
+                result = await task
+            self.assertEqual(result.outcome, 'unknown')
+            self.assertTrue(self.frames.empty(), 'post-guard cwd changed but plaintext escaped')
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_process_start_and_namespaces_rechecked_after_guard_snapshot_barrier(self):
+        from mop import session
+        original = session.native_process
+        for field in ('start', 'namespaces', 'uid'):
+            with self.subTest(field=field):
+                entered, release = asyncio.Event(), asyncio.Event()
+                async def guard():
+                    entered.set()
+                    await release.wait()
+                task = asyncio.create_task(self.bridge.deliver_guarded(self.frame(), guard))
+                await asyncio.wait_for(entered.wait(), 1)
+                def changed(pid):
+                    result = original(pid)
+                    if field == 'start':
+                        # Инъекция read snapshot, не настоящий kernel PID reuse.
+                        result['start'] += '1'
+                    elif field == 'uid':
+                        result['uid'] += 1
+                    else:
+                        result['namespaces'] = tuple((name, inode+1) for name, inode in result['namespaces'])
+                    return result
+                with patch.object(session, 'native_process', changed):
+                    release.set()
+                    self.assertEqual((await task).outcome, 'unknown')
+                self.assertTrue(self.frames.empty(), f'post-guard {field} changed but bytes escaped')
+
+    async def test_callback_rechecks_current_scope_after_waiting_for_receipt_bytes(self):
+        frame, task = await self.begin()
+        entered = asyncio.Event()
+        original = self.bridge._peer
+        def checked(writer):
+            result = original(writer)
+            entered.set()
+            return result
+        with patch.object(self.bridge, '_peer', checked):
+            reader, writer = await asyncio.open_unix_connection(str(self.bridge._callback))
+            await asyncio.wait_for(entered.wait(), 1)
+            try:
+                with changed_cwd(self.directory.name):
+                    writer.write((json.dumps(dict(msgV=1, type='control', action='peer_message_status',
+                        orig_msg_id=str(frame.message_id), status='delivered'))+'\n').encode())
+                    await writer.drain()
+                    writer.write_eof()
+                    await asyncio.wait_for(reader.read(), 1)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        self.assertEqual((await task).outcome, 'unknown', 'pre-read peer snapshot accepted stale callback')
+
+    async def test_guard_suppressing_cancellation_cannot_resume_a_cancelled_write(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def guard():
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                # Trusted port может закончить свою cleanup после cancel;
+                # это не разрешение bridge продолжить начатый write.
+                await release.wait()
+        frame = self.frame()
+        task = asyncio.create_task(self.bridge.deliver_guarded(frame, guard))
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(self.frames.empty(), 'cancelled guard resumed and emitted bytes')
+        self.assertFalse(self.bridge._writers)
+        self.assertFalse(self.bridge._pending)
+        self.assertEqual((await self.bridge.deliver(frame)).outcome, 'unknown')
+
+    async def test_guard_close_cancel_and_timeout_never_emit_late_bytes(self):
+        for action in ('cancel', 'timeout', 'close'):
+            with self.subTest(action=action):
+                entered, release = asyncio.Event(), asyncio.Event()
+                async def guard():
+                    entered.set()
+                    await release.wait()
+                frame = self.frame()
+                task = asyncio.create_task(self.bridge.deliver_guarded(frame, guard))
+                await asyncio.wait_for(entered.wait(), 1)
+                if action == 'cancel':
+                    task.cancel()
+                elif action == 'close':
+                    await self.bridge.aclose()
+                if action in ('cancel', 'close'):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                else:
+                    self.assertEqual((await task).outcome, 'unknown')
+                release.set()
+                self.assertTrue(self.frames.empty())
+                self.assertFalse(self.bridge._pending)
+                self.assertFalse(self.bridge._outbound)
+                self.assertFalse(self.bridge._writers)
+                if action != 'close':
+                    self.assertEqual((await self.bridge.deliver(frame)).outcome, 'unknown')
 
     async def test_pending_and_replay_memory_are_bounded(self):
         frames = [self.frame() for _ in range(64)]
