@@ -19,7 +19,7 @@ _COMMON = frozenset({"schema_version", "epoch", "request_id", "incarnation",
                      "expected_revision", "not_after", "params"})
 _FIELDS = _COMMON | {"target_id", "body", "fresh", "message", "priority",
                      "wait_seconds", "notify_when_idle", "digest_key",
-                     "project_id", "node_id", "definition_id"}
+                     "project_id", "node_id", "definition_id", "origin"}
 # Создание (#643): цели ещё нет -- ни incarnation, ни expected_revision; target,
 # инкарнацию и владельца назначает сервер, не тело запроса.
 _CREATE = frozenset({"schema_version", "epoch", "request_id", "not_after", "params"})
@@ -116,6 +116,34 @@ class RestartCommand:
     def __post_init__(self):
         _require(type(self.intent) is TargetIntent, "body")
         _require(type(self.fresh) is bool, "fresh")
+
+
+@dataclass(frozen=True)
+class UpdateCommand:
+    """Замена текущего запуска: источник только из того же Catalog project."""
+    intent: TargetIntent
+    fresh: bool = False
+    origin: str | None = None
+
+    def __post_init__(self):
+        _require(type(self.intent) is TargetIntent, "body")
+        _require(type(self.fresh) is bool, "fresh")
+        if self.origin is not None:
+            from mop.server.catalog.policy import project_origin
+            try:
+                value = project_origin(self.origin)
+            except (ValueError, UnicodeError):
+                raise InvalidCommand(field='origin') from None
+            object.__setattr__(self, 'origin', value.origin)
+
+
+def parse_update(target_id, body):
+    _shape(body, _COMMON, _COMMON, "body")
+    params = body['params']
+    _shape(params, {'fresh', 'origin'}, set(), 'params')
+    if 'origin' in params:
+        _require(type(params['origin']) is str, 'origin')
+    return UpdateCommand(_intent(target_id, body), params.get('fresh', False), params.get('origin'))
 
 
 @dataclass(frozen=True)

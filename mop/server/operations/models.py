@@ -247,6 +247,50 @@ class ReplacementBinding(Evidence):
             & Q(expires_at__lte=models.F('source_expires_at')), name='replacement_source_pins')]
 
 
+class ReplacementPlan(Evidence):
+    """Полный immutable план admitted update, без credential/частного transcript.
+
+    Отдельно от seeded ReplacementBinding prerequisite: наличие одного source/
+    policy pin ещё не доказывает admission. Продолжение -- opaque reference
+    SQL-порта execution; HTTP его не выбирает и result его не раскрывает.
+    """
+    operation = models.OneToOneField(Operation, primary_key=True, on_delete=models.PROTECT)
+    source_executor_epoch = models.UUIDField()
+    owner_id = models.PositiveBigIntegerField()
+    project_id = models.UUIDField()
+    node_id = models.UUIDField()
+    role = models.CharField(max_length=64)
+    bundle_digest = models.CharField(max_length=64)
+    destination_incarnation_id = models.UUIDField()
+    destination_grant_id = models.UUIDField()
+    destination_revision = models.PositiveBigIntegerField()
+    destination_generation = models.PositiveBigIntegerField()
+    scheduler_id = models.UUIDField()
+    job_id = models.CharField(max_length=128)
+    namespace = models.CharField(max_length=128)
+    modify_index = models.PositiveBigIntegerField()
+    origin = models.CharField(max_length=2048)
+    source_ref = models.CharField(max_length=256)
+    source_commit = models.CharField(max_length=64)
+    clone_ref = models.UUIDField()
+    continuation_ref = models.UUIDField(null=True)
+    fresh = models.BooleanField()
+    source_bootstrap_revision = models.UUIDField()
+    source_bootstrap_digest = models.CharField(max_length=64)
+    source_image_id = models.UUIDField()
+    source_image_digest = models.CharField(max_length=64)
+    bootstrap_revision = models.UUIDField()
+    bootstrap_digest = models.CharField(max_length=64)
+    image = models.ForeignKey('catalog.ImageRevision', on_delete=models.PROTECT)
+    image_digest = models.CharField(max_length=64)
+
+    class Meta(Evidence.Meta):
+        constraints = [models.CheckConstraint(condition=Q(destination_revision__gte=1,
+            destination_generation__gte=1, modify_index__gte=1), name='replacement_plan_counters'),
+            models.CheckConstraint(condition=Q(fresh=True, continuation_ref__isnull=True)
+                | Q(fresh=False, continuation_ref__isnull=False), name='replacement_exact_continuation')]
+
+
 class CreateReservation(Evidence):
     """Неизменный intent и слот общего admission до credential I/O (#704/#709).
 

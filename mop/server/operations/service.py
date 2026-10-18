@@ -106,6 +106,14 @@ def _snapshot(row):
             result['target']['revision'] = str(applied_revision or row.expected_revision)
             if result['evidence'] is not None:
                 result['evidence']['projection_updated'] = applied_revision is not None
+    if row.action == 'update':
+        binding = row.replacementbinding
+        result['source'] = dict(id=str(row.target_id), incarnation=str(binding.source_incarnation_id),
+            revision=str(binding.source_revision), generation=str(binding.source_generation), grant_id=str(binding.source_grant_id))
+        result['destination'] = dict(id=str(row.target_id), incarnation=str(row.incarnation_id),
+            revision=str(row.expected_revision), generation=str(row.restartbinding.generation),
+            grant_id=str(row.restartbinding.grant_id))
+        result['target']['source_revision'] = str(binding.source_revision)
     if row.action in ('send', 'dispatch'):
         result['message_id'] = str(row.messagebinding.message_id)
     return result

@@ -53,6 +53,8 @@ class Operation(serializers.Serializer):
     code = serializers.CharField(allow_null=True, required=False)
     reason = serializers.CharField(allow_null=True, required=False)
     target = free({'type': 'object', 'additionalProperties': True})
+    source = free({'type': 'object', 'additionalProperties': True}, required=False)
+    destination = free({'type': 'object', 'additionalProperties': True}, required=False)
     steps = free({'type': 'array', 'items': {'type': 'object', 'additionalProperties': True}},
                  required=False)
     resources_held = serializers.BooleanField()
@@ -83,6 +85,14 @@ class RestartCommand(serializers.Serializer):
     not_after = serializers.CharField()
     params = free({'type': 'object', 'properties': {'fresh': {'type': 'boolean'}},
                    'additionalProperties': False})
+
+
+class UpdateCommand(RestartCommand):
+    params = free({'type': 'object', 'properties': {
+        'fresh': {'type': 'boolean', 'default': False},
+        'origin': {'type': 'string', 'maxLength': 2048,
+                   'description': 'Optional source origin of the same Catalog project.'}},
+        'additionalProperties': False})
 
 
 class CreateCommand(serializers.Serializer):
@@ -365,6 +375,10 @@ def annotations():
             'Submits a node drain command; eligible is fixed by the route.')},
         operationviews.EnableNode: {'post': (NodeCommand, OperationReply, 202,
             'Submits a node enable command; eligible is fixed by the route.')},
+        operationviews.UpdatePuppet: {'post': (UpdateCommand, OperationReply, 202,
+            'Admits an update plan and synchronously prepares its exact replacement grant. '
+            'Source assignment and agent credentials are unchanged; prepared is not physical completion. '
+            'Missing replacement or continuation support refuses before effects. Unknown preparation is replay-only.')},
         operationviews.RestartPuppet: {'post': (RestartCommand, OperationReply, 202,
             'Submits a puppet restart command; fresh requires its own credential binding.')},
         operationviews.StopPuppetJob: {'post': (RestartCommand, OperationReply, 202,
