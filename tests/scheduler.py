@@ -245,6 +245,46 @@ def scenario(c, name, expect_proof, expect_writes, *, get_delay=0.0, replaced_in
         peer.close()
 
 
+# HYPOTHESIS (#701): _resolve берёт только первый адрес getaddrinfo; в CI
+# localhost первым отдаёт ::1, peer слушает только IPv4 -- observe отказывал при
+# рабочем втором адресе (пайплайн 5676).
+# SOLUTION: резолв отдаёт все адреса, соединение пробует их по порядку в остатке
+# того же бюджета вызова (#680).
+# STATUS: FIXED — see #701
+def check_all_addresses_701(c):
+    import socket as sockets
+    peer = DripPeer(drip=0.0)
+    real = sockets.getaddrinfo
+    port = int(peer.origin.rsplit(':', 1)[1])
+
+    def dual(host, *args, **kwargs):
+        if host != 'localhost':
+            return real(host, *args, **kwargs)
+        # Первым -- адрес, где никто не слушает, вторым -- рабочий peer.
+        return [(sockets.AF_INET6, sockets.SOCK_STREAM, 6, '', ('::1', 0, 0, 0)),
+                (sockets.AF_INET, sockets.SOCK_STREAM, 6, '', ('127.0.0.1', 0))]
+    try:
+        scheduler_id = uuid4()
+        value = ticket(peer, scheduler_id, 30)
+
+        class Inspector:
+            def inspect_stopped(self, ticket_, allocation_ids):
+                raise AssertionError('observe needs no body proof')
+
+        sockets.getaddrinfo = dual
+        try:
+            index = NomadStopScheduler(origin='http://localhost:%d' % port, scheduler_id=scheduler_id,
+                                       token='owned-check', body_inspector=Inspector(), timeout=1).observe(value.job)
+            c.expect("#701 an unreachable first address does not hide a working second one", index, 7)
+        except SchedulerUnavailable:
+            c.fail("#701 an unreachable first address does not hide a working second one",
+                   "observe refused although 127.0.0.1 answers")
+        finally:
+            sockets.getaddrinfo = real
+    finally:
+        peer.close()
+
+
 def main():
     c = Checks()
 
@@ -377,6 +417,7 @@ def main():
     finally:
         peer.close()
 
+    check_all_addresses_701(c)
     return c.report("scheduler")
 
 
