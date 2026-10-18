@@ -444,7 +444,7 @@ class Endpoints(TransactionTestCase):
                         received.append(frame)
                         callback = frame['from'][4:]
                         r, w = await asyncio.open_unix_connection(callback)
-                        w.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'message_accepted',
+                        w.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'peer_message_status', 'status': 'delivered',
                             'orig_msg_id': frame['msg_id']})+'\n').encode())
                         await w.drain()
                         w.close()
@@ -530,8 +530,9 @@ class Endpoints(TransactionTestCase):
                         frame = json.loads(line)
                         frames.append(frame)
                         _, reply = await asyncio.open_unix_connection(frame['from'][4:])
-                        action = 'peer_idle_notice' if frame['type'] == 'control' else 'message_accepted'
-                        reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': action,
+                        receipt = ({'action': 'peer_idle_notice', 'state': 'idle'} if frame['type'] == 'control'
+                            else {'action': 'peer_message_status', 'status': 'delivered'})
+                        reply.write((json.dumps({'msgV': 1, 'type': 'control', **receipt,
                             'orig_msg_id': frame['msg_id']})+'\n').encode())
                         await reply.drain()
                         reply.close()
@@ -592,8 +593,9 @@ class Endpoints(TransactionTestCase):
                         frame = json.loads(line)
                         frames.append(frame)
                         _, reply = await asyncio.open_unix_connection(frame['from'][4:])
-                        action = 'peer_idle_notice' if frame['type'] == 'control' else 'message_accepted'
-                        reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': action,
+                        receipt = ({'action': 'peer_idle_notice', 'state': 'idle'} if frame['type'] == 'control'
+                            else {'action': 'peer_message_status', 'status': 'delivered'})
+                        reply.write((json.dumps({'msgV': 1, 'type': 'control', **receipt,
                             'orig_msg_id': frame['msg_id']})+'\n').encode())
                         await reply.drain()
                         reply.close()
@@ -936,7 +938,7 @@ class Endpoints(TransactionTestCase):
                     await asyncio.wait_for(received.wait(), 2)
                     await runtime.database(self.auth.revoke_token, self.other_actor)
                     _, reply = await asyncio.open_unix_connection(frames[0]['from'][4:])
-                    reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'message_accepted',
+                    reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'peer_message_status', 'status': 'delivered',
                         'orig_msg_id': str(report.message_id)})+'\n').encode())
                     await reply.drain()
                     reply.close()

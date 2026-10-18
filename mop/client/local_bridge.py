@@ -27,6 +27,20 @@ class OwnSession:
     token: str | None = field(default=None, repr=False)
 
 
+def _unique_object(pairs):
+    """Неоднозначный JSON не может быть свидетельством принятия."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate callback field')
+        result[key] = value
+    return result
+
+
+def _invalid_constant(value):
+    raise ValueError('nonfinite callback value')
+
+
 class LocalBridge:
     def __init__(self, own, *, timeout=2):
         if type(own) is not OwnSession or type(own.pid) is not int or own.pid <= 0:
@@ -105,23 +119,38 @@ class LocalBridge:
             self._peer(writer)
             async with asyncio.timeout(self.timeout):
                 line = await reader.readline()
-                frame = json.loads(line)
-            if (type(frame) is not dict or frame.get('msgV') != 1 or frame.get('type') != 'control'
-                    or not isinstance(frame.get('orig_msg_id'), str)):
+                frame = json.loads(line, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+            if (type(frame) is not dict or type(frame.get('msgV')) is not int or frame['msgV'] != 1
+                    or frame.get('type') != 'control' or type(frame.get('orig_msg_id')) is not str
+                    or not 0 < len(frame['orig_msg_id']) <= 256):
                 return
             key, action = frame['orig_msg_id'], frame.get('action')
-            future = self._pending.get(key)
-            if future is not None and not future.done():
-                if action == 'message_accepted':
-                    future.set_result('accepted')
-                elif action == 'message_refused':
-                    future.set_result('unavailable')
-            if action == 'peer_idle_notice':
-                for subscription, event in self._idle.values():
+            if action == 'peer_message_status':
+                status = frame.get('status')
+                if status not in ('delivered', 'denied', 'expired', 'refused', 'dropped'):
+                    # held, неизвестный status и отсутствие receipt не доказывают enqueue.
+                    return
+                keys = [key]
+                if status == 'dropped':
+                    dropped = frame.get('dropped_msg_ids', [])
+                    # Native ограничивает список 256 ID; не расширяем его из wire.
+                    if (type(dropped) is not list or len(dropped) > 256
+                            or any(type(value) is not str or not 0 < len(value) <= 256 for value in dropped)):
+                        return
+                    keys.extend(dropped)
+                for message_id in keys:
+                    future = self._pending.get(message_id)
+                    if future is not None and not future.done():
+                        # delivered: ранее held input одобрен и released сессии;
+                        # это не обычный enqueue ACK и не результат model turn.
+                        future.set_result('accepted' if status == 'delivered' else 'unavailable')
+            elif action == 'peer_idle_notice' and frame.get('state') in ('idle', 'exited', 'unavailable'):
+                for subscription, future in self._idle.values():
                     if key == subscription:
-                        event.set()
+                        if not future.done():
+                            future.set_result(frame['state'] == 'idle')
                         break
-        except (OSError, ValueError, PermissionError, TimeoutError):
+        except (OSError, ValueError, PermissionError, TimeoutError, RecursionError):
             # Чужой/повреждённый callback не является evidence; ожидатель получит unknown.
             pass
         finally:
@@ -213,7 +242,7 @@ class LocalBridge:
                 outcome = 'unknown'
             if outcome == 'accepted' and frame.notify_when_idle:
                 subscription = str(uuid4())
-                self._idle[frame.message_id] = (subscription, asyncio.Event())
+                self._idle[frame.message_id] = (subscription, asyncio.get_running_loop().create_future())
                 try:
                     await self._write({'msgV': 1, 'type': 'control', 'msg_id': subscription,
                         'action': 'notify_when_idle', 'from': callback}, guard)
@@ -236,13 +265,12 @@ class LocalBridge:
         if pair is None:
             return False
         try:
-            await asyncio.wait_for(pair[1].wait(), timeout)
-            return True
+            return await asyncio.wait_for(asyncio.shield(pair[1]), timeout)
         except TimeoutError:
             return False
         finally:
             # Короткий poll timeout не отменяет долгую idle subscription.
-            if pair[1].is_set():
+            if pair[1].done():
                 self._idle.pop(message_id, None)
 
     async def aclose(self):
@@ -271,4 +299,7 @@ class LocalBridge:
             if not future.done():
                 future.cancel()
         self._pending.clear()
+        for _, future in self._idle.values():
+            if not future.done():
+                future.cancel()
         self._idle.clear()
