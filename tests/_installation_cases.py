@@ -40,18 +40,19 @@ class FreshPostgreSQL(unittest.TestCase):
             'paths': {name: str(self.base / name) for name in
                       ('venv', 'configuration', 'state', 'backup', 'root_trust')},
             'identities': self.users})
+        self.users['credential'] = self.users['credentials']
         db = settings.BOOTSTRAP['database']
         self.admin = psycopg.connect(host=db['HOST'], port=db['PORT'], dbname=db['NAME'],
             user=db['USER'], password=db['PASSWORD'], sslmode='verify-full',
             sslrootcert=dict(self.spec.database)['tls_ca'], autocommit=True, connect_timeout=5)
         self.addCleanup(self.admin.close)
-        self.passwords = {role: secrets.token_urlsafe(32) for role in (*installation.RUNTIME_ROLES, 'maintenance')}
+        self.passwords = {role: secrets.token_urlsafe(32) for role in (*installation.RUNTIME_ROLES, 'credential', 'maintenance')}
         self.addCleanup(self.cleanup_database)
 
     def cleanup_database(self):
         self.admin.execute(sql.SQL('DROP DATABASE IF EXISTS {} WITH (FORCE)').format(sql.Identifier(self.dbname)))
         for role in self.passwords:
-            self.admin.execute(sql.SQL('DROP ROLE IF EXISTS {}').format(sql.Identifier(self.users[role])))
+            self.admin.execute(sql.SQL('DROP ROLE IF EXISTS {}').format(sql.Identifier(self.users['credentials' if role == 'credential' else role])))
 
     def provision(self):
         self.assertTrue(callable(getattr(installation, 'provision_database', None)),
@@ -61,20 +62,48 @@ class FreshPostgreSQL(unittest.TestCase):
     def connect(self, role, *, autocommit=True):
         db = dict(self.spec.database)
         return psycopg.connect(host=db['host'], port=db['port'], dbname=db['name'],
-            user=self.users[role], password=self.passwords[role], sslmode='verify-full',
+            user=self.users['credentials' if role == 'credential' else role], password=self.passwords[role], sslmode='verify-full',
             sslrootcert=db['tls_ca'], autocommit=autocommit, connect_timeout=5)
+
+    # HYPOTHESIS: installer создаёт только четыре LOGIN, credential purpose не привязан.
+    # SPEC: пятый отдельный DML LOGIN, 8 connections; DDL/ownership/maintenance запрещены.
+    # SOLUTION: credential учитывается отдельно от трёх ordinary runtime pools.
+    # RESULT: PG17 RED — four-password restriction; GREEN — 23 fresh DB/ACL/restore случаев.
+    # STATUS: FIXED — see #644.
+    def test_credential_login_is_distinct_restricted_and_budgeted(self):
+        receipt = self.provision()
+        self.assertEqual(receipt['credential_connections'], 8)
+        self.assertEqual(receipt['total_connections'], 40)
+        with self.connect('maintenance') as maintenance:
+            maintenance.execute('CREATE TABLE credential_probe (id bigserial PRIMARY KEY, value text)')
+            self.assertTrue(installation.verify_database(self.spec, maintenance)['verified'])
+        with self.connect('credential') as daemon:
+            self.assertEqual(daemon.execute('SELECT current_user').fetchone(), (self.users['credentials'],))
+            daemon.execute("INSERT INTO credential_probe (value) VALUES ('fixture')")
+            daemon.execute("UPDATE credential_probe SET value='changed'")
+            self.assertEqual(daemon.execute('SELECT value FROM credential_probe').fetchone(), ('changed',))
+            daemon.execute('DELETE FROM credential_probe')
+            for statement in ('CREATE TABLE forbidden (id int)', 'ALTER TABLE credential_probe ADD COLUMN bad int',
+                              'CREATE ROLE forbidden', 'CREATE DATABASE forbidden', 'TRUNCATE credential_probe',
+                              'SET ROLE ' + self.users['maintenance']):
+                with self.subTest(statement=statement), self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                    daemon.execute(statement)
+        self.admin.execute(sql.SQL('ALTER ROLE {} CREATEDB').format(sql.Identifier(self.users['credentials'])))
+        with self.connect('maintenance') as maintenance:
+            with self.assertRaisesRegex(RuntimeError, 'role privileges'):
+                installation.verify_database(self.spec, maintenance)
 
     def test_fresh_database_runtime_roles_are_not_owner_or_superuser(self):
         receipt = self.provision()
         self.assertTrue(receipt['database_created'])
         self.assertFalse(receipt['services_started'])
-        for role in (*installation.RUNTIME_ROLES, 'maintenance'):
+        for role in installation.DATABASE_ROLES:
             row = self.admin.execute('SELECT rolsuper, rolcreatedb, rolcreaterole, rolreplication, '
                 'rolbypassrls, rolconnlimit FROM pg_roles WHERE rolname=%s', (self.users[role],)).fetchone()
             self.assertEqual(row, (False, False, False, False, False, 8))
         with self.connect('maintenance') as maintenance:
             maintenance.execute('CREATE TABLE install_probe (id bigserial PRIMARY KEY, content text)')
-        for role in installation.RUNTIME_ROLES:
+        for role in installation.DATABASE_RUNTIME_ROLES:
             with self.connect(role) as runtime:
                 runtime.execute('INSERT INTO install_probe (content) VALUES (%s)', ('test',))
                 self.assertGreater(runtime.execute('SELECT count(*) FROM install_probe').fetchone()[0], 0)
@@ -84,18 +113,18 @@ class FreshPostgreSQL(unittest.TestCase):
                         runtime.execute(statement)
         owner = self.admin.execute('SELECT pg_get_userbyid(datdba), datconnlimit FROM pg_database WHERE datname=%s',
                                   (self.dbname,)).fetchone()
-        self.assertEqual(owner, (self.users['maintenance'], 32))
+        self.assertEqual(owner, (self.users['maintenance'], 40))
         self.assertNotIn(self.passwords['web'], repr(receipt))
 
     def test_budget_is_enforced_across_connections_not_thread_count(self):
         self.provision()
         active = []
         try:
-            for role in (*installation.RUNTIME_ROLES, 'maintenance'):
+            for role in installation.DATABASE_ROLES:
                 for _ in range(8):
                     active.append(self.connect(role))
-            self.assertEqual(len(active), 32)
-            for role in (*installation.RUNTIME_ROLES, 'maintenance'):
+            self.assertEqual(len(active), 40)
+            for role in installation.DATABASE_ROLES:
                 with self.subTest(role=role), self.assertRaises(psycopg.OperationalError):
                     self.connect(role)
             self.assertEqual(active[-1].execute('SELECT 1').fetchone(), (1,))

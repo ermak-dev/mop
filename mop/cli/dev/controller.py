@@ -14,7 +14,7 @@ Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
 checks start their own native TLS broker with fixture-only principals and ACLs.
 --cross-uid runs only the narrow root UID gate (_credential_uid_gate.py,
-the two real cross-peer cases) as root inside the owned container,
+the two real cross-peer cases and the fresh-installer daemon case) as root inside the owned container,
 after the setup builds the uid pair; the default suite still runs as
 unprivileged ci.
 --web adds the frontend gates — the dashboard build check, full TypeScript
@@ -87,7 +87,7 @@ def main(argv):
             + ' && ' + shlex.join(['python3', 'tests/api_body_spec.py'])
     if args.cross_uid:
         # Узкий root gate #674: в корневом прогоне исполняется только
-        # точечный вход gate (проверка пары UID + два перенесённых случая),
+        # точечный вход gate (проверка UID + два перенесённых случая + fresh startup),
         # не весь credential_service suite.
         test_script = shlex.join(['python3', 'tests/_credential_uid_fixture.py'])
     if args.web:

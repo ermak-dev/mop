@@ -114,6 +114,40 @@ class FreshPlan(FreshPlanFixture, unittest.TestCase):
         self.assertIn('#669', result.stderr)
 
 class PreparationTests(FreshPlanFixture, unittest.TestCase):
+    # HYPOTHESIS: plural OS identity ошибочно исключает singular credential purpose.
+    # SPEC: отдельный DML login и private root/signing refs, не maintenance/rootless client.
+    # SOLUTION: явное соответствие credential -> credentials, без второго bootstrap schema.
+    # RESULT: RED — unsupported credential / missing budget; узкий pure прогон GREEN.
+    # STATUS: FIXED — see #644.
+    def test_credential_bootstrap_has_its_own_login_and_private_root_custody(self):
+        module = self.library()
+        data = module.bootstrap_document(module.specification(self.spec), 'credential',
+                                         password='private-credential-password')
+        config = self.spec['paths']['configuration'] + '/credentials'
+        self.assertEqual(set(data), {'installation_id', 'role', 'database', 'root_key', 'django_key'})
+        self.assertEqual(data['role'], 'credential')
+        self.assertEqual(data['database']['USER'], self.spec['identities']['credentials'])
+        self.assertNotEqual(data['database']['USER'], self.spec['identities']['web'])
+        self.assertEqual(data['root_key'], config + '/root.key')
+        self.assertEqual(data['django_key'], config + '/django.key')
+        self.assertNotIn(self.spec['paths']['root_trust'], data['root_key'])
+        self.assertNotIn('private-credential-password', repr(data))
+
+    def test_credential_pool_is_explicit_and_does_not_consume_ordinary_or_maintenance_budget(self):
+        module = self.library()
+        spec = module.specification(self.spec)
+        budget = module.connection_budget({role: (1, 8) for role in module.RUNTIME_ROLES},
+                                          runtime=24, maintenance=8)
+        self.assertEqual(budget['credential'], 8)
+        self.assertEqual(budget['total'], 40)
+        planned = module.plan(spec)['connections']
+        self.assertEqual(planned['roles']['credential'], 8)
+        self.assertEqual(planned['credential'], 8)
+        self.assertEqual(planned['total'], 40)
+        postgres = module.provisioning_artifact(spec)['postgresql']
+        self.assertEqual(postgres['credential_connections'], 8)
+        self.assertEqual(postgres['max_connections'], 43)
+
     def library(self):
         from mop.server import installation
         return installation
@@ -140,7 +174,7 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
         managed = module.provisioning_artifact(module.specification(self.spec))
         self.assertEqual(managed['postgresql']['package'], 'postgresql-16')
         self.assertTrue(managed['postgresql']['manage_service'])
-        self.assertEqual(managed['postgresql']['max_connections'], 35)
+        self.assertEqual(managed['postgresql']['max_connections'], 43)
 
     # HYPOTHESIS: installer не передаёт endpoint/UID, factory всегда unbound.
     # SPEC: один derived path для renderer/provisioner, web/worker получают
@@ -282,12 +316,51 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
         self.assertIn('signing key', refused.stderr)
         self.assertFalse(path.exists())
 
+    def test_bootstrap_cli_maps_credential_purpose_to_plural_os_account_and_private_files(self):
+        import pwd
+        self.spec['identities']['credentials'] = pwd.getpwuid(os.geteuid()).pw_name
+        self.spec['paths'] = {name: str(Path(self.tmp.name) / name) for name in self.spec['paths']}
+        directory = Path(self.spec['paths']['configuration']) / 'credentials'
+        directory.mkdir(parents=True, mode=0o700)
+        directory.parent.chmod(0o700)
+        for name, value in [('django.key', b'd' * 64), ('root.key', b'r' * 32)]:
+            path = directory / name
+            path.write_bytes(value)
+            path.chmod(0o600)
+        ca = Path(self.tmp.name) / 'fixture-ca.pem'
+        ca.write_bytes(b'explicit-fixture-trust-reference')
+        ca.chmod(0o644)
+        self.spec['database']['tls_ca'] = str(ca)
+        password = directory / 'database.password'
+        password.write_bytes(b'private-credential-db-password-644')
+        password.chmod(0o600)
+        self.write()
+        result = self.call('bootstrap', '--role', 'credential', '--password-file', str(password))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '')
+        bootstrap = directory / 'bootstrap.json'
+        self.assertEqual(bootstrap.stat().st_mode & 0o777, 0o600)
+        from mop.server.controller.bootstrap import load
+        data = load(bootstrap)
+        self.assertEqual(data['role'], 'credential')
+        self.assertEqual(data['database']['USER'], self.spec['identities']['credentials'])
+        self.assertNotIn('private-credential-db-password-644', result.stdout + result.stderr)
+        repeated = self.call('bootstrap', '--role', 'credential', '--password-file', str(password))
+        self.assertNotEqual(repeated.returncode, 0)
+        self.assertIn('new file', repeated.stderr)
+        bootstrap.unlink()
+        (directory / 'root.key').write_bytes(b'short')
+        refused = self.call('bootstrap', '--role', 'credential', '--password-file', str(password))
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('root trust', refused.stderr)
+        self.assertFalse(bootstrap.exists())
+
     def test_instance_budget_counts_all_processes_and_rejects_hidden_pool(self):
         module = self.library()
         self.assertTrue(callable(getattr(module, 'connection_budget', None)),
                         'instance-wide process budget is missing')
         self.assertEqual(module.connection_budget({'web': (1, 8), 'worker': (1, 8),
-                         'gateway': (1, 8)}, runtime=24, maintenance=8)['total'], 32)
+                         'gateway': (1, 8)}, runtime=24, maintenance=8)['total'], 40)
         for pools in ({'web': (2, 8), 'worker': (1, 8), 'gateway': (1, 8)},
                       {'web': (1, 8), 'worker': (1, 8), 'gateway': (1, 8), 'hidden': (1, 1)}):
             with self.assertRaisesRegex(ValueError, 'budget|process'):

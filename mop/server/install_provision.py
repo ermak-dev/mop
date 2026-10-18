@@ -116,11 +116,17 @@ def prepare(data, *, execute=subprocess.run):
         shared.chmod(int(item['mode'], 8))
         command(['chown', item['owner'] + ':' + item['group'], str(shared)])
     signing = secrets.token_hex(32).encode('ascii')
-    for role in ('maintenance', 'web', 'worker', 'gateway'):
+    for role in ('maintenance', 'web', 'worker', 'gateway', 'credentials'):
         path = Path(paths['configuration']) / role / 'django.key'
         _key(path, signing)
         command(['chown', users[role] + ':' + users[role], str(path)])
-    _key(Path(paths['root_trust']) / 'root.key', secrets.token_bytes(32))
+    # Maintenance recovery и runtime credential имеют разные private custody,
+    # но одинаковый root fingerprint; frontends не получают ни bytes, ни traversal.
+    root = secrets.token_bytes(32)
+    _key(Path(paths['root_trust']) / 'root.key', root)
+    credential_root = Path(paths['configuration']) / 'credentials' / 'root.key'
+    _key(credential_root, root)
+    command(['chown', users['credentials'] + ':' + users['credentials'], str(credential_root)])
     for key in ('backup', 'root_trust'):
         command(['chown', '-R', users['maintenance'] + ':' + users['maintenance'], paths[key]])
 
