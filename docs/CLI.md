@@ -592,7 +592,7 @@ Sets status::wip and, unless --no-branch, creates the issue's branch.
 #### mop dev chat-probe
 
 ```text
-mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py]: probe the installed interactive Claude
+mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py] [--model-hooks]: probe the installed interactive Claude
 
 Uses a fresh home/workdir, a private randomly named tmux server and a loopback
 Messages fixture with a dummy key. No existing session is resumed. All responses
@@ -619,6 +619,19 @@ Captures live ready/after-model/after-clear registry, socket peer and key fields
 without peerToken values. Optional --history-module explicitly selects a trusted
 local regular session.py source (not a downloaded file); invokes its history
 before and after /clear and records only safe headers/counts, not private records.
+
+Optional --model-hooks replaces the default scenarios with same-model, real
+change and return-to-target observations. A fixed quoted command uses isolated
+Python and reads at most 4096 bytes; malformed and at-limit inputs are dropped.
+Only event/session/to-model/from-model/receiver-time reach model-hooks.jsonl.
+The new private fixture sink is activated after live PID/start/registry/socket
+proof; startup hooks before activation are lost. This is fixture-only activation,
+not production HookBridge/registration acceptance. Requested --model, statusline
+and next fixture requests are not model confirmation. This probe implements no
+readiness receipt or scope retirement. If the installed --help explicitly says
+--bare skips settings hooks, hook scenarios report unsupported in this mode;
+silence alone remains unknown and does not prove normal-mode hook behavior.
+No isolation flag is removed. Default scenarios/settings are unchanged.
 
 Prints the report path and one verdict per scenario. Exit 1 for runner errors,
 not for unsupported or unknown scenarios. Does not contact the pool or load

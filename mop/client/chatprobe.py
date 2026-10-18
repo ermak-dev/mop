@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -186,6 +187,117 @@ def live_snapshot(config, work, expected_pid):
             row["socket_peer_error"] = peer_error
             rows.append(row)
     return rows
+
+
+def model_hook_projection(raw, now_ns):
+    """Никаких сырых prompts/paths/tokens: только узкие поля и время приёмника."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) < 4096:
+        return None
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate hook field")
+            result[key] = value
+        return result
+    def constant(_):
+        raise ValueError("nonfinite hook value")
+    try:
+        body = json.loads(raw, object_pairs_hook=unique, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(body, dict) or type(now_ns) is not int or now_ns < 0:
+        return None
+    event, sid = body.get("hook_event_name"), body.get("session_id")
+    if (event not in ("PostModelSwitch", "SessionStart", "UserPromptSubmit")
+            or not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid)):
+        return None
+    to_model = from_model = None
+    if event == "PostModelSwitch":
+        to_model, from_model = body.get("to_model"), body.get("from_model")
+        if not isinstance(to_model, str):
+            return None
+        for value in (to_model, from_model):
+            if value is not None and (not isinstance(value, str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}", value)):
+                return None
+    return dict(event=event, session_id=sid, to_model=to_model, from_model=from_model, at_ns=now_ns)
+
+
+def bare_skips_hooks(help_text):
+    """Только явный контракт установленного CLI, не догадка по пустому sink."""
+    option = re.search(r"^\s+--bare\b(.*?)(?=^\s+--[a-z]|\Z)", help_text, re.MULTILINE | re.DOTALL)
+    return bool(option and "skip hooks" in " ".join(option[1].lower().split()))
+
+
+def probe_settings(hook_output=None):
+    """Opt-in fixed command: argv не берётся ни из stdin, ни из окружения."""
+    settings = {"permissions": {"defaultMode": "default"}}
+    if hook_output is not None:
+        command = shlex.join([str(Path(sys.executable).resolve()), "-I", str(Path(__file__).resolve()),
+                              "--capture-model-hook", str(hook_output)])
+        settings["hooks"] = {event: [{"hooks": [{"type": "command", "command": command, "timeout": 2}]}]
+            for event in ("SessionStart", "UserPromptSubmit", "PostModelSwitch")}
+    return settings
+
+
+def capture_model_hook(output, raw, now_ns):
+    """Существующий private fixture sink, не authority file и не create API.
+
+    Отсутствующий файл — ещё не активированный producer; ранний hook теряется.
+    Ровно 4096 байт тоже отбрасываются: без чтения 4097-го размер не доказан.
+    """
+    row = model_hook_projection(raw, now_ns)
+    if row is None:
+        return False
+    try:
+        fd = os.open(output, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            return False
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        data = (json.dumps(row, ensure_ascii=True, allow_nan=False) + "\n").encode()
+        if os.fstat(fd).st_size + len(data) > 65536:
+            return False
+        return os.write(fd, data) == len(data)
+    finally:
+        os.close(fd)
+
+
+def _model_hook_stdin():
+    """EOF и размер ограничены; зависший producer не держит CLI открытым."""
+    chunks = bytearray()
+    deadline = time.monotonic() + .2
+    while len(chunks) < 4096:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([0], [], [], remaining)[0]:
+            return b""
+        chunk = os.read(0, 4096 - len(chunks))
+        if not chunk:
+            return bytes(chunks)
+        chunks.extend(chunk)
+    return b""
+
+
+def model_switch_observed(events, before, after, started_ns, ended_ns, active_ns, target, previous):
+    """Нужен switch в своём окне, не запрос/сокет/statusline или старый hook."""
+    if (not live_contract_observed(before) or not live_contract_observed(after)
+            or not 0 <= active_ns <= started_ns < ended_ns):
+        return False
+    first, last = before[0], after[0]
+    identity = lambda row: (row["pid"], row["sessionId"], row["process"]["start_ticks"],
+                            row.get("config_home"), row.get("messagingSocketPath"))
+    if identity(first) != identity(last):
+        return False
+    matches = [event for event in events if event.get("event") == "PostModelSwitch"
+        and event.get("session_id") == first["sessionId"]
+        and event.get("to_model") == target and event.get("from_model") == previous
+        and type(event.get("at_ns")) is int and started_ns <= event["at_ns"] <= ended_ns]
+    return len(matches) == 1
 
 
 def probe_command(claude, settings, session_id, messaging_socket):
@@ -586,7 +698,81 @@ class Terminal:
         return verified
 
 
-def run(root, timeout=30, history_module=None):
+def _run_model_hooks(terminal, fixture, report, output, ready, capture_live, snapshot, turn):
+    """Только наблюдения native CLI; sink-активация не подменяет production ACK."""
+    details = report["model_hooks"]
+    if not live_contract_observed(ready):
+        raise RuntimeError("model hook capture requires proven owned live registry/key/socket identity")
+    active_ns = time.monotonic_ns()
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    details.update(activated_at_ns=active_ns,
+        activation="fixture-only sink after live proof; not production HookBridge or registration ACK")
+    def events():
+        with output.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise RuntimeError("bounded model hook evidence exceeded fixture capacity")
+        return [json.loads(line) for line in raw.splitlines()]
+    initial_start = time.monotonic_ns()
+    initial_answer = turn("after-model", "probe:after-model initial hook control")
+    initial_requests = [r for r in fixture.requests if r["kind"] == "after-model"]
+    capture_live("hook-initial")
+    details["initial_fixture_request"] = dict(fresh_answer_rendered=initial_answer,
+        model=initial_requests[-1]["body"].get("model") if initial_requests else None,
+        confirmation=False, reason="next fixture request is supporting evidence, not model readiness")
+    cases = []
+    for name, target, previous in (("same-model", MODEL, MODEL),
+            ("change", SECOND_MODEL, MODEL), ("return", MODEL, SECOND_MODEL)):
+        before = capture_live("hook-" + name + "-before")
+        start_ns = time.monotonic_ns()
+        terminal.text("/model " + target)
+        terminal.pump(2)
+        screen = snapshot("hook-" + name + "-command")
+        confirmation = "Switch model?" in screen
+        if confirmation:
+            terminal.send(b"\r")
+            terminal.pump(1)
+        request_count = len(fixture.requests)
+        answer = turn("after-model", "probe:after-model hook " + name)
+        terminal.pump(.5)
+        after = capture_live("hook-" + name + "-after")
+        end_ns = time.monotonic_ns()
+        seen = events()
+        window = [event for event in seen if start_ns <= event["at_ns"] <= end_ns]
+        requests = [r for r in fixture.requests[request_count:] if r["kind"] == "after-model"]
+        request_model = requests[-1]["body"].get("model") if requests else None
+        observed = model_switch_observed(seen, before, after, start_ns, end_ns, active_ns, target, previous)
+        cases.append(dict(name=name, target=target, previous=previous, started_at_ns=start_ns,
+            ended_at_ns=end_ns, events=window, hook_observed=observed, fresh_answer_rendered=answer,
+            next_request_model=request_model, switch_confirmation_seen=confirmation,
+            before_snapshot="hook-" + name + "-before", after_snapshot="hook-" + name + "-after"))
+    seen = events()
+    controls = [event for event in seen if event["event"] == "UserPromptSubmit"
+        and event["session_id"] == ready[0]["sessionId"] and event["at_ns"] >= initial_start]
+    details["events"] = seen
+    details["cases"] = cases
+    details["initial_readiness"] = "unknown; no readiness receipt or scope retirement is implemented by this probe"
+    details["strategy"] = ("Require a genuine launch-scoped causal model query/handshake, or an explicitly authorized "
+        "real transition away and back with correlated PostModelSwitch. Do not infer readiness from --model, "
+        "statusline, registry/socket liveness, or a next fixture request. Same-model reassertion needs its own hook.")
+    unsupported = details["native_bare_skips_hooks"]
+    reason = ("installed --help explicitly says --bare skips settings/plugin hooks; isolation retained"
+        if unsupported else "no explicit hook-suppression contract; missing hook evidence remains unknown")
+    details["native_capability_reason"] = reason
+    report["scenarios"]["model-hooks-control"] = dict(outcome=outcome(bool(controls), unsupported),
+        evidence=dict(projected_prompt_events=len(controls), initial_snapshot="hook-initial", reason=reason))
+    for case in cases:
+        # Пустой sink не доказывает отсутствие native события. Отказ лишь из
+        # явного --bare contract; same-model в обычном режиме не проверен.
+        report["scenarios"]["model-hooks-" + case["name"]] = dict(
+            outcome=outcome(case["hook_observed"], unsupported), evidence={**case, "reason": reason})
+    report["scenarios"]["live-registry-contract"] = dict(outcome=outcome(all(
+        live_contract_observed(rows) for rows in report["live_snapshots"].values())),
+        evidence=dict(snapshots=list(report["live_snapshots"])))
+
+
+def run(root, timeout=30, history_module=None, model_hooks=False):
     """Возвращает независимые наблюдения и пути доказательств; ничего не печатает."""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -607,7 +793,9 @@ def run(root, timeout=30, history_module=None):
     (home / ".claude" / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True,
         "theme": "dark", "customApiKeyResponses": {"approved": ["chat-probe-dummy-key"], "rejected": []}}))
     settings = home / ".claude" / "settings.json"
-    settings.write_text(json.dumps({"permissions": {"defaultMode": "default"}}))
+    hook_output = root / "model-hooks.jsonl" if model_hooks else None
+    hook_prepared_ns = time.monotonic_ns()
+    settings.write_text(json.dumps(probe_settings(hook_output)))
     server_thread = threading.Thread(target=fixture.serve_forever, daemon=True)
     server_thread.start()
     label = tmux_socket(runtime)
@@ -618,6 +806,12 @@ def run(root, timeout=30, history_module=None):
               "live_snapshots": {}, "history_module": history_module, "history": {},
               "report_path": str(root / "report.json"), "scenarios": {},
               "terminal_path": str(root / "terminal.jsonl"), "errors": []}
+    if model_hooks:
+        report["model_hooks"] = dict(output_path=str(hook_output), prepared_at_ns=hook_prepared_ns,
+            source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            projection_fields=["event", "session_id", "to_model", "from_model", "at_ns"],
+            input_limit_bytes=4096, at_limit_input_dropped=True,
+            preactivation="sink absent; startup hooks are dropped, never treated as readiness")
     terminal = None
     def record(name, observed, evidence, unsupported=False):
         report["scenarios"][name] = {"outcome": outcome(observed, unsupported), "evidence": evidence}
@@ -671,6 +865,8 @@ def run(root, timeout=30, history_module=None):
         help_text = subprocess.run([claude, "--help"], env=env, cwd=work,
             capture_output=True, text=True, timeout=10, check=True).stdout
         (root / "claude-help.txt").write_text(help_text)
+        if model_hooks:
+            report["model_hooks"]["native_bare_skips_hooks"] = bare_skips_hooks(help_text)
         report["claude_executable"] = claude
         if "--bare" not in help_text:
             raise RuntimeError("installed claude lacks --bare isolation; probe not started")
@@ -694,6 +890,9 @@ def run(root, timeout=30, history_module=None):
         report["initial_identity"] = before
         terminal.track_owned()
         ready_registry = capture_live("ready")
+        if model_hooks:
+            _run_model_hooks(terminal, fixture, report, hook_output, ready_registry, capture_live, snapshot, turn)
+            return report
         framing_text = "probe:framing\nsecond line with Unicode: Проба"
         framing = turn("framing", framing_text)
         sent = request("framing")
@@ -840,10 +1039,23 @@ def run(root, timeout=30, history_module=None):
                              "own_tmux_server_stopped": tmux_stopped,
                              "fixture_listener_closed": fixture.socket.fileno() == -1,
                              "fixture_thread_stopped": not server_thread.is_alive()}
-        for name in ("terminal-framing", "foreground-slash", "model-identity", "clear-identity",
-                     "live-registry-contract", "history-adapter", "stream-interrupt",
-                     "permissions-default", "bash-interrupt", "ask-user-question"):
+        names = (("model-hooks-control", "model-hooks-same-model", "model-hooks-change", "model-hooks-return",
+                  "live-registry-contract") if model_hooks else
+                 ("terminal-framing", "foreground-slash", "model-identity", "clear-identity",
+                  "live-registry-contract", "history-adapter", "stream-interrupt",
+                  "permissions-default", "bash-interrupt", "ask-user-question"))
+        for name in names:
             if name not in report["scenarios"]:
                 record(name, False, {"reason": "scenario not reached"})
         (root / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     return report
+
+
+if __name__ == "__main__":
+    # Единственный внутренний entrypoint fixed command, не запускатель команд.
+    if len(sys.argv) != 3 or sys.argv[1] != "--capture-model-hook":
+        sys.exit("fixed model hook capture arguments required")
+    try:
+        capture_model_hook(sys.argv[2], _model_hook_stdin(), time.monotonic_ns())
+    except OSError as error:
+        sys.exit("private model hook capture failed: " + type(error).__name__)

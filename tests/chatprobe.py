@@ -205,6 +205,114 @@ def main():
                          {"key": {"procStart": "54321", "procStart_type": "str", "peer_token_present": True}}):
             c.check("#613 missing/mismatched contract unknown", not p.live_contract_observed([{**row, **modified}]))
         c.check("#613 empty live capture unknown", not p.live_contract_observed([]))
+    # HYPOTHESIS: одинаковый /model может не породить PostModelSwitch; наличие
+    # сокета, --model и passive model.id не доказывают подтверждение модели.
+    # SOLUTION: opt-in fixture sink до exec, активация только после live proof;
+    # строгая bounded проекция и отдельное причинное окно каждой команды.
+    # RESULT: RED сначала на отсутствующих parser/settings/verdict функциях.
+    # STATUS: FIXED — see #643
+    import shlex
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    features = ("model_hook_projection", "probe_settings", "capture_model_hook",
+                "model_switch_observed")
+    feature_available = {name: c.check("#643 function " + name,
+        callable(getattr(p, name, None))) for name in features}
+    payload = dict(hook_event_name="PostModelSwitch", session_id="sid",
+                   to_model=p.MODEL, from_model=p.SECOND_MODEL, prompt="private-prompt",
+                   transcript_path="private-transcript", token="private-token", at_ns=1)
+    if feature_available["model_hook_projection"]:
+        project = lambda body: p.model_hook_projection(json.dumps(body).encode(), 50)
+        projected = project(payload)
+        c.expect("#643 exact bounded projection", projected, dict(event="PostModelSwitch",
+            session_id="sid", to_model=p.MODEL, from_model=p.SECOND_MODEL, at_ns=50))
+        c.check("#643 raw private fields never retained", "private-" not in json.dumps(projected))
+        for raw in (b"", b"{", b"[]", b"null", b"\xff", b"{}" + b" " * 4094,
+                    b'{"hook_event_name":"Stop","hook_event_name":"PostModelSwitch"}',
+                    b"[" * 1000 + b"0" + b"]" * 1000):
+            c.expect("#643 malformed/at-limit/duplicate input dropped", p.model_hook_projection(raw, 50), None)
+        for modified in ({"session_id": "../foreign"}, {"session_id": "x" * 129},
+                {"session_id": []}, {"to_model": {}}, {"to_model": ""},
+                {"to_model": "a\nb"}, {"from_model": "x" * 129},
+                {"hook_event_name": "Statusline"}, {"hook_event_name": "Stop"}):
+            c.expect("#643 invalid identity/model/event dropped", project({**payload, **modified}), None)
+        c.expect("#643 passive model cannot stand in for switch", project(dict(
+            hook_event_name="PostModelSwitch", session_id="sid", model={"id": p.MODEL})), None)
+        c.expect("#643 absent from-model stays unknown", project(dict(hook_event_name="PostModelSwitch",
+            session_id="sid", to_model=p.MODEL))["from_model"], None)
+        submit = project(dict(hook_event_name="UserPromptSubmit", session_id="sid", prompt="private"))
+        c.expect("#643 hook positive control contains no prompt", submit, dict(
+            event="UserPromptSubmit", session_id="sid", to_model=None, from_model=None, at_ns=50))
+    if feature_available["probe_settings"]:
+        c.expect("#643 default settings unchanged", p.probe_settings(), {"permissions": {"defaultMode": "default"}})
+        target = "/private/with space ' and $/model-hooks.jsonl"
+        settings = p.probe_settings(target)
+        c.expect("#643 only fixed explicit hooks", sorted(settings["hooks"]),
+                 ["PostModelSwitch", "SessionStart", "UserPromptSubmit"])
+        command_hook = settings["hooks"]["PostModelSwitch"][0]["hooks"][0]
+        argv = shlex.split(command_hook["command"])
+        c.expect("#643 quoted trusted interpreter and fixed module", argv,
+                 [str(Path(sys.executable).resolve()), "-I", str(Path(p.__file__).resolve()),
+                  "--capture-model-hook", target])
+        c.check("#643 command hook has finite timeout", 0 < command_hook["timeout"] <= 2)
+        c.check("#643 no statusline model authority", "statusLine" not in settings)
+    if feature_available["capture_model_hook"]:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "model-hooks.jsonl"
+            c.check("#643 inactive output drops hook", not p.capture_model_hook(output, json.dumps(payload).encode(), 50))
+            c.check("#643 hook cannot create authority/output file", not output.exists())
+            output.touch(mode=0o600)
+            c.check("#643 valid active sink captures", p.capture_model_hook(output, json.dumps(payload).encode(), 50))
+            c.expect("#643 sink contains safe projection only", json.loads(output.read_text()), dict(
+                event="PostModelSwitch", session_id="sid", to_model=p.MODEL,
+                from_model=p.SECOND_MODEL, at_ns=50))
+            before = output.read_bytes()
+            c.check("#643 malformed sink write dropped", not p.capture_model_hook(output, b"{", 51))
+            c.expect("#643 malformed does not change evidence", output.read_bytes(), before)
+            alias = Path(directory) / "alias"
+            alias.symlink_to(output)
+            try:
+                accepted = p.capture_model_hook(alias, json.dumps(payload).encode(), 52)
+            except OSError:
+                accepted = False
+            c.check("#643 output symlink refused", not accepted)
+            c.expect("#643 symlink target unchanged", output.read_bytes(), before)
+            # Настоящий pipe проверяет stdin-timeout, но это не native acceptance.
+            argv = [sys.executable, "-I", p.__file__, "--capture-model-hook", str(output)]
+            child = subprocess.run(argv, input=json.dumps(payload).encode(), capture_output=True, timeout=2)
+            c.expect("#643 fixed hook subprocess is silent", (child.returncode, child.stdout, child.stderr), (0, b"", b""))
+            c.expect("#643 fixed subprocess writes one safe record", len(output.read_text().splitlines()), 2)
+            child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                child.stdin.write(b"{")
+                child.stdin.flush()
+                child.wait(timeout=1)
+                c.expect("#643 stalled stdin quietly expires", child.returncode, 0)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
+            c.expect("#643 stalled stdin never becomes evidence", len(output.read_text().splitlines()), 2)
+    if feature_available["model_switch_observed"]:
+        rows = [dict(pid=123, sessionId="sid", process_config_matches=True,
+            socket_path_present=True, process=dict(pid=123, start_ticks="456", state="S"),
+            socket_peer=dict(pid=123, start_ticks="456"),
+            key=dict(peer_token_present=True, procStart="456", procStart_type="str"))]
+        event = dict(event="PostModelSwitch", session_id="sid", to_model=p.MODEL,
+                     from_model=p.SECOND_MODEL, at_ns=50)
+        observe = lambda events, before=rows, after=rows: p.model_switch_observed(
+            events, before, after, 40, 60, 30, p.MODEL, p.SECOND_MODEL)
+        c.check("#643 scoped timed native event observed", observe([event]))
+        c.check("#643 same-model without hook is not confirmation", not observe([]))
+        for modified in ({"at_ns": 39}, {"at_ns": 61}, {"session_id": "foreign"},
+                         {"event": "UserPromptSubmit"}, {"to_model": p.SECOND_MODEL},
+                         {"from_model": None}):
+            c.check("#643 stale/foreign/non-switch event unknown", not observe([{**event, **modified}]))
+        c.check("#643 missing live process unknown", not observe([event], after=[]))
+        c.check("#643 changed registry unknown", not observe([event], after=[{**rows[0], "sessionId": "new"}]))
+        c.check("#643 activation after command unknown", not p.model_switch_observed(
+            [event], rows, rows, 40, 60, 45, p.MODEL, p.SECOND_MODEL))
     command = importlib.import_module("mop.cli.dev.chat-probe")
     calls = []
     def fake_run(root, timeout, history_module=None):
@@ -229,6 +337,27 @@ def main():
             _, _, code = run_command(command.main, ["--history-module", value])
             c.check("#613 CLI rejects unsafe history source", bool(code))
         c.expect("#613 rejected history never launches", len(calls), count)
+    # HYPOTHESIS: 2.1.302 подавляет даже explicit hooks в --bare; пустой sink
+    # не различает suppression и неподдержанную same-model семантику.
+    # SOLUTION: выводить unsupported лишь по явному native --help contract;
+    # неизвестный контракт остаётся unknown, --bare никогда не удаляется.
+    # RESULT: owned run a: пустой sink при трёх успешных fixture turns; RED
+    # на отсутствующем разборщике capability до изменения verdict.
+    # STATUS: FIXED — see #643
+    if c.check("#643 native bare capability parser exists", callable(getattr(p, "bare_skips_hooks", None))):
+        native = ("  --bare   Minimal mode: skip hooks (those defined\n"
+                  "             in settings and by installed plugins).\n  --betas <x> other")
+        c.check("#643 wrapped native skip contract recognized", p.bare_skips_hooks(native))
+        for text in ("", "--help", "  --bare Minimal mode\n  --other skip hooks", "--not-bare skip hooks"):
+            c.check("#643 absent contract not invented", not p.bare_skips_hooks(text))
+    hook_calls = []
+    def fake_hooks(root, timeout, history_module=None, model_hooks=False):
+        hook_calls.append((str(root), timeout, history_module, model_hooks))
+        return {"report_path": "/private/report.json", "scenarios": {}, "errors": []}
+    with patched(p, run=fake_hooks):
+        _, _, code = run_command(command.main, ["--output", "/private", "--model-hooks"])
+        c.expect("#643 CLI opt-in accepted", code, 0)
+        c.expect("#643 CLI forwards explicit hook mode", hook_calls, [("/private", 20, None, True)])
     return c.report("chatprobe")
 
 
