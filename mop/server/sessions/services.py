@@ -12,7 +12,7 @@ from . import models as m
 from .protocol import (WorkV1, AuthorityV1, ReceiptV1, FactPageV1, FACT_FIELDS,
     positive, role_binding, result_codes, WorkPort, GrantAuthority, FactReader,
     InstallationQuery, InspectionV1, EffectInspector, CleanCloneQuery, FactV1, AssignmentBinding,
-    CredentialAssignment)
+    CredentialAssignment, ReplacementPort, StoppedSourceAuthority)
 
 
 class Conflict(ValueError):
@@ -107,6 +107,12 @@ class Assignments:
         self.clones = clones if clones is not None else UnboundClone()
         self.target_fence = target_fence if target_fence is not None else unbound_target_fence
         self.clone_freshness_seconds = bound(clone_freshness_seconds, 60)
+
+    def replacement_execution(self, *, authority: ReplacementPort | None = None,
+                              installation: InstallationQuery | None = None):
+        """SQL lifecycle #625; отсутствие Root proof/restore port -- отказ."""
+        from .replacement import ReplacementExecution
+        return ReplacementExecution(self, authority=authority, installation=installation)
 
     def current(self, *, project_id, target_id):
         """Внутренний запрос для портов Access/Secrets; внешний вызов требует авторизации.
@@ -389,7 +395,10 @@ class Landing:
 class MachineExecution:
     def __init__(self, *, work: WorkPort | None = None, grants: GrantAuthority | None = None,
                  facts: FactReader | None = None, installation: InstallationQuery | None = None,
-                 inspector: EffectInspector | None = None, lease_seconds=30, target_fence=None):
+                 inspector: EffectInspector | None = None, lease_seconds=30, target_fence=None,
+                 stopped_sources: StoppedSourceAuthority | None = None):
+        from .replacement import UnboundReplacement
+        self.stopped_sources = stopped_sources if stopped_sources is not None else UnboundReplacement()
         self.target_fence = target_fence if target_fence is not None else unbound_target_fence
         self.work = work if work is not None else UnboundWork()
         self.grants = grants if grants is not None else UnboundGrants()
@@ -423,8 +432,12 @@ class MachineExecution:
             raise Conflict('target node or incarnation changed')
         incarnation = m.ExecutionIncarnation.objects.select_for_update().get(pk=work.incarnation_id)
         if (incarnation.assignment_id != row.id or incarnation.node_id != row.node_id
-                or incarnation.executor_epoch != work.executor_epoch or not incarnation.accepting):
+                or incarnation.executor_epoch != work.executor_epoch):
             raise Conflict('executor restarted; explicit reconciliation required')
+        if not incarnation.accepting:
+            if work.action != 'wipe_clone':
+                raise Conflict('executor retired; explicit reconciliation required')
+            self.stopped_sources.authorize(work)
         if (row.generation != work.generation or row.revision != work.revision
                 or row.owner_id != work.owner_id or row.role != work.role
                 or row.bundle_digest != work.bundle_digest or row.grant_id != work.grant_id):
@@ -435,9 +448,14 @@ class MachineExecution:
         if (row.owner_id is None or not row.owner.is_active
                 or row.expires_at <= timezone.now() or work.not_after <= timezone.now()):
             raise Conflict('assignment or command is no longer live')
-        self.grants.authorize(owner_id=row.owner_id, project_id=row.project_id,
-            target_id=row.id, grant_id=row.grant_id, role=row.role, bundle_digest=row.bundle_digest,
-            incarnation_id=work.incarnation_id, action=work.action)
+        if not m.ExecutionIncarnation.objects.get(pk=work.incarnation_id).accepting:
+            # Не ослабляем generic grant gate: old binding для exact recycle
+            # wipe проверяется отдельным SQL Root port, не current().
+            self.stopped_sources.authorize(work)
+        else:
+            self.grants.authorize(owner_id=row.owner_id, project_id=row.project_id,
+                target_id=row.id, grant_id=row.grant_id, role=row.role, bundle_digest=row.bundle_digest,
+                incarnation_id=work.incarnation_id, action=work.action)
         if work.action == 'send_message' and not m.IdentityApplication.objects.filter(
                 attempt__assignment_id=row.id, attempt__incarnation_id=work.incarnation_id,
                 attempt__generation=row.generation, attempt__role=row.role,

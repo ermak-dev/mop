@@ -270,4 +270,93 @@ class FactReader(Protocol):
     def read(self, *, node_id: UUID, kind: str, limit: int) -> FactPageV1: ...
 
 
+@dataclass(frozen=True)
+class ReplacementLaunch:
+    """Пины destination; Root проверяет одобренную policy, не latest."""
+    bootstrap_revision: UUID
+    bootstrap_digest: str
+    image_digest: str
+    image_revision_id: UUID | None
+
+    def __post_init__(self):
+        if (type(self.bootstrap_revision) is not UUID
+                or self.image_revision_id is not None and type(self.image_revision_id) is not UUID
+                or any(type(value) is not str or re.fullmatch('[0-9a-f]{64}', value) is None
+                       for value in (self.bootstrap_digest, self.image_digest))):
+            raise ValueError('pinned replacement launch required')
+
+
+@dataclass(frozen=True)
+class ReplacementAuthority:
+    """Внутренний trusted SQL proof; wire parser намеренно отсутствует.
+
+    receipt/index означают successful scheduler stop (stop/wipe) или exact
+    registration readback (cutover), не claim, отправленный POST или observed
+    job без operation token. Для recycle cutover Root также проверяет wipe.
+    """
+    operation_id: UUID
+    step_id: UUID
+    token: UUID
+    epoch: UUID
+    action: str
+    phase: str
+    source: AssignmentBinding
+    source_expires_at: datetime
+    destination_incarnation_id: UUID
+    destination_grant_id: UUID
+    destination_generation: int
+    destination_revision: int
+    expires_at: datetime
+    launch: ReplacementLaunch
+    receipt_id: UUID
+    modify_index: int
+
+    def __post_init__(self):
+        for name in ('operation_id', 'step_id', 'token', 'epoch', 'destination_incarnation_id',
+                     'destination_grant_id', 'receipt_id'):
+            if type(getattr(self, name)) is not UUID:
+                raise ValueError('typed replacement ' + name + ' required')
+        if (type(self.source) is not AssignmentBinding or type(self.launch) is not ReplacementLaunch
+                or type(self.action) is not str or self.action not in ('update', 'recycle')
+                or type(self.phase) is not str or self.phase not in ('stop', 'cutover', 'wipe')
+                or self.phase != 'cutover' and self.action != 'recycle'):
+            raise ValueError('finite typed replacement authority required')
+        for value in (self.modify_index, self.destination_generation, self.destination_revision,
+                      self.source.generation, self.source.revision, self.source.owner_id):
+            positive(value)
+        for name in ('target_id', 'project_id', 'node_id', 'incarnation_id', 'executor_epoch'):
+            if type(getattr(self.source, name)) is not UUID:
+                raise ValueError('typed source binding required')
+        role_binding(self.source.role, self.source.bundle_digest, self.source.grant_id)
+        for stamp in (self.source_expires_at, self.expires_at):
+            if type(stamp) is not datetime or stamp.tzinfo is None or stamp.utcoffset() is None:
+                raise ValueError('aware replacement expiry required')
+
+
+class ReplacementPort(Protocol):
+    """Root-only SQL, caller transaction; не capability от caller JSON.
+
+    require берёт restore -> Assignment -> Operation -> Steps -> sorted
+    Resource locks, перечитывает actor/current rights, epoch, exact source,
+    immutable destination/policy/launch, exact held claims и stage token.
+    Проспективный grant обязан быть reserved с точным destination binding,
+    owner/subject и сроком, без смены Actor/token или потери ancestry. При
+    cutover требуется successful exact registration readback; при stop --
+    successful quiescent scheduler receipt с фактическим applied index; при
+    wipe -- этот stop и текущие права/deadline. Recycle registration требует
+    предшествующий successful wipe того же operation. Исторический receipt
+    не даёт повторить эффект. Никаких provider/network calls под locks.
+    """
+    def require(self, *, operation_id: UUID, step_id: UUID, token: UUID,
+                phase: str) -> ReplacementAuthority: ...
+    def stopped(self, work: WorkV1) -> ReplacementAuthority:
+        """Текущий claimed recycle wipe, включая его token и old-grant authority."""
+        ...
+
+
+class StoppedSourceAuthority(Protocol):
+    """Исключение только для exact wipe, не общий current/GrantAuthority."""
+    def authorize(self, work: WorkV1) -> None: ...
+
+
 InstallationQuery = Callable[[], AuthorityV1]

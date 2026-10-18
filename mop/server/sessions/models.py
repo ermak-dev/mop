@@ -149,6 +149,29 @@ class ResultReceipt(ImmutableRecord):
         ]
 
 
+class ReplacementReceipt(ImmutableRecord):
+    """SQL projection подтверждённого перехода, без FK на чужой журнал."""
+    operation_id = models.UUIDField()
+    phase = models.CharField(max_length=16)
+    step_id = models.UUIDField()
+    token = models.UUIDField()
+    receipt_id = models.UUIDField(unique=True)
+    binding_digest = models.CharField(max_length=64)
+    assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT)
+    source_incarnation = models.ForeignKey(ExecutionIncarnation, on_delete=models.PROTECT)
+    resulting_revision = models.PositiveBigIntegerField()
+    resulting_generation = models.PositiveBigIntegerField()
+    modify_index = models.PositiveBigIntegerField()
+
+    class Meta(Record.Meta):
+        default_permissions = ()
+        constraints = Record.Meta.constraints + [
+            models.UniqueConstraint(fields=('operation_id', 'phase'), name='replacement_operation_phase'),
+            models.CheckConstraint(condition=Q(phase__in=('stop', 'cutover'), resulting_revision__gte=1,
+                resulting_generation__gte=1, modify_index__gte=1), name='replacement_confirmed_transition'),
+        ]
+
+
 class IdentityApplication(ImmutableRecord):
     attempt = models.OneToOneField(AssignmentAttempt, on_delete=models.PROTECT)
     receipt = models.OneToOneField(ResultReceipt, on_delete=models.PROTECT)
