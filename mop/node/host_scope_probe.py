@@ -34,13 +34,14 @@ def verify_fixture_config(config):
 
 
 DOCKERFILE = '''FROM python:3.12-slim-bookworm
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus passwd > /dev/null && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus passwd python3 > /dev/null && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g 21071 fixture-node && useradd -u 21071 -g 21071 -M -s /usr/sbin/nologin fixture-node && groupadd -g 21072 fixture-body && useradd -u 21072 -g 21072 -M -s /usr/sbin/nologin fixture-body
 COPY package/ /opt/fixture/
 COPY runner.py /opt/mop/libexec/host-runner
 COPY entry.py /opt/hostscope-entry.py
 COPY acceptance.py /opt/hostscope-acceptance.py
-RUN chmod 755 /opt/mop/libexec/host-runner
+COPY hostbackend-acceptance.py /opt/hostbackend-acceptance.py
+RUN chmod -R go-w /opt/fixture && chmod 755 /opt/fixture/bin/mop /opt/mop/libexec/host-runner
 ENV container=docker
 STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/usr/local/bin/python3", "-I", "/opt/hostscope-entry.py"]
@@ -55,15 +56,22 @@ def snapshot_sources(source, context):
     (context/'package/mop/__init__.py').write_text('')
     (package/'__init__.py').write_text('')
     for filename in ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
-                     'host_scope_systemd.py', 'http_execution.py', 'host_backend.py'):
+                     'host_scope_systemd.py', 'http_execution.py', 'host_backend.py',
+                     'host_backend_client.py', 'host_root.py', 'native_startup.py', 'bootstrap_transport.py'):
         shutil.copyfile(source/'mop/node'/filename, package/filename)
     common = context/'package/mop/common'
     common.mkdir()
     (common/'__init__.py').write_text('')
     shutil.copyfile(source/'mop/common/initialcreate.py', common/'initialcreate.py')
+    for name in ('bin/mop', 'mop/cli/__init__.py', 'mop/cli/service/__init__.py',
+                 'mop/cli/service/host-root.py'):
+        target = context/'package'/name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source/name, target)
     for src, dst in (('_host_scope_runner.py', 'runner.py'),
                      ('_host_scope_entry.py', 'entry.py'),
-                     ('_host_scope_acceptance.py', 'acceptance.py')):
+                     ('_host_scope_acceptance.py', 'acceptance.py'),
+                     ('_host_backend_acceptance.py', 'hostbackend-acceptance.py')):
         shutil.copyfile(source/'tests'/src, context/dst)
     (context/'Dockerfile').write_text(DOCKERFILE)
 

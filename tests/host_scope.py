@@ -1051,10 +1051,14 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
         snapshot = getattr(host_scope_probe, 'snapshot_sources', None)
         self.assertTrue(callable(snapshot), 'scope probe needs a testable explicit source snapshot')
         modules = ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
-                   'host_scope_systemd.py', 'http_execution.py', 'host_backend.py')
+                   'host_scope_systemd.py', 'http_execution.py', 'host_backend.py',
+                   'host_backend_client.py', 'host_root.py', 'native_startup.py', 'bootstrap_transport.py')
         helpers = (('_host_scope_runner.py', 'runner.py'), ('_host_scope_entry.py', 'entry.py'),
-                   ('_host_scope_acceptance.py', 'acceptance.py'))
-        source_files = ['mop/node/'+name for name in modules] + ['mop/common/initialcreate.py']
+                   ('_host_scope_acceptance.py', 'acceptance.py'),
+                   ('_host_backend_acceptance.py', 'hostbackend-acceptance.py'))
+        installed_sources = ('bin/mop', 'mop/cli/__init__.py', 'mop/cli/service/__init__.py',
+                             'mop/cli/service/host-root.py')
+        source_files = ['mop/node/'+name for name in modules] + ['mop/common/initialcreate.py'] + list(installed_sources)
         source_files += ['tests/'+name for name, _ in helpers]
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix='mop-probe-sources-') as directory:
@@ -1071,6 +1075,7 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
             expected |= {'package/mop/common/initialcreate.py', 'package/mop/__init__.py',
                          'package/mop/node/__init__.py', 'package/mop/common/__init__.py', 'Dockerfile'}
             expected |= {destination for _, destination in helpers}
+            expected |= {'package/'+name for name in installed_sources}
             self.assertEqual({str(path.relative_to(context)) for path in context.rglob('*') if path.is_file()}, expected)
             script = '''import sys
 sys.path.insert(0, sys.argv[1])

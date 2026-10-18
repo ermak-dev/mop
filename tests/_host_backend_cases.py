@@ -95,7 +95,8 @@ class HostBackendEpochs(TransactionTestCase):
         self.assertEqual(AssignmentAttempt.objects.count(), 0)
 
     def test_changed_backend_never_retires_active_sql_incarnation_before_empty_cas(self):
-        from mop.server.sessions.models import Assignment, ExecutionIncarnation, NodeExecutor
+        from mop.server.sessions.models import Assignment, ExecutionIncarnation, NodeExecutor, AssignmentAttempt
+        from mop.server.sessions.producer_models import SessionProducer, CurrentProducer
         from django.utils import timezone
         from datetime import timedelta
         row = Assignment.objects.create(node=self.node, project=self.project, role='worker',
@@ -103,8 +104,18 @@ class HostBackendEpochs(TransactionTestCase):
         inc = ExecutionIncarnation.objects.create(assignment=row, node=self.node, executor_epoch=self.boot)
         row.current_incarnation = inc
         row.save(update_fields=('current_incarnation',))
-        before = (list(Assignment.objects.values()), list(ExecutionIncarnation.objects.values()),
-                  list(NodeExecutor.objects.values()))
+        # SQL ledger fixture, не assertion о vendor-native producer acceptance.
+        producer = SessionProducer.objects.create(assignment=row, incarnation=inc, node=self.node,
+            epoch=self.epoch, executor_epoch=self.boot, producer_epoch=uuid4(), session_id='fixture-session',
+            executor_user_id=1, owner_id=1, generation=1, assignment_revision=1, role='worker',
+            bundle_digest='a'*64, grant_id=row.grant_id, operation_id=uuid4(), step_id=uuid4(),
+            attempt_id=uuid4(), proof_digest='b'*64, request_digest='c'*64, accepted_revision=1,
+            pane='%1', pid=123, process_start='456')
+        CurrentProducer.objects.create(incarnation=inc, producer=producer)
+        def snapshot():
+            return tuple(list(model.objects.values()) for model in (Assignment, ExecutionIncarnation,
+                NodeExecutor, AssignmentAttempt, SessionProducer, CurrentProducer))
+        before = snapshot()
         with self.https() as (server, origin, cert, _):
             status, _, body = self.request(origin, cert)
             self.assertEqual(status, 200, body)
@@ -113,8 +124,7 @@ class HostBackendEpochs(TransactionTestCase):
             status, _, body = self.request(origin, cert, bind=self.binding())
             self.assertEqual(status, 409, body)
             self.assertEqual(self.request(origin, cert)[2]['executor_epoch'], str(self.boot))
-        self.assertEqual((list(Assignment.objects.values()), list(ExecutionIncarnation.objects.values()),
-                          list(NodeExecutor.objects.values())), before)
+        self.assertEqual(snapshot(), before)
 
     def test_host_bind_refuses_restore_epoch_stale_node_and_extraneous_authority(self):
         from mop.server.sessions.models import NodeExecutor
