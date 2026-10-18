@@ -67,6 +67,27 @@ class OperationReply(serializers.Serializer):
     operation = Operation()
 
 
+class LandingCommand(serializers.Serializer):
+    schema_version = free({'type': 'integer', 'enum': [1]})
+    epoch = serializers.UUIDField()
+    expected_revision = free({'type': 'string', 'pattern': '^(0|[1-9][0-9]{0,18})$',
+        'description': 'Exact CAS revision, at most 9223372036854775807; 0 means unmaterialized.'})
+
+
+class LandingState(serializers.Serializer):
+    project_id = serializers.UUIDField()
+    state = choices('unmaterialized', 'free', 'held')
+    revision = serializers.CharField()
+    generation = serializers.CharField(allow_null=True)
+    owner_id = serializers.IntegerField(min_value=1, allow_null=True)
+
+
+class LandingReply(serializers.Serializer):
+    schema_version = free({'type': 'integer', 'enum': [1]})
+    epoch = serializers.UUIDField()
+    landing = LandingState()
+
+
 class NodeCommand(serializers.Serializer):
     schema_version = serializers.IntegerField(default=1)
     epoch = serializers.CharField()
@@ -339,7 +360,7 @@ def _param(name, required=False, description='', pattern=None):
 
 def parameters():
     """{класс view: query-параметры реального адаптера} (#696)."""
-    from . import auditviews, operationviews, projectionviews, usageviews
+    from . import auditviews, operationviews, projectionviews, usageviews, landingviews
     return {
         auditviews.Audit: (
             OpenApiParameter('project_id', OpenApiTypes.UUID, OpenApiParameter.QUERY,
@@ -350,6 +371,8 @@ def parameters():
             OpenApiParameter('limit', {'type': 'integer', 'minimum': 1, 'maximum': 100},
                              OpenApiParameter.QUERY, default=100,
                              description='Maximum audit items; the same limit is required on continuation.')),
+        landingviews.LandingDetail: (
+            _param('epoch', description='Optional exact installation epoch; mismatch refuses without a mutation.'),),
         usageviews.Usage: (
             _param('schema_version', description='wire version, always 1'),
             _param('start', description='inclusive ISO date of the period'),
@@ -379,13 +402,23 @@ def annotations():
     urlpatterns и держится рядом с реальными адаптерами. Вызывается
     лениво: модуль urls импортируется только при генерации.
     """
-    from . import auditviews, authviews, buildviews, operationviews, projectionviews, usageviews, views
+    from . import auditviews, authviews, buildviews, operationviews, projectionviews, usageviews, views, landingviews
     return {
         auditviews.Audit: {'get': (None, AuditPage, 200,
             'Read-only immutable operation audit, authorized before keyset pagination. '
             'Requires operations.view_audit and current complete project/node/grant scope. '
             'Coverage is operation_audit, not legacy bus messages. Responses are no-store; '
             'invalid or stale cursors require a reset (410).')},
+        landingviews.LandingDetail: {'get': (None, LandingReply, 200,
+            'One authorized project landing state, no writes and no cursor. An absent row is explicitly '
+            'unmaterialized at revision 0, with no owner or generation. Requires execution.view_landing.')},
+        landingviews.TakeLanding: {'post': (LandingCommand, LandingReply, 200,
+            'Human-only project CAS acquire, committed before reply; requires execution.acquire_landing. '
+            'No force, puppet identity or external Operation. Lost responses require read-only '
+            'comparison of exact successor revision and human owner, never a blind retake.')},
+        landingviews.ReleaseLanding: {'post': (LandingCommand, LandingReply, 200,
+            'Human-only release of the current actor own token by exact epoch/revision; requires '
+            'execution.release_landing. A late old release cannot touch a newer acquisition.')},
         views.Health: {'get': (None, Health, 200,
             'Liveness and installation identity of the controller.')},
         usageviews.Usage: {'get': (None, Usage, 200,

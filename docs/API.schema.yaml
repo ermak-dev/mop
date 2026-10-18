@@ -1655,6 +1655,262 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: ''
+  /api/v1/projects/{project_id}/landing:
+    get:
+      operationId: api_v1_projects_project_id_landing_retrieve
+      description: One authorized project landing state, no writes and no cursor.
+        An absent row is explicitly unmaterialized at revision 0, with no owner or
+        generation. Requires execution.view_landing.
+      parameters:
+      - in: query
+        name: epoch
+        schema:
+          type: string
+        description: Optional exact installation epoch; mismatch refuses without a
+          mutation.
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects/{project_id}/landing/commands/release:
+    post:
+      operationId: api_v1_projects_project_id_landing_commands_release_submit
+      description: Human-only release of the current actor own token by exact epoch/revision;
+        requires execution.release_landing. A late old release cannot touch a newer
+        acquisition.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LandingCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects/{project_id}/landing/commands/take:
+    post:
+      operationId: api_v1_projects_project_id_landing_commands_take_submit
+      description: Human-only project CAS acquire, committed before reply; requires
+        execution.acquire_landing. No force, puppet identity or external Operation.
+        Lost responses require read-only comparison of exact successor revision and
+        human owner, never a blind retake.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LandingCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
   /api/v1/puppets:
     get:
       operationId: api_v1_puppets_retrieve
@@ -2774,6 +3030,69 @@ components:
         * `human` - human
         * `service` - service
         * `agent` - agent
+    LandingCommand:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        expected_revision:
+          type: string
+          pattern: ^(0|[1-9][0-9]{0,18})$
+          description: Exact CAS revision, at most 9223372036854775807; 0 means unmaterialized.
+      required:
+      - epoch
+      - expected_revision
+      - schema_version
+    LandingReply:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        landing:
+          $ref: '#/components/schemas/LandingState'
+      required:
+      - epoch
+      - landing
+      - schema_version
+    LandingState:
+      type: object
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/LandingStateStateEnum'
+        revision:
+          type: string
+        generation:
+          type: string
+          nullable: true
+        owner_id:
+          type: integer
+          minimum: 1
+          nullable: true
+      required:
+      - generation
+      - owner_id
+      - project_id
+      - revision
+      - state
+    LandingStateStateEnum:
+      enum:
+      - unmaterialized
+      - free
+      - held
+      type: string
+      description: |-
+        * `unmaterialized` - unmaterialized
+        * `free` - free
+        * `held` - held
     ModeEnum:
       enum:
       - missing

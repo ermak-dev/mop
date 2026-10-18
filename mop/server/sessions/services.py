@@ -355,12 +355,20 @@ class Assignments:
 
 class Landing:
     """Только сериализация человеческого landing; expiry worker не участвует."""
+    def get(self, actor, project_id):
+        """Конечный authorized query; отсутствие строки не материализует токен."""
+        Access().authorize(actor, 'execution.view_landing', project_ids=(project_id,))
+        row = m.LandingToken.objects.filter(project_id=project_id).first()
+        return None if row is None else snapshot(row)
+
     def acquire(self, actor, project_id, *, expected_revision):
         human(actor)
         Access().authorize(actor, 'execution.acquire_landing', project_ids=(project_id,))
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
             row = m.LandingToken.objects.select_for_update().filter(project_id=project_id).first()
+            human(actor)
+            Access().authorize(actor, 'execution.acquire_landing', project_ids=(project_id,))
             if row is None:
                 if type(expected_revision) is not int or expected_revision != 0:
                     raise Conflict('landing token has no matching revision')
@@ -381,7 +389,13 @@ class Landing:
         Access().authorize(actor, 'execution.release_landing', project_ids=(project_id,))
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
-            row = m.LandingToken.objects.select_for_update().get(project_id=project_id)
+            row = m.LandingToken.objects.select_for_update().filter(project_id=project_id).first()
+            human(actor)
+            Access().authorize(actor, 'execution.release_landing', project_ids=(project_id,))
+            if row is None:
+                raise Conflict('landing token is unmaterialized')
+            if type(expected_revision) is int and expected_revision == 0:
+                raise Conflict('landing token was already created')
             expected(row, expected_revision)
             if row.owner_id != actor.user_id:
                 raise Denied('landing belongs to another human')
