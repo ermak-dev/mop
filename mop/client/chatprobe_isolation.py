@@ -202,15 +202,15 @@ def _copy_regular(source, target, native=False):
 
 def _dockerfile(uid, owner):
     """Только публичные зависимости; runtime сеть выключена отдельной create."""
-    return f'''FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux git ca-certificates libstdc++6 libgcc-s1 tini && rm -rf /var/lib/apt/lists/*
+    return f'''FROM python:3.12-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends tmux git ca-certificates libstdc++6 libgcc-s1 tini && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g {uid} fixture && useradd -u {uid} -g {uid} -M -d /tmp/fixture-home fixture && mkdir /evidence && chown {uid}:{uid} /evidence
 COPY claude /usr/local/bin/claude
 COPY chatprobe.py chatprobe_isolation.py host-namespaces.json /opt/probe/
 LABEL {OWNER_LABEL}="{owner}"
 USER {uid}:{uid}
 WORKDIR /tmp
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/python3", "-I", "/opt/probe/chatprobe_isolation.py"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/python3", "-I", "/opt/probe/chatprobe_isolation.py"]
 '''
 
 

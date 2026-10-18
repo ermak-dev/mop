@@ -579,6 +579,14 @@ def main():
             c.check("#643 late policy refuses before source/native copy", ("copy",) not in actions)
         else:
             c.check("#643 refused created fixture is cleaned", report["cleanup"].get("container_removed"))
+    # HYPOTHESIS: bookworm apt python3 даёт 3.11, хотя owned fixture нужен 3.12.
+    # SOLUTION: публичный Python 3.12 image и его interpreter, без host install.
+    # RESULT: RED на трёх свойствах старого image; GREEN после смены base/entry.
+    # STATUS: FIXED — see #743
+    dockerfile = d._dockerfile(26430, "owned")
+    c.check("#743 owned fixture uses Python 3.12 base", dockerfile.startswith("FROM python:3.12-slim-bookworm\n"))
+    c.check("#743 apt cannot select a different fixture Python", " install -y --no-install-recommends python3 " not in dockerfile)
+    c.check("#743 entry uses the image Python", '"/usr/local/bin/python3", "-I"' in dockerfile)
     return c.report("chatprobe")
 
 
