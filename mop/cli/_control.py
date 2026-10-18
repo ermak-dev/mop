@@ -33,7 +33,7 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete', 'add', 'send'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add', 'send', 'landing'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -290,6 +290,21 @@ def _operation_note(operation):
           '; request_id=' + operation.request_id + '; epoch=' + operation.epoch, file=sys.stderr)
 
 
+def _landing_recovery(client, intent, credential):
+    """Никакого повторного POST: даже совпадение — observation, не receipt."""
+    print('landing command outcome unknown; read-only recovery is not a command receipt; '
+          'do not retake automatically; project_id=' + intent.project_id + '; epoch=' + intent.epoch +
+          '; expected_revision=' + intent.expected_revision + '; owner_id=' + str(intent.owner_id), file=sys.stderr)
+    try:
+        recovery = client.recover_landing(intent)
+    except api.ClientError as error:
+        print('landing observation failed: ' + _failure(error, credential), file=sys.stderr)
+        return 3
+    emit({**recovery.snapshot.envelope(), 'recovery': {'matched': recovery.matched,
+          'command_outcome': 'unknown', 'historical_receipt': False}}, credential=credential)
+    return 3
+
+
 def invoke(words, argv, *, origin=None, ca_file=None):
     """Один CLI handler для dispatcher и MCP; stdout — только ответ команды."""
     operation = selected = lookup_failure = None
@@ -328,6 +343,27 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                     raise api.ClientError('usage days must be within 1..366')
                 end = datetime.now(timezone.utc).date() + timedelta(days=1)
                 args.start, args.end = (end - timedelta(days=days)).isoformat(), end.isoformat()
+        elif words == 'landing':
+            p.add_argument('action', choices=('show', 'take', 'give', 'recover-take', 'recover-give'))
+            p.add_argument('project_id')
+            p.add_argument('--epoch')
+            p.add_argument('--expected-revision')
+            p.add_argument('--owner-id', type=int)
+            args = p.parse_args(argv)
+            if args.action == 'show':
+                if args.expected_revision is not None or args.owner_id is not None:
+                    raise api.ClientError('landing show accepts only project id and optional epoch')
+                api._key(args.project_id)
+                if args.epoch is not None:
+                    api._key(args.epoch)
+            else:
+                args.command = 'take' if args.action.endswith('take') else 'release'
+                api.landing_binding(args.command, args.project_id, args.epoch, args.expected_revision)
+                if args.action.startswith('recover-'):
+                    prepare = api.LandingIntent(args.command, args.project_id, args.epoch,
+                        args.expected_revision, args.owner_id)
+                elif args.owner_id is not None:
+                    raise api.ClientError('landing mutation derives the actual human actor, not an owner-id argument')
         elif words == 'addresses':
             p.add_argument('project_id')
             p.add_argument('--limit', type=int, default=100)
@@ -492,6 +528,18 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         elif words == 'stat':
             emit(client.proxy_usage(start=args.start, end=args.end, group_by=args.group_by),
                  credential=selected.token)
+        elif words == 'landing':
+            if args.action == 'show':
+                emit(client.read_landing(args.project_id, epoch=args.epoch).envelope(), credential=selected.token)
+            elif args.action.startswith('recover-'):
+                return _landing_recovery(client, prepare, selected.token)
+            else:
+                try:
+                    value = client.change_landing(args.command, args.project_id, epoch=args.epoch,
+                        expected_revision=args.expected_revision)
+                except api.UnknownLanding as error:
+                    return _landing_recovery(client, error.intent, selected.token)
+                emit(value.envelope(), credential=selected.token)
         elif words == 'addresses':
             emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
                  credential=selected.token)

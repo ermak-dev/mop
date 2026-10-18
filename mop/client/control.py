@@ -73,6 +73,18 @@ class UnknownSubmission(ClientError):
         super().__init__("submission outcome unknown; recover by request_id")
 
 
+class UnknownLanding(ClientError):
+    """SQL CAS мог завершиться; request_id/Operation для этого ресурса нет."""
+
+    def __init__(self, intent: "LandingIntent"):
+        self.intent = intent
+        super().__init__('landing outcome unknown; observe exact revision and owner, never retake automatically')
+
+
+def _unknown_submission(command):
+    return UnknownLanding(command) if type(command) is LandingIntent else UnknownSubmission(command)
+
+
 class WaitTimeout(ClientError):
     """Локальное ожидание закончилось, серверную операцию это не отменяет."""
 
@@ -216,6 +228,66 @@ class Target:
         _identity(self.id)
         _identity(self.incarnation)
         _revision(self.revision)
+
+
+def _landing_revision(value):
+    _require(type(value) is str and re.fullmatch(r'0|[1-9][0-9]{0,18}', value) is not None)
+    _require(int(value) <= 9223372036854775807)
+    return value
+
+
+def landing_binding(action, project_id, epoch, expected_revision):
+    """Проверка конечного intent до сети, без выдуманного owner/Operation."""
+    _require(action in ('take', 'release'))
+    _key(project_id)
+    _key(epoch)
+    _landing_revision(expected_revision)
+
+
+@dataclass(frozen=True)
+class LandingIntent:
+    action: str
+    project_id: str
+    epoch: str
+    expected_revision: str
+    owner_id: int
+
+    def __post_init__(self):
+        landing_binding(self.action, self.project_id, self.epoch, self.expected_revision)
+        _require(type(self.owner_id) is int and self.owner_id > 0)
+
+    @property
+    def body(self):
+        return json.dumps({'schema_version': 1, 'epoch': self.epoch,
+            'expected_revision': self.expected_revision}, separators=(',', ':')).encode()
+
+
+@dataclass(frozen=True)
+class LandingSnapshot:
+    epoch: str
+    project_id: str
+    state: str
+    revision: str
+    generation: str | None
+    owner_id: int | None
+
+    def envelope(self):
+        return {'schema_version': 1, 'epoch': self.epoch, 'landing': {
+            name: getattr(self, name) for name in ('project_id', 'state', 'revision', 'generation', 'owner_id')}}
+
+
+@dataclass(frozen=True)
+class LandingRecovery:
+    intent: LandingIntent
+    snapshot: LandingSnapshot
+
+    @property
+    def matched(self):
+        expected_owner = self.intent.owner_id if self.intent.action == 'take' else None
+        return (self.snapshot.project_id == self.intent.project_id and self.snapshot.epoch == self.intent.epoch
+            and int(self.snapshot.revision) == int(self.intent.expected_revision) + 1
+            and self.snapshot.state == ('held' if self.intent.action == 'take' else 'free')
+            and self.snapshot.owner_id == expected_owner)
 
 
 @dataclass(frozen=True)
@@ -615,7 +687,7 @@ _CODES = frozenset(("validation_error", "not_authenticated", "authentication_fai
                     "database_outcome_unknown", "installation_unavailable", "deadline_horizon",
                     "effects_disabled", "admission_limit", "claim_conflict", "operation_conflict",
                     "transaction_boundary", "controller_unavailable", "delivery_capacity",
-                    "delivery_unavailable", "delivery_conflict", "usage_unavailable"))
+                    "delivery_unavailable", "delivery_conflict", "usage_unavailable", "execution_conflict"))
 
 
 def _api_error(data, status, retry_after):
@@ -870,13 +942,13 @@ class Client:
         # Вне except: __context__ тоже не удерживает сырое исключение с секретами.
         if failed:
             if command is not None and possible_post:
-                raise UnknownSubmission(command)
+                raise _unknown_submission(command)
             raise TransportError("control API transport unavailable")
         data = _json(raw)
         if not 200 <= status < 300:
             error = _api_error(data, status, retry_after)
             if command is not None and error.error.code == 'database_outcome_unknown':
-                raise UnknownSubmission(command)
+                raise _unknown_submission(command)
             raise error
         return status, data
 
@@ -983,6 +1055,68 @@ class Client:
         if result.request_id != request_id or epoch is not None and result.epoch != epoch:
             raise ProtocolError("operation request identity mismatch")
         return result
+
+    @staticmethod
+    def _read_landing(data, project_id, epoch=None):
+        failed = False
+        try:
+            _require(set(data) == {'schema_version', 'epoch', 'landing'})
+            _require(type(data['schema_version']) is int and data['schema_version'] == 1)
+            _key(data['epoch'])
+            _require(epoch is None or data['epoch'] == epoch)
+            row = data['landing']
+            _require(isinstance(row, Mapping) and set(row) == {
+                'project_id', 'state', 'revision', 'generation', 'owner_id'})
+            _key(row['project_id'])
+            _require(row['project_id'] == project_id)
+            _landing_revision(row['revision'])
+            owner = row['owner_id']
+            _require(owner is None or type(owner) is int and owner > 0)
+            if row['state'] == 'unmaterialized':
+                _require(row['revision'] == '0' and row['generation'] is None and owner is None)
+            else:
+                _require(row['state'] in ('free', 'held') and int(row['revision']) > 0)
+                _landing_revision(row['generation'])
+                _require(int(row['generation']) > 0 and (owner is None) == (row['state'] == 'free'))
+            result = LandingSnapshot(data['epoch'], **dict(row))
+        except (KeyError, TypeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError('invalid project landing response')
+        return result
+
+    def read_landing(self, project_id: str, *, epoch: str | None = None) -> LandingSnapshot:
+        path = '/api/v1/projects/' + _key(project_id) + '/landing'
+        if epoch is not None:
+            path += '?' + urlencode({'epoch': _key(epoch)})
+        return self._read_landing(self._get(path), project_id, epoch)
+
+    def change_landing(self, action: str, project_id: str, *, epoch: str,
+                       expected_revision: str) -> LandingSnapshot:
+        landing_binding(action, project_id, epoch, expected_revision)
+        actor = self.identity()
+        if actor.kind != 'human' or actor.grant_id is not None:
+            raise ClientError('landing mutations require the actual current human actor, not delegated ownership')
+        intent = LandingIntent(action, project_id, epoch, expected_revision, actor.user_id)
+        failed = False
+        try:
+            status, data = self._exchange('POST',
+                f'/api/v1/projects/{project_id}/landing/commands/{action}', intent.body, command=intent)
+            if status != 200:
+                raise ProtocolError('unexpected project landing command status')
+            result = self._read_landing(data, project_id, epoch)
+            if not LandingRecovery(intent, result).matched:
+                raise ProtocolError('project landing command binding mismatch')
+        except ProtocolError:
+            failed = True
+        if failed:
+            raise UnknownLanding(intent)
+        return result
+
+    def recover_landing(self, intent: LandingIntent) -> LandingRecovery:
+        """Только query: совпадение текущего CAS не доказывает historical receipt."""
+        _require(type(intent) is LandingIntent)
+        return LandingRecovery(intent, self.read_landing(intent.project_id, epoch=intent.epoch))
 
     def identity(self) -> Identity:
         data = self._get("/api/v1/identity")
