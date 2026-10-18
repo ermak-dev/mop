@@ -136,6 +136,8 @@ async def acceptance():
                         'get-property', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1/unit/'+object_name,
                         'org.freedesktop.systemd1.Service', prop)
                     print(prop+': '+raw_property.decode(), file=sys.stderr, flush=True)
+                journal = await adapter.command.run('/usr/bin/journalctl', '--no-pager', '-n', '30', '--unit='+s.unit)
+                print(journal.decode('utf-8', errors='replace'), file=sys.stderr, flush=True)
                 raise RuntimeError('fixture node '+action+' failed: '+str(error)+' '+detail) from error
             return m.Snapshot.parse(json.loads(raw))
         started = await call('start')

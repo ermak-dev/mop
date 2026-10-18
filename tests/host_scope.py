@@ -795,6 +795,51 @@ class SystemdTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('fixture diagnostic', str(caught.exception))
         await command.aclose()
 
+    # HYPOTHESIS (#740): snapshot node-only теряет общий initial-create protocol.
+    # SOLUTION: явный source closure, не весь checkout и не installation inputs.
+    # RESULT: RED missing common sources; 49 checks GREEN и actual OS probe accepted.
+    # Отдельный startup unit-change unknown остаётся в #741, повтор его не исправляет.
+    # STATUS: FIXED — see #740.
+    def test_probe_snapshot_imports_current_protocol_without_ambient_package_or_private_inputs(self):
+        import shutil
+        import subprocess
+        from mop.node import host_scope_probe
+        snapshot = getattr(host_scope_probe, 'snapshot_sources', None)
+        self.assertTrue(callable(snapshot), 'scope probe needs a testable explicit source snapshot')
+        modules = ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
+                   'host_scope_systemd.py', 'http_execution.py')
+        helpers = (('_host_scope_runner.py', 'runner.py'), ('_host_scope_entry.py', 'entry.py'),
+                   ('_host_scope_acceptance.py', 'acceptance.py'))
+        source_files = ['mop/node/'+name for name in modules] + ['mop/common/initialcreate.py']
+        source_files += ['tests/'+name for name, _ in helpers]
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix='mop-probe-sources-') as directory:
+            source, context = Path(directory)/'source', Path(directory)/'context'
+            context.mkdir()
+            for relative in source_files:
+                target = source/relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root/relative, target)
+            (source/'.env').write_text('fixture-only installation sentinel')
+            (source/'mop/node/unselected.py').write_text('raise AssertionError("unselected source")')
+            snapshot(source, context)
+            expected = {'package/mop/node/'+name for name in modules}
+            expected |= {'package/mop/common/initialcreate.py', 'package/mop/__init__.py',
+                         'package/mop/node/__init__.py', 'package/mop/common/__init__.py', 'Dockerfile'}
+            expected |= {destination for _, destination in helpers}
+            self.assertEqual({str(path.relative_to(context)) for path in context.rglob('*') if path.is_file()}, expected)
+            script = '''import sys
+sys.path.insert(0, sys.argv[1])
+from mop.node import host_scope, host_scope_client, host_scope_supervisor, host_scope_systemd, http_execution
+assert 'prepare_body' in http_execution.ACTIONS
+assert 'mop.common.config' not in sys.modules
+'''
+            result = subprocess.run([sys.executable, '-ISB', '-c', script, str(context/'package')],
+                cwd=directory, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertFalse(list(context.rglob('__pycache__')))
+
     async def test_fixture_plan_is_new_private_and_never_mounts_host_cgroup_or_socket(self):
         api()
         from mop.node.host_scope_probe import fixture_args, verify_fixture_config

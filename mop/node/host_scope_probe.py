@@ -47,6 +47,27 @@ ENTRYPOINT ["/usr/local/bin/python3", "-I", "/opt/hostscope-entry.py"]
 '''
 
 
+def snapshot_sources(source, context):
+    """Точный набор fixture sources, без installation inputs и обхода checkout."""
+    source, context = Path(source), Path(context)
+    package = context/'package/mop/node'
+    package.mkdir(parents=True)
+    (context/'package/mop/__init__.py').write_text('')
+    (package/'__init__.py').write_text('')
+    for filename in ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
+                     'host_scope_systemd.py', 'http_execution.py'):
+        shutil.copyfile(source/'mop/node'/filename, package/filename)
+    common = context/'package/mop/common'
+    common.mkdir()
+    (common/'__init__.py').write_text('')
+    shutil.copyfile(source/'mop/common/initialcreate.py', common/'initialcreate.py')
+    for src, dst in (('_host_scope_runner.py', 'runner.py'),
+                     ('_host_scope_entry.py', 'entry.py'),
+                     ('_host_scope_acceptance.py', 'acceptance.py')):
+        shutil.copyfile(source/'tests'/src, context/dst)
+    (context/'Dockerfile').write_text(DOCKERFILE)
+
+
 async def run_probe(source):
     """Возвращает actual accepted/blocked; code 77 не является green gate."""
     docker = shutil.which('docker')
@@ -64,18 +85,7 @@ async def run_probe(source):
     try:
         with tempfile.TemporaryDirectory(prefix='mop-host-scope-build-') as directory:
             context = Path(directory)
-            package = context/'package/mop/node'
-            package.mkdir(parents=True)
-            (context/'package/mop/__init__.py').write_text('')
-            (package/'__init__.py').write_text('')
-            for filename in ('host_scope.py', 'host_scope_client.py', 'host_scope_supervisor.py',
-                             'host_scope_systemd.py', 'http_execution.py'):
-                shutil.copyfile(Path(source)/'mop/node'/filename, package/filename)
-            for src, dst in (('_host_scope_runner.py', 'runner.py'),
-                             ('_host_scope_entry.py', 'entry.py'),
-                             ('_host_scope_acceptance.py', 'acceptance.py')):
-                shutil.copyfile(Path(source)/'tests'/src, context/dst)
-            (context/'Dockerfile').write_text(DOCKERFILE)
+            snapshot_sources(source, context)
             await command.run(docker, 'build', '--label='+LABEL+'='+identifier,
                               '--tag='+name+':probe', str(context))
             image_created = True
