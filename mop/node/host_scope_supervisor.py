@@ -271,7 +271,7 @@ class Supervisor:
             raise Unknown(self.last_error)
 
 
-async def serve(installed, path, stop):
+async def serve(installed, path, stop, *, identity=None):
     """Production daemon entry для будущего installer composition.
 
     Никаких env/config.json/credentials: только проверенный root-installed
@@ -279,7 +279,7 @@ async def serve(installed, path, stop):
     """
     from mop.node.host_scope_systemd import SystemdCgroupAdapter
     adapter = SystemdCgroupAdapter(installed)
-    owner = Supervisor(installed, adapter)
+    owner = Supervisor(installed, adapter, identity=identity)
     server = SocketServer(owner, path)
     try:
         await server.start()

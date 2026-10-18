@@ -101,7 +101,52 @@ async def _join_cleanup(owner):
         raise asyncio.CancelledError
 
 
-async def start(client, executor, *, installation_id, node_id):
+async def _host_start(client, executor, backend, *, installation_id, node_id):
+    """Конкретный root Unix proof + live SQL; generic restart здесь запрещён."""
+    from mop.node.host_backend import Identity
+    from mop.node.host_backend_client import BackendClient
+    from mop.node.host_scope import Unknown
+    if type(backend) is not BackendClient or backend.identity != Identity(installation_id, node_id):
+        raise Refused('concrete installed HOST backend authority required')
+
+    async def live():
+        value = await client.host_executor_state(_nonzero_uuid(node_id))
+        exact(value, ('schema_version', 'installation_id', 'epoch', 'node_id', 'executor_epoch', 'empty'))
+        if type(value['empty']) is not bool:
+            raise Refused('exact HOST discovery empty observation required')
+        authority = Authority.parse({key: item for key, item in value.items() if key != 'empty'},
+            installation_id=installation_id, node_id=node_id)
+        return authority, value['empty']
+
+    try:
+        async with backend.connect() as connection:
+            authority, empty = await live()
+            proof = await connection.bind(epoch=authority.epoch,
+                executor_epoch=authority.executor_epoch, empty=empty)
+            proof.check()
+            if proof.state.mode == 'first':
+                nonce = proof.state.executor_epoch
+                # Ровно одна CAS-попытка. Lost response не повод повторить effect;
+                # новый bridge увидит committed nonce либо fail-closed mismatch.
+                await client.host_bound(node_id, authority.epoch, authority.executor_epoch, nonce)
+                committed, empty = await live()
+                if committed.epoch != authority.epoch or committed.executor_epoch != nonce:
+                    raise Refused('HOST binding commit does not match the live backend/installation epoch')
+                proof.check()
+                proof = await connection.confirm(epoch=committed.epoch,
+                    executor_epoch=committed.executor_epoch, empty=empty)
+            elif proof.state.mode != 'resume':
+                raise Refused('HOST backend did not authorize first bind or resume')
+            proof.check()
+            runtime = NativeRuntime(client, executor, node_id=node_id, epoch=authority.epoch,
+                                    executor_epoch=proof.state.executor_epoch)
+            runtime._ready = True
+            return runtime
+    except Unknown as error:
+        raise Unavailable(str(error)) from error
+
+
+async def start(client, executor, *, installation_id, node_id, backend=None):
     """Передача ownership clients/tasks; production ports, не fake reconciliation.
 
     Ни UUID от local file, ни Runtime.start старого порядка не участвуют. При
@@ -110,10 +155,14 @@ async def start(client, executor, *, installation_id, node_id):
     runtime = None
     try:
         async with asyncio.timeout(STARTUP_TIMEOUT):
-            authority = await check(client, installation_id=installation_id, node_id=node_id)
-            runtime = NativeRuntime(client, executor, node_id=authority.node_id, epoch=authority.epoch,
-                                    executor_epoch=str(uuid4()))
-            await runtime.start(authority.executor_epoch)
+            if backend is not None:
+                runtime = await _host_start(client, executor, backend,
+                    installation_id=installation_id, node_id=node_id)
+            else:
+                authority = await check(client, installation_id=installation_id, node_id=node_id)
+                runtime = NativeRuntime(client, executor, node_id=authority.node_id, epoch=authority.epoch,
+                                        executor_epoch=str(uuid4()))
+                await runtime.start(authority.executor_epoch)
         return runtime
     except BaseException as error:
         if runtime is not None:
@@ -131,6 +180,7 @@ async def start(client, executor, *, installation_id, node_id):
 class NativeBindings:
     """Полный physical graph от доверенного native root; не snapshot permissions."""
     executor: object
+    backend: object = None
 
     def __post_init__(self):
         from mop.node.execution_adapters import LocalExecutor
@@ -171,7 +221,7 @@ async def serve(bootstrap, *, bindings=None):
         raise
     # start() владеет cleanup на любой ошибке, run()/aclose() — после успеха.
     runtime = await start(client, bindings.executor, installation_id=bootstrap.installation_id,
-                          node_id=bootstrap.node_id)
+                          node_id=bootstrap.node_id, backend=bindings.backend)
     try:
         await runtime.run()
     finally:

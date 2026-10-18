@@ -5,8 +5,8 @@ physical executor. Raw JSON/SQL UUID is not proof of that executor's lifetime.
 SPEC: process-owned nonce, immutable identity, live one-time epoch bind; same
 backend resumes without effects, unknown old inventory refuses before CAS.
 SOLUTION: finite root Unix session, process-owned nonce and retained ownership.
-RESULT: missing-boundary, peer-client and inventory/source-closure RED observed;
-unit state/transport negatives GREEN. Actual root/systemd and HTTP/PG separately.
+RESULT: missing boundary/peer/inventory/entry/startup RED, затем narrow GREEN.
+Actual root/systemd reconnect принят scope-probe; PG17/HTTPS проверен отдельно.
 STATUS: FIXED — see #745
 """
 import asyncio
@@ -155,10 +155,52 @@ class BackendOwnerTests(unittest.IsolatedAsyncioTestCase):
         from native_startup import Client, Executor
         client = Client()
         executor = Executor(client.calls)
-        with self.assertRaisesRegex((Refused, TypeError), 'backend|authority'):
+        with self.assertRaisesRegex(Refused, 'backend|authority'):
             await native_startup.start(client, executor, installation_id=INSTALLATION,
                 node_id=NODE, backend={'executor_epoch': PREVIOUS})
         self.assertNotIn('restart', [row[0] for row in client.calls])
+
+    async def test_no_first_reference_fence_survives_frontend_resume_and_never_kills(self):
+        m = api()
+        adapter = InventoryAdapter()
+        owner = Supervisor(installed(), adapter, identity=m.Identity(INSTALLATION, NODE))
+        first = await self.bind(owner)
+        await owner.backend(self.request('backend_confirm', epoch=EPOCH,
+            executor=first.executor_epoch, empty=True))
+        s = replace(scope(), node_id=NODE, epoch=EPOCH, executor_epoch=first.executor_epoch)
+        async def uncertain(address):
+            raise Unknown('no first physical reference')
+        adapter.start = uncertain
+        try:
+            with self.assertRaisesRegex(Unknown, 'uncertain'):
+                await owner.execute(installed().node_uid, Request('start', s, str(uuid4())))
+            with self.assertRaisesRegex(Unknown, 'ownership'):
+                await owner.backend(self.request('backend_bind', epoch=EPOCH,
+                    executor=first.executor_epoch, empty=False))
+            with self.assertRaisesRegex(Refused, 'replay|uncertain'):
+                await owner.execute(installed().node_uid, Request('start', s, str(uuid4())))
+            self.assertIn(s, owner._fences)
+            self.assertNotIn(s, owner._owned)
+            self.assertFalse(any(call[0] == 'retire' for call in adapter.calls))
+        finally:
+            with self.assertRaisesRegex(Unknown, 'no owned reference'):
+                await owner.aclose()
+
+    async def test_known_old_cleanup_reference_is_not_authority_for_start(self):
+        m, owner, adapter = self.owner()
+        first = await self.bind(owner)
+        await owner.backend(self.request('backend_confirm', epoch=EPOCH,
+            executor=first.executor_epoch, empty=True))
+        old = replace(scope(), node_id=NODE)
+        facts = await adapter.start(old)
+        reference = facts.verify(installed(), old).reference
+        owner._owned[old] = reference
+        before = tuple(adapter.calls)
+        with self.assertRaisesRegex(Refused, 'authority'):
+            await owner.execute(installed().node_uid, Request('start', old, str(uuid4())))
+        self.assertEqual(tuple(adapter.calls), before)
+        empty = await owner.execute(installed().node_uid, Request('retire', old, str(uuid4()), reference))
+        self.assertFalse(empty.populated)
 
     async def test_authority_wire_is_finite_not_work_env_argv_or_nonce_input(self):
         m = api()
@@ -215,6 +257,53 @@ class BackendInventoryTests(unittest.IsolatedAsyncioTestCase):
                         await adapter.startup_inventory()
         self.assertTrue(all('list-units' in words and 'mop-host-*.service' in words
                             for words in adapter.command.calls))
+
+
+class StartupBackendTests(unittest.TestCase):
+    # HYPOTHESIS: корректный root nonce бесполезен, пока frontend всё ещё uuid4.
+    # RESULT: RED missing backend parameter (unit + actual), затем actual fixture GREEN.
+    # STATUS: FIXED — see #745
+    def test_startup_accepts_concrete_backend_without_changing_generic_contract(self):
+        import inspect
+        from mop.node import native_startup
+        parameters = inspect.signature(native_startup.start).parameters
+        self.assertIn('backend', parameters, 'native startup lacks concrete HOST authority composition')
+        self.assertIsNone(parameters['backend'].default)
+
+
+class RootEntryTests(unittest.TestCase):
+    def root_api(self):
+        self.assertIsNotNone(importlib.util.find_spec('mop.node.host_root'),
+                             'installed immutable HOST root entry is missing')
+        from mop.node import host_root
+        return host_root
+
+    def test_physical_config_contains_only_bounded_installed_ids_and_paths(self):
+        root = self.root_api()
+        p = installed()
+        value = dict(schema_version=1, installation_id=INSTALLATION, node_id=NODE,
+            node_uid=p.node_uid, body_uid=p.body_uid, body_gid=p.body_gid,
+            runner=str(p.runner), body_root=str(p.body_root), node_private=str(p.node_private),
+            socket='/run/mop-host/supervisor.sock')
+        parsed = root.PhysicalConfig.parse(value)
+        self.assertEqual(parsed.installed, p)
+        self.assertEqual(parsed.identity, api().Identity(INSTALLATION, NODE))
+        for change in ({'epoch': EPOCH}, {'backend_nonce': str(uuid4())}, {'policy': {}},
+                {'credentials': {}}, {'env': {}}, {'schema_version': True}, {'node_uid': 0},
+                {'socket': str(p.node_private/'authority.sock')}, {'socket': '/tmp/../root.sock'},
+                {'socket': '/run/'+'a'*100}):
+            with self.subTest(change=change), self.assertRaises(Refused):
+                root.PhysicalConfig.parse({**value, **change})
+
+    def test_production_entry_refuses_nonisolated_interpreter_and_user_checkout(self):
+        root = self.root_api()
+        with self.assertRaisesRegex((Refused, RuntimeError), 'root|isolated|immutable|release'):
+            root.trusted_release()
+        with tempfile.TemporaryDirectory(prefix='mop-root-config-') as directory:
+            config = Path(directory)/'physical.json'
+            config.write_text('{}')
+            with self.assertRaisesRegex((Refused, RuntimeError), 'root|immutable'):
+                root.load(config)
 
 
 class BackendTransportTests(unittest.IsolatedAsyncioTestCase):
