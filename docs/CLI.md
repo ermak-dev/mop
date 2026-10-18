@@ -1010,6 +1010,22 @@ The roster of this machine, asked from its driver: on a hypervisor the
 containers, on a host node the live tmux servers. Runs on the node itself.
 ```
 
+#### mop driver phase-input-probe
+
+```text
+mop driver phase-input-probe: check private phase handoff in an owned container
+
+Runs the production input writer, root snapshot store and body reader in a new
+Python 3.12 Docker container with distinct actual root/node/body UIDs. Checks
+exact selected bytes, private permissions, substitution/race refusals, bounded
+capacity and retained physical cleanup after Work expiry. Copies only the fixed
+source closure; no host mounts, credentials, network, sudo or host services.
+Removes only its labelled container/image, including after a failed check.
+Requires an existing Docker installation and the mop source checkout with tests.
+This checks private transport, not machine authorization, the root backend,
+a phase runner/broker, native execution, readiness, installation or rollout.
+```
+
 #### mop driver purge-clone
 
 ```text
