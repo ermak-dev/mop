@@ -67,7 +67,7 @@ class ResetRequired(APIError):
 class UnknownSubmission(ClientError):
     """POST мог достичь admission COMMIT; восстановление только по тому же ключу."""
 
-    def __init__(self, command: "PreparedCommand | NodeCommand | BuildCommand"):
+    def __init__(self, command: "PreparedCommand | NodeCommand | BuildCommand | CreateCommand"):
         self.command = command
         self.request_id = command.request_id
         super().__init__("submission outcome unknown; recover by request_id")
@@ -284,6 +284,30 @@ class NodeCommand:
             "request_id": self.request_id, "not_after": self.not_after,
             "expected_revision": self.expected_revision, "params": {}},
             sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+@dataclass(frozen=True)
+class CreateCommand:
+    """Новый target ещё не существует: только явные UUID узла и approved definition."""
+
+    project_id: str
+    node_id: str
+    definition_id: str
+    epoch: str
+    request_id: str
+    not_after: str
+
+    def __post_init__(self):
+        for value in (self.project_id, self.node_id, self.definition_id, self.epoch, self.request_id):
+            _key(value)
+        _deadline(self.not_after)
+
+    @property
+    def body(self) -> bytes:
+        return json.dumps({'schema_version': 1, 'epoch': self.epoch,
+            'request_id': self.request_id, 'not_after': self.not_after,
+            'params': {'node_id': self.node_id, 'definition_id': self.definition_id}},
+            sort_keys=True, separators=(',', ':')).encode('ascii')
 
 
 @dataclass(frozen=True)
@@ -757,6 +781,10 @@ class Client:
         return NodeCommand("enable", node_id, epoch, new_request_id(request_id),
                            not_after, expected_revision)
 
+    def prepare_create(self, project_id: str, *, node_id: str, definition_id: str, epoch: str,
+                       not_after: str, request_id: str | None = None) -> CreateCommand:
+        return CreateCommand(project_id, node_id, definition_id, epoch, new_request_id(request_id), not_after)
+
     def prepare_build(self, project_id: str, *, policy_id: str, epoch: str, expected_revision: str,
                       not_after: str, target_nodes: tuple[str, ...], mode: str = 'missing',
                       request_id: str | None = None) -> BuildCommand:
@@ -846,9 +874,11 @@ class Client:
             raise ProtocolError("unexpected control API query status")
         return data
 
-    def submit(self, command: PreparedCommand | NodeCommand | BuildCommand) -> Submission:
-        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand))
-        if type(command) is NodeCommand:
+    def submit(self, command: PreparedCommand | NodeCommand | BuildCommand | CreateCommand) -> Submission:
+        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand, CreateCommand))
+        if type(command) is CreateCommand:
+            path = f'/api/v1/projects/{command.project_id}/commands/create-puppet'
+        elif type(command) is NodeCommand:
             path = f"/api/v1/nodes/{command.node_id}/commands/{command.action}"
         elif type(command) is BuildCommand:
             path = f'/api/v1/projects/{command.project_id}/commands/build'
@@ -876,6 +906,23 @@ class Client:
 
     @staticmethod
     def _command_binding(command, result):
+        if type(command) is CreateCommand:
+            # Только сервер выдаёт target/incarnation. Receipt пока не несёт
+            # node/definition, поэтому не выдумываем клиентский CAS/echo этих полей.
+            target = result.data['target']
+            valid = False
+            try:
+                _key(result.target_id)
+                _key(result.incarnation)
+                _revision(target.get('revision'))
+                _revision(target.get('source_revision'))
+                valid = (result.request_id == command.request_id and result.epoch == command.epoch and
+                         target.get('kind') == 'puppet')
+            except ClientError:
+                pass
+            if not valid:
+                raise ProtocolError('create operation binding mismatch')
+            return
         if type(command) is NodeCommand:
             target_id, incarnation, kind = command.node_id, None, 'node'
         elif type(command) is BuildCommand:
@@ -898,8 +945,8 @@ class Client:
                     sorted(build['target_nodes']) != sorted(command.target_nodes)):
                 raise ProtocolError('build policy binding mismatch')
 
-    def recover(self, command: PreparedCommand | NodeCommand | BuildCommand) -> Operation:
-        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand))
+    def recover(self, command: PreparedCommand | NodeCommand | BuildCommand | CreateCommand) -> Operation:
+        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand, CreateCommand))
         result = self.lookup_operation(command.request_id, epoch=command.epoch)
         self._command_binding(command, result)
         return result

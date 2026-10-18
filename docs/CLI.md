@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
+Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -29,23 +29,20 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [git-origin] --role <role>
+mop add <project-id> --node-id <id> --definition-id <id> --epoch <id>
 
-Without origin, the origin of the current working copy is used. The name is
-picked automatically: <project>-<number>; placement over the pool and the
-8 GB reservation are not chosen here. Silent when the puppet is running; on
-a terminal it shows the current step. The new puppet is in mop list.
-Use mop models to see model IDs offered by the selected proxy.
+Submit a durable puppet create command using an explicit project, node and
+approved immutable role-definition id. The server assigns the target, name and
+incarnation; no target revision is required or accepted. Origin, role-name,
+shell and force inputs are not supported. No git, .env, bus or SSH fallback.
 
---role names the new puppet's role (soul name): the creation carries a
-request_id, the answer is checked against the server's echo of the role
-triple. A role principal (a grant master) names the role and sends no
-bootstrap policy of its own: the child inherits the parent's approved
-snapshot. A roleless add is gone: every puppet carries a soul.
-
---request-id retries an earlier unknown outcome under its id: the server
-reconciles to the job it reserved instead of creating a second one; a
-changed payload under the same id is refused before any effect.
+--request-id fixes the initial command identity before I/O; --not-after fixes
+its absolute UTC execution deadline (default two minutes). --wait is a bounded
+GET wait. An accepted receipt is not a running puppet: pending/unknown outcomes
+return exit 3. Recover with mop operation using the original request key and
+epoch; neither a lost reply nor a lookup failure automatically reposts create.
+Actual body launch/readiness depends on the server's configured bindings.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop addresses

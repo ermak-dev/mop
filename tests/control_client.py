@@ -588,6 +588,86 @@ class ControlClient(unittest.TestCase):
         self.assertTrue(result.operation.terminal)
         self.assertEqual(self.fixture.calls[-1][2], command.body)
 
+    # HYPOTHESIS: create ошибочно требует CAS ещё не существующего target.
+    # SOLUTION: отдельный immutable intent; назначение и incarnation выдаёт сервер.
+    # RESULT: четыре missing-consumer red сменились green без target/CAS во вводе.
+    # STATUS: FIXED — see #642
+    def test_create_prepares_exact_immutable_intent_before_io(self):
+        from _control_fixture import PROJECT, NODE, DEFINITION, EPOCH
+        self.assertTrue(hasattr(self.client, 'prepare_create'), '#642 missing typed create consumer')
+        command = self.client.prepare_create(PROJECT, node_id=NODE, definition_id=DEFINITION,
+            epoch=EPOCH, request_id=KEY, not_after=DEADLINE)
+        self.assertEqual(json.loads(command.body), {'schema_version': 1, 'epoch': EPOCH,
+            'request_id': KEY, 'not_after': DEADLINE,
+            'params': {'node_id': NODE, 'definition_id': DEFINITION}})
+        self.assertEqual(command.body, command.body)
+        self.assertFalse(hasattr(command, 'target'))
+        self.assertFalse(hasattr(command, 'expected_revision'))
+        for name in ('project_id', 'node_id', 'definition_id', 'epoch', 'request_id', 'not_after'):
+            with self.subTest(name=name), self.assertRaises(dataclasses.FrozenInstanceError):
+                setattr(command, name, 'changed')
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_create_rejects_invalid_ids_deadline_and_unsupported_fields_before_io(self):
+        from _control_fixture import PROJECT, NODE, DEFINITION, EPOCH
+        self.assertTrue(hasattr(self.client, 'prepare_create'), '#642 missing typed create consumer')
+        values = dict(project_id=PROJECT, node_id=NODE, definition_id=DEFINITION,
+            epoch=EPOCH, request_id=KEY, not_after=DEADLINE)
+        for name in ('project_id', 'node_id', 'definition_id', 'epoch', 'request_id'):
+            for bad in ('', True, 'name-not-id', '../other', NODE.upper()):
+                with self.subTest(name=name, bad=bad), self.assertRaises(api.ClientError):
+                    self.client.prepare_create(**{**values, name: bad})
+        for bad in ('', '2026-10-16', '2026-10-16T10:05:00+02:00'):
+            with self.assertRaises(api.ClientError):
+                self.client.prepare_create(**{**values, 'not_after': bad})
+        for name in ('force', 'origin', 'shell', 'target', 'incarnation', 'expected_revision'):
+            with self.subTest(name=name), self.assertRaises(TypeError):
+                self.client.prepare_create(**values, **{name: 'unsupported'})
+        generated = self.client.prepare_create(**{k: v for k, v in values.items() if k != 'request_id'})
+        self.assertEqual(api.new_request_id(generated.request_id), generated.request_id)
+        self.assertNotEqual(generated.request_id, KEY)
+        self.assertEqual(self.fixture.calls, [])
+
+    def test_create_submission_status_route_and_get_only_recovery(self):
+        from _control_fixture import PROJECT, NODE, DEFINITION, EPOCH, PUPPET, INCARNATION, create_operation
+        self.assertTrue(hasattr(self.client, 'prepare_create'), '#642 missing typed create consumer')
+        command = self.client.prepare_create(PROJECT, node_id=NODE, definition_id=DEFINITION,
+            epoch=EPOCH, request_id=KEY, not_after=DEADLINE)
+        for status in (202, 200):
+            self.fixture.responses.append(Response(status, create_operation()))
+            result = self.client.submit(command)
+            self.assertEqual(result.http_status, status)
+            self.assertEqual((result.operation.target_id, result.operation.incarnation), (PUPPET, INCARNATION))
+            self.assertEqual(self.fixture.calls[-1][:3], ('POST',
+                f'/api/v1/projects/{PROJECT}/commands/create-puppet', command.body))
+        self.fixture.responses.append(OSError('lost admission reply'))
+        with self.assertRaises(api.UnknownSubmission) as caught:
+            self.client.submit(command)
+        self.assertIs(caught.exception.command, command)
+        self.fixture.responses.append(Response(200, create_operation('succeeded')))
+        self.assertEqual(self.client.recover(command).state, 'succeeded')
+        self.assertEqual(self.fixture.calls[-1][:2], ('GET',
+            f'/api/v1/operations?request_id={KEY}&epoch={EPOCH}'))
+        self.assertEqual([call[0] for call in self.fixture.calls], ['POST', 'POST', 'POST', 'GET'])
+
+    def test_create_rejects_mismatched_admission_and_recovery_receipts(self):
+        from _control_fixture import PROJECT, NODE, DEFINITION, EPOCH, create_operation
+        self.assertTrue(hasattr(self.client, 'prepare_create'), '#642 missing typed create consumer')
+        command = self.client.prepare_create(PROJECT, node_id=NODE, definition_id=DEFINITION,
+            epoch=EPOCH, request_id=KEY, not_after=DEADLINE)
+        mutations = [lambda op: op.update(request_id=NODE), lambda op: op.update(epoch=NODE),
+            lambda op: op['target'].update(kind='other'), lambda op: op['target'].update(id='not-a-uuid'),
+            lambda op: op['target'].update(incarnation=None)]
+        for mutate in mutations:
+            reply = create_operation()
+            mutate(reply['operation'])
+            self.fixture.responses.append(Response(202, reply))
+            with self.assertRaises(api.UnknownSubmission):
+                self.client.submit(command)
+            self.fixture.responses.append(Response(200, reply))
+            with self.assertRaises(api.ProtocolError):
+                self.client.recover(command)
+
     def test_no_server_imports_or_ambient_configuration(self):
         import ast
         with open(api.__file__, encoding="utf-8") as source_file:
