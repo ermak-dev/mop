@@ -7,8 +7,8 @@ CAS -> poll; ни CLI --check, ни unbound/failed root не имеют прав
 SOLUTION: отдельный bounded startup owner и полный explicit physical root.
 RESULT: RED — composition отсутствовал; отдельные RED нашли cleanup при отказе
 client construction и unbounded direct start. Unit order/cleanup checks зелёные;
-own TLS доказывает real MachineClient/auth/CA/bounds и отказ scalar discovery,
-не реальную reconciliation. Rich discovery wire остаётся у #721, OS root не связан.
+own TLS доказывает real MachineClient/auth/CA/bounds и отказ неполного discovery,
+не реальную reconciliation. Полный live wire связан под #639/#640, OS root не связан.
 STATUS: FIXED — see #640; native effectful acceptance здесь не заявляется.
 """
 import asyncio
@@ -29,6 +29,15 @@ from mop.node.http_execution import MachineClient, Refused, Unavailable
 
 NODE, EPOCH, PREVIOUS = (str(uuid4()) for _ in range(3))
 TOKEN = 'b' * 40
+EXISTING_ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message',
+                              'confirm_ready', 'wipe_clone'))
+
+
+def existing_surface_bindings(api, executor):
+    """Положительный helper прежних effects, не включение новых physical ports."""
+    from mop.node import http_execution
+    with patch.object(http_execution, 'ACTIONS', EXISTING_ACTIONS):
+        return api.NativeBindings(executor)
 
 
 def state(**change):
@@ -196,8 +205,12 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         executor = LocalExecutor(ProcessRunner(), complete, readiness=complete,
             replacement=complete, body=complete)
         self.addAsyncCleanup(executor.aclose)
-        bindings = api.NativeBindings(executor)
+        bindings = existing_surface_bindings(api, executor)
         from mop.node import http_execution
+        # #721 расширил wire, но physical implementations здесь не появились.
+        self.assertGreater(http_execution.ACTIONS, EXISTING_ACTIONS)
+        with self.assertRaisesRegex(Unavailable, 'capabilities'):
+            api.NativeBindings(executor)
         with patch.object(http_execution, 'ACTIONS', http_execution.ACTIONS | {'create_body'}):
             with self.assertRaisesRegex(Unavailable, 'capabilities'):
                 api.NativeBindings(executor)
@@ -213,7 +226,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         executor = LocalExecutor(ProcessRunner(), None)
         try:
             with self.assertRaisesRegex(Unavailable, 'physical'):
-                api.NativeBindings(executor)
+                existing_surface_bindings(api, executor)
         finally:
             await executor.aclose()
 
@@ -260,7 +273,7 @@ class RealTLSStartup(unittest.TestCase):
                 self.assertLessEqual(client.transport.timeout, 5)
                 self.assertLessEqual(client.transport.response_limit, 262144)
                 try:
-                    with self.assertRaisesRegex(Unavailable, 'installation'):
+                    with self.assertRaisesRegex(Refused, 'schema'):
                         await api.check(client, installation_id='fixture', node_id=NODE)
                 finally:
                     await client.aclose()
@@ -274,7 +287,7 @@ class RealTLSStartup(unittest.TestCase):
             result = subprocess.run([str(root/'bin/mop'), 'agent', '--bootstrap', str(file), '--check'],
                 capture_output=True, text=True, env=os.environ.copy(), timeout=10)
             self.assertEqual(result.returncode, 1)
-            self.assertIn('installation', result.stderr)
+            self.assertIn('schema', result.stderr)
             self.assertNotIn('Traceback', result.stderr)
             self.assertEqual(result.stdout, '')
             self.assertNotIn(TOKEN, result.stderr)

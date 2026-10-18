@@ -109,8 +109,9 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(Refused):
             asyncio.run(client.action_input(work))
         self.assertTrue(callable(getattr(client,'executor_state',None)), 'server epoch discovery client port missing')
-        transport.value = dict(schema_version=1,node_id=work.node_id,executor_epoch=work.executor_epoch)
-        self.assertEqual(asyncio.run(client.executor_state(work.node_id)),work.executor_epoch)
+        transport.value = dict(schema_version=1, installation_id='fixture', epoch=work.epoch,
+            node_id=work.node_id, executor_epoch=work.executor_epoch)
+        self.assertEqual(asyncio.run(client.executor_state(work.node_id)), transport.value)
         transport.value = {**transport.value,'node_id':str(uuid4())}
         with self.assertRaises(Refused):
             asyncio.run(client.executor_state(work.node_id))
@@ -149,7 +150,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def request(inner,method,path,payload=None,params=None):
                 if path == 'executor':
                     inner.calls.append((method,path,payload,params))
-                    return dict(schema_version=1,node_id=work['node_id'],executor_epoch=previous)
+                    return dict(schema_version=1, installation_id='fixture', epoch=work['epoch'],
+                        node_id=work['node_id'], executor_epoch=previous)
                 return await super().request(method,path,payload,params)
         transport = Discovery(work)
         runtime = Runtime(MachineClient(transport),Executor(),node_id=work['node_id'],epoch=work['epoch'],

@@ -141,6 +141,184 @@ class ExecutorDiscovery(TransactionTestCase):
             self.assertEqual(status, 503, body)
             self.assertNotIn('installation_id', body)
 
+    # HYPOTHESIS #640: старый client требует executor-only wire и возвращает
+    # scalar; startup не может проверить настоящую installation authority.
+    # SOLUTION: один finite decoder для полного live ответа; никаких snapshots.
+    # RESULT: RED/GREEN — production MachineClient и CLI через этот TLS/DRF/PG.
+    # STATUS: FIXED — see #640
+    def bootstrap_file(self, origin, cert, directory):
+        from pathlib import Path
+        cert.chmod(0o600)
+        file = Path(directory)/'bootstrap.json'
+        file.write_text(json.dumps(dict(schema_version=1,
+            installation_id=self.expected()['installation_id'], origin=origin,
+            ca_file=str(cert), node_id=str(self.node.pk), token=self.machine_key)))
+        file.chmod(0o600)
+        return file
+
+    def test_real_tls_machine_client_bootstrap_and_cli_accept_complete_live_authority(self):
+        import asyncio
+        import os
+        from pathlib import Path
+        import subprocess
+        from mop.node import native_startup
+        from mop.node.bootstrap_transport import load
+        expected = self.expected()
+        with self.https() as (server, origin, cert, directory):
+            file = self.bootstrap_file(origin, cert, directory)
+            bootstrap = load(file)
+            async def check():
+                client = native_startup.machine_client(bootstrap)
+                try:
+                    self.assertEqual(await client.executor_state(str(self.node.pk)), expected)
+                finally:
+                    await client.aclose()
+                authority = await native_startup.check_bootstrap(bootstrap)
+                self.assertEqual(authority.installation_id, expected['installation_id'])
+                self.assertEqual(authority.epoch, expected['epoch'])
+                self.assertEqual(authority.node_id, expected['node_id'])
+                self.assertEqual(authority.executor_epoch, expected['executor_epoch'])
+            asyncio.run(check())
+            result = subprocess.run([str(Path(__file__).resolve().parents[1]/'bin/mop'),
+                'agent', '--bootstrap', str(file), '--check'], env=os.environ.copy(),
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout+result.stderr, '')
+            self.assertEqual([method for method, _ in server.calls], ['GET']*3)
+
+    def test_real_tls_client_refuses_old_incomplete_foreign_and_noncanonical_discovery(self):
+        import asyncio
+        import ssl
+        from mop.node.http_execution import MachineClient, HttpsTransport, Refused
+        mutations = [(name, lambda body, key=name: {k:v for k,v in body.items() if k != key})
+            for name in self.expected()]
+        mutations += [('scalar', lambda body: body['executor_epoch']),
+            ('old-wire', lambda body: {k:body[k] for k in ('schema_version', 'node_id', 'executor_epoch')})]
+        changes = [dict(schema_version=True), dict(installation_id=1), dict(installation_id=''),
+            dict(installation_id='x/y'), dict(installation_id='x'*65), dict(epoch=True),
+            dict(epoch='00000000-0000-0000-0000-000000000000'), dict(epoch=str(self.epoch).upper()),
+            dict(executor_epoch='00000000-0000-0000-0000-000000000000'),
+            dict(executor_epoch=True), dict(node_id=str(uuid4())), dict(policy={})]
+        mutations += [(str(index), lambda body, change=change: {**body, **change})
+            for index, change in enumerate(changes)]
+        with self.https() as (server, origin, cert, _):
+            for name, mutate in mutations:
+                def corrupt(method, response):
+                    self.assertEqual(response.status_code, 200)
+                    response.content = json.dumps(mutate(json.loads(response.content))).encode()
+                server.after = corrupt
+                async def check():
+                    client = MachineClient(HttpsTransport(origin, self.machine_key,
+                        tls=ssl.create_default_context(cafile=str(cert))))
+                    try:
+                        with self.assertRaises(Refused):
+                            await client.executor_state(str(self.node.pk))
+                    finally:
+                        await client.aclose()
+                with self.subTest(wire=name):
+                    asyncio.run(check())
+            self.assertEqual([method for method, _ in server.calls], ['GET']*len(mutations))
+
+    def test_real_tls_runtime_rejects_discovered_epoch_mismatch_before_restart(self):
+        import asyncio
+        import ssl
+        from mop.node.http_execution import MachineClient, HttpsTransport, Runtime, Refused
+        with self.https() as (server, origin, cert, _):
+            async def check():
+                client = MachineClient(HttpsTransport(origin, self.machine_key,
+                    tls=ssl.create_default_context(cafile=str(cert))))
+                runtime = Runtime(client, object(), node_id=str(self.node.pk),
+                    epoch=str(uuid4()), executor_epoch=str(uuid4()))
+                try:
+                    with self.assertRaisesRegex(Refused, 'installation epoch'):
+                        await runtime.start(None)
+                finally:
+                    await runtime.aclose()
+            asyncio.run(check())
+            self.assertEqual([method for method, _ in server.calls], ['GET'])
+
+    # HYPOTHESIS #640: отмена во время cleanup до создания Runtime убивает
+    # единственного владельца executor cleanup, хотя discovery был read-only.
+    # SOLUTION: bounded shielded cleanup owner переживает повторную отмену.
+    # RESULT: настоящий TLS discovery, никакого fake client/authority dict.
+    # STATUS: FIXED — see #640
+    def test_real_tls_startup_cancellation_cannot_abandon_unstarted_cleanup(self):
+        import asyncio
+        import ssl
+        from mop.node.http_execution import MachineClient, HttpsTransport
+        from mop.node import native_startup
+        with self.https() as (server, origin, cert, _):
+            async def check():
+                class Closing:
+                    def __init__(inner):
+                        inner.entered, inner.release = asyncio.Event(), asyncio.Event()
+                        inner.closed, inner.cancelled = False, False
+                    async def aclose(inner):
+                        inner.entered.set()
+                        try:
+                            await inner.release.wait()
+                            inner.closed = True
+                        except asyncio.CancelledError:
+                            inner.cancelled = True
+                            raise
+                executor = Closing()
+                client = MachineClient(HttpsTransport(origin, self.machine_key,
+                    tls=ssl.create_default_context(cafile=str(cert))))
+                task = asyncio.create_task(native_startup.start(client, executor,
+                    installation_id='foreign', node_id=str(self.node.pk)))
+                try:
+                    await asyncio.wait_for(executor.entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    executor.release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, 2)
+                    self.assertTrue(executor.closed, 'startup abandoned its executor cleanup')
+                    self.assertFalse(executor.cancelled)
+                    self.assertTrue(client.transport._closed)
+                    self.assertTrue(client.transport._session.closed)
+                finally:
+                    executor.release.set()
+                    await asyncio.gather(task, return_exceptions=True)
+                    await client.aclose()
+            asyncio.run(check())
+            self.assertEqual([method for method, _ in server.calls], ['GET'])
+
+    # HYPOTHESIS #640: bounded bytes не исключают RecursionError в JSON decoder.
+    # SOLUTION: success/error parser переводит recursion overflow в safe refusal.
+    # RESULT: PG17/TLS RED — настоящий RecursionError при 200 и 401; GREEN —
+    # конечная ошибка без bearer и parser traceback; 2000 уровней RED не давали.
+    # STATUS: FIXED — see #640
+    def test_real_tls_deep_json_is_a_finite_redacted_refusal_not_a_parser_crash(self):
+        import asyncio
+        import ssl
+        from mop.node.http_execution import MachineClient, HttpsTransport, Refused
+        # C JSON decoder в Python 3.12 имеет иной recursion bound, чем Python frames.
+        depth = 20000
+        self.assertLess(depth*2+42, 262144)
+        with self.https() as (server, origin, cert, _):
+            for status in (200, 401):
+                def corrupt(method, response):
+                    self.assertEqual(response.status_code, 200)
+                    response.status_code = status
+                    response.content = b'['*depth + json.dumps(self.machine_key).encode() + b']'*depth
+                server.after = corrupt
+                async def check():
+                    client = MachineClient(HttpsTransport(origin, self.machine_key,
+                        tls=ssl.create_default_context(cafile=str(cert))))
+                    try:
+                        with self.assertRaisesRegex(Refused,
+                                'invalid machine JSON' if status == 200 else 'HTTP 401') as caught:
+                            await client.executor_state(str(self.node.pk))
+                        self.assertNotIn(self.machine_key, str(caught.exception))
+                    finally:
+                        await client.aclose()
+                with self.subTest(status=status):
+                    asyncio.run(check())
+            self.assertEqual([method for method, _ in server.calls], ['GET', 'GET'])
+
     def test_real_tls_discovery_waits_for_consistent_installation_and_executor_admission(self):
         from concurrent.futures import ThreadPoolExecutor
         import threading

@@ -1,7 +1,7 @@
 """Native composition #640: live discovery, physical quiescence, затем fence.
 
-Transport export не несёт epoch/policy. Wire остаётся у MachineClient (#721);
-старый scalar discovery недостаточен и явно отказывает, без второго transport.
+Transport export не несёт epoch/policy. MachineClient проверяет полный live wire;
+старый неполный discovery явно отказывает, без второго transport.
 CLI не выдумывает physical root: полный LocalExecutor связывает доверенный caller.
 """
 import asyncio
@@ -30,8 +30,8 @@ class Authority:
 
     @classmethod
     def parse(cls, value, *, installation_id, node_id):
-        # Это проверка результата публичного client port, не альтернативный HTTP
-        # parser. #721 должен вернуть installation coordinates из live authority.
+        # Это проверка результата client port и привязки к transport identity,
+        # не альтернативный HTTP parser или локальный authority snapshot.
         if type(value) is not dict:
             raise Unavailable('machine executor discovery lacks installation identity and epoch; startup unavailable')
         exact(value, ('schema_version', 'installation_id', 'epoch', 'node_id', 'executor_epoch'))
@@ -76,6 +76,27 @@ class NativeRuntime(Runtime):
         self._ready = True
 
 
+async def _close_unstarted(client, executor):
+    """До Runtime cleanup тоже имеет одного owner, независимого от caller cancel."""
+    async def close():
+        try:
+            async with asyncio.timeout(STARTUP_TIMEOUT):
+                await executor.aclose()
+        finally:
+            async with asyncio.timeout(STARTUP_TIMEOUT):
+                await client.aclose()
+    owner = asyncio.create_task(close())
+    cancelled = False
+    while not owner.done():
+        try:
+            await asyncio.shield(owner)
+        except asyncio.CancelledError:
+            cancelled = True
+    owner.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def start(client, executor, *, installation_id, node_id):
     """Передача ownership clients/tasks; production ports, не fake reconciliation.
 
@@ -94,11 +115,7 @@ async def start(client, executor, *, installation_id, node_id):
         if runtime is not None:
             await runtime.aclose()
         else:
-            try:
-                async with asyncio.timeout(STARTUP_TIMEOUT):
-                    await executor.aclose()
-            finally:
-                await client.aclose()
+            await _close_unstarted(client, executor)
         if isinstance(error, TimeoutError):
             raise Unavailable('native startup timed out before reconciliation and restart confirmation') from None
         raise

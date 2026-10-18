@@ -204,13 +204,13 @@ class HttpsTransport:
                 if response.status != 200:
                     try:
                         value = json.loads(body, object_pairs_hook=_unique_object)
-                    except (ValueError, UnicodeError):
+                    except (ValueError, UnicodeError, RecursionError):
                         value = None
                     raise _response_error(response.status, value, self._token) from None
                 try:
                     return json.loads(body, object_pairs_hook=_unique_object)
-                except (ValueError, UnicodeError) as error:
-                    raise Refused('invalid machine JSON') from error
+                except (ValueError, UnicodeError, RecursionError):
+                    raise Refused('invalid machine JSON') from None
         except (aiohttp.ClientError, TimeoutError, OSError) as error:
             raise Unavailable('machine HTTPS connection lost; outcome unknown') from error
 
@@ -287,10 +287,16 @@ class MachineClient:
 
     async def executor_state(self, node_id):
         value = await self.transport.request('GET','executor',params=dict(schema_version='1',node_id=uuid(node_id)))
-        exact(value, ('schema_version','node_id','executor_epoch'))
+        exact(value, ('schema_version','installation_id','epoch','node_id','executor_epoch'))
+        if (type(value['installation_id']) is not str
+                or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', value['installation_id'])):
+            raise Refused('canonical installation identity required')
+        for name in ('epoch', 'node_id', 'executor_epoch'):
+            if UUID(uuid(value[name])).int == 0:
+                raise Refused('nonzero installation/node/executor UUID required')
         if value['node_id'] != node_id:
             raise Refused('executor discovery changed node')
-        return uuid(value['executor_epoch'])
+        return value
 
     async def restarted(self, node_id, previous_epoch, new_epoch):
         value = await self.transport.request('POST', 'executor/restarted', dict(
@@ -431,7 +437,10 @@ class Runtime:
             raise Refused('runtime already started or closed')
         async with asyncio.timeout(self.shutdown_timeout):
             if previous_epoch is None:
-                previous_epoch = await self.client.executor_state(self.node_id)
+                discovery = await self.client.executor_state(self.node_id)
+                if discovery['epoch'] != self.epoch:
+                    raise Refused('executor discovery changed installation epoch')
+                previous_epoch = discovery['executor_epoch']
             await self.client.restarted(self.node_id, previous_epoch, self.executor_epoch)
             quiet = await self.executor.reconcile(self.node_id, previous_epoch, self.executor_epoch)
         if quiet is not True:

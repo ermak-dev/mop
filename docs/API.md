@@ -823,6 +823,18 @@ caller transaction, including explicit autocommit-off transactions. External
 fact, clone and inspection reads also refuse such a caller transaction. Restore
 guard precedes Assignment and Operation/Step locks, including the expiry worker.
 
+The private node bootstrap consumer validates this complete live response through
+`MachineClient`, then compares its installation identity and node to the private
+transport export. `mop agent --bootstrap /absolute/private/bootstrap.json --check`
+is a bounded read-only check and is silent on success. Neither the export nor a
+local epoch file supplies authority. Its CA is loaded from validated private
+no-follow file bytes, not reopened by path or augmented with system trust;
+redirects and environment proxies are disabled. Startup refusal owns bounded
+executor/client cleanup even under repeated cancellation. Effectful native serve
+still requires a complete explicit physical root: the expanded machine action
+vocabulary does not enable missing physical implementations or bypass the
+`NativeBindings` capability refusal.
+
 Run the disposable native fixture with the worktree launcher:
 `mop dev controller --postgres 17 --label _restart_live_cases`. It uses Python 3.12 and
 new isolated PostgreSQL/Docker resources, verified native HTTPS, actual disposable
