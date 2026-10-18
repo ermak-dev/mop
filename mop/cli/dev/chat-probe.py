@@ -1,4 +1,4 @@
-"""mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py] [--model-hooks]: probe the installed interactive Claude
+"""mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py] [--model-hooks] [--isolated-normal]: probe the installed interactive Claude
 
 Uses a fresh home/workdir, a private randomly named tmux server and a loopback
 Messages fixture with a dummy key. No existing session is resumed. All responses
@@ -37,7 +37,21 @@ and next fixture requests are not model confirmation. This probe implements no
 readiness receipt or scope retirement. If the installed --help explicitly says
 --bare skips settings hooks, hook scenarios report unsupported in this mode;
 silence alone remains unknown and does not prove normal-mode hook behavior.
-No isolation flag is removed. Default scenarios/settings are unchanged.
+The host probe never removes --bare. Default scenarios/settings are unchanged.
+
+--model-hooks --isolated-normal instead always builds a new owned nonroot Docker
+fixture. It accepts only a local Unix Docker endpoint, refuses host managed
+policy before copying/building/launching, snapshots only the installed native ELF
+and two tracked fixture modules, and mounts no host paths or sockets. Public
+image dependencies may be downloaded at build time. Runtime uses --network none,
+private PID/cgroup/mount/net/IPC namespaces, a distinct fixture UID, dropped
+capabilities and no-new-privileges. Both Docker inspect and kernel evidence must
+prove isolation before the native CLI starts; failure has no host fallback.
+Fresh home/config/runtime and the dummy loopback provider remain mandatory.
+This mode cannot be combined with --history-module. Reports and raw fixture
+artifacts are copied out privately before owned container/image cleanup; only
+safe hook/identity projections reach report.json. Native version is measured
+inside the container, not inferred from the host installation.
 
 Prints the report path and one verdict per scenario. Exit 1 for runner errors,
 not for unsupported or unknown scenarios. Does not contact the pool or load
@@ -55,6 +69,7 @@ def main(argv):
     timeout = 20
     history_module = None
     model_hooks = False
+    isolated_normal = False
     args = iter(argv)
     try:
         for arg in args:
@@ -62,6 +77,8 @@ def main(argv):
                 root = Path(next(args))
             elif arg == "--model-hooks":
                 model_hooks = True
+            elif arg == "--isolated-normal":
+                isolated_normal = True
             elif arg == "--history-module":
                 history_module = next(args)
                 if not chatprobe.valid_history_argument(history_module):
@@ -74,9 +91,13 @@ def main(argv):
                 usage(__doc__)
     except (StopIteration, ValueError):
         usage(__doc__)
+    if isolated_normal and (not model_hooks or history_module):
+        usage(__doc__)
     options = {"history_module": history_module}
     if model_hooks:
         options["model_hooks"] = True
+    if isolated_normal:
+        options["isolated_normal"] = True
     report = chatprobe.run(root, timeout, **options)
     print(report["report_path"])
     print("fixture-backed; paid provider not tested")
