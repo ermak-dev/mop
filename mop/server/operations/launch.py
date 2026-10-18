@@ -489,6 +489,8 @@ class GrantActivations:
                 return None
             target = LaunchJobs._target(self, row)
             try:
+                if row.not_after <= timezone.now():
+                    raise Refused('deadline_expired')
                 if not installation.effects_enabled:
                     raise Refused('effects_disabled')
                 if current != target:
@@ -512,7 +514,7 @@ class GrantActivations:
                 return None
             step.token = step.attempt_id = uuid4()
             step.started_at = step.dispatched_at = timezone.now()
-            step.lease_until = timezone.now() + timedelta(seconds=30)
+            step.lease_until = min(row.not_after, timezone.now() + timedelta(seconds=30))
             step.save(update_fields=('token', 'attempt_id', 'started_at', 'dispatched_at', 'lease_until'))
             # Шаги узла держат цель до терминала операции: их claims остаются,
             # заводятся только недостающие ключи.
@@ -522,7 +524,7 @@ class GrantActivations:
                     m.ResourceClaim.objects.create(resource_id=key, operation=row, step=step, token=step.token)
             from mop.server.access.models import Grant
             return (row.id, step.token, target.grant_id, Grant.objects.values_list('revision', flat=True).get(
-                pk=target.grant_id))
+                pk=target.grant_id), row.not_after)
 
     def record(self, operation_id, token, outcome, evidence, reason=None):
         _independent()
@@ -562,7 +564,11 @@ class GrantActivations:
         ticket = self.claim(operation_id)
         if ticket is None:
             return None
-        operation_id, token, grant_id, revision = ticket
+        operation_id, token, grant_id, revision, not_after = ticket
+        # #703: COMMIT claim занял wall time; перед новым эффектом intent
+        # проверяется снова. Сверка старого результата срока не требует.
+        if not_after <= timezone.now():
+            return self.record(operation_id, token, 'failed', 'activation-refused', 'command deadline expired')
         try:
             receipt = self.activator.activate_grant(grant_id, expected_revision=revision)
             outcome = ('succeeded', 'grant-activated') if receipt.state == 'active' else (
