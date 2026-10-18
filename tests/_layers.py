@@ -46,6 +46,7 @@ LAYERS = {
     "mop.cli.driver": COMMON,
     # cli: клиент
     "mop.cli._control": CLIENT,  # HTTPS frontend, не общий transport узла
+    "mop.cli._mcp": CLIENT,  # stdio frontend того же HTTPS-клиента (#642)
     "mop.cli.core": CLIENT, "mop.cli.project": CLIENT, "mop.cli.secret": CLIENT,
     "mop.cli.node": CLIENT, "mop.cli.dev": CLIENT, "mop.cli.service.mcp": CLIENT,
     "mop.cli.session": CLIENT,

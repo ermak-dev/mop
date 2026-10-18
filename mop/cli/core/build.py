@@ -14,7 +14,7 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 """
 from mop.cli import _control
 
-MCP = {"annotations": "destructive", "human_only": True,
+MCP = {"annotations": "destructive",
        "actions": ["catalog.build_project", "operations.view_operation"], "args": [
     {"name": "project_id", "type": "string", "required": True, "help": "existing project resource id"},
     {"name": "policy_id", "type": "string", "flag": "--policy-id", "required": True, "help": "approved immutable image policy id"},

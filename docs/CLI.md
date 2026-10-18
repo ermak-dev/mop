@@ -1804,8 +1804,12 @@ answer precisely while a puppet is restarting.
 #### mop mcp
 
 ```text
-mop mcp [--check]: expose pool commands as tools
+mop mcp [--check] [--project-id UUID] [--node-id UUID] [--client-id UUID]: authenticated management tools
 
-Started by a claude session. --check shows the local profile and connection
-settings; the available tools depend on the session's access.
+Uses only transient HTTPS context and the server's current scoped action
+catalogue. --check queries that catalogue and reports the private inbox as
+unavailable; it does not register an endpoint or confirm native delivery.
+No scope exposes only authenticated identity/health diagnostics, not all actions.
+Management tools invoke the bound commandlets themselves. The private inbox,
+agent discovery, reports and idle notifications remain unavailable (#649).
 ```

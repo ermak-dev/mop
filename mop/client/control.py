@@ -368,6 +368,51 @@ class Identity:
     action_permissions: frozenset[str] | None = None
 
 
+def canonical_identity(identity):
+    """Проверка формы Actor, не выдача полномочий по классификации."""
+    if type(identity) is not Identity:
+        return False
+    try:
+        _require(type(identity.user_id) is int and identity.user_id > 0)
+        owner = identity.human_owner_id
+        _require(owner is None or type(owner) is int and owner > 0)
+        for value in (identity.node_id, identity.grant_id):
+            if value is not None:
+                _key(value)
+        if identity.kind == 'human':
+            return owner == identity.user_id and identity.node_id is None and identity.grant_id is None
+        if identity.kind == 'agent':
+            return (owner is not None and identity.node_id is not None if identity.grant_id is not None
+                    else owner == identity.user_id and identity.node_id is None)
+        return (identity.kind == 'service' and owner is None and identity.node_id is not None
+                and identity.grant_id is None)
+    except ClientError:
+        return False
+
+
+@dataclass(frozen=True)
+class CapabilityScope:
+    project_id: str | None = None
+    node_id: str | None = None
+    client_id: str | None = None
+
+    def __post_init__(self):
+        for value in (self.project_id, self.node_id, self.client_id):
+            if value is not None:
+                _key(value)
+
+    def query(self):
+        return {name: value for name, value in vars(self).items() if value is not None}
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    epoch: str
+    identity: Identity
+    scope: CapabilityScope
+    catalogue_version: int = 1
+
+
 @dataclass(frozen=True)
 class Health:
     epoch: str
@@ -1006,6 +1051,30 @@ class Client:
         if failed:
             raise ProtocolError("invalid identity response")
         return result
+
+    def capabilities(self, scope: CapabilityScope) -> Capabilities:
+        """Строгий no-cache advisory query; scope ответа обязан совпадать с запросом."""
+        from .action_catalogue import ACTIONS_V1
+        _require(type(scope) is CapabilityScope)
+        data = self._get('/api/v1/capabilities?' + urlencode({'schema_version': 1, **scope.query()}))
+        try:
+            _require(set(data) == {'schema_version', 'catalogue_version', 'epoch', 'actor', 'scope', 'actions'})
+            _require(type(data['catalogue_version']) is int and data['catalogue_version'] == 1)
+            _key(data['epoch'])
+            _require(set(data['scope']) == {'project_id', 'node_id', 'client_id'})
+            returned = CapabilityScope(**data['scope'])
+            _require(returned == scope)
+            actor = data['actor']
+            _require(set(actor) == {'user_id', 'kind', 'human_owner_id', 'node_id', 'grant_id'})
+            actions = data['actions']
+            _require(type(actions) is tuple and all(type(action) is str and action in ACTIONS_V1 for action in actions))
+            _require(tuple(sorted(set(actions))) == actions)
+            _require(bool(scope.query()) or not actions)
+            identity = Identity(**actor, action_permissions=frozenset(actions))
+            _require(canonical_identity(identity))
+            return Capabilities(data['epoch'], identity, returned)
+        except (KeyError, TypeError, ValueError, ClientError):
+            raise ProtocolError('invalid action catalogue response') from None
 
     def health(self) -> Health:
         data = self._get("/api/v1/health")

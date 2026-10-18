@@ -180,37 +180,27 @@ def plain(value):
     return value
 
 
-# Лишь делегируемые действия; человеческий override/terminal/node Admin не
-# появляется у гранта от имени роли или от прав human owner.
-_GRANT_ACTIONS = frozenset('execution.' + action for action in (
-    'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet',
-    'wipe_puppet', 'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery',
-    'deliver_report', 'send_session_command', 'change_session_model', 'view_usage',
-    'view_landing', 'acquire_landing', 'release_landing')) | frozenset((
-    'catalog.view_project', 'catalog.view_pool', 'operations.view_operation',
-    'access.view_role', 'controller.view_models'))
 _TOOL_LOCK = threading.RLock()
 
 
 def allowed(declaration, identity):
+    """Одинаковые действия для Actor; kind только проверяет форму/бизнес-fence."""
+    from mop.client.action_catalogue import ACTIONS_V1
     actions = declaration.get('actions')
-    if (type(identity) is not api.Identity or identity.action_permissions is None or
+    if (not api.canonical_identity(identity) or
+            type(identity.action_permissions) is not frozenset or
+            not identity.action_permissions <= ACTIONS_V1 or
             not isinstance(actions, list) or
-            any(not isinstance(action, str) for action in actions)):
+            any(not isinstance(action, str) or action not in ACTIONS_V1 for action in actions)):
         return False
     if not actions and declaration.get('annotations') != 'readonly':
         return False
-    required = frozenset(actions)
     if declaration.get('human_only') is True and identity.kind != 'human':
         return False
-    delegated = identity.grant_id is not None
-    if delegated and identity.kind == 'service' and not required <= _GRANT_ACTIONS:
-        return False
-    return (identity.kind in ('human', 'service') if delegated
-            else identity.kind in ('human', 'agent')) and required <= identity.action_permissions
+    return frozenset(actions) <= identity.action_permissions
 
 
-def tool_call(words, declaration, values):
+def tool_call(words, declaration, values, *, with_status=False):
     """MCP вызывает тот же dispatcher/commandlet, а не второй API adapter.
 
     Блокировка нужна из-за process-global stdout; команда не исполняется в
@@ -219,7 +209,11 @@ def tool_call(words, declaration, values):
     from mop import cli
     if SURFACES.get(' '.join(words)) != 'bound':
         raise api.ClientError('unsupported MCP commandlet')
-    argv = cli.tool_argv(declaration.get('args', []), values)
+    try:
+        argv = cli.tool_argv(declaration.get('args', []), values)
+    except ValueError as error:
+        # Фразы собственного codec безопасны: loud сохраняет причину отказа.
+        raise api.ClientError(str(error)) from None
     out, err = io.StringIO(), io.StringIO()
     with _TOOL_LOCK, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
@@ -227,7 +221,8 @@ def tool_call(words, declaration, values):
         except SystemExit as error:
             code = error.code
     text = out.getvalue() + err.getvalue()
-    return text.rstrip() or ('done' if code == 0 else 'command refused')
+    result = text.rstrip() or ('done' if code == 0 else 'command refused')
+    return (result, code) if with_status else result
 
 
 def emit(value, *, credential):
@@ -301,11 +296,10 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         p = parser(words)
         if words == 'mcp':
             p.add_argument('--check', action='store_true')
+            for field in ('project', 'node', 'client'):
+                p.add_argument('--' + field + '-id')
             args = p.parse_args(argv)
-            if not args.check:
-                print('unsupported: server action-permission catalogue and private inbox lifecycle are not bound',
-                      file=sys.stderr)
-                return 2
+            scope = api.CapabilityScope(args.project_id, args.node_id, args.client_id)
         elif words in ('health', 'profile', 'diagnose'):
             args = p.parse_args(argv)
         elif words == 'stat':
@@ -487,8 +481,16 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                            not_after=args.not_after, request_id=args.request_id, **params)
         if words == 'health':
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
-        elif words in ('profile', 'mcp'):
+        elif words == 'profile':
             emit({'schema_version': 1, **plain(client.identity())}, credential=selected.token)
+        elif words == 'mcp':
+            from . import _mcp
+            if not args.check:
+                return _mcp.serve(selected, scope)
+            capabilities = client.capabilities(scope)
+            emit({'schema_version': 1, 'catalogue_version': capabilities.catalogue_version,
+                  'epoch': capabilities.epoch, 'actor': plain(capabilities.identity),
+                  'scope': plain(scope), 'private_inbox': _mcp.PRIVATE_INBOX}, credential=selected.token)
         elif words == 'stat':
             emit(client.proxy_usage(start=args.start, end=args.end, group_by=args.group_by),
                  credential=selected.token)
