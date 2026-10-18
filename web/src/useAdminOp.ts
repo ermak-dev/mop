@@ -38,6 +38,12 @@ export function useAdminOp(session: Session, target: string | null) {
     const promise = (async () => {
       try {
         if (!target || !poolNetwork.matches(session)) throw new Error('Authenticated target required');
+        if (action === 'create') {
+          if (Object.keys(params).some(key => !['node_id', 'definition_id'].includes(key))
+              || typeof params.node_id !== 'string' || typeof params.definition_id !== 'string')
+            throw new Error('Create takes only node and approved definition ids');
+          return await poolNetwork.create(target, params.node_id, params.definition_id, requestId);
+        }
         return await poolNetwork.command(target, action, params, requestId);
       } catch (error) {
         const refused = error instanceof HybridHttpError ? error.status >= 400 && error.status < 500
