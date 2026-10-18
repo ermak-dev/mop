@@ -10,10 +10,8 @@ mop driver hold-probe, без пула и native readiness.
 STATUS: FIXED — see #643
 """
 import ast
-import contextlib
 import hashlib
 import importlib
-import io
 import os
 from pathlib import Path
 import subprocess
@@ -24,6 +22,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import hermetic  # noqa: F401 — до mop (#209)
+from _lib import run_command
 
 ROOT = Path(__file__).resolve().parents[1]
 OPTIONS = ('--sha256', '--target', '--incarnation', '--executor-epoch',
@@ -99,9 +98,14 @@ class HoldAnchorTests(unittest.TestCase):
 
     def test_artifact_metadata_has_exact_source_bytes_not_placeholder_or_authority(self):
         builder = self.module('hold_artifact')
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            artifact = builder.artifact()
+        # HYPOTHESIS: ручной capture нарушает retained tests_lib gate (#675).
+        # SOLUTION: общий runner сохраняет artifact и проверку тишины библиотеки.
+        # RESULT: retained tests_lib RED -> GREEN, artifact checks сохранены.
+        # STATUS: FIXED — see #675
+        artifacts = []
+        out, err, code = run_command(lambda _: artifacts.append(builder.artifact()))
+        self.assertEqual(code, 0)
+        artifact, = artifacts
         content = (ROOT/'mop/node/hold_anchor.py').read_bytes()
         self.assertEqual(artifact.content, content)
         self.assertEqual(artifact.sha256, hashlib.sha256(content).hexdigest())
@@ -109,7 +113,7 @@ class HoldAnchorTests(unittest.TestCase):
             '/opt/mop/anchors/sha256-'+artifact.sha256+'/hold-anchor')
         # Root imports тоже не должны создавать stdlib __pycache__ на узле.
         self.assertTrue(content.startswith(b'#!/usr/bin/python3 -ISB\n'))
-        self.assertEqual((out.getvalue(), err.getvalue()), ('', ''))
+        self.assertEqual((out, err), ('', ''))
         for bad in ('relative', '/opt/../anchors', '/opt//anchors', '/opt/anchors/', '/tmp/bad name'):
             with self.subTest(prefix=bad), self.assertRaises(ValueError):
                 artifact.executable(bad)

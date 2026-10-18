@@ -1,7 +1,5 @@
 """Чистые границы maintenance export #722, без БД/узла/старых файлов."""
-import contextlib
 import importlib.util
-import io
 import json
 import os
 from pathlib import Path
@@ -12,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-import _lib  # noqa: F401
+from _lib import run_command
 import hermetic  # noqa: F401
 
 # HYPOTHESIS: freshNode не имеет finite issuer/export, а старый server путь
@@ -154,21 +152,23 @@ class NodeBootstrapFiles(unittest.TestCase):
         from mop.cli.server import controller
         from mop.server.controller import runtime
         self.assertTrue(callable(getattr(runtime, 'enroll_node', None)), 'finite maintenance issuer is missing')
-        output = io.StringIO()
+        # HYPOTHESIS: ручной capture нарушает retained tests_lib gate (#675).
+        # SOLUTION: общий runner сохраняет dispatch, exit/refusal и secret checks.
+        # RESULT: retained tests_lib RED -> GREEN, все 9 export checks GREEN.
+        # STATUS: FIXED — see #675
         with patch('mop.common.context.strip_server', side_effect=AssertionError('legacy context read')), \
                 patch.object(runtime, 'configure'), patch.object(runtime, 'close_pools') as close, \
-                patch.object(runtime, 'enroll_node', return_value={'enrollment_id': str(uuid4())}) as issue, \
-                contextlib.redirect_stdout(output):
-            with self.assertRaises(SystemExit) as stopped:
-                cli.main(['server', 'controller', 'enroll-node', '--node', str(uuid4()),
-                    '--origin', 'https://controller.example.invalid', '--ca-file', '/etc/mop/ca.pem',
-                    '--file', str(self.root/'new'/'bootstrap.json'), '--node-file', '/var/lib/node/bootstrap.json'])
-        self.assertEqual(stopped.exception.code, 0)
+                patch.object(runtime, 'enroll_node', return_value={'enrollment_id': str(uuid4())}) as issue:
+            output, _, code = run_command(cli.main,
+                ['server', 'controller', 'enroll-node', '--node', str(uuid4()),
+                 '--origin', 'https://controller.example.invalid', '--ca-file', '/etc/mop/ca.pem',
+                 '--file', str(self.root/'new'/'bootstrap.json'), '--node-file', '/var/lib/node/bootstrap.json'])
+        self.assertEqual(code, 0)
         issue.assert_called_once()
         close.assert_called_once()
-        self.assertNotIn('token', output.getvalue())
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            controller.main(['enroll-node', '--token', 'private-value'])
+        self.assertNotIn('token', output)
+        _, _, code = run_command(controller.main, ['enroll-node', '--token', 'private-value'])
+        self.assertEqual(code, 2)
 
 
 if __name__ == '__main__':

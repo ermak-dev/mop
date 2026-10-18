@@ -25,9 +25,9 @@ from uuid import uuid4
 import _lib  # noqa: F401
 import hermetic  # noqa: F401
 from _control_fixture import own_tls
+from _native_startup_fixture import Client, EPOCH, Executor, NODE, PREVIOUS, state
 from mop.node.http_execution import MachineClient, Refused, Unavailable
 
-NODE, EPOCH, PREVIOUS = (str(uuid4()) for _ in range(3))
 TOKEN = 'b' * 40
 EXISTING_ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message',
                               'confirm_ready', 'wipe_clone'))
@@ -38,56 +38,6 @@ def existing_surface_bindings(api, executor):
     from mop.node import http_execution
     with patch.object(http_execution, 'ACTIONS', EXISTING_ACTIONS):
         return api.NativeBindings(executor)
-
-
-def state(**change):
-    return dict(schema_version=1, installation_id='fixture', epoch=EPOCH,
-                node_id=NODE, executor_epoch=PREVIOUS, **change)
-
-
-class Client:
-    """Unit port; TLS checks ниже не подменяют MachineClient/transport."""
-    def __init__(self, value=None):
-        self.value = state() if value is None else value
-        self.calls = []
-        self.closed = False
-        self.fail_restart = False
-
-    async def executor_state(self, node):
-        self.calls.append(('discover', node))
-        return self.value
-
-    async def restarted(self, node, previous, new):
-        self.calls.append(('restart', node, previous, new))
-        if self.fail_restart:
-            raise Unavailable('restart reply lost')
-
-    async def poll(self, node, executor, limit):
-        self.calls.append(('poll', node, executor, limit))
-        return ()
-
-    async def aclose(self):
-        self.closed = True
-
-
-class Executor:
-    def __init__(self, calls):
-        self.calls = calls
-        self.quiet = True
-        self.closed = False
-        self.block = False
-
-    async def reconcile(self, node, previous, new):
-        self.calls.append(('reconcile', node, previous, new))
-        if self.block:
-            await asyncio.Event().wait()
-        return self.quiet
-
-    async def execute(self, *args):
-        raise AssertionError('no effect in a startup test')
-
-    async def aclose(self):
-        self.closed = True
 
 
 class StartupTests(unittest.IsolatedAsyncioTestCase):
@@ -397,7 +347,8 @@ class RealTLSStartup(unittest.TestCase):
             server.calls, server.status = [], 200
             server.raw = json.dumps(dict(schema_version=1, node_id=NODE, executor_epoch=PREVIOUS)).encode()
             bootstrap = load(file)
-            async def check():
+            # TLS callback, не собственный check DSL (#675).
+            async def discovery_scenario():
                 client = api.machine_client(bootstrap)
                 self.assertIs(type(client), MachineClient)
                 self.assertLessEqual(client.transport.timeout, 5)
@@ -409,7 +360,7 @@ class RealTLSStartup(unittest.TestCase):
                     await client.aclose()
                 self.assertTrue(client.transport._closed)
                 self.assertTrue(client.transport._session.closed)
-            asyncio.run(check())
+            asyncio.run(discovery_scenario())
             self.assertEqual(server.calls, [('GET', '/api/v1/machine/executor?schema_version=1&node_id='+NODE,
                                             'Token '+TOKEN)])
             import subprocess
@@ -436,7 +387,7 @@ class RealTLSStartup(unittest.TestCase):
             bootstrap = load(file)
             for status, raw in ((401, b'{}'), (302, b'{}'), (200, b' ' * 262145)):
                 server.calls, server.status, server.raw = [], status, raw
-                async def check():
+                async def refused_discovery_scenario():
                     client = api.machine_client(bootstrap)
                     try:
                         with self.assertRaises((Refused, Unavailable)) as caught:
@@ -444,7 +395,7 @@ class RealTLSStartup(unittest.TestCase):
                         self.assertNotIn(TOKEN, str(caught.exception))
                     finally:
                         await client.aclose()
-                asyncio.run(check())
+                asyncio.run(refused_discovery_scenario())
                 self.assertEqual(len(server.calls), 1)
                 self.assertEqual(server.calls[0][0], 'GET')
             # Другой собственный CA: TLS handshake отказывает до HTTP/auth bytes.
