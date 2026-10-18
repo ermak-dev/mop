@@ -230,11 +230,20 @@ class NomadStopScheduler:
                     # connect стартует ПОСЛЕ резолва: остаток бюджета, а не
                     # срезанный на входе timeout, иначе connect жил бы за
                     # пределами бюджета, пока Timer ещё не заведён.
-                    if deadline is not None:
-                        timeout = min(timeout, deadline - time.monotonic())
-                        if timeout <= 0:
-                            raise SchedulerUnavailable()
-                    return socket.create_connection((_resolved, address[1]), timeout, source_address)
+                    # #701: адреса имени -- по порядку; недоступный первый
+                    # (::1 при IPv4-only peer) не прячет рабочий второй.
+                    failure = SchedulerUnavailable()
+                    for host in _resolved:
+                        budget = timeout
+                        if deadline is not None:
+                            budget = min(timeout, deadline - time.monotonic())
+                            if budget <= 0:
+                                raise SchedulerUnavailable()
+                        try:
+                            return socket.create_connection((host, address[1]), budget, source_address)
+                        except OSError as error:
+                            failure = error
+                    raise failure
                 connection._create_connection = dial
             raw = None if body is None else json.dumps(body,separators=(',',':')).encode()
             connection.request(method,path+'?'+query,body=raw,
@@ -265,11 +274,13 @@ class NomadStopScheduler:
             connection.close()
 
     def _resolve(self, hostname, remaining):
-        """getaddrinfo в bounded потоке: медленный резолвер не держит вызов."""
+        """getaddrinfo в bounded потоке: медленный резолвер не держит вызов.
+        -> все адреса имени по порядку резолвера, без повторов (#701)."""
         outcome = []
         def run():
             try:
-                outcome.append(socket.getaddrinfo(hostname,None)[0][4][0])
+                found = tuple(dict.fromkeys(info[4][0] for info in socket.getaddrinfo(hostname, None)))
+                outcome.append(found or None)
             except Exception:
                 outcome.append(None)
         worker = threading.Thread(target=run,daemon=True)

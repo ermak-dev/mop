@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import zipfile
 
 import _lib  # noqa: F401 -- lifetime временных файлов
@@ -101,6 +102,32 @@ def fresh_venv(directory):
     return home
 
 
+def site_packages(home):
+    return home / 'lib' / f'python{sys.version_info.major}.{sys.version_info.minor}' / 'site-packages'
+
+
+def venv_env():
+    """Окружение каждого процесса внутри venv проверки (#700): без PYTHONPATH
+    и PYTHONHOME. Клон на PYTHONPATH (его экспортирует bin/mop) подменял
+    установку: pip в venv находил mop уже установленным в клоне и не ставил
+    ничего. venv сам чистит эти две переменные для своего ensurepip
+    (CPython gh-98251, EnvBuilder._call_new_python)."""
+    return {key: value for key, value in os.environ.items()
+            if key not in ('PYTHONPATH', 'PYTHONHOME')}
+
+
+def install(python, wheelhouse, requirement):
+    """pip install из wheelhouse проверки в её venv; вывод pip -- в отказ."""
+    result = subprocess.run([str(python), '-m', 'pip', 'install',
+                             '--disable-pip-version-check', '--no-index',
+                             '--find-links', str(wheelhouse), requirement],
+                            env=venv_env(), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    if result.returncode:
+        raise AssertionError(f'pip install {requirement} failed:\n{result.stdout}')
+    return result.stdout
+
+
 def wait_port(port, host='127.0.0.1', timeout=60):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -164,12 +191,8 @@ class PackagedDashboard(unittest.TestCase):
                         str(ROOT) + '[server]'], check=True)
         cls.venv = fresh_venv(tempfile.mkdtemp(prefix='mop-627-venv-'))
         cls.python = cls.venv / 'bin' / 'python'
-        cls.site = (cls.venv / 'lib' / f'python{sys.version_info.major}.{sys.version_info.minor}'
-                    / 'site-packages')
-        subprocess.run([str(cls.python), '-m', 'pip', 'install', '--quiet',
-                        '--disable-pip-version-check', '--no-index',
-                        '--find-links', str(cls.wheelhouse), 'mop[server]'],
-                       check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cls.site = site_packages(cls.venv)
+        install(cls.python, cls.wheelhouse, 'mop[server]')
         cls.root = Path(tempfile.mkdtemp(prefix='mop-627-child-'))
         # Один доверенный root.key на класс: initialize пишет его digest.
         (cls.root / 'root.key').write_bytes(os.urandom(64))
@@ -209,7 +232,7 @@ class PackagedDashboard(unittest.TestCase):
         os.environ['MOP_627_DASHBOARD_WEB_DB'] = json.dumps(database(cls.web_role, cls.web_password))
         child = subprocess.Popen([str(cls.python), '-I', str(cls.root / 'server.py'),
                                   str(cls.site), str(cls.root), str(port)],
-                                 cwd=cls.root, stdout=subprocess.PIPE,
+                                 cwd=cls.root, env=venv_env(), stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True)
         type(self)._child = child
         try:
@@ -354,17 +377,55 @@ class PackagedDashboard(unittest.TestCase):
     def test_client_wheel_stays_free_of_server_imports(self):
         home = fresh_venv(tempfile.mkdtemp(prefix='mop-627-client-'))
         python = home / 'bin' / 'python'
-        subprocess.run([str(python), '-m', 'pip', 'install', '--quiet',
-                        '--disable-pip-version-check', '--no-index',
-                        '--find-links', str(self.wheelhouse), 'mop'],
-                       check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        install(python, self.wheelhouse, 'mop')
         probe = ("import importlib.util; import mop.cli; "
                  "assert importlib.util.find_spec('django') is None; "
                  "assert importlib.util.find_spec('channels') is None; print('client-clean')")
-        result = subprocess.run([str(python), '-I', '-c', probe],
+        result = subprocess.run([str(python), '-I', '-c', probe], env=venv_env(),
                                 capture_output=True, text=True, cwd=tempfile.gettempdir())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'client-clean')
+
+    # #700: полный CI (bin/mop dev test -v) красил 8 из 10 проверок класса --
+    # «controller must come from the installed package» и в клиентском venv
+    # «No module named 'mop'», а `mop dev controller --check dashboard` на том
+    # же HEAD был зелёным.
+    # HYPOTHESIS: bin/mop экспортирует PYTHONPATH=<клон>, mop dev test отдаёт
+    # окружение файлу проверки, и pip внутри чистого venv его наследует; SETUP
+    # CI (pip wheel '.[server]') и pip wheel этого класса оставляют в клоне
+    # mop.egg-info. pip видит mop уже установленным в клоне («Requirement
+    # already satisfied: mop in /io») и в venv не ставит ничего. Изолированный
+    # --check dashboard звал файл без PYTHONPATH -- поэтому зелёный.
+    # Клон здесь подложен явно: проверка ловит дефект при любом способе
+    # запуска, не только из bin/mop.
+    # SOLUTION: каждый процесс внутри venv проверки (pip install, ребёнок-
+    # контроллер, клиентская проба) получает venv_env() -- окружение без
+    # PYTHONPATH/PYTHONHOME, как ensurepip у самого venv.
+    # RESULT: до правки прогон как в CI (bin/mop dev test -v packaged_dashboard
+    # в fixture dev controller) -- FAILED (failures=8) за 435 с, те же две
+    # причины; изолированный --check dashboard с этой проверкой -- 1 провал,
+    # «Requirement already satisfied: mop in <подложенный клон>». После
+    # правки оба пути -- 11 из 11; controller_install и control_tls под тем
+    # же PYTHONPATH зелёные и до правки (установка по пути и --target pip
+    # всегда ставят заново).
+    # STATUS: FIXED — see #700
+    def test_venv_install_ignores_a_checkout_on_pythonpath(self):
+        checkout = Path(tempfile.mkdtemp(prefix='mop-700-checkout-'))
+        (checkout / 'mop.egg-info').mkdir()
+        (checkout / 'mop.egg-info' / 'PKG-INFO').write_text(
+            'Metadata-Version: 2.1\nName: mop\nVersion: 0.1.0\n')
+        home = fresh_venv(tempfile.mkdtemp(prefix='mop-700-venv-'))
+        python, site = home / 'bin' / 'python', site_packages(home)
+        with mock.patch.dict(os.environ, {'PYTHONPATH': str(checkout)}):
+            output = install(python, self.wheelhouse, 'mop')
+        self.assertTrue((site / 'mop' / '__init__.py').is_file(),
+                        'a checkout on PYTHONPATH must not stand in for the venv install:\n'
+                        + output)
+        located = subprocess.run([str(python), '-I', '-c', 'import mop; print(mop.__file__)'],
+                                 env=venv_env(), capture_output=True, text=True,
+                                 cwd=tempfile.gettempdir())
+        self.assertEqual(located.returncode, 0, located.stderr)
+        self.assertEqual(Path(located.stdout.strip()), site / 'mop' / '__init__.py')
 
 
 if __name__ == '__main__':

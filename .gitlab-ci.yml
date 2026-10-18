@@ -145,6 +145,13 @@ stages: [test, deploy]
         -e MOP_TEST_NATS_BINARY=/opt/mop-nats/nats-server \
         -e MOP_TESTS_STRICT -e TESTS -e PYTHON_TESTS -e CHECK -e POSTGRES_MAJOR -e MOP_TEST_POSTGRES_HOST=postgres \
         "$PYTHON_IMAGE" bash -euc "$SETUP"
+  hooks:
+    # #699: убитый по таймауту job не выполняет after_script, и root-овые
+    # артефакты контейнера остаются в checkout -- следующий job падал на
+    # git clean раньше своего script. Тот же chown до получения исходников;
+    # каталога ещё нет -- не трогаем (docker -v создал бы его от root).
+    pre_get_sources_script:
+      - if [ -d "$CI_PROJECT_DIR" ]; then docker run --rm -v "$CI_PROJECT_DIR:/io" alpine chown -R "$(id -u):$(id -g)" /io; fi
   after_script:
     - docker rm -f "mop-ci-db-$CI_JOB_ID" || true
     - docker rm -f "mop-ci-nats-image-$CI_JOB_ID" || true
