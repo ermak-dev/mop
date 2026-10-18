@@ -420,6 +420,40 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             await transport.aclose()
             self.assertTrue(transport._session.closed)
 
+    async def test_addressed_launch_uses_finite_post_without_disclosing_work_in_url(self):
+        # HYPOTHESIS (#643): LaunchQuery ещё не связан с finite HTTPS transport.
+        # SPEC: POST metadata body, тот же verified transport, не UUID oracle.
+        # RED: missing LaunchQuery adapter; SOLUTION: явный POST в allowlist и
+        # MachineClient.read_launch. RESULT: 30/30 green. STATUS: FIXED -- see #643.
+        metadata, seen = wire(), []
+        class Response:
+            status = 200
+            content_type = 'application/json'
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            @property
+            def content(self): return self
+            async def iter_chunked(self, size): yield b'{"schema_version":1}'
+        class Session:
+            def __init__(self, **kwargs): self.connector = kwargs['connector']
+            def request(self, method, url, **kwargs):
+                seen.append((method, url, kwargs))
+                return Response()
+            async def close(self): await self.connector.close()
+        with patch('aiohttp.ClientSession', Session):
+            transport = HttpsTransport('https://host.test', 'credential')
+            client = MachineClient(transport)
+            self.assertTrue(callable(getattr(client, 'read_launch', None)), 'LaunchQuery adapter is missing')
+            try:
+                value = await client.read_launch(metadata)
+                self.assertEqual(value, {'schema_version': 1})
+                self.assertEqual(seen[0][:2], ('POST', 'https://host.test/api/v1/machine/work/launch'))
+                self.assertEqual(seen[0][2]['json'], metadata)
+                self.assertIsNone(seen[0][2]['params'])
+                with self.assertRaises(Refused): await transport.request('GET', 'work/launch')
+            finally:
+                await client.aclose()
+
     async def test_bounded_json_duplicate_fields_redirect_and_no_raw_error_leak(self):
         class Response:
             status = 200

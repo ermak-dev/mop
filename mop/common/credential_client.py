@@ -169,6 +169,13 @@ class CredentialClient:
         result = self._invoke(auth, p.Command.APPROVE_PREPARATION, {'revision_id': str(revision_id)})
         return self._result(p.ApprovalReceipt, result)
 
+    def read_launch(self, auth: p.Credential, work: dict) -> dict:
+        """Только текущая machine Work; выбор definition -- внутри службы."""
+        result = self._invoke(auth, p.Command.LAUNCH, {'work': work})
+        if type(result) is not dict:
+            raise p.CredentialError('invalid addressed launch response')
+        return result
+
     def read_definition(self, auth: p.Credential, definition_id: UUID) -> p.DefinitionBytes:
         result = self._invoke(auth, p.Command.DEFINITION, {'definition_id': str(definition_id)})
         return self._result(p.DefinitionBytes, result)

@@ -668,6 +668,14 @@ class MachineExecution:
 
     def action_work(self, actor, *, operation_id, step_id):
         """Текущий addressed input gate; JSON owner/project не даёт полномочий."""
+        work, _ = self.action_admission(actor, operation_id=operation_id, step_id=step_id)
+        return work
+
+    def action_admission(self, actor, *, operation_id, step_id):
+        """Публичный SQL proof: собственная Work и id её текущего claim.
+
+        Durable operation проверяет свой token по этому id, не читая execution ORM.
+        """
         current_actor(actor)
         with transaction.atomic():
             self._installation_state()
@@ -682,7 +690,7 @@ class MachineExecution:
             if self.work.current(operation_id, step_id) != work:
                 raise Conflict('action input operation changed')
             self._admit(row, work)
-            return work
+            return work, attempt.id
 
     def executor_state(self, actor, node_id):
         """Предыдущий epoch приходит из controller DB, не имени/marker нового агента."""

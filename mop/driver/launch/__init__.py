@@ -159,7 +159,7 @@ class RegisteredLayout:
 @dataclass(frozen=True)
 class LaunchResponse:
     registration: Registration
-    bundle: soul.Bundle
+    bundle: soul.Bundle = field(repr=False)
     # ActionInput проверяет node adapter; driver не импортирует верхний слой.
     inputs: object = field(repr=False)
 

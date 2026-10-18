@@ -98,6 +98,9 @@ class OperationWork:
     def message_input(self, work):
         return self.operations.messages.input(MachineStep(**asdict(work)))
 
+    def launch_definition(self, work, attempt_id):
+        return self.operations.launch_machine.launch_definition(MachineStep(**asdict(work)), attempt_id)
+
 
 def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,
                wipe_support=None, launch_support=None):

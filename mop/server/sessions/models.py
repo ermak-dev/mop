@@ -115,6 +115,7 @@ class AssignmentAttempt(Record):
             ('claim_work', 'Can claim enrolled machine work'),
             ('report_result', 'Can report enrolled machine result'),
             ('read_facts', 'Can read enrolled machine facts'),
+            ('read_launch', 'Can read own admitted launch inputs'),
             ('reconcile_work', 'Can reconcile unknown machine work')]
         constraints = Record.Meta.constraints + [
             models.UniqueConstraint(fields=('executor_user_id', 'request_id'), name='attempt_request_identity'),
