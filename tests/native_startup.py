@@ -231,6 +231,136 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             await executor.aclose()
 
 
+# BUG: повторный cancel после construction теряет join runtime cleanup.
+# HYPOTHESIS: shield сохраняет задачу, но caller возвращается раньше неё;
+# asyncio.run отменяет оставшегося owner при закрытии loop.
+# SOLUTION: startup удерживает один aclose task и join через все caller cancel;
+# собственный deadline Runtime остаётся неизменным и его отказ не маскируется.
+# RESULT: loop shutdown больше не отменяет cleanup; stuck port даёт Unavailable.
+# STATUS: FIXED — see #736
+class RuntimeCancellationTests(unittest.TestCase):
+    def test_repeated_cancel_joins_runtime_cleanup_before_loop_shutdown(self):
+        from mop.node import native_startup as api
+        client = Client()
+        events = []
+        runtimes = []
+
+        async def scenario():
+            reconcile_entered, cleanup_entered, release = (asyncio.Event() for _ in range(3))
+
+            class ControlledExecutor(Executor):
+                async def reconcile(self, *args):
+                    self.calls.append(('reconcile', *args))
+                    reconcile_entered.set()
+                    await asyncio.Event().wait()
+
+                async def aclose(self):
+                    events.append('cleanup-entered')
+                    cleanup_entered.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        events.append('cleanup-cancelled')
+                        raise
+                    events.append('cleanup-completed')
+                    self.closed = True
+
+            class CapturedRuntime(api.NativeRuntime):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    runtimes.append(self)
+
+            executor = ControlledExecutor(client.calls)
+            with patch.object(api, 'NativeRuntime', CapturedRuntime):
+                startup = asyncio.create_task(api.start(client, executor,
+                    installation_id='fixture', node_id=NODE))
+                await asyncio.wait_for(reconcile_entered.wait(), 1)
+                startup.cancel()
+                await asyncio.wait_for(cleanup_entered.wait(), 1)
+                # Каждый cancel доставляется во время cleanup, не до construction.
+                for _ in range(3):
+                    startup.cancel()
+                    for _ in range(5):
+                        await asyncio.sleep(0)
+                events.append('startup-held' if not startup.done() else 'startup-escaped')
+                if not startup.done():
+                    release.set()
+                try:
+                    await startup
+                except asyncio.CancelledError:
+                    events.append('startup-cancelled')
+                events.append('scenario-returned')
+
+        asyncio.run(scenario())
+        # Проверяем именно результат loop shutdown, а не существование shield.
+        self.assertEqual(events, ['cleanup-entered', 'startup-held', 'cleanup-completed',
+                                  'startup-cancelled', 'scenario-returned'])
+        self.assertTrue(client.closed)
+        self.assertEqual([row[0] for row in client.calls], ['discover', 'reconcile'])
+        self.assertEqual(len(runtimes), 1)
+        self.assertTrue(runtimes[0]._close_task.done())
+        self.assertFalse(runtimes[0]._close_task.cancelled())
+        self.assertTrue(runtimes[0]._cleanup_task.done())
+        self.assertFalse(runtimes[0]._cleanup_task.cancelled())
+
+    def test_repeated_cancel_stuck_runtime_cleanup_reports_bounded_failure(self):
+        from mop.node import native_startup as api
+        events, failures = [], []
+        client = Client()
+
+        async def scenario():
+            reconcile_entered, cleanup_entered, release = (asyncio.Event() for _ in range(3))
+
+            class StuckExecutor(Executor):
+                async def reconcile(self, *args):
+                    self.calls.append(('reconcile', *args))
+                    reconcile_entered.set()
+                    await asyncio.Event().wait()
+
+                async def aclose(self):
+                    events.append('cleanup-entered')
+                    cleanup_entered.set()
+                    await release.wait()
+                    events.append('cleanup-completed')
+
+            executor = StuckExecutor(client.calls)
+            startup = asyncio.create_task(api.start(client, executor,
+                installation_id='fixture', node_id=NODE))
+            await asyncio.wait_for(reconcile_entered.wait(), 1)
+            startup.cancel()
+            await asyncio.wait_for(cleanup_entered.wait(), 1)
+            before = time.monotonic()
+            async def cancel_repeatedly():
+                while not startup.done():
+                    startup.cancel()
+                    await asyncio.sleep(.01)
+            canceller = asyncio.create_task(cancel_repeatedly())
+            try:
+                await asyncio.wait_for(startup, 10.5)
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                await canceller
+                elapsed = time.monotonic() - before
+                release.set()
+                # Только test teardown дожидается зависшего port после отказа;
+                # production не вправе выдавать его за physical quiescence.
+                remaining = asyncio.all_tasks() - {asyncio.current_task()}
+                await asyncio.gather(*remaining, return_exceptions=True)
+            return elapsed
+
+        elapsed = asyncio.run(scenario())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], Unavailable, repr(failures[0]))
+        self.assertIn('shutdown incomplete', str(failures[0]))
+        self.assertGreaterEqual(elapsed, 4.8)
+        self.assertLess(elapsed, 10.5)
+        self.assertEqual(api.STARTUP_TIMEOUT, 5.0)
+        self.assertEqual(events, ['cleanup-entered', 'cleanup-completed'])
+        self.assertTrue(client.closed)
+        self.assertEqual([row[0] for row in client.calls], ['discover', 'reconcile'])
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass

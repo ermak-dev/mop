@@ -85,7 +85,11 @@ async def _close_unstarted(client, executor):
         finally:
             async with asyncio.timeout(STARTUP_TIMEOUT):
                 await client.aclose()
-    owner = asyncio.create_task(close())
+    await _join_cleanup(asyncio.create_task(close()))
+
+
+async def _join_cleanup(owner):
+    """Shield без join теряет cleanup при следующем cancel и shutdown loop."""
     cancelled = False
     while not owner.done():
         try:
@@ -113,7 +117,9 @@ async def start(client, executor, *, installation_id, node_id):
         return runtime
     except BaseException as error:
         if runtime is not None:
-            await runtime.aclose()
+            # Один aclose ждёт существующего Runtime shutdown owner. Повторный
+            # caller cancel не освобождает startup до его bounded результата.
+            await _join_cleanup(asyncio.create_task(runtime.aclose()))
         else:
             await _close_unstarted(client, executor)
         if isinstance(error, TimeoutError):
