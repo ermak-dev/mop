@@ -3748,9 +3748,10 @@ def check_server_namespace_259(c):
             "diagnose" in top)
     # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
     # #719: private OS fixture -- node diagnostic, не pool/model operation.
-    c.expect("#646/#719/#643 driver keeps operations and bounded non-model diagnostics",
+    c.expect("#646/#719/#643/#746 driver keeps operations and bounded non-model diagnostics",
              set(tree.get("driver") or {}),
-             {"run", "list", "sweep", "build", "clone-work", "purge-clone", "exec", "scope-probe", "hold-probe"})
+             {"run", "list", "sweep", "build", "clone-work", "purge-clone", "exec",
+              "scope-probe", "hold-probe", "phase-input-probe"})
     for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
         c.expect(f"#259 LEGACY must map {old} into server", cli.LEGACY.get(old), ("server", old))
     for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],
