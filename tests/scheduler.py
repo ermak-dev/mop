@@ -265,14 +265,19 @@ def scenario(c, name, expect_proof, expect_writes, *, get_delay=0.0, replaced_in
 # нет», иначе текущий индекс), readback точной адресной Meta; потерянный ответ
 # -- unknown без второй записи, сверка inspect_register только чтением.
 # STATUS: FIXED — see #643
-def register_ticket(peer, scheduler_id, *, expected=0, seconds=30, meta=None):
+def register_ticket(peer, scheduler_id, *, expected=0, seconds=30, meta=None, predecessor=None):
     target = Target(uuid4(), uuid4(), uuid4(), uuid4(), uuid4(), 1, 'role', 'a' * 64, uuid4(), 3, 7)
     epoch, restore = uuid4(), uuid4()
+    if predecessor is not None:
+        from dataclasses import replace
+        target = replace(predecessor.target, incarnation_id=uuid4())
+        epoch, restore = predecessor.epoch, predecessor.restore_generation
     job = {'ID': 'owned-job', 'Name': 'pu-owned-1', 'Type': 'service',
            'Meta': {**port.addressed_metadata(epoch, restore, target), 'mop.launch_schema': '1',
                     **(meta or {})}}
     return port.RegisterTicket(epoch, target, scheduler_id, 'owned-job', 'default', restore, expected,
-                               job, uuid4(), uuid4(), datetime.now(timezone.utc) + timedelta(seconds=seconds))
+                               job, uuid4(), uuid4(), datetime.now(timezone.utc) + timedelta(seconds=seconds),
+                               predecessor=predecessor)
 
 
 def check_register_643(c):
@@ -300,12 +305,14 @@ def check_register_643(c):
     try:
         scheduler_id = uuid4()
         old = ticket(peer, scheduler_id, 30)
-        value = register_ticket(peer, scheduler_id, expected=7)
+        value = register_ticket(peer, scheduler_id, expected=7, predecessor=old.job)
         proof = adapter(peer, scheduler_id).register_job(value)
         c.expect("#643 update replaces the expected index",
                  (proof.outcome, proof.modify_index), ('succeeded', 8))
         peer.state['replaced_index'] = 12
-        stale = register_ticket(peer, scheduler_id, expected=8)
+        current = JobPin(value.epoch, value.target, scheduler_id, value.job_id, value.namespace, 8,
+                         value.restore_generation)
+        stale = register_ticket(peer, scheduler_id, expected=8, predecessor=current)
         proof = adapter(peer, scheduler_id).register_job(stale)
         c.expect("#643 a moved index refuses without a write",
                  (proof.outcome, proof.evidence, peer.state['writes']), ('failed', 'conditional-refusal', 1))
@@ -329,8 +336,10 @@ def check_register_643(c):
         c.expect("#643 reconciliation never writes", peer.state['writes'], 1)
         foreign = register_ticket(peer, scheduler_id, meta={'mop.launch_schema': '2'})
         proof = adapter(peer, scheduler_id).inspect_register(foreign)
-        c.expect("#643 a job with other metadata is not ours", (proof.outcome, proof.evidence),
-                 ('failed', 'conditional-refusal'))
+        # #625: чужая Meta после возможного POST не доказывает, что исходный
+        # write уже не придёт. Сверка сохраняет unknown, не снимает fences.
+        c.expect("#643 foreign readback cannot prove the original write was refused", (proof.outcome, proof.evidence),
+                 ('unknown', 'scheduler-uncertain'))
     finally:
         peer.close()
     # Истёкший intent и неадресная Meta -- отказ до любого запроса.
