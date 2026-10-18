@@ -36,6 +36,7 @@ class Command(str, Enum):
     APPROVE_DEFINITION = 'approve_definition'
     RESERVE_GRANT = 'reserve_grant'
     PROVISION_GRANT = 'provision_grant'
+    PREPARE_REPLACEMENT = 'prepare_replacement'
     ACTIVATE_GRANT = 'activate_grant'
     PUBLISH_PREPARATION = 'publish_preparation'
     READ_PREPARATION = 'read_preparation'
@@ -235,13 +236,14 @@ def parse_request(data):
               Command.APPROVE_DEFINITION: ('definition_id',),
               Command.RESERVE_GRANT: ('project_id', 'definition_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),
               Command.PROVISION_GRANT: ('grant_id', 'expected_revision'),
+              Command.PREPARE_REPLACEMENT: ('operation_id',),
               Command.ACTIVATE_GRANT: ('grant_id', 'expected_revision'),
               Command.PUBLISH_PREPARATION: ('project_id', 'tasks', 'variables', 'provenance', 'commit', 'secret_refs'),
               Command.READ_PREPARATION: ('revision_id',), Command.APPROVE_PREPARATION: ('revision_id',)}
     exact(args, shapes[command])
     result = dict(args)
     for name in ('project_id', 'secret_id', 'rotation_id', 'claim_id', 'definition_id',
-                 'grant_id', 'revision_id', 'target_id', 'incarnation', 'request_id'):
+                 'grant_id', 'revision_id', 'target_id', 'incarnation', 'request_id', 'operation_id'):
         if name in result:
             optional = command is Command.CREATE and name == 'project_id' and result[name] is None
             result[name] = None if optional else identifier(result[name])

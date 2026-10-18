@@ -27,7 +27,7 @@ from . import models as m, services as auth
 from .context import ActorContext, ActorKind
 from .delegation import (ApprovedPolicy, RoleBinding, DefinitionContent, DefinitionMetadata, AgentProfileInfo,
                          GrantInfo, AddressedPolicy, MessageAuthority, PolicyBinding, RetirementReceipt,
-                         allows_spawn, uuid_value)
+                         ReplacementIntent, allows_spawn, uuid_value)
 
 
 class Conflict(ValueError):
@@ -114,6 +114,62 @@ class _RetentionAuthority:
                 raise auth.Denied('credential provisioning binding changed')
         else:
             raise auth.Denied('unsupported retained access value')
+
+
+class _ReplacementRetentionAuthority:
+    """Исключение только admitted подготовки, никогда generic reserve/provision.
+
+    Внешний SQL-only порт держит restore/Assignment/Operation/resource locks
+    до COMMIT вызывающего; Access повторно доказывает source и exact policy.
+    """
+    def __init__(self, grants, authority):
+        self.grants, self.authority, self.proof = grants, authority, None
+
+    def require(self, actor):
+        api = self.grants
+        with transaction.atomic():
+            spec = self.authority.require(actor)
+            if type(spec) is not ReplacementIntent:
+                raise auth.Denied('typed admitted replacement intent required')
+            old, new = spec.source, spec.destination
+            for action in ('operations.view_operation', 'execution.update_puppet', 'execution.create_puppet', 'access.issue_grant'):
+                if api._human(actor, action, old.project_id) != old.human_owner_id:
+                    raise auth.Denied('replacement requires its human owner')
+            source = api._execution_rows(old)[0]
+            api._creation_actor(api._intent_actor(source), source)
+            # Перенос ancestry -- отдельный контракт. До его реализации не
+            # превращаем делегированного child в новый root grant.
+            if source.intent.parent_id is not None:
+                raise auth.Denied('replacement of delegated ancestry is not bound')
+            profile = m.AgentProfile.objects.filter(project_id=old.project_id, target_id=old.target_id,
+                owner_id=old.human_owner_id, agent_id=source.subject_id, definition_id=spec.definition_id).first()
+            if (profile is None or source.intent.definition_id != spec.definition_id or api._policy(source) != spec.policy
+                    or not timezone.now() < spec.expires_at <= source.intent.expires_at):
+                raise auth.Denied('replacement definition, exact policy or expiry changed')
+            credential = m.CredentialBinding.objects.get(token_user_id=source.subject_id)
+            proof = (spec, api._info(source), profile.id, profile.revision, credential.id, credential.token_digest)
+            if self.proof is not None and self.proof != proof:
+                raise auth.Denied('replacement source authority changed')
+            self.proof = proof
+            row = m.Grant.objects.select_for_update().select_related('intent__definition', 'subject').filter(pk=new.grant_id).first()
+            if row is not None:
+                intent = row.intent
+                if (api._info(row).binding != new or row.subject_id != source.subject_id
+                        or (intent.request_id, intent.actor_id, intent.actor_credential_id, intent.definition_id,
+                            intent.parent_id, intent.expires_at, api._policy(row)) !=
+                           (spec.request_id, actor.user_id, actor.credential_id, spec.definition_id, None,
+                            spec.expires_at, spec.policy)):
+                    raise auth.Denied('replacement reservation intent changed')
+                api._creation_actor(actor, row)
+                api._check_row(row, state='reserved')
+            return spec, source, row
+
+    def check(self, actor, scope):
+        spec, _, row = self.require(actor)
+        wanted = RetentionScope(spec.destination.project_id, spec.destination.human_owner_id,
+                                spec.destination.grant_id, 'grant')
+        if row is None or scope != wanted:
+            raise auth.Denied('replacement retained credential scope mismatch')
 
 
 class _LaunchDefinitionAuthority:
@@ -894,6 +950,45 @@ class Grants:
                 self._recheck(actor, chain)
             self._check_row(row, state='reserved')
             version_id = self.secrets.commit(actor, prepared)
+            self._cas(row, credential_version_id=version_id)
+            self._event(row, actor, 'provision')
+            return self._info(row)
+
+    @storage_boundary
+    @sensitive_variables('key', 'prepared')
+    def prepare_replacement(self, actor, *, authority):
+        """Только prospective credential по уже admitted locator общего журнала.
+
+        Прежние Assignment/Actor/Token не меняются. Generic provision остаётся
+        закрыт при current-binding mismatch; активации и cutover здесь нет.
+        """
+        outside_transaction()
+        gate = _ReplacementRetentionAuthority(self, authority)
+        with transaction.atomic():
+            spec, source, row = gate.require(actor)
+            if row is None:
+                new, proof = spec.destination, spec.policy
+                intent = m.CreationIntent.objects.create(
+                    id=uuid.uuid5(spec.request_id, 'replacement-intent'), owner_id=new.human_owner_id,
+                    actor_id=actor.user_id, actor_credential_id=actor.credential_id, project_id=new.project_id,
+                    definition_id=spec.definition_id, parent_id=None, request_id=spec.request_id,
+                    target_id=new.target_id, incarnation=new.incarnation, expires_at=spec.expires_at,
+                    policy_approval_id=proof.approval_id, policy_version_id=proof.version_id, policy_digest=proof.digest)
+                row = m.Grant.objects.create(id=new.grant_id, intent=intent, subject_id=source.subject_id)
+                # Проверка destination proof не выбирает latest approval.
+                self._check_row(self._row(row.id), state='reserved')
+                self._event(row, actor, 'reserve')
+            if row.credential_version_id is not None:
+                return self._info(row)
+            revision, grant_id = row.revision, row.id
+        retained = RetainedSecrets(provider=self.secrets.provider, authority=gate)
+        key = _secrets.token_hex(32)
+        prepared = retained.prepare(actor,
+            RetentionScope(spec.destination.project_id, spec.destination.human_owner_id, grant_id, 'grant'), key.encode())
+        with transaction.atomic():
+            _, _, row = gate.require(actor)
+            self._expected(row, revision)
+            version_id = retained.commit(actor, prepared)
             self._cas(row, credential_version_id=version_id)
             self._event(row, actor, 'provision')
             return self._info(row)
