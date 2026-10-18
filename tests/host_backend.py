@@ -21,7 +21,8 @@ from uuid import uuid4
 
 import _lib  # noqa: F401
 import hermetic  # noqa: F401
-from host_scope import Adapter, installed, scope
+from _host_scope_fixture import Adapter, installed, scope
+from _native_startup_fixture import Client, Executor
 from mop.node.host_scope import Refused, Request, Unknown
 from mop.node.host_scope_supervisor import Supervisor, SocketServer
 
@@ -152,7 +153,6 @@ class BackendOwnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raw_dictionary_or_fake_backend_cannot_bypass_native_startup(self):
         from mop.node import native_startup
-        from native_startup import Client, Executor
         client = Client()
         executor = Executor(client.calls)
         with self.assertRaisesRegex(Refused, 'backend|authority'):

@@ -39,6 +39,7 @@ def changed_cwd(path):
         os.fchdir(previous)
         os.close(previous)
 
+import _lib  # noqa: F401 — общий lifetime проверки (#675)
 import hermetic  # noqa: F401
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mop.client.local_bridge import LocalBridge, OwnSession
