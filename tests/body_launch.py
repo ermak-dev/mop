@@ -540,8 +540,9 @@ class SessionConfirmationTests(unittest.IsolatedAsyncioTestCase):
         target = BoundTarget(w.target_id, w.incarnation_id, w.node_id, w.executor_epoch,
             w.generation, w.role, w.bundle_digest, w.grant_id, layout.clone,
             layout.tmux_socket, '%0', layout.launcher, proof.session_socket, proof)
-        receipt = ReadyReceipt(r, proof.scope, proof.pid, proof.process_start, str(uuid4()), 'confirmed-model')
+        receipt = ReadyReceipt(r, proof.scope, proof.pid, proof.process_start, '42', 'confirmed-model')
         class Receipts:
+            desired_model = 'confirmed-model'
             async def ready(self, requested, observed): return receipt
         confirmation = ReadyConfirmation(resolver, Receipts())
         self.assertTrue(await confirmation.confirmed(w, target))
@@ -549,8 +550,9 @@ class SessionConfirmationTests(unittest.IsolatedAsyncioTestCase):
                     replace(receipt, scope=replace(proof.scope, producer_epoch=uuid4()))):
             receipt = bad
             self.assertFalse(await confirmation.confirmed(w, target))
-        receipt = ReadyReceipt(r, proof.scope, proof.pid, proof.process_start, str(uuid4()), 'confirmed-model')
+        receipt = ReadyReceipt(r, proof.scope, proof.pid, proof.process_start, '42', 'confirmed-model')
         class RacingReceipts:
+            desired_model = 'confirmed-model'
             async def ready(self, requested, observed):
                 nonlocal proof
                 proof = replace(proof, process_start='replacement-during-HTTP')

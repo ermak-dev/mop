@@ -681,7 +681,7 @@ class ActivatedManagementContext(TransactionTestCase):
             app_label, codename = code.split('.')
             machine_user.user_permissions.add(Permission.objects.get(content_type__app_label=app_label, codename=codename))
         self.machine_auth = Credential('token', self._executor_key)
-        observed = Observation(SessionScope.parse(self.scope), 1, 'PostModelSwitch', None, 'fixture-native-model', None, None, 0)
+        observed = Observation(SessionScope.parse(self.scope), 1, 'PostModelSwitch', None, 'fixture-model', None, None, 0)
         response = Client(HTTP_AUTHORIZATION='Token '+self._executor_key).post('/api/v1/machine/telemetry',
             observed.wire(), content_type='application/json', secure=True)
         self.assertEqual(response.status_code, 200, response.content)
@@ -689,8 +689,10 @@ class ActivatedManagementContext(TransactionTestCase):
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot)
         self.assertEqual(work.action, 'confirm_ready')
         attempt = service.claim(actor, work, request_id=uuid4())
+        from _create_cases import ready_evidence
         service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready', ready_evidence=ready_evidence(
+                self, service, actor, work, attempt, self._executor_key, ingest=False))
         grant = Grant.objects.get(pk=self.assignment.grant_id)
         canonical = Token.objects.get(user_id=grant.subject_id).key
         activator = auth.enroll_service('management-activation-worker', self.node.pk,

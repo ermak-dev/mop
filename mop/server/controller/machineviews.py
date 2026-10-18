@@ -122,13 +122,27 @@ class Claim(MachineView):
             'lease_until': attempt.lease_until.isoformat(), 'work': p.work_to_wire(work)})
 
 
+class ReadyReceipt(MachineView):
+    def post(self, request):
+        from mop.common.readiness import ReadyRequest
+        from mop.server.access.services import node_executor, Denied
+        metadata = ReadyRequest.parse(request.data)
+        node_executor(request.actor, metadata.scope.node_id)
+        if request.auth is None:
+            raise Denied('machine token required for initial readiness query')
+        return Response(execution.ready_receipt(request.actor, metadata).wire())
+
+
 class Result(MachineView):
     def post(self, request):
-        value = machine_document(request.data, ('schema_version', 'attempt_id', 'expected_revision',
-                                                'receipt_id', 'outcome', 'evidence'))
+        from .strict import strict_document
+        from mop.common.readiness import ReadyEvidence
+        value = strict_document(request.data, ('schema_version', 'attempt_id', 'expected_revision',
+            'receipt_id', 'outcome', 'evidence'), optional=('ready_evidence',))
+        ready = ReadyEvidence.parse(value['ready_evidence']) if 'ready_evidence' in value else None
         result = execution.result(request.actor, p.uuid_value(value['attempt_id']),
             expected_revision=p.counter(value['expected_revision']), receipt_id=p.uuid_value(value['receipt_id']),
-            outcome=value['outcome'], evidence=value['evidence'])
+            outcome=value['outcome'], evidence=value['evidence'], ready_evidence=ready)
         return Response(result.to_wire())
 
 
