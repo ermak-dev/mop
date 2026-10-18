@@ -126,14 +126,41 @@ class ActualPrivateInputTests(unittest.TestCase):
     def bootstrap_budget_roundtrip(self, tasks, variables=b'', provenance='fixture', refs=()):
         from mop.common.bootstrap_envelope import bounded_content, encode
         import base64
+        prepare_a, prepare_value = replace(self.a, attempt_id=str(uuid4())), self.value
         _, _, self.value = selected('bootstrap_body')
         self.a = replace(self.a, work=replace(self.a.work, action='bootstrap_body'))
         self.value['work'] = self.a.work.wire()
         raw = encode(bounded_content(tasks, variables, provenance, 'a'*64, refs))
         self.value['bootstrap'] = dict(envelope=base64.b64encode(raw).decode())
         self.value['bootstrap_digest'] = hashlib.sha256(raw).hexdigest()
-        descriptor = self.write()
+        private_size = len(self.m.pack(self.a, self.s, self.value).raw)
+        for cap in (262144, private_size-1):
+            def lowered():
+                with self.f.NodeWriter(self.ingress, node_uid=NODE,
+                        limits=self.m.Limits(max_file_bytes=cap)) as writer:
+                    return writer.write(self.a, self.s, self.value).wire()
+            denied = as_uid(NODE, lowered)
+            self.assertFalse(denied['ok'], denied)
+            self.assertEqual(denied['error'], 'Refused')
+            self.assertEqual(data_entries(self.ingress), [])
+        def produce():
+            with self.f.NodeWriter(self.ingress, node_uid=NODE) as writer:
+                large = writer.write(self.a, self.s, self.value).wire()
+                # Mixed retained phases: prepare не получает bootstrap budget,
+                # но большой owned bootstrap не ломает следующий small write.
+                small = writer.write(prepare_a, self.s, prepare_value).wire()
+                return large, small
+        produced = as_uid(NODE, produce)
+        self.assertTrue(produced['ok'], produced)
+        descriptor, small = (self.m.Descriptor.parse(value) for value in produced['value'])
+        for cap in (262144, private_size-1):
+            with self.store(limits=self.m.Limits(max_file_bytes=cap)) as lower:
+                with self.assertRaises(Refused):
+                    lower.snapshot(NODE, descriptor, self.a)
+                self.assertEqual(lower.retained, ())
+                self.assertEqual(data_entries(self.snapshots), [])
         receipt = self.owner.snapshot(NODE, descriptor, self.a)
+        small_receipt = self.owner.snapshot(NODE, small, prepare_a)
         def consume():
             from mop.common.bootstrap_envelope import decode_base64
             with self.f.BodyReader(self.snapshots, body_uid=BODY, body_gid=BODY,
@@ -148,7 +175,9 @@ class ActualPrivateInputTests(unittest.TestCase):
         self.assertEqual(result['value'], dict(tasks=hashlib.sha256(tasks).hexdigest(),
             variables=hashlib.sha256(variables).hexdigest(), refs=len(refs)))
         self.owner.cleanup_input(receipt)
-        self.owner.cleanup_snapshot(receipt, quiescent=True)
+        self.owner.cleanup_snapshot(receipt)
+        self.owner.cleanup_input(small_receipt)
+        self.owner.cleanup_snapshot(small_receipt)
         self.assertEqual(data_entries(self.ingress), [])
         self.assertEqual(data_entries(self.snapshots), [])
 

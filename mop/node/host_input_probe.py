@@ -17,6 +17,7 @@ LABEL = 'dev.mop.phase-input-fixture'
 SOURCES = ('mop/node/host_inputs.py', 'mop/node/host_input_files.py',
     'mop/node/host_scope.py', 'mop/node/http_execution.py',
     'mop/common/initialcreate.py', 'mop/common/bootstrap_envelope.py',
+    'mop/common/initial_transfer.py',
     'mop/common/credentials.py', 'mop/common/soul.py',
     'mop/common/busnames.py', 'mop/common/paths.py',
     'tests/_host_inputs_data.py', 'tests/_host_inputs_fixture.py')
