@@ -237,6 +237,16 @@ class CredentialClient:
         from .initialcreate import parse_delivery
         return parse_delivery(self._invoke(auth, p.Command.INITIAL_LAUNCH, {'work': work}), work)
 
+    def read_management_context(self, auth: p.Credential, request):
+        """Только current runtime locators; original machine token остаётся authority."""
+        from .management_context import ManagementContext, ManagementRequest
+        wanted = ManagementRequest.parse(request)
+        result = self._invoke(auth, p.Command.MANAGEMENT_CONTEXT, {'request': wanted.wire()})
+        try:
+            return ManagementContext.parse(result, wanted)
+        except ValueError:
+            raise p.CredentialError('invalid addressed management context response') from None
+
     def read_definition(self, auth: p.Credential, definition_id: UUID) -> p.DefinitionBytes:
         result = self._invoke(auth, p.Command.DEFINITION, {'definition_id': str(definition_id)})
         return self._result(p.DefinitionBytes, result)

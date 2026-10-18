@@ -384,7 +384,8 @@ class Grant(Evidence):
         # ровно один ContentType на codename; deprecated Principal их не держит.
         permissions = [('view_role', 'Can view role'), ('approve_role', 'Can approve role'),
                        ('issue_grant', 'Can issue grant'), ('revoke_grant', 'Can revoke grant'),
-                       ('activate_grant', 'Can activate claimed create grant')]
+                       ('activate_grant', 'Can activate claimed create grant'),
+                       ('read_management_context', 'Can read current addressed agent management context')]
         constraints = [models.CheckConstraint(condition=Q(state__in=('reserved', 'active', 'revoked', 'expired'), revision__gte=1), name='access_grant_lifecycle'),
             models.CheckConstraint(condition=Q(retirement__in=('pending', 'applied', 'refused', 'unknown')), name='access_grant_retirement'),
             models.CheckConstraint(condition=~Q(state='active') | Q(credential_version__isnull=False), name='access_active_credential')]

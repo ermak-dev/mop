@@ -24,7 +24,8 @@ from django.db.models import Q
 
 from ..catalog.services import readmission
 from . import models as m
-from .crypto import CryptoProvider, Envelope, SecretContext, SecretCryptoError, MAX_PLAINTEXT_BYTES
+from .crypto import (CryptoProvider, Envelope, SecretContext, SecretCryptoError,
+                     SecretCryptoUnavailable, MAX_PLAINTEXT_BYTES)
 
 
 class Conflict(ValueError):
@@ -253,16 +254,17 @@ def seal(provider, value, aad):
 
 
 def reveal(provider, envelope, aad):
-    result = None
     try:
         result = provider.decrypt(envelope, aad)
     except SecretCryptoError:
         raise
     except Exception:
         pass
-    if type(result) is not bytes or len(result) > MAX_PLAINTEXT_BYTES:
-        raise SecretCryptoError('secret decryption failed')
-    return result
+    else:
+        if type(result) is not bytes or len(result) > MAX_PLAINTEXT_BYTES:
+            raise SecretCryptoError('secret decryption failed')
+        return result
+    raise SecretCryptoUnavailable('secret decryption failed')
 
 
 @storage_errors

@@ -14,7 +14,7 @@ from mop.server.install_files import private_directory
 # и не бизнес-политика файла. Каждое действие повторно проверяет живой RBAC.
 NODE_ACTIONS = frozenset('execution.' + name for name in (
     'poll_work', 'claim_work', 'report_result', 'read_facts', 'read_launch',
-    'register_producer', 'ingest_telemetry', 'ingest_observations'))
+    'register_producer', 'ingest_telemetry', 'ingest_observations')) | frozenset(('access.read_management_context',))
 
 
 class Transport(dict):

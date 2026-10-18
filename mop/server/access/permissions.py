@@ -33,7 +33,7 @@ _OPERATIONS = ('stop_puppet_job', 'override_assignment', 'recover_operation', 'c
     'view_operation', 'view_audit', 'diagnose_pool', 'treat_pool', 'collect_pool_garbage',
     'sweep_pool', 'view_node_disk')
 _SECRETS = ('view_secret_metadata', 'manage_project_secret', 'deliver_secret', 'rotate_proxy_key')
-_ACCESS = ('view_role', 'approve_role', 'issue_grant', 'revoke_grant', 'activate_grant')
+_ACCESS = ('view_role', 'approve_role', 'issue_grant', 'revoke_grant', 'activate_grant', 'read_management_context')
 
 
 def _identity(prefix, codes):
@@ -68,7 +68,7 @@ ACTIONS = frozenset(ACTION_PERMISSIONS)
 MACHINE_ACTIONS = frozenset(('catalog.record_node_application', 'catalog.observe_node',
     'catalog.record_settings_application', 'execution.poll_work', 'execution.claim_work',
     'execution.report_result', 'execution.read_facts', 'execution.read_launch', 'execution.register_producer', 'execution.ingest_telemetry',
-    'execution.ingest_observations', 'secrets.deliver_secret', 'access.activate_grant'))
+    'execution.ingest_observations', 'secrets.deliver_secret', 'access.activate_grant', 'access.read_management_context'))
 
 # Инвариант оставшейся scope-таблицы: у installation-wide действий нет строки
 # проекта, поэтому проектная membership не может выразить их границу; право

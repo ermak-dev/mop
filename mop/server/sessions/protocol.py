@@ -108,6 +108,18 @@ class CredentialAssignment:
 
 
 @dataclass(frozen=True)
+class ManagementAssignment:
+    """SQL-only proof current runtime; не wire authority и не Work lease."""
+    binding: AssignmentBinding
+    epoch: UUID
+    identity_receipt_id: UUID
+    readiness_receipt_id: UUID
+    producer_id: UUID
+    model_receipt_id: int
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class WorkV1:
     epoch: UUID
     operation_id: UUID

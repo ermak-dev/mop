@@ -25,6 +25,8 @@ GATE_LABELS = (
     '.test_fresh_installer_starts_rootless_daemon_with_separate_pg_login_and_frontend_uid',
     '_endpoint_credential_uid_gate.EndpointCredentialUids'
     '.test_private_reports_cross_real_uid_without_root_or_caller_authority',
+    '_credential_uid_gate.ManagementContextUids'
+    '.test_management_context_actual_frontend_uid_has_no_human_or_generic_token_authority',
 )
 
 

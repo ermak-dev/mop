@@ -32,7 +32,7 @@ from mop.server.sessions.models import NodeExecutor
 # STATUS: FIXED — see #722
 ACTIONS = frozenset('execution.' + name for name in (
     'poll_work', 'claim_work', 'report_result', 'read_facts', 'read_launch',
-    'register_producer', 'ingest_telemetry', 'ingest_observations'))
+    'register_producer', 'ingest_telemetry', 'ingest_observations')) | frozenset(('access.read_management_context',))
 
 
 @override_settings(ALLOWED_HOSTS=['testserver'])
@@ -192,6 +192,23 @@ class NodeBootstrapExport(TransactionTestCase):
         with self.assertRaises(RuntimeError):
             self.export('removed', enrollment_id=enrollment.pk)
         self.assertEqual(get_user_model().objects.filter(kind='service').count(), 1)
+
+    def test_old_eight_action_enrollment_reexport_never_silently_expands(self):
+        # HYPOTHESIS #742: расширение fresh profile не должно ремонтировать старый.
+        # SOLUTION: fresh nine; existing exact permissions не меняются при reexport.
+        # RESULT: fresh profile RED 8 != 9; 15/15 PG17 GREEN, old eight отказан.
+        # STATUS: FIXED — see #742
+        _, data, enrollment, user = self.issued()
+        permission = Permission.objects.get(content_type__app_label='access', codename='read_management_context')
+        user.user_permissions.remove(permission)
+        before = set(user.get_all_permissions())
+        self.assertEqual(len(before), 8)
+        with self.assertRaises(RuntimeError):
+            self.export('legacy-eight', enrollment_id=enrollment.pk)
+        user = get_user_model().objects.get(pk=user.pk)
+        self.assertEqual(set(user.get_all_permissions()), before)
+        self.assertEqual(Token.objects.get(user=user).key, data['token'])
+        self.assertFalse((self.root/'legacy-eight').exists())
 
     def test_permission_membership_purpose_and_actor_drift_refuse_without_repair(self):
         _, data, enrollment, user = self.issued()

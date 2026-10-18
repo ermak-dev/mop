@@ -134,11 +134,14 @@ adapters.
 
 Создаётся один стандартный `Actor(kind='service')` с unusable password,
 `ServiceEnrollment(use_case='node-executor', node=…)`, DRF Token и штатным
-CredentialBinding. Права — фиксированные восемь canonical `execution.*`:
-`poll_work`, `claim_work`, `report_result`, `read_facts`, `read_launch`,
-`register_producer`, `ingest_telemetry`, `ingest_observations`. Это не весь
-machine registry: нет catalog administration/receipts, глобальных proxy rights,
-secret management или grant activation. Membership — ровно текущие не-retired
+CredentialBinding. Fresh profile содержит девять canonical прав: восемь `execution.*`
+(`poll_work`, `claim_work`, `report_result`, `read_facts`, `read_launch`,
+`register_producer`, `ingest_telemetry`, `ingest_observations`) и отдельное
+`access.read_management_context` (#742). Последнее разрешает только адресное
+read-only чтение существующего agent Actor Token после activation, с current
+assignment/readiness/producer и committed model receipt; не issuance/rotation.
+Это не весь machine registry: нет catalog administration/receipts, глобальных
+proxy rights, secret management или grant activation. Membership — ровно текущие не-retired
 NodeProjects, через enabled local source; нет all-project scope, Groups,
 LoginIdentity или human-owner impersonation.
 
@@ -156,6 +159,8 @@ Issuer проверяет **тот же exact live enrollment**, узел/use ca
 UUID/узел, collision username (в том числе человеческого), изменённые права,
 проекты, purpose или отсутствие epoch — отказ, не repair. Нельзя добавить
 права/проекты, ротировать token, усыновить username или породить второй Actor.
+Старый enrollment с восемью правами также не расширяется при reexport: нужен
+отдельный явный maintenance-переход, а не молчаливое присвоение девятого права.
 При обычном I/O/SQL отказе новый bundle удаляется, SQL откатывается. Это не
 распределённая транзакция DB/filesystem при аварийном завершении процесса:
 оставшийся файл/каталог сам по себе ничего не разрешает, а повторная команда

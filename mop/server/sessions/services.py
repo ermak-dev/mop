@@ -175,6 +175,66 @@ class Assignments:
             raise Denied('current identity and readiness confirmations required for addressed credentials')
         return CredentialAssignment(binding, epoch, *receipts)
 
+    def management_proof(self, actor, request, *, epoch):
+        """SQL-only post-activation runtime proof, без stage/lease authority.
+
+        Sessions владеет accepting assignment, exact current producer, native и
+        ready receipts и committed model event. Access видит только projection.
+        """
+        from mop.common.management_context import ManagementRequest
+        from .protocol import ManagementAssignment, AuthorityV1
+        from .producer import CurrentSessions
+        from .producer_models import SessionProducer
+        from .telemetry_models import SessionObservation, ModelObservation, TelemetryReceipt
+        if (type(request) is not ManagementRequest or type(epoch) is not UUID
+                or request.scope.epoch != epoch or not transaction.get_connection().in_atomic_block):
+            raise Denied('current management runtime scope required')
+        scope = request.scope
+        current_actor(actor)
+        node_executor(actor, scope.node_id, reason='own enrolled node executor required for management context')
+        binding = self.target(scope.target_id, lock=True)
+        if (binding is None or request.generation != binding.generation
+                or any(getattr(scope, name) != getattr(binding, name) for name in
+                    ('target_id', 'incarnation_id', 'node_id', 'executor_epoch'))):
+            raise Denied('management assignment binding changed')
+        Access().authorize(actor, 'access.read_management_context', project_ids=(binding.project_id,),
+            node_ids=(binding.node_id,))
+        receipts = self.readiness(binding, epoch=epoch)
+        if receipts is None:
+            raise Denied('current identity and readiness required for management context')
+        source = CurrentSessions(installation=lambda: AuthorityV1(epoch, True)).current(binding)
+        if source is None or (source.session_id, source.producer_epoch) != (scope.session_id, scope.producer_epoch):
+            raise Denied('current native producer required for management context')
+        producer = SessionProducer.objects.filter(currentproducer__incarnation_id=binding.incarnation_id,
+            producer_epoch=scope.producer_epoch, executor_user_id=actor.user_id).first()
+        ready = m.ResultReceipt.objects.select_related('attempt').get(pk=receipts[1])
+        if producer is None or not m.ResultReceipt.objects.filter(attempt_id=producer.attempt_id,
+                attempt__assignment_id=binding.target_id, attempt__incarnation_id=binding.incarnation_id,
+                attempt__epoch=epoch, attempt__executor_epoch=binding.executor_epoch,
+                attempt__owner_id=binding.owner_id, attempt__generation=binding.generation,
+                attempt__assignment_revision=binding.revision, attempt__role=binding.role,
+                attempt__bundle_digest=binding.bundle_digest, attempt__grant_id=binding.grant_id,
+                attempt__action='native_exec', attempt__state='succeeded', attempt__executor_user_id=actor.user_id,
+                attempt__operation_id=producer.operation_id, attempt__step_id=producer.step_id,
+                outcome='succeeded', evidence='native-started', resulting_revision=F('attempt__revision'),
+                expected_revision=F('attempt__revision')-1).exists():
+            raise Denied('current successful native execution required for management context')
+        if (ready.attempt.operation_id != producer.operation_id
+                or ready.attempt.executor_user_id != producer.executor_user_id):
+            raise Denied('readiness belongs to a different native producer')
+        observation = SessionObservation.objects.filter(assignment_id=binding.target_id,
+            incarnation_id=binding.incarnation_id, node_id=binding.node_id, epoch=epoch,
+            executor_epoch=binding.executor_epoch, producer_epoch=scope.producer_epoch,
+            session_id=scope.session_id, model_proven=True, confirmed_sequence__gte=1).first()
+        model = None if observation is None else ModelObservation.objects.filter(observation=observation,
+            sequence=observation.confirmed_sequence, model=observation.confirmed_model, kind='PostModelSwitch').first()
+        receipt = None if model is None else TelemetryReceipt.objects.filter(observation=observation,
+            sequence=model.sequence).first()
+        if receipt is None:
+            raise Denied('committed current-producer model receipt required for management context')
+        expiry = m.Assignment.objects.get(pk=binding.target_id).expires_at
+        return ManagementAssignment(binding, epoch, *receipts, producer.id, receipt.id, expiry)
+
     def readiness(self, binding, *, epoch):
         """SQL-only: подтверждённые identity и готовность именно текущего
         admission назначения -> (identity receipt, ready receipt) | None.

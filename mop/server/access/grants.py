@@ -22,7 +22,7 @@ from mop.common import soul
 from ..catalog.models import Project
 from ..secrets.services import (RetainedSecrets, RetentionScope, outside_transaction,
                                 Refused as SecretRefused, Conflict as SecretConflict)
-from ..secrets.crypto import SecretCryptoError
+from ..secrets.crypto import SecretCryptoError, SecretCryptoUnavailable
 from . import models as m, services as auth
 from .context import ActorContext, ActorKind
 from .delegation import (ApprovedPolicy, RoleBinding, DefinitionContent, DefinitionMetadata, AgentProfileInfo,
@@ -335,6 +335,8 @@ class Grants:
         self._require_seal(row)
         try:
             raw = self.secrets.read(actor, RetentionScope(row.project_id, row.owner_id, row.id, 'policy'), row.content_version_id)
+        except SecretCryptoUnavailable:
+            raise
         except SecretCryptoError:
             raise auth.Denied('retained agent definition authentication failed') from None
         return self._decode_definition(row, raw)
@@ -664,6 +666,59 @@ class Grants:
     def authorize_execution(self, binding):
         """Проверка получающего grant без provider I/O; инициатора проверяет WorkPort."""
         self._execution_rows(binding)
+
+    def _management_subject(self, row):
+        """Только stable AGENT профиля назначения; ID caller здесь отсутствует."""
+        subject = row.subject
+        if (subject.kind != 'agent' or not subject.is_active or subject.is_staff
+                or subject.is_superuser or subject.has_usable_password()
+                or not m.AgentProfile.objects.filter(agent=subject, project_id=row.intent.project_id,
+                    target_id=row.intent.target_id, owner_id=row.intent.owner_id).exists()):
+            raise auth.Denied('current registered agent subject required')
+        credential = m.CredentialBinding.objects.filter(token_user=subject).first()
+        if credential is None:
+            raise auth.Denied('agent management credential is unavailable')
+        actor = ActorContext(subject.id, ActorKind.AGENT, credential.id,
+            row.intent.owner_id, credential.bound_node_id, row.id)
+        self._credential(actor)
+        return actor
+
+    @storage_boundary
+    @sensitive_variables('token')
+    def read_management_credential(self, binding, *, authority):
+        """Purpose-specific read, не getToken(userId) и не retained Grant secret.
+
+        Authority — SQL-only порт composition root: current node/runtime/restore.
+        Provider waits вне transaction, весь допуск и creator credential повторены
+        перед чтением plaintext. Ни issuance, ни repair отсутствующих строк.
+        """
+        from .delegation import AgentManagementCredential
+        outside_transaction()
+        with transaction.atomic():
+            authority.require()
+            rows = self._execution_rows(binding)
+            for row in rows:
+                self._creation_actor(self._intent_actor(row), row)
+            actor = self._management_subject(rows[0])
+            pinned = tuple(self._info(row) for row in rows)
+            expiry = min(row.intent.expires_at for row in rows)
+        chain = self._chain(actor)
+        with transaction.atomic():
+            authority.require()
+            rows = self._execution_rows(binding)
+            for row in rows:
+                self._creation_actor(self._intent_actor(row), row)
+            if (tuple(self._info(row) for row in rows) != pinned
+                    or self._management_subject(rows[0]) != actor
+                    or min(row.intent.expires_at for row in rows) != expiry):
+                raise auth.Denied('agent management binding changed during read')
+            self._recheck(actor, chain)
+            token = Token.objects.filter(user_id=actor.user_id).first()
+            credential = m.CredentialBinding.objects.filter(pk=actor.credential_id, token_user_id=actor.user_id).first()
+            if (token is None or credential is None
+                    or not constant_time_compare(credential.token_digest, auth._digest(token.key))):
+                raise auth.Denied('agent management credential revoked or rotated')
+            return AgentManagementCredential(actor.user_id, actor.credential_id, expiry, token.key)
 
     @storage_boundary
     def addressed_policy(self, binding):
