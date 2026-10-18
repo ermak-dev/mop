@@ -32,6 +32,7 @@ class Command(str, Enum):
     ROTATION = 'issue_rotation'
     DEFINITION = 'read_definition'
     LAUNCH = 'read_launch'
+    INITIAL_LAUNCH = 'read_initial_launch'
     PUBLISH_DEFINITION = 'publish_definition'
     APPROVE_DEFINITION = 'approve_definition'
     RESERVE_GRANT = 'reserve_grant'
@@ -231,7 +232,7 @@ def parse_request(data):
               Command.STAGE: ('secret_id', 'value', 'expected_revision'),
               Command.UPDATE: ('secret_id', 'value', 'expected_revision'),
               Command.ADDRESSED: ('target_id',), Command.ROTATION: ('rotation_id', 'claim_id', 'generation'),
-              Command.DEFINITION: ('definition_id',), Command.LAUNCH: ('work',),
+              Command.DEFINITION: ('definition_id',), Command.LAUNCH: ('work',), Command.INITIAL_LAUNCH: ('work',),
               Command.PUBLISH_DEFINITION: ('project_id', 'manifest', 'prompt', 'provenance'),
               Command.APPROVE_DEFINITION: ('definition_id',),
               Command.RESERVE_GRANT: ('project_id', 'definition_id', 'target_id', 'incarnation', 'request_id', 'expires_at'),

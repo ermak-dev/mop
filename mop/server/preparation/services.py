@@ -273,6 +273,18 @@ class Preparation:
         return result
 
     @storage_boundary
+    def read_initial_launch(self, actor, revision_id, *, authority):
+        """Точный approved bootstrap для claimed bootstrap_body, без owner credential."""
+        outside_transaction()
+        row = m.BootstrapRevision.objects.get(pk=revision_id)
+        from mop.server.secrets.services import RetainedSecrets
+        reader = RetainedSecrets(provider=self.secrets.provider, authority=authority)
+        value = reader.read(actor, self._scope(row), row.content_version_id)
+        result = self._decode(row, value)
+        authority.check(actor, self._scope(row))
+        return result
+
+    @storage_boundary
     def approve(self, actor, revision_id):
         with transaction.atomic():
             row = m.BootstrapRevision.objects.select_for_update().get(pk=revision_id)

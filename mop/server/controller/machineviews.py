@@ -65,6 +65,18 @@ class Launch(MachineView):
         return Response(read(Credential('token', request.auth.key), p.work_to_wire(work)))
 
 
+class InitialLaunch(MachineView):
+    def post(self, request):
+        from mop.common.credentials import Credential
+        from mop.server.access.services import node_executor, Denied
+        from .launchdelivery import read_initial
+        work = p.work_from_wire(request.data)
+        node_executor(request.actor, work.node_id)
+        if request.auth is None:
+            raise Denied('machine token required for initial launch')
+        return Response(read_initial(Credential('token', request.auth.key), p.work_to_wire(work)))
+
+
 class ExecutorState(MachineView):
     def get(self, request):
         values = query(request.query_params, ('schema_version','node_id'))

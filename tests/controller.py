@@ -16,6 +16,7 @@ if __name__ == '__main__':
         '_restart_vertical_cases', '_send_dispatch_cases.SendDispatch', '_wipe_cases.WipeVertical',
         '_restart_live_cases',
         '_stop_cases.StopVertical', '_delete_cases.DeleteVertical', '_create_cases.CreateVertical', '_create_cases.CreateRegistration', '_create_cases.CreateMachineSteps', '_create_cases.CreateActivation',
+        '_initial_create_cases.InitialCreatePhases',
         '_replacement_cases.ReplacementRegistration', '_replacement_cases.ReplacementPreparation', '_update_cases.UpdateAdmission',
         '_replacement_execution_cases.ReplacementExecution', '_replacement_execution_cases.ReplacementGrantExecution',
         '_telemetry_cases', '_producer_cases', '_realtime_cases', '_endpoint_cases', '_endpoint_grant_cases',

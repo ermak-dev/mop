@@ -435,6 +435,45 @@ class RetainedSecrets:
         return value
 
 
+@dataclass(frozen=True)
+class InitialConsumerScope:
+    """Внутренний finite consumer выбранного initial launch, не wire secret lookup."""
+    project_id: uuid.UUID
+    owner_id: int
+    policy_id: uuid.UUID
+    purpose: str
+    version_id: uuid.UUID
+
+
+class InitialLaunchSecrets:
+    """Purpose-specific read; authority принадлежит exact claimed фазе Root."""
+    def __init__(self, *, provider, authority):
+        self.provider, self.authority = provider, authority
+
+    @storage_errors
+    def read(self, actor, scope):
+        from mop.common.initialcreate import CONSUMERS
+        outside_transaction()
+        if type(scope) is not InitialConsumerScope or scope.purpose not in CONSUMERS:
+            raise Refused('finite initial launch consumer scope required')
+        self.authority.check_consumer(actor, scope)
+        version = m.SecretVersion.objects.select_related('secret__installation').get(pk=scope.version_id)
+        row = version.secret
+        expected_purpose = dict(source_credential='git', bootstrap_input='project', model_config='project', model_credential='proxy')
+        if (row.project_id != scope.project_id or row.created_by_id != scope.owner_id
+                or row.active_version_id != version.id or row.purpose != expected_purpose[scope.purpose]):
+            raise Refused('selected initial launch consumer changed')
+        available(row)
+        envelope = Envelope.from_bytes(bytes(version.envelope))
+        if envelope.key_id != version.key_id or envelope.nonce != bytes(version.nonce):
+            raise SecretCryptoError('secret envelope metadata mismatch')
+        value = reveal(self.provider, envelope, context(row, version))
+        if len(value) != version.size:
+            raise SecretCryptoError('secret envelope size mismatch')
+        self.authority.check_consumer(actor, scope)
+        return dict(purpose=scope.purpose, version_id=str(version.id), name=row.name, kind=row.kind, value=value)
+
+
 class SecretStore:
     def __init__(self, *, provider: CryptoProvider, authorizer: Authorizer | None = None,
                  delivery_gate: DeliveryGate | None = None, controller_gate=None):

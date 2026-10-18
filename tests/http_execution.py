@@ -115,6 +115,23 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(Refused):
             asyncio.run(client.executor_state(work.node_id))
 
+    def test_initial_create_vocabulary_is_finite_without_binding_physical_ports(self):
+        # HYPOTHESIS #721: server native_exec не проходит общий wire consumer.
+        # SOLUTION: общий конечный словарь, без включения physical ports.
+        # RESULT: native_exec/initial endpoint были refused; wire checks green.
+        # STATUS: FIXED — see #721; unknown fallback по-прежнему запрещён.
+        from mop.common.initialcreate import MACHINE, CONFIRMATIONS
+        from mop.node.http_execution import EVIDENCE
+        from mop.node.execution_adapters import LocalExecutor
+        for action in MACHINE:
+            work = Work.parse(wire(action=action))
+            self.assertEqual(Work.parse(work.wire()), work)
+            with self.assertRaises(Unavailable):
+                asyncio.run(LocalExecutor(None, None).execute(work, None))
+        self.assertTrue(set(CONFIRMATIONS.values()) <= EVIDENCE)
+        with self.assertRaises(Refused):
+            Work.parse(wire(action='arbitrary_new_action'))
+
     def test_strict_finite_work(self):
         self.assertEqual(Work.parse(wire()).action, 'send_message')
         for change in ({'action':'shell'}, {'owner_id':1}, {'revision':'01'},
@@ -451,6 +468,13 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(seen[0][2]['json'], metadata)
                 self.assertIsNone(seen[0][2]['params'])
                 with self.assertRaises(Refused): await transport.request('GET', 'work/launch')
+                # #721: отдельный именованный POST, не generic delivery endpoint.
+                await transport.request('POST', 'work/initial-launch', metadata)
+                self.assertEqual(seen[1][:2], ('POST', 'https://host.test/api/v1/machine/work/initial-launch'))
+                self.assertEqual(seen[1][2]['json'], metadata)
+                self.assertIsNone(seen[1][2]['params'])
+                for method, path in (('GET', 'work/initial-launch'), ('POST', 'work/initial-launch/secret')):
+                    with self.assertRaises(Refused): await transport.request(method, path)
             finally:
                 await client.aclose()
 
