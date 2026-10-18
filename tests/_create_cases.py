@@ -64,27 +64,25 @@ class CreateVertical(TransactionTestCase):
     setUp = RestartVertical.setUp
 
     def ready(self, *, bootstrap=True, image=True, executor=True, approve=True, enroll=True, scheduler=None):
-        from _grant_cases import ApprovalFixture, BindingFixture, manifest
+        from _grant_cases import manifest
         from mop.server.access import services as auth
-        from mop.server.access.grants import Grants, ApprovedPolicy
+        from mop.server.access.grants import Grants
+        from mop.server.controller.machinebinding import AssignmentBindings
         from mop.server.catalog.services import Catalog
         from mop.server.preparation.services import Preparation
         from mop.server.secrets.crypto import Keyring, XChaCha20Provider
-        from mop.server.secrets.services import SecretStore
         provider = XChaCha20Provider(Keyring('fixture', {'fixture': b'c'*32}))
-        policy = SecretStore(provider=provider, authorizer=auth.Access()).create(self.actor,
-            project_id=self.project.pk, name='policy', kind='credential', purpose='policy', value=b'approved fixture policy')
-        proof = ApprovedPolicy(uuid4(), policy.active_version_id, 'a'*64, self.user.pk, self.project.pk)
-        self.grants = Grants(provider=provider, approvals=ApprovalFixture(proof), bindings=BindingFixture())
+        self.preparation = Preparation(provider=provider, authorizer=auth.Access())
+        self.grants = Grants(provider=provider, approvals=self.preparation.approval_query(),
+                             bindings=AssignmentBindings())
         self.definition = self.grants.publish_definition(self.actor, project_id=self.project.pk,
             manifest=json.dumps(manifest()).encode(), prompt=b'fixture role', provenance='controlled fixture')
         if approve:
             self.grants.approve_definition(self.actor, self.definition.id)
         if bootstrap:
-            prep = Preparation(provider=provider, authorizer=auth.Access())
-            self.revision = prep.publish(self.actor, project_id=self.project.pk, tasks=b'- debug: msg=hello\n',
+            self.revision = self.preparation.publish(self.actor, project_id=self.project.pk, tasks=b'- debug: msg=hello\n',
                 variables=b'answer: 42\n', provenance='git:example.invalid/vertical', commit='b'*40, secret_refs=())
-            prep.approve(self.actor, self.revision.id)
+            self.bootstrap_approval = self.preparation.approve(self.actor, self.revision.id)
         if image:
             catalog = Catalog(authorizer=auth.Access())
             from mop.server.catalog.models import Project
@@ -302,6 +300,44 @@ class CreateRegistration(TransactionTestCase):
         self.ops.launches.run(operation)
         self.assertEqual(len(self.peer.posts), 1)
 
+    # BUG (#706): reserved обходил живое pinned approval на обеих полосах.
+    # HYPOTHESIS: scheduler проверял только state/target, а authorize_launch
+    # не вызывал SQL-only проверки expiry, approval и creation authority.
+    # SOLUTION: обе полосы используют Grants.authorize_launch с реальным
+    # Preparation.approval_query; последняя SQL-проверка повторяет authority.
+    # RESULT: RED -- registration после revoke и prepare=True; GREEN -- PG17.
+    # STATUS: FIXED — see #706
+    def test_revoked_pinned_bootstrap_blocks_registration_after_admission(self):
+        from mop.server.operations.models import Operation
+        operation, _, _ = self.launch()
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        self.ops.launches.run(operation)
+        self.assertEqual(self.peer.posts, [], 'registration ran after pinned approval revocation')
+        row = Operation.objects.get(pk=operation)
+        self.assertEqual(row.state, 'refused')
+        self.assertIn('revoked', row.reason)
+        self.assertIsNone(self.step(operation).token)
+
+    def test_revoked_pinned_bootstrap_blocks_registration_after_claim(self):
+        operation, _, _ = self.launch()
+        ticket = self.ops.launches.claim(operation)
+        self.assertIsNotNone(ticket)
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        self.assertFalse(self.ops.launches.prepare(ticket), 'last SQL gate ignored approval revocation')
+        self.assertEqual(self.peer.posts, [])
+        self.assertIsNone(self.step(operation).dispatched_at)
+
+    def test_default_scheduler_authority_is_bound_without_a_provider(self):
+        from mop.server.controller.createbinding import service
+        operation, _, _ = self.launch()
+        # Production composition без подставленного Grants/crypto provider.
+        default = service(issuer=self.issuer, scheduler=self.adapter)
+        ticket = default.launches.claim(operation)
+        self.assertIsNotNone(ticket)
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        self.assertFalse(default.launches.prepare(ticket))
+        self.assertEqual(self.peer.posts, [])
+
     def test_lost_register_reply_is_unknown_and_reconciles_by_reading(self):
         operation, target, _ = self.launch()
         self.peer.lose_post = True
@@ -429,6 +465,159 @@ class CreateMachineSteps(TransactionTestCase):
         with self.assertRaises(Denied), transaction.atomic():
             self.grants.authorize_launch(RoleBinding(row.project_id, row.id, uuid4(), row.role,
                                                      row.bundle_digest, row.grant_id, row.owner_id))
+
+    # BUG (#706): readiness исключала active, но вместе с ним теряла authority.
+    # HYPOTHESIS: отдельная reserved-проверка должна повторять все общие
+    # локальные guards; она не даёт reserved гранту активных действий.
+    # SOLUTION: общий SQL-only gate проверяет точный binding, expiry/seal,
+    # retained references, pinned approval и credential/права создателя.
+    # RESULT: RED -- claim после revoke и PermissionError not raised;
+    # GREEN -- 223/223 create/grant/preparation/execution/restart/send/wipe PG17.
+    # STATUS: FIXED — see #706
+    def launch_binding(self, target):
+        from mop.server.access.delegation import RoleBinding
+        from mop.server.sessions.models import Assignment
+        row = Assignment.objects.get(pk=target)
+        return RoleBinding(row.project_id, row.id, row.current_incarnation_id, row.role,
+                           row.bundle_digest, row.grant_id, row.owner_id)
+
+    def test_revoked_pinned_bootstrap_blocks_next_machine_claim(self):
+        from mop.server.sessions.models import AssignmentAttempt
+        operation, _, _ = self.launch()
+        self.ops.launches.run(operation)
+        service, actor = self.machine()
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        with self.assertRaisesRegex(PermissionError, 'revoked'):
+            service.claim(actor, work, request_id=uuid4())
+        self.assertFalse(AssignmentAttempt.objects.filter(operation_id=operation).exists())
+
+    def test_default_machine_authority_is_bound_without_a_provider(self):
+        from mop.server.controller.createbinding import LaunchSupport
+        from mop.server.controller.machinebinding import compose
+        operation, _, _ = self.launch()
+        self.ops.launches.run(operation)
+        _, actor = self.machine()
+        service = compose(launch_support=LaunchSupport())
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        attempt = service.claim(actor, work, request_id=uuid4())
+        service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                       outcome='succeeded', evidence='identity-applied')
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        with self.assertRaisesRegex(PermissionError, 'revoked'):
+            service.claim(actor, work, request_id=uuid4())
+
+    def test_revoked_pinned_bootstrap_blocks_readiness_after_identity(self):
+        from mop.server.sessions.models import AssignmentAttempt
+        operation, _, _ = self.launch()
+        self.ops.launches.run(operation)
+        service, actor = self.machine()
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        attempt = service.claim(actor, work, request_id=uuid4())
+        service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+                       outcome='succeeded', evidence='identity-applied')
+        work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
+        self.assertEqual(work.action, 'confirm_ready')
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        with self.assertRaisesRegex(PermissionError, 'revoked'):
+            service.claim(actor, work, request_id=uuid4())
+        self.assertFalse(AssignmentAttempt.objects.filter(operation_id=operation, action='confirm_ready').exists())
+
+    def test_expired_reserved_grant_cannot_authorize_launch(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from django.db import transaction
+        from mop.server.access.models import Grant
+        _, target, _ = self.launch()
+        binding = self.launch_binding(target)
+        expires = Grant.objects.get(pk=binding.grant_id).intent.expires_at
+        with patch('mop.server.access.grants.timezone', SimpleNamespace(now=lambda: expires)), \
+                self.assertRaises(PermissionError), transaction.atomic():
+            self.grants.authorize_launch(binding)
+        self.assertEqual(Grant.objects.get(pk=binding.grant_id).state, 'reserved')
+
+    def test_unsealed_reserved_definition_cannot_authorize_launch(self):
+        from django.db import connections, transaction
+        from django.db.migrations.loader import MigrationLoader
+        _, target, _ = self.launch()
+        # Состояние до seal migration, не разрешённый mutation публичного ORM.
+        historical = MigrationLoader(connections['default']).project_state().apps
+        historical.get_model('access', 'AgentDefinitionSeal').objects.filter(definition_id=self.definition.id).delete()
+        with self.assertRaisesRegex(PermissionError, 'sealed'), transaction.atomic():
+            self.grants.authorize_launch(self.launch_binding(target))
+
+    def test_launch_rechecks_exact_creator_credential_not_another_owner_token(self):
+        from django.db import transaction
+        from mop.server.access import services as auth
+        _, target, _ = self.launch()
+        key = auth.rotate_token(self.actor)
+        current = auth.token_context(key)
+        self.assertNotEqual(current.credential_id, self.actor.credential_id)
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.grants.authorize_launch(self.launch_binding(target))
+
+    def test_launch_rechecks_owner_issue_permission(self):
+        from django.db import transaction
+        _, target, _ = self.launch()
+        self.user.is_superuser = False
+        self.user.save(update_fields=['is_superuser'])
+        from _grant_cases import permit_actions
+        from mop.server.access import models as a
+        a.ProjectMembership.objects.get_or_create(user=self.user, project=self.project,
+            source=a.IdentitySource.objects.get(name='local'))
+        permit_actions(self.user, 'execution.create_puppet', 'access.view_role', 'preparation.approve_bootstrap')
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.grants.authorize_launch(self.launch_binding(target))
+
+    def test_launch_keeps_exact_old_policy_and_retained_references_without_provider_io(self):
+        from unittest.mock import patch
+        from django.db import transaction
+        from mop.server.access.models import Grant
+        _, target, _ = self.launch()
+        binding = self.launch_binding(target)
+        pinned = Grant.objects.get(pk=binding.grant_id).intent.policy_version_id
+        newer = self.preparation.publish(self.actor, project_id=self.project.pk, tasks=b'- debug: msg=new\n',
+            variables=b'answer: 43\n', provenance='git:example.invalid/new', commit='c'*40, secret_refs=())
+        self.preparation.approve(self.actor, newer.id)
+        with patch.object(type(self.grants.secrets.provider), 'decrypt', side_effect=AssertionError('provider under SQL')), \
+                patch.object(type(self.grants.secrets.provider), 'encrypt', side_effect=AssertionError('provider under SQL')), \
+                transaction.atomic():
+            self.grants.authorize_launch(binding)
+        self.assertEqual(Grant.objects.get(pk=binding.grant_id).intent.policy_version_id, pinned)
+        # Новый latest не подменяет отозванный exact proof старого намерения.
+        self.preparation.revoke(self.actor, self.bootstrap_approval.id)
+        with self.assertRaisesRegex(PermissionError, 'revoked'), transaction.atomic():
+            self.grants.authorize_launch(binding)
+
+    def test_revoked_retained_launch_credential_blocks_authority(self):
+        from django.db import transaction
+        from mop.server.access.models import Grant
+        from mop.server.secrets.models import Secret
+        from mop.server.secrets.services import SecretStore
+        _, target, _ = self.launch()
+        binding = self.launch_binding(target)
+        version = Grant.objects.get(pk=binding.grant_id).credential_version_id
+        secret = Secret.objects.get(secretversion__id=version)
+        from mop.server.access.services import Access
+        SecretStore(provider=self.grants.secrets.provider, authorizer=Access()).revoke(
+            self.actor, secret.pk, expected_revision=secret.revision)
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.grants.authorize_launch(binding)
+
+    def test_revoked_retained_definition_blocks_launch_authority(self):
+        from django.db import transaction
+        from mop.server.access.models import AgentDefinitionVersion
+        from mop.server.access.services import Access
+        from mop.server.secrets.models import Secret
+        from mop.server.secrets.services import SecretStore
+        _, target, _ = self.launch()
+        version = AgentDefinitionVersion.objects.get(pk=self.definition.id).content_version_id
+        secret = Secret.objects.get(secretversion__id=version)
+        SecretStore(provider=self.grants.secrets.provider, authorizer=Access()).revoke(
+            self.actor, secret.pk, expected_revision=secret.revision)
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.grants.authorize_launch(self.launch_binding(target))
 
 
 class Activator:

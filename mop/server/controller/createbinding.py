@@ -5,9 +5,8 @@ create отказывает до записей: наличие права не 
 """
 from dataclasses import dataclass
 
-from .machinebinding import AssignmentBindings, Targets
+from .machinebinding import Targets, local_grants
 from .runtime import assignments_service, machine_execution_service, operations_service
-from mop.server.access.grants import Grants
 from mop.server.operations.launch import CreateMachine, CreatePuppets, GrantActivations, LaunchJobs
 
 
@@ -141,7 +140,7 @@ class LaunchSupport:
 
 def service(*, grants=None, issuer=None, scheduler=None, activator=None):
     from .adminservices import credential_client
-    grants = grants or Grants(provider=None, bindings=AssignmentBindings())
+    grants = grants or local_grants()
     operations = operations_service(grants=grants.local_authority())
     operations.creates = CreatePuppets(operations, grants=grants, targets=LaunchTargets(),
         issuer=issuer if issuer is not None else credential_client(), scheduler=scheduler)

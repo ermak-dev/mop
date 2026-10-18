@@ -1174,6 +1174,55 @@ class GrantCases(TransactionTestCase):
         activated = self.api.activate(row.id, expected_revision=provisioned.revision)
         self.assertEqual(activated.state, 'active')
 
+    # BUG (#706): launch доверял reserved без проверки сохранённого issuer
+    # и всей живой цепочки. Реальный Preparation query, не approval boolean.
+    # HYPOTHESIS: SQL-only допуск запуска повторяет authority выдачи; seal
+    # позволяет не читать plaintext spawn policy под Grant locks.
+    # SOLUTION: упорядоченные Grant locks и существующие локальные проверки
+    # intent actor/issuer и ancestors, без превращения reserved в active.
+    # RESULT: три negative RED -- PermissionError not raised; GREEN -- PG17.
+    # STATUS: FIXED — see #706
+    def reserved_child_launch(self):
+        from mop.server.preparation.services import Preparation
+        self.permit('preparation.approve_bootstrap')
+        preparation = Preparation(provider=self.provider, authorizer=auth.Access())
+        revision = preparation.publish(self.actor, project_id=self.project.pk, tasks=b'- debug: msg=launch\n',
+            variables=b'{}\n', provenance='git:test', commit='c'*40, secret_refs=())
+        preparation.approve(self.actor, revision.id)
+        self.api.approvals = preparation.approval_query()
+        root, root_actor = self.active(definition=self.publish('root', spawn=('middle', 'worker')))
+        parent, parent_actor = self.active(actor=root_actor, definition=self.publish('middle', spawn=('worker',)))
+        child = self.reserve(actor=parent_actor)
+        child = self.api.provision(parent_actor, child.id, expected_revision=child.revision)
+        self.bindings.bindings[(self.project.pk, child.target_id)] = child.binding
+        return root, parent, child
+
+    def test_reserved_launch_checks_live_ancestry_without_provider_io(self):
+        _, _, child = self.reserved_child_launch()
+        with patch.object(type(self.provider), 'decrypt', side_effect=AssertionError('provider under SQL')), \
+                patch.object(type(self.provider), 'encrypt', side_effect=AssertionError('provider under SQL')), \
+                transaction.atomic():
+            self.api.authorize_launch(child.binding)
+
+    def test_reserved_launch_denies_revoked_root_ancestor(self):
+        root, _, child = self.reserved_child_launch()
+        self.api.revoke(self.actor, root.id, expected_revision=root.revision)
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.api.authorize_launch(child.binding)
+
+    def test_reserved_launch_denies_revoked_root_credential(self):
+        root, _, child = self.reserved_child_launch()
+        Token.objects.filter(user_id=root.subject_id).delete()
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.api.authorize_launch(child.binding)
+
+    def test_reserved_launch_denies_issuer_losing_create_permission(self):
+        _, parent, child = self.reserved_child_launch()
+        subject = get_user_model().objects.get(pk=parent.subject_id)
+        subject.user_permissions.remove(Permission.objects.get(content_type__app_label='execution', codename='create_puppet'))
+        with self.assertRaises(PermissionError), transaction.atomic():
+            self.api.authorize_launch(child.binding)
+
     def test_crypto_provider_never_runs_in_sql_and_no_unsupported_effect_port(self):
         with transaction.atomic():
             with self.assertRaises(ValueError):
