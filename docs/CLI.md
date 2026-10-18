@@ -1843,13 +1843,19 @@ Started by systemd and the job spec, not by hand.
 #### mop agent
 
 ```text
-node agent: answers the bus about the puppets on this node (unit mop-agent)
+node agent: explicit private HTTPS bootstrap, one per node under systemd
 
-  mop agent            subscribe and serve, until stopped
-  mop agent --check    ask this node's agent over the bus whether it answers
+  mop agent --bootstrap /absolute/private/bootstrap.json --check
+  mop agent --bootstrap /absolute/private/bootstrap.json
 
-One per node, under systemd, outside the job spec (docs/BUS.md): it must
-answer precisely while a puppet is restarting.
+--check performs bounded authenticated executor discovery and verifies the
+installation identity, epoch and enrolled node. It never changes the executor
+fence, reconciles physical scopes, polls work or claims effects. An executor-only
+response without installation coordinates is refused, not upgraded locally.
+
+Normal serve is unavailable until a complete native physical startup root is
+bound. A transport export is not physical reconciliation or readiness evidence.
+No .env, bus.json, ready.json or previous login fallback is supported.
 ```
 
 #### mop mcp
