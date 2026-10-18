@@ -63,6 +63,7 @@ LAYERS = {
     "mop.cli.service.agent": NODE, "mop.cli.driver.run": NODE,
     "mop.cli.driver.list": NODE, "mop.cli.driver.sweep": NODE,
     "mop.cli.driver.clone-work": NODE,
+    "mop.cli.driver.scope-probe": NODE,  # Частная OS fixture, не controller/pool API.
 }
 # Что вправе лежать в корне пакета, кроме каталогов слоёв.
 ROOT_PARTS = ("session", "usage", "driver", "cli")

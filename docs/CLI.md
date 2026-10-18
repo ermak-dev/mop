@@ -979,6 +979,20 @@ puppet: ensure the body, bootstrap the sandbox through the server,
 push the inner wrapper in and hold its session until it ends.
 ```
 
+#### mop driver scope-probe
+
+```text
+mop driver scope-probe: check physical host containment in a new private Docker fixture
+
+Builds an isolated systemd fixture with private PID/cgroup namespaces, no host
+bind mounts, no Docker socket and no network. Runs only the fixture's installed
+double-fork runner, never an existing body, host service or user session.
+
+Exit 0 is actual OS containment acceptance; exit 77 means the kernel could not
+provide the private fixture. Neither outcome binds production capabilities or
+installs a supervisor. Requires an already available Docker installation.
+```
+
 #### mop driver sweep
 
 ```text
