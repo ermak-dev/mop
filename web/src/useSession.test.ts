@@ -5,6 +5,13 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { fetchSession, GUEST, LoginRefused, postLogin, postLogout } from './useSession';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 afterEach(() => vi.unstubAllGlobals());
+// HYPOTHESIS: human-only browser gate invents kind-based audit authority.
+// SPEC: identity classifies; DRF current permissions/scope decide disclosure.
+// STATUS: FIXED — see #627
+test.each(['human', 'agent', 'service'] as const)('recognizes canonical %s identity without manufacturing admin rights', async kind => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({ schema_version: 1, user_id: 42, kind, human_owner_id: null, node_id: null, grant_id: null })));
+  expect(await fetchSession()).toMatchObject({ login: '42', role: 'user', kind, authenticated: true });
+});
 test('uses the authenticated identity and treats only auth codes as guest', async () => {
   const mock = vi.fn().mockResolvedValueOnce(json({ schema_version: 1, user_id: 42, principal_id: 'principal', kind: 'human' }))
     .mockResolvedValueOnce(json({ error: { code: 'not_authenticated', message: 'Authentication required' } }, 403))

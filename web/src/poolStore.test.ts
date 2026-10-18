@@ -30,6 +30,19 @@ function snapshot(state: PoolState) {
 }
 
 describe('versioned pool core #627', () => {
+  // HYPOTHESIS: epoch bootstrap отменяет ранний 403 того же credential.
+  // SOLUTION: первое связывание epoch сохраняет текущие read tokens; смена -- reset.
+  // STATUS: FIXED — see #627
+  it('binds the first epoch without abandoning concurrent authority reads, never rebinds stale contexts', () => {
+    const reading = beginRead(createPoolState(context, ''), { type: 'detail' });
+    const bootstrap = (epoch: string, generation = reading.state.generation) => ({ type: 'bootstrap', generation, epoch } as Parameters<typeof reducePool>[1]);
+    const bound = reducePool(reading.state, bootstrap('e1'));
+    expect(bound.epoch).toBe('e1'); expect(bound.generation).toBe(reading.state.generation);
+    expect(bound.requests).toEqual(reading.state.requests);
+    const changed = reducePool(bound, bootstrap('e2'));
+    expect(changed.generation).toBeGreaterThan(bound.generation); expect(changed.requests).toEqual({});
+    expect(reducePool(changed, bootstrap('e1'))).toBe(changed);
+  });
   // HYPOTHESIS: одинаковые user/permissions не означают ту же credential;
   // серверный next cursor может зациклить конечный fetch-loop без page budget.
   // SOLUTION: credential generation — часть auth scope; visited cursors/page cap.

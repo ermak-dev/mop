@@ -1,89 +1,78 @@
-// Страница журнала (#422): все события шины на одном экране для админа --
-// полная дата/время, событие, папет, узел, проект и описание; строка
-// открывается кликом или с клавиатуры (кнопка в ячейке времени -- вся
-// строка доступна Tab'ом и Enter'ом). Новые сверху; снимок не хранится --
-// что пришло из useJournal, то и на экране.
-import { useEffect, useRef, useState } from "react";
-import { Table, Text, UnstyledButton } from "@mantine/core";
-import type { JournalEntry } from "../types";
-import { fullAt, journalText } from "../journalView";
-import { EmptyNote, SectionTitle } from "./Section";
-import { JournalModal } from "./JournalModal";
-
-export const COLS = {
-  at: { label: "время" }, event: { label: "событие" }, name: { label: "папет" },
-  node: { label: "узел" }, project: { label: "проект" }, text: { label: "что случилось" },
-};
-
-export const EMPTY = "событий пока нет — агенты пишут send, idle, type, wipe и свой запуск";
-
-// Время как кнопка: строка таблицы не фокусится сама, а кнопка в первой
-// ячейке -- и клик мышью, и Tab+Enter; на клик по всей строке -- тоже открываем.
-// Ячейки -- строками: full_entry хранит произвольный JSON, и объект в
-// name/event/node ронял таблицу («Objects are not valid as a React child»,
-// ревью 7); сырое значение остаётся в диалоге.
-function Row({ e, onOpen }: { e: JournalEntry; onOpen: () => void }) {
-  const cell = (v: unknown) => (v == null ? "-" : typeof v === "object" ? JSON.stringify(v) : String(v));
-  return (
-    <Table.Tr onClick={onOpen} onKeyDown={(ev) => { if (ev.key === "Enter") onOpen(); }}>
-      <Table.Td>
-        <UnstyledButton onClick={onOpen} style={{ fontVariantNumeric: "tabular-nums" }}>
-          {fullAt(e.at)}
-        </UnstyledButton>
-      </Table.Td>
-      <Table.Td><Text span fw={600}>{cell(e.event)}</Text></Table.Td>
-      <Table.Td>{cell(e.name)}</Table.Td>
-      <Table.Td>{cell(e.node)}</Table.Td>
-      <Table.Td>{cell(e.project)}</Table.Td>
-      <Table.Td><Text lineClamp={1}>{journalText(e)}</Text></Table.Td>
-    </Table.Tr>
-  );
-}
-
-export function JournalPage({ journal, error = null, open, initial, sourceKey }: {
-  journal: JournalEntry[];
-  /** Отказ источника (#424): null -- загрузка прошла или не начиналась. */
+// Конечный operation audit #626/#627, не полный журнал событий шины.
+// Selection -- только ID + source; подтверждённые DTO остаются у общего owner.
+import { useEffect, useState } from 'react';
+import { Button, Group, Table, Text, TextInput, UnstyledButton } from '@mantine/core';
+import { auditQuery } from '../audit';
+import type { AuditItem, AuditQuery } from '../audit';
+import { fullAt } from '../journalView';
+import { EmptyNote, SectionTitle } from './Section';
+import { JournalModal } from './JournalModal';
+export const EMPTY = 'No operation audit evidence in the current scope';
+export function JournalPage({ journal, error = null, sourceKey, loading = false, nextCursor = null, more, refresh, query = {}, onQuery }: {
+  journal: readonly AuditItem[];
   error?: string | null;
-  /** Открыть запись (страница-владелец держит состояние диалога). */
-  open: (e: JournalEntry) => void;
-  /** Запись, чей диалог уже открыт (переход по ссылке внутрь). */
-  initial?: JournalEntry;
-  /** Ключ источника (кто смотрит): смена закрывает диалог, опрос -- нет. */
   sourceKey: string;
+  loading?: boolean;
+  nextCursor?: string | null;
+  more?: () => void;
+  refresh?: () => void;
+  query?: AuditQuery;
+  onQuery?: (query: AuditQuery) => void;
 }) {
-  const [entry, setEntry] = useState<JournalEntry | null>(initial ?? null);
-  const items = [...journal].reverse();   // новые сверху
-  // Открытый диалог не переживает отказ источника (ревью 2 #422): error --
-  // право ушло, и скрыть надо в этот же рендер, не эффектом после paint:
-  // рендер с пустым списком уже не рисует ни таблицы, ни модала.
-  const denied = error != null;
-  // и не переживает смену источника (ревью 3): журнал другого админа --
-  // запись A в диалоге чужая. Ключ источника приносит App (кто смотрит),
-  // а не ссылка массива: опрос строит новый массив тем же содержимым
-  // каждые POLL_S, и на ссылке диалог закрывался бы сам собой (ревью 4).
-  const prevSource = useRef(sourceKey);
-  const switched = prevSource.current !== sourceKey;
-  useEffect(() => {
-    if (denied || switched) setEntry(null);
-    prevSource.current = sourceKey;
-  }, [denied, switched, sourceKey]);
-  const shown = denied ? [] : items;
-  const held = denied || switched ? null : entry;
+  const [projectDraft, setProjectDraft] = useState(query.projectId ?? '');
+  const [limitDraft, setLimitDraft] = useState(String(query.limit ?? 100));
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<{ id: string; source: string } | null>(null);
+  const denied = error !== null;
+  const held = denied || selection?.source !== sourceKey ? null : journal.find(row => row.id === selection?.id);
+  useEffect(() => { setSelection(null); }, [denied, sourceKey]);
+  const shown = denied ? [] : journal;
+  const open = (row: AuditItem) => setSelection({ id: row.id, source: sourceKey });
   return (
-    <div data-testid="journal-page">
-      <SectionTitle title="Журнал" note={shown.length ? "события шины, новые сверху" : undefined} />
-      {error && <Text c="red" size="sm" mb="xs">{error}</Text>}
+    <div data-testid="journal-page" aria-busy={loading}>
+      <SectionTitle title="Operation audit" />
+      <Text size="sm" c="dimmed" mb="sm">Finite operation evidence, newest first; not all bus events, idle notifications or private message contents.</Text>
+      {error && <Text role="alert" c="red" size="sm" mb="xs">{error}</Text>}
+      {onQuery && <form onSubmit={event => {
+        event.preventDefault();
+        try {
+          if (!/^[1-9][0-9]*$/.test(limitDraft)) throw new Error('Page size must be a decimal integer within 1–100');
+          const selected = { projectId: projectDraft.trim() || undefined, limit: Number(limitDraft) };
+          auditQuery(selected); setDraftError(null); onQuery(selected);
+        } catch (error) { setDraftError(error instanceof Error ? error.message : 'Invalid audit scope'); }
+      }}>
+        <Group mb="sm" align="end">
+          <TextInput label="Project id (optional)" value={projectDraft} onChange={event => setProjectDraft(event.currentTarget.value)} />
+          <TextInput label="Page size (1–100)" type="number" min={1} max={100} step={1} value={limitDraft} onChange={event => setLimitDraft(event.currentTarget.value)} />
+          <Button type="submit" size="xs" disabled={loading}>Apply audit scope</Button>
+        </Group>
+        {draftError && <Text role="alert" c="red" size="sm">{draftError}</Text>}
+      </form>}
+      <Group mb="sm">
+        {refresh && <Button size="xs" variant="light" disabled={loading} onClick={refresh}>Refresh operation audit</Button>}
+        {loading && <Text role="status" size="sm">Loading operation audit…</Text>}
+      </Group>
       {shown.length ? (
-        <Table striped highlightOnHover withTableBorder>
-          <Table.Thead>
-            <Table.Tr>{Object.values(COLS).map((c, i) => <Table.Th key={i}>{c.label}</Table.Th>)}</Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>{shown.map((e, i) => <Row key={i} e={e} onOpen={() => { setEntry(e); open(e); }} />)}</Table.Tbody>
-        </Table>
-      ) : !error && <EmptyNote>{EMPTY}</EmptyNote>}
-      {/* отказ или смена источника скрыли таблицу этим же рендером; модал
-          держится только на показанном журнале */}
-      {held && <JournalModal entry={held} onClose={() => setEntry(null)} />}
+        <Table.ScrollContainer minWidth={760}>
+          <Table striped highlightOnHover withTableBorder>
+            <Table.Thead><Table.Tr>
+              {['Time', 'Action', 'State', 'Code', 'Target kind / id', 'Node id', 'Project ids', 'Reason'].map(label => <Table.Th key={label}>{label}</Table.Th>)}
+            </Table.Tr></Table.Thead>
+            <Table.Tbody>{shown.map(row => (
+              <Table.Tr key={row.id} onClick={() => open(row)}>
+                <Table.Td><UnstyledButton aria-label={`Open audit evidence ${row.id}`} onClick={event => { event.stopPropagation(); open(row); }}>
+                  {fullAt(Date.parse(row.created_at) / 1000)}
+                </UnstyledButton></Table.Td>
+                <Table.Td>{row.action}</Table.Td><Table.Td>{row.state}</Table.Td><Table.Td>{row.code || '—'}</Table.Td>
+                <Table.Td>{row.target.kind} / {row.target.id}</Table.Td><Table.Td>{row.node_id}</Table.Td>
+                <Table.Td>{row.project_ids.join(', ')}</Table.Td><Table.Td><Text lineClamp={2}>{row.reason || '—'}</Text></Table.Td>
+              </Table.Tr>
+            ))}</Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+      ) : !error && !loading && <EmptyNote>{EMPTY}</EmptyNote>}
+      {!error && nextCursor && more && <Button mt="sm" disabled={loading} onClick={more}>Load older evidence</Button>}
+      {held && <JournalModal entry={held} onClose={() => setSelection(null)} />}
     </div>
   );
 }

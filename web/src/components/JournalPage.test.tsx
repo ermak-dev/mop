@@ -1,170 +1,73 @@
-// Страница журнала (#422): полная таблица события шины для админа --
-// дата/время целиком, событие, папет, узел, проект, описание; клик по
-// строке или клавиатурой открывает доступный диалог с полной записью.
-//
-// HYPOTHESIS (#422): события приходят из useJournal (GET /api/journal,
-// #424), новые сверху; диалог показывает все поля записи, какие сервер
-// ни дал, -- без выдумывания своих.
-// RESULT: тесты написаны до реализации (RED).
-import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
-import { MantineProvider } from "@mantine/core";
-import { renderUi } from "../test-utils";
-import { JournalPage } from "./JournalPage";
-import { JournalModal } from "./JournalModal";
-import type { JournalEntry } from "../types";
+// HYPOTHESIS: bus table/full_entry семантика неверна для immutable operation evidence.
+// SPEC: server order, actual metadata/IDs, selection-only state, accessible dialog.
+// SOLUTION: таблица показывает audit metadata, selection хранит только ID/source.
+// RESULT: RED → GREEN. STATUS: FIXED — see #627
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { expect, test, vi } from 'vitest';
+import { MantineProvider } from '@mantine/core';
+import { renderUi } from '../test-utils';
+import { JournalPage } from './JournalPage';
+import { auditItem } from '../audit-test-utils';
+import { ID, OP } from '../network-test-utils';
+const J = [auditItem('20', 'newest refusal'), auditItem('19', 'older refusal')];
 
-const J: JournalEntry[] = [
-  { at: 1700000060, event: "idle", name: "pu-mop-1", node: "hyper", project: "mop", text: "" },
-  { at: 1700000000, event: "send", name: "pu-mop-1", node: "hyper", project: "mop",
-    text: "from ermak", result: "доставлено" },   // безопасное поле #424: показывается, а не теряется
-];
-
-test("rows carry full date, event, puppet, node, project and the phrase", () => {
-  renderUi(<JournalPage journal={J} open={() => {}} sourceKey="anton\0admin" />);
-  const row = screen.getByText("14.11.2023 22:14:20 UTC").closest("tr")!;
-  // дата «полная»: не чч:мм:сс главной, а день и время с секундами
-  expect(row.textContent).toContain("idle");
-  expect(row.textContent).toContain("pu-mop-1");
-  // осмысленное описание: пустой text у idle -- фраза без хвоста
-  expect(row.textContent).toContain("дождался простоя");
+test('renders truthful audit coverage and server ordering, with actual target ids and safe reason', () => {
+  renderUi(<JournalPage journal={J} sourceKey="source" />);
+  expect(screen.getByRole('heading', { name: 'Operation audit' })).toBeInTheDocument();
+  const rows = screen.getAllByRole('row').slice(1);
+  expect(rows[0].textContent).toContain('newest refusal'); expect(rows[1].textContent).toContain('older refusal');
+  expect(rows[0].textContent).toContain(ID); expect(rows[0].textContent).toContain('dispatch');
+  expect(rows[0].textContent).toContain('refused'); expect(rows[0].textContent).toContain('dispatch_declined');
+  expect(rows[0].textContent).toContain('18.10.2026 10:05:00 UTC');
+  expect(screen.queryByText(/дождался простоя|сообщение от/)).toBeNull();
 });
 
-test("clicking a row opens the modal, keyboard Enter too", () => {
-  const open = vi.fn();
-  renderUi(<JournalPage journal={J} open={open} sourceKey="anton\0admin" />);
-  // клик по строке: старейшая запись (новые сверху) -- с текстом from ermak
-  fireEvent.click(screen.getByText(/сообщение от ermak/));
-  expect(open).toHaveBeenCalledWith(J[1]);
-  const row = screen.getByText("14.11.2023 22:14:20 UTC").closest("tr")!;
-  fireEvent.keyDown(row, { key: "Enter" });
-  expect(open).toHaveBeenCalledTimes(2);
+test('keyboard-focusable evidence button and row click open exact evidence, Escape closes', async () => {
+  renderUi(<JournalPage journal={J} sourceKey="source" />);
+  const button = screen.getByRole('button', { name: 'Open audit evidence 20' });
+  button.focus(); expect(button).toHaveFocus(); fireEvent.click(button);
+  const dialog = await screen.findByRole('dialog');
+  expect(within(dialog).getByText(OP)).toBeInTheDocument();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  fireEvent.click(screen.getByText('older refusal'));
+  expect(await screen.findByRole('dialog')).toHaveTextContent('older refusal');
 });
 
-test("keyboard: Enter on the focused row opens the modal too", () => {
-  const open = vi.fn();
-  renderUi(<JournalPage journal={J} open={open} sourceKey="anton\0admin" />);
-  const row = screen.getAllByRole("row")[1];   // [0] -- заголовок
-  fireEvent.keyDown(row, { key: "Enter" });
-  expect(open).toHaveBeenCalledWith(J[1]);
+test('empty and unavailable are distinct; unavailable never leaks stale rows or selected metadata', async () => {
+  const view = renderUi(<JournalPage journal={J} sourceKey="source" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Open audit evidence 20' }));
+  expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  view.rerender(<MantineProvider><JournalPage journal={J} error="Operation audit unavailable: permission denied" sourceKey="source" /></MantineProvider>);
+  expect(screen.queryByRole('dialog')).toBeNull(); expect(screen.queryByRole('row')).toBeNull();
+  expect(screen.getByRole('alert')).toHaveTextContent('permission denied');
+  view.rerender(<MantineProvider><JournalPage journal={[]} sourceKey="source" /></MantineProvider>);
+  expect(screen.getByText('No operation audit evidence in the current scope')).toBeInTheDocument();
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-test("an empty journal keeps the old note", () => {
-  renderUi(<JournalPage journal={[]} open={() => {}} sourceKey="anton\0admin" />);
-  expect(screen.getByText(/событий пока нет/)).toBeInTheDocument();
+test('same-source poll preserves selection but source/epoch/scope switch closes it immediately', async () => {
+  const view = renderUi(<JournalPage journal={J} sourceKey="source" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Open audit evidence 20' }));
+  view.rerender(<MantineProvider><JournalPage journal={[...J]} sourceKey="source" /></MantineProvider>);
+  expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  view.rerender(<MantineProvider><JournalPage journal={J} sourceKey="new-source" /></MantineProvider>);
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-test("the refusal reason shows instead of a stale journal", () => {
-  renderUi(<JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} sourceKey="anton\0admin" />);
-  expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
-  // прежних записей нет: только причина
-  expect(screen.queryByRole("row")).toBeNull();
+test('selection is only an id: a removed row cannot leave copied DTO in the modal', async () => {
+  const view = renderUi(<JournalPage journal={J} sourceKey="source" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Open audit evidence 20' }));
+  expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  view.rerender(<MantineProvider><JournalPage journal={[J[1]]} sourceKey="source" /></MantineProvider>);
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-// Ревью #422: открытый диалог не переживает отказ источника. Журнал --
-// только действующему админу: как только приходит error, диалог закрывается
-// и таблица уходит -- ни одного кадра устаревших данных на экране.
-test("review: an open modal closes the moment the source refuses", async () => {
-  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]} sourceKey="anton\0admin" />);
-  expect(await screen.findByRole("dialog")).toBeInTheDocument();
-  // источник отказал: 401/403/роль ушла -- hook положил error и пустой журнал
-  view.rerender(<MantineProvider>
-    <JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} sourceKey="anton\0admin" />
-  </MantineProvider>);
-  // диалог закрыт сразу, без ждущего клика; записей нет
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
-});
-
-// Ревью 7 (#422): full_entry хранит произвольный JSON не только в text --
-// объект в name/event/node/project ронял строку таблицы («Objects are not
-// valid as a React child»). Ячейки таблицы и заголовок рисуются строками
-// (объект -- его JSON); модал остаётся носителем сырого значения. Вид
-// события, не являющийся строкой, фразу не заслужил -- колонка описания
-// честно показывает сырой text.
-test("review7: object name/event/node render as text, not a crash", () => {
-  const odd = [
-    { at: 1700000000, event: { kind: "send" }, name: { x: 1 }, node: [1, 2],
-      project: "mop", text: "from ermak" },
-  ] as unknown as JournalEntry[];
-  renderUi(<JournalPage journal={odd} open={() => {}} sourceKey="anton\0admin" />);
-  const row = screen.getByText("14.11.2023 22:13:20 UTC").closest("tr")!;
-  expect(row.textContent).toContain('{"kind":"send"}');   // event -- строкой
-  expect(row.textContent).toContain('{"x":1}');           // name -- строкой
-  expect(row.textContent).toContain("mop");
-  expect(row.textContent).toContain("from ermak");        // default: сырой text
-});
-
-// Ревью 4 (#422): обычный 10s опрос приносит новый массив с теми же
-// событиями -- ссылка другая, источник тот же. Диалог полного события
-// переживает такой кадр: закрыть его может смена источника или отказ,
-// не тик опроса.
-test("review4: an open modal survives a same-source poll frame", async () => {
-  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]}
-                                     sourceKey="anton\0admin" />);
-  expect(await screen.findByRole("dialog")).toBeInTheDocument();
-  // очередной опрос: новый массив, то же содержимое, тот же источник
-  view.rerender(<MantineProvider>
-    <JournalPage journal={[...J]} error={null} open={() => {}} sourceKey="anton\0admin" />
-  </MantineProvider>);
-  await new Promise((r) => setTimeout(r, 50));
-  expect(screen.getByRole("dialog")).toBeInTheDocument();
-});
-
-// Ревью 3 (#422): открытый диалог записи A не переживает смену источника
-// A→B (error нет, журнал просто новый): диалог -- часть показанного
-// журнала, чужой записи в нём быть не должно. Ключ источника -- от App
-// (кто смотрит), не ссылка массива: опрос её меняет каждую 10 с.
-test("review3: an open modal does not survive a source switch", async () => {
-  const BJ: JournalEntry[] = [{ at: 1700000120, event: "wipe", name: "pu-mop-2", node: "gpu",
-                                project: "other", text: "" }];
-  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]}
-                                     sourceKey="anton\0admin" />);
-  expect(await screen.findByRole("dialog")).toBeInTheDocument();
-  view.rerender(<MantineProvider>
-    <JournalPage journal={BJ} error={null} open={() => {}} sourceKey="bob\0admin" />
-  </MantineProvider>);
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(screen.getByText("pu-mop-2")).toBeInTheDocument();
-});
-
-// Ревью 2 (#422): модал показывает и сырое поле text -- отдельно от
-// человекочитаемого описания: полное событие обязано нести запись как
-// она есть, описание -- надстройка, не замена.
-test("review2: the modal shows the raw text field besides the phrase", () => {
-  renderUi(<JournalModal entry={J[1]} onClose={() => {}} />);
-  const dlg = screen.getByRole("dialog");
-  // сырая строка события агента -- как пришла
-  expect(dlg.textContent).toContain("text:");
-  expect(dlg.textContent).toContain("from ermak");
-  // и человекочитаемая фраза рядом
-  expect(dlg.textContent).toContain("сообщение от ermak");
-});
-
-// Блокер ревью (4): oversized-маркер #424 несёт только {event,text,at,
-// received_at} -- name/node/project в записи нет. Диалог обязан рисовать
-// такой маркер без crash'а, пустые поля показывая прочерком.
-test("review: an oversized marker without name/node/project renders, not crashes", () => {
-  const marker = { at: 1700000000, received_at: 1700000001, event: "type",
-                   text: "[oversized: 64 KB]" } as JournalEntry;
-  renderUi(<JournalModal entry={marker} onClose={() => {}} />);
-  const dlg = screen.getByRole("dialog");
-  expect(dlg.textContent).toContain("type");
-  expect(dlg.textContent).toContain("[oversized: 64 KB]");
-  expect(dlg.textContent).not.toContain("undefined");
-});
-
-// Блокер ревью (5): полное событие копируем в буфер одной кнопкой.
-test("review: the modal copies the full entry JSON to the clipboard", async () => {
-  const E: JournalEntry = { at: 1700000000, event: "send", name: "pu-mop-1",
-                            node: "hyper", project: "mop", text: "from ermak" };
-  const writeText = vi.fn().mockResolvedValue(undefined);
-  vi.stubGlobal("navigator", { clipboard: { writeText } });
-  renderUi(<JournalModal entry={E} onClose={() => {}} />);
-  fireEvent.click(screen.getByRole("button", { name: /копировать/i }));
-  await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
-  // запись целиком, читаемо отступами; проверяем содержимое, не формат
-  const sent = writeText.mock.calls[0][0] as string;
-  expect(JSON.parse(sent)).toEqual(E);
-  vi.unstubAllGlobals();
+test('pagination controls are accessible, bounded by owner and disabled while a page is loading', () => {
+  const more = vi.fn(), refresh = vi.fn();
+  const view = renderUi(<JournalPage journal={J} sourceKey="source" nextCursor="opaque" more={more} refresh={refresh} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Load older evidence' })); expect(more).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh operation audit' })); expect(refresh).toHaveBeenCalledOnce();
+  view.rerender(<MantineProvider><JournalPage journal={J} sourceKey="source" loading nextCursor="opaque" more={more} /></MantineProvider>);
+  expect(screen.getByRole('button', { name: 'Load older evidence' })).toBeDisabled();
 });
