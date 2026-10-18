@@ -161,6 +161,36 @@ class DefaultDelegationRoots(TransactionTestCase):
         app, code = action.split('.')
         user.user_permissions.remove(Permission.objects.get(content_type__app_label=app, codename=code))
 
+    # #715: discovery roots тоже обязаны работать без injected resolver.
+    # RED: Identity/Projects -- unbound resolver, capabilities -- unbound policy.
+    # SOLUTION: общий SQL grant root и explicit ReadScope для делегированного query.
+    # GREEN: 104 discovery/auth regressions + 3 UID checks; парольные границы прежние.
+    def test_default_identity_resolves_the_current_delegated_actor(self):
+        value = self.assert_ok('identity')
+        self.assertEqual((value['user_id'], value['kind'], value['grant_id']),
+                         (self.subject.pk, 'agent', str(self.child.id)))
+        self.assertNotIn('principal_id', value)
+        self.preparation.revoke(self.human, self.approval.id)
+        self.assert_denied('identity')
+
+    def test_default_capability_catalogue_uses_real_policy_and_live_permissions(self):
+        values = {'project_id': str(self.project.pk)}
+        value = self.assert_ok('capabilities', values)
+        self.assertEqual(value['actor']['user_id'], self.subject.pk)
+        self.assertIn('catalog.view_pool', value['actions'])
+        self.remove_permission(self.owner, 'catalog.view_pool')
+        self.assertNotIn('catalog.view_pool', self.assert_ok('capabilities', values)['actions'])
+        self.preparation.revoke(self.human, self.approval.id)
+        self.assert_denied('capabilities', values)
+
+    def test_default_project_queries_preserve_delegated_scope(self):
+        value = self.assert_ok('projects')
+        self.assertEqual([row['id'] for row in value['results']], [str(self.project.pk)])
+        self.assertEqual(self.assert_ok('projects/'+str(self.project.pk))['id'], str(self.project.pk))
+        self.assert_denied('projects/'+str(self.foreign.pk))
+        self.preparation.revoke(self.human, self.approval.id)
+        self.assert_denied('projects')
+
     def test_default_snapshot_and_detail_use_real_exact_approval_without_provider_io(self):
         with patch.object(type(self.provider), 'encrypt', side_effect=AssertionError('provider in read root')), \
              patch.object(type(self.provider), 'decrypt', side_effect=AssertionError('provider in read root')):
