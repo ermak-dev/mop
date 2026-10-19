@@ -192,6 +192,89 @@ class CheckpointDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(item, 'last_effect', None), 'git-fetch')
 
 
+class EarlyStartCleanupTests(unittest.IsolatedAsyncioTestCase):
+    # BUG #758: отмена prepare во время physical start теряет cleanup owner.
+    # HYPOTHESIS: phase override ломает _abandon, а phase cleanup не ждёт start.
+    # SOLUTION: разные cleanup методы; phase owner joins original action и empty proof.
+    # RESULT: 38 phase checks GREEN; actual 3.12/PG17 cancel+timeout — exact cleanup,
+    # один start/retire, repeated cancel не бросает retained task (125 rechecks).
+    # STATUS: FIXED — see #758
+    def owner(self):
+        from types import SimpleNamespace
+        from _host_scope_fixture import Adapter, installed, scope
+        from mop.node.host_phase_supervisor import Body, PhaseOwner
+        from mop.node.host_scope_supervisor import Supervisor
+        adapter = Adapter()
+        adapter.release = asyncio.Event()
+        owner = PhaseOwner.__new__(PhaseOwner)
+        Supervisor.__init__(owner, installed(), adapter)
+        owner.config = SimpleNamespace(control=lambda scope: Path('/unused-phase-control'))
+        body = Body(scope(), None)
+        return owner, adapter, body
+
+    async def test_abandoned_physical_start_keeps_inherited_cleanup_contract(self):
+        from mop.node.host_scope import Request
+        owner, adapter, body = self.owner()
+        task = asyncio.create_task(owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4()))))
+        await adapter.entered.wait()
+        action = owner.active[body.scope]
+        task.cancel()
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertIsNotNone(action.cleanup, 'inherited physical cleanup was never scheduled')
+        finally:
+            adapter.release.set()
+            await asyncio.gather(task, action.task, *([action.cleanup] if action.cleanup else []), return_exceptions=True)
+        self.assertFalse(adapter.units[body.scope].populated)
+        self.assertNotIn(body.scope, owner.active)
+        retired = action.cleanup.result()
+        self.assertIsNotNone(retired, 'physical cleanup discarded its exact retirement outcome')
+        self.assertEqual(retired.reference, owner._owned[body.scope])
+        self.assertFalse(retired.populated)
+
+    async def test_phase_artifacts_wait_for_original_start_and_exact_reference(self):
+        from mop.node.host_scope import Request
+        owner, adapter, body = self.owner()
+        task = asyncio.create_task(owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4()))))
+        await adapter.entered.wait()
+        cleanup = asyncio.create_task(owner._cleanup_owned(body))
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(cleanup.done(), 'phase cleanup failed before joining the original retained start')
+            self.assertIsNone(body.reference)
+            self.assertEqual([name for name, _ in adapter.calls].count('start'), 1)
+            adapter.release.set()
+            snapshot = await task
+            await cleanup
+            self.assertEqual(body.reference, snapshot.reference)
+            self.assertFalse(adapter.units[body.scope].populated)
+            self.assertEqual([name for name, _ in adapter.calls].count('start'), 1)
+        finally:
+            adapter.release.set()
+            await asyncio.gather(task, cleanup, return_exceptions=True)
+
+    async def test_uncertain_original_start_never_adopts_a_later_matching_unit(self):
+        from mop.node.host_scope import Request, Unknown
+        owner, adapter, body = self.owner()
+        original = adapter.start
+        async def uncertain(scope):
+            await original(scope)
+            raise Unknown('original physical outcome has no reference')
+        adapter.start = uncertain
+        task = asyncio.create_task(owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4()))))
+        await adapter.entered.wait()
+        cleanup = asyncio.create_task(owner._cleanup_owned(body))
+        adapter.release.set()
+        with self.assertRaises(Unknown): await task
+        with self.assertRaises(Unknown): await cleanup
+        self.assertIsNone(body.reference)
+        self.assertNotIn(body.scope, owner._owned)
+        self.assertEqual([name for name, _ in adapter.calls].count('retire'), 0)
+        with self.assertRaisesRegex(Refused, 'replay|uncertain'):
+            await owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4())))
+
+
 class ShutdownTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_cleanup_still_joins_every_owned_body_and_closes_private_store(self):
         from types import SimpleNamespace
@@ -207,7 +290,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
             calls.append(body)
             if body == 'first': raise Unknown('first exact cleanup unknown')
         async def super_close(self): calls.append('super-close')
-        owner._cleanup = cleanup
+        owner._cleanup_phase = cleanup
         with patch.object(Supervisor, 'aclose', super_close), self.assertRaisesRegex(Unknown, 'first exact cleanup unknown'):
             await owner.aclose()
         self.assertEqual(calls, ['first', 'second', 'store-close', 'super-close'])

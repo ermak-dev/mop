@@ -218,8 +218,11 @@ class Supervisor:
                     raise Unknown('abandoned HOST start absent; cleanup unknown')
                 facts.verify(self.installed, snapshot.reference.scope, snapshot.reference)
                 empty = await self.adapter.retire(snapshot.reference)
-                if empty.verify(self.installed, snapshot.reference.scope, snapshot.reference).populated:
+                snapshot = empty.verify(self.installed, snapshot.reference.scope, snapshot.reference)
+                if snapshot.populated:
                     raise Unknown('abandoned HOST start remains populated')
+            # Phase owner использует исходный empty proof, не повторяет retire.
+            return snapshot
         except (Refused, Unknown) as error:
             self.last_error = str(error)
         except asyncio.CancelledError:

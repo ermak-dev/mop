@@ -78,6 +78,7 @@ class Body:
     completed: list = field(default_factory=list)
     attempts: list = field(default_factory=list)
     cleanup: object = None
+    physical_start: object = None
     connection_error: str | None = None
     cleanup_connection: object = None
 
@@ -314,12 +315,12 @@ class PhaseOwner(Supervisor):
                 +' at '+(item.pending.effect if item.pending is not None else (item.last_effect or 'body-control'))
                 +('; control refusal: '+body.connection_error if body.connection_error else ''))
             try:
-                await self._cleanup(body)
+                await self._cleanup_phase(body)
             except (Refused, Unknown, OSError, TimeoutError) as cleanup_error:
                 item.error += '; cleanup unknown: '+str(cleanup_error)
         except Exception as error:
             item.status, item.error = 'unknown', 'planned phase failed: '+type(error).__name__
-            try: await self._cleanup(body)
+            try: await self._cleanup_phase(body)
             except Exception as cleanup_error: item.error += '; cleanup failed: '+type(cleanup_error).__name__
 
     def _clean_input(self, item):
@@ -329,16 +330,39 @@ class PhaseOwner(Supervisor):
             self.store.forget(item.receipt)
             item.receipt = None
 
-    async def _cleanup(self, body):
+    def _phase_cleanup_task(self, body):
         if body.cleanup is None:
+            # Захватываем original action до yield: physical cleanup может уже
+            # завершиться и убрать active entry, но его outcome ещё нужен фазе.
+            body.physical_start = self.active.get(body.scope)
             body.cleanup = asyncio.create_task(self._cleanup_owned(body))
-        await asyncio.shield(body.cleanup)
+        return body.cleanup
+
+    async def _cleanup_phase(self, body):
+        await asyncio.shield(self._phase_cleanup_task(body))
 
     async def _cleanup_owned(self, body):
+        start = body.physical_start or self.active.get(body.scope)
+        retired = None
+        if start is not None:
+            body.physical_start = start
+            if start.request.action != 'start' or start.request.scope != body.scope:
+                raise Unknown('planned cleanup lost its original physical start')
+            snapshot = await asyncio.shield(start.task)
+            if (snapshot.reference != self._owned.get(body.scope)
+                    or body.reference is not None and body.reference != snapshot.reference):
+                raise Unknown('planned original physical start reference changed')
+            body.reference = snapshot.reference
+            body.ready.set()
+            if start.cleanup is not None:
+                retired = await asyncio.shield(start.cleanup)
+                if retired is None or retired.reference != body.reference or retired.populated:
+                    raise Unknown('planned original physical retirement outcome unknown')
         if body.reference is not None:
-            facts = await self.adapter.retire(body.reference)
-            if facts.verify(self.installed, body.scope, body.reference).populated:
-                raise Unknown('planned cleanup requires exact empty cgroup first')
+            if retired is None:
+                facts = await self.adapter.retire(body.reference)
+                if facts.verify(self.installed, body.scope, body.reference).populated:
+                    raise Unknown('planned cleanup requires exact empty cgroup first')
         elif body.scope in self._fences:
             raise Unknown('planned launch has no retained reference; cleanup unknown')
         for item in body.attempts: self._clean_input(item)
@@ -421,8 +445,7 @@ class PhaseOwner(Supervisor):
                     body = self.bodies[scope]
                     if item.task is not None and not item.task.done():
                         item.task.cancel()
-                    if body.cleanup is None:
-                        body.cleanup = asyncio.create_task(self._cleanup_owned(body))
+                    self._phase_cleanup_task(body)
                     # Только submission cleanup; последующий status не начинает эффект.
                 result = self.status(item)
             response = dict(schema_version=1, status='ok', phase=result, error=None)
@@ -442,7 +465,7 @@ class PhaseOwner(Supervisor):
             if item.task is not None and not item.task.done(): item.task.cancel()
         tasks = [item.task for item in self.attempts.values() if item.task is not None]
         if tasks: await asyncio.gather(*tasks, return_exceptions=True)
-        results = await asyncio.gather(*(self._cleanup(body) for body in self.bodies.values()), return_exceptions=True)
+        results = await asyncio.gather(*(self._cleanup_phase(body) for body in self.bodies.values()), return_exceptions=True)
         if self._body_handlers: await asyncio.gather(*self._body_handlers, return_exceptions=True)
         try:
             if self.store is not None: self.store.close()

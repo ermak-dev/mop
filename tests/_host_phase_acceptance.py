@@ -289,6 +289,12 @@ async def frontend(document):
                     if not checkpoint: await asyncio.sleep(.02)
             print(json.dumps(dict(status='retained', admission=admission_wire(admission), scope=scope.wire(), reference=phase['reference'])), flush=True)
             return
+        if mode == 'approve_start':
+            original = parse_admission(document['admission'])
+            await executor.exchange(dict(schema_version=1, action='phase_checkpoint',
+                scope=executor.scope(original.work).wire(), attempt_id=original.attempt_id), guard=phase_guard(original))
+            print(json.dumps(dict(status='accepted-start')), flush=True)
+            return
         if mode in ('checkpoint_denied', 'cleanup'):
             original = parse_admission(document['admission'])
             scope = executor.scope(original.work)
@@ -382,6 +388,108 @@ async def frontend(document):
     finally:
         await runtime.aclose()
         writer.close()
+
+
+async def early_start_cleanup(config, authority, template, values, launch):
+    # BUG #758 / HYPOTHESIS: early cancel ломает inherited cleanup и не ждёт
+    # исходный physical start. Barrier внутри настоящего systemd start, до Facts.
+    # SOLUTION: join original start + retirement, затем exact phase artifacts.
+    # RESULT: actual cancel/timeout + repeated cancel GREEN, один start/retire.
+    # STATUS: FIXED — see #758
+    import copy
+    from mop.node.host_backend import Identity, Process
+    from mop.node.host_phase_supervisor import PhaseConfig, PhaseOwner
+    from mop.node.host_scope import Scope, Refused, Unknown
+    from mop.node.host_scope_supervisor import SocketServer
+    from mop.node.host_scope_systemd import SystemdCgroupAdapter
+    for mode in ('cancel', 'timeout'):
+        case = copy.deepcopy(template)
+        target, incarnation, operation = (str(uuid4()) for _ in range(3))
+        for value in case:
+            value['work'].update(target_id=target, incarnation_id=incarnation, operation_id=operation,
+                step_id=str(uuid4()), executor_epoch=authority.executor)
+        values.extend(case)
+        installed = PhaseConfig.load(ROOT/'host-phase.json').installed
+        adapter = SystemdCgroupAdapter(installed)
+        print('early-start '+mode+': install owner', file=sys.stderr, flush=True)
+        owner = PhaseOwner(installed, adapter, identity=Identity(INSTALLATION, authority.node), phase_config=ROOT/'host-phase.json')
+        endpoint = SocketServer(owner, SOCKET)
+        entered, release = asyncio.Event(), asyncio.Event()
+        command = adapter.command.run
+        starts, kills = [], []
+        async def barrier(*args):
+            result = await command(*args)
+            if args[0] == '/usr/bin/systemd-run' and '--scope' in args:
+                starts.append(args)
+                entered.set()
+                await release.wait()
+            return result
+        adapter.command.run = barrier
+        retire = adapter.retire
+        async def retirement(reference):
+            result = await retire(reference)
+            kills.append(reference)
+            return result
+        adapter.retire = retirement
+        await endpoint.start()
+        print('early-start '+mode+': stage', file=sys.stderr, flush=True)
+        try:
+            staged = await launch([case[0]['work']], mode='stage', stop_before='start-broker')
+            print('early-start '+mode+': approve physical start', file=sys.stderr, flush=True)
+            scope = Scope.parse(staged['scope'])
+            item = owner._attempt(scope, staged['admission']['attempt_id'])
+            body = owner.bodies[scope]
+            if mode == 'timeout': owner.timeout = .5
+            await launch([], mode='approve_start', admission=staged['admission'])
+            async with asyncio.timeout(10.): await entered.wait()
+            print('early-start '+mode+': original physical start barrier', file=sys.stderr, flush=True)
+            process = Process.read(int(run('/usr/bin/systemctl', 'show', '--value', '--property=MainPID', '--', scope.unit)))
+            assert Path('/proc', str(process.pid), 'status').read_text().split('Uid:')[1].splitlines()[0].split() == [str(BODY)]*4
+            assert scope.cgroup in Path('/proc', str(process.pid), 'cgroup').read_text()
+            assert body.reference is None and scope not in owner._owned, 'barrier missed original physical start'
+            if mode == 'cancel': item.task.cancel()
+            async with asyncio.timeout(10.):
+                while item.status == 'accepted': await asyncio.sleep(.01)
+            # Повторная отмена caller не вправе бросить retained cleanup task.
+            # Новый startup/bind здесь намеренно не нужен и не является cleanup.
+            item.task.cancel()
+            await asyncio.sleep(0)
+            item.task.cancel()
+            await asyncio.sleep(.02)
+            assert body.cleanup is not None and not body.cleanup.done(), (
+                '#758 phase cleanup failed before original start outcome: '+str(item.error))
+            assert body.workspace is not None and body.socket_identity is not None
+            assert item.receipt is not None and not kills, 'artifacts removed before exact retirement'
+            release.set()
+            async with asyncio.timeout(25.): await asyncio.shield(body.cleanup)
+            await asyncio.gather(item.task, return_exceptions=True)
+            assert body.reference == owner._owned[scope], 'cleanup reminted instead of retaining the original reference'
+            assert len(starts) == 1 and kills == [body.reference], 'cleanup replayed start/retirement or changed incarnation'
+            assert body.workspace is None and body.socket_identity is None and item.receipt is None
+            assert not (installed.body_root/scope.launch_id).exists()
+            assert not (Path(config['control_root'])/(scope.launch_id+'.sock')).exists()
+            assert not list(Path(config['ingress']).glob('*'+item.submission.admission.attempt_id+'*'))
+            assert not list(Path(config['snapshots']).glob('*.json'))
+            try: current = Process.read(process.pid)
+            except (Refused, Unknown, OSError): current = None
+            assert current != process, 'original actual body process survived early-start cleanup'
+            # Удаляем только собственные точные fixture units перед cold-bind
+            # следующего daemon; production inventory/adoption не подменяется.
+            run('/usr/bin/systemctl', 'stop', '--', scope.unit, scope.unit.replace('mop-host-', 'mop-clean-', 1))
+            run('/usr/bin/systemctl', 'reset-failed', '--', scope.unit)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            raise
+        finally:
+            release.set()
+            try:
+                await endpoint.aclose()
+                # Manager GC асинхронен: cold-bind не усыновляет даже empty unit.
+                async with asyncio.timeout(5.):
+                    while (await adapter.startup_inventory()):
+                        await asyncio.sleep(.05)
+            finally: await adapter.aclose()
 
 
 async def accept():
@@ -514,6 +622,28 @@ async def accept():
         user=BODY, group=BODY, extra_groups=(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=dict(PATH='/usr/bin:/bin'))
     assert preflight.returncode == 0 and not preflight.stdout, 'actual installed body preflight: '+preflight.stderr.decode()
+    from mop.node.host_scope import Scope
+    async def launch(works, observations=(), **options):
+        document = dict(origin='https://localhost:8443', token=TOKEN, node=node,
+            works=works, observations=list(observations), **options)
+        proc = await asyncio.create_subprocess_exec('/usr/local/bin/python3.12', '-IB', __file__, 'frontend',
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            user=NODE, group=NODE, extra_groups=(), env=dict(PATH='/usr/bin:/bin',
+                HTTPS_PROXY='http://127.0.0.1:1', GIT_CONFIG_PARAMETERS='poison', SSH_AUTH_SOCK='/tmp/hostile-agent',
+                GIT_AUTHOR_NAME='wrong-ambient-owner', NODE_BEARER=TOKEN))
+        out, err = await proc.communicate(json.dumps(document).encode())
+        if proc.returncode != 0:
+            statuses = []
+            for work in works:
+                scope = Scope(epoch, node, server.authority.executor, work['target_id'], work['incarnation_id'], work['operation_id'])
+                p = subprocess.run(('/usr/bin/systemctl', 'show', scope.unit, '--property=ActiveState,SubState,ExecMainCode,ExecMainStatus,Result,ControlGroup'),
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                origin = next(v['selection']['source']['origin'] for v in values if v['work']['step_id'] == work['step_id'])
+                statuses.append(origin+' '+p.stdout.decode())
+            raise AssertionError('actual planned frontend failed: '+err.decode()+' owned units: '+repr(statuses))
+        return json.loads(out)
+    async with asyncio.timeout(90.):
+        await early_start_cleanup(config, server.authority, cases[0], values, launch)
     root = await asyncio.create_subprocess_exec(str(ROOT/'bin/mop'), 'host-root', '--physical', '/etc/mop-physical.json',
         env=dict(PATH='/usr/bin:/bin', NODE_BEARER='root-ambient-not-for-body'),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -524,27 +654,6 @@ async def accept():
                     out, err = await root.communicate()
                     raise AssertionError('installed root failed: '+err.decode())
                 await asyncio.sleep(.02)
-        from mop.node.host_scope import Scope
-        async def launch(works, observations=(), **options):
-            document = dict(origin='https://localhost:8443', token=TOKEN, node=node,
-                works=works, observations=list(observations), **options)
-            proc = await asyncio.create_subprocess_exec('/usr/local/bin/python3.12', '-IB', __file__, 'frontend',
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                user=NODE, group=NODE, extra_groups=(), env=dict(PATH='/usr/bin:/bin',
-                    HTTPS_PROXY='http://127.0.0.1:1', GIT_CONFIG_PARAMETERS='poison', SSH_AUTH_SOCK='/tmp/hostile-agent',
-                    GIT_AUTHOR_NAME='wrong-ambient-owner', NODE_BEARER=TOKEN))
-            out, err = await proc.communicate(json.dumps(document).encode())
-            if proc.returncode != 0:
-                from mop.node.host_scope import Scope
-                statuses = []
-                for work in works:
-                    scope = Scope(epoch, node, server.authority.executor, work['target_id'], work['incarnation_id'], work['operation_id'])
-                    p = subprocess.run(('/usr/bin/systemctl', 'show', scope.unit, '--property=ActiveState,SubState,ExecMainCode,ExecMainStatus,Result,ControlGroup'),
-                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                    origin = next(v['selection']['source']['origin'] for v in values if v['work']['step_id'] == work['step_id'])
-                    statuses.append(origin+' '+p.stdout.decode())
-                raise AssertionError('actual planned frontend failed: '+err.decode()+' owned units: '+repr(statuses))
-            return json.loads(out)
         for index, case in enumerate(cases):
             if index == 0:
                 result = await launch([case[0]['work']], mode='lost_submission')
@@ -737,7 +846,7 @@ async def accept():
         negatives.append('approved-isolating-role-unavailable')
         assert not list(Path('/var/lib/mop-snapshots').glob('*.json'))
         print(json.dumps(dict(status='accepted', python='3.12', postgres=17, root_uid=0, node_uid=NODE, body_uid=BODY,
-            actual_negatives=negatives,
+            actual_negatives=negatives, early_start_cleanup=['cancel', 'timeout'],
             actual_phases=['prepare_body', 'bootstrap_body', 'initial_identity'],
             source_transports=['https', 'ssh'], frontend_replacement=True,
             lost_submission_ack=True, lost_status_ack=True, lost_result_ack=True, original_attempt_resume=True,
