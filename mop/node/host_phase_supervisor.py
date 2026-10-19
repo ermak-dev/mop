@@ -471,7 +471,11 @@ class PhaseOwner(Supervisor):
                     self._phase_cleanup_task(body)
                     # Только submission cleanup; последующий status не начинает эффект.
                 result = self.status(item)
+            if 'native' in result:
+                from mop.node.host_native import phase_wire
+                result = phase_wire(result)
             response = dict(schema_version=1, status='ok', phase=result, error=None)
+            encode(response)
         except (Refused, Unknown) as error:
             response = dict(schema_version=1, status='refused' if isinstance(error, Refused) else 'unknown', phase=None, error=str(error))
         except Exception as error:

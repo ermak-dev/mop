@@ -146,6 +146,9 @@ class _Session:
             raise (Refused if value['status'] == 'refused' else Unknown)(error)
         if value['status'] != 'ok' or value['error'] is not None or type(value['phase']) is not dict:
             raise Refused('invalid planned HOST response status')
+        if 'native' in value['phase']:
+            from mop.node.host_native import phase_parse
+            return phase_parse(value['phase'])
         return value['phase']
 
     async def native_mailbox(self, request):

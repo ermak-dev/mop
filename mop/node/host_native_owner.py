@@ -183,7 +183,8 @@ def submit_native(owner, request):
             or body.completed != ['prepare_body', 'bootstrap_body', 'initial_identity']
             or any(not item.acknowledged for item in body.attempts) or body.cleanup is not None):
         raise Refused('native requires original body and three exact committed phase ACKs')
-    owner.manifest.project(request.projection)
+    from mop.node.host_native import status_budget
+    status_budget(request, owner.manifest)
     owner.manifest.require_native_release(owner.installed.runner.parents[2])
     # Role canonicalizer использует declared PyYAML. Только заранее hashed
     # installed dependency tree; -S остаётся, .pth/user-site не исполняются.

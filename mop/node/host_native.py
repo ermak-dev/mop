@@ -186,6 +186,122 @@ class NativeSubmission:
             Projection.parse(value['projection']), Reference.parse(value['reference']), NativePins.parse(value['pins']))
 
 
+def phase_wire(phase):
+    """Замкнутая lossless projection; shared identity берётся из этого же frame."""
+    if 'native' not in phase:
+        return phase
+    native = phase['native']
+    exact(native, ('producer', 'attachment', 'committed', 'pending', 'error'))
+    reference = Reference.parse(phase['reference'])
+    attachment = native['attachment']
+    if attachment is not None:
+        exact(attachment, ('reference', 'runner', 'session_id', 'native', 'tmux'))
+        if attachment['reference'] != reference.wire():
+            raise Refused('native status attachment reference disagrees')
+        def process(value):
+            from mop.node.host_backend import Process
+            p = Process.parse(value)
+            if p.boot_id != reference.boot_id:
+                raise Refused('native status process boot disagrees')
+            return [p.pid, p.start]
+        attachment = dict(runner=process(attachment['runner']), session_id=attachment['session_id'],
+            **{name: dict(process=process(attachment[name]['process']), executable=attachment[name]['executable'])
+               for name in ('native', 'tmux')})
+    producer = native['producer']
+    if producer is not None:
+        from mop.common.producer import ProducerAck
+        ack = ProducerAck.parse(producer)
+        if any(str(getattr(ack.scope, key)) != getattr(reference.scope, key) for key in
+               ('epoch', 'target_id', 'incarnation_id', 'node_id', 'executor_epoch')):
+            raise Refused('native status producer scope disagrees')
+        if attachment is None or attachment['session_id'] != ack.scope.session_id:
+            raise Refused('native status producer session disagrees')
+        producer = dict(producer_epoch=str(ack.scope.producer_epoch), revision=str(ack.revision))
+    committed = native['committed']
+    if committed is not None:
+        from mop.common.telemetry import Observation
+        row = Observation.parse(committed)
+        if native['producer'] is None or row.scope != ack.scope:
+            raise Refused('native status committed producer disagrees')
+        committed = {key: value for key, value in committed.items() if key != 'scope'}
+    return {**phase, 'native': dict(format='shared-v1', attachment=attachment,
+        producer=producer, committed=committed, pending=native['pending'], error=native['error'])}
+
+
+def phase_parse(phase):
+    """Восстановление exact proof без frontend cache или внешней discovery."""
+    if 'native' not in phase:
+        return phase
+    native = phase['native']
+    exact(native, ('format', 'producer', 'attachment', 'committed', 'pending', 'error'))
+    if native['format'] != 'shared-v1':
+        raise Refused('unsupported native status projection')
+    reference = Reference.parse(phase['reference'])
+    attachment = native['attachment']
+    if attachment is not None:
+        exact(attachment, ('runner', 'session_id', 'native', 'tmux'))
+        def process(value):
+            from mop.node.host_backend import Process
+            if type(value) is not list or len(value) != 2:
+                raise Refused('exact native status process pair required')
+            return Process(*value, reference.boot_id).wire()
+        for name in ('native', 'tmux'):
+            exact(attachment[name], ('process', 'executable'))
+        attachment = dict(reference=reference.wire(), runner=process(attachment['runner']),
+            session_id=attachment['session_id'], **{name: dict(process=process(attachment[name]['process']),
+                executable=attachment[name]['executable']) for name in ('native', 'tmux')})
+    producer = native['producer']
+    if producer is not None:
+        from uuid import UUID
+        from mop.common.producer import ProducerAck
+        from mop.common.telemetry import SessionScope
+        exact(producer, ('producer_epoch', 'revision'))
+        if attachment is None:
+            raise Refused('native status producer requires attachment')
+        scope = SessionScope(*(UUID(getattr(reference.scope, k)) for k in
+            ('epoch', 'target_id', 'incarnation_id', 'node_id', 'executor_epoch')),
+            attachment['session_id'], UUID(producer['producer_epoch']))
+        producer = ProducerAck(scope, counter(producer['revision'])).wire()
+    committed = native['committed']
+    if committed is not None:
+        from mop.common.telemetry import Observation
+        if producer is None or 'scope' in committed:
+            raise Refused('native status observation requires shared producer scope')
+        committed = Observation.parse(dict(**committed, scope=producer['scope'])).wire()
+    result = {**phase, 'native': dict(producer=producer, attachment=attachment,
+        committed=committed, pending=native['pending'], error=native['error'])}
+    # Проверяется и обратная canonical projection: неизвестные поля не теряются.
+    if phase_wire(result) != phase:
+        raise Refused('noncanonical native status projection')
+    return result
+
+
+def status_budget(request, manifest):
+    """До snapshot/dispatch резервируем весь populated response, включая JSON escapes."""
+    from mop.node.host_backend import Process
+    from mop.common.producer import ProducerAck
+    from mop.common.telemetry import Observation, SessionScope
+    from uuid import UUID
+    reference = request.reference
+    scope = SessionScope(*(UUID(getattr(reference.scope, k)) for k in
+        ('epoch', 'target_id', 'incarnation_id', 'node_id', 'executor_epoch')), 's'*128, UUID(int=1))
+    process = Process(2**31-1, 2**64-1, reference.boot_id).wire()
+    phase = dict(status='succeeded', receipt=str(UUID(int=1)), error=None,
+        admission=admission_wire(request.admission), reference=reference.wire(),
+        checkpoint=dict(effect='producer-attach', sequence=3), runtime_digest=manifest.content_digest,
+        resources=manifest.project(request.projection).wire(), acknowledged=False,
+        native=dict(producer=ProducerAck(scope, 1).wire(),
+            attachment=dict(reference=reference.wire(), runner=process, session_id=scope.session_id,
+                **{name: dict(process=process, executable=str(manifest.tools[name])) for name in ('native', 'tmux')}),
+            committed=Observation(scope, 2**63-1, 'PostModelSwitch', UUID(int=1),
+                request.pins.desired_model, None, None, 0).wire(), pending=4, error=None))
+    try:
+        # ACK меняет false на true (короче); accepted/unknown короче succeeded.
+        encode(dict(schema_version=1, status='ok', phase=phase_wire(phase), error=None))
+    except Refused as error:
+        raise Refused('native populated status frame budget exceeded before dispatch') from error
+
+
 def confirm_admission(admission):
     # confirm не получает input Envelope: не расширять PURPOSES transport #746.
     if (type(admission) is not Admission or type(admission.work) is not Work

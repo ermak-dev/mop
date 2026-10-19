@@ -342,5 +342,193 @@ class LifetimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(m, 'NativeBindings'))
 
 
+# BUG #781: complete populated status, а не короткая projection, превышает frame.
+# HYPOTHESIS: Reference и SessionScope повторяются в native proof/ACK/observation.
+# SOLUTION: замкнутая shared-v1 projection + whole-frame preflight до snapshot/effect.
+# RESULT: populated status/result ACK проходят через actual handler и Node decoder.
+# STATUS: FIXED — see #781
+class PopulatedStatusTests(unittest.IsolatedAsyncioTestCase):
+    def populated(self, *, bounded=False, escaped=False):
+        from types import SimpleNamespace
+        from uuid import UUID
+        from host_native import model_delivery
+        from mop.common.telemetry import SessionScope
+        from mop.node.host_backend import Process
+        from mop.node.host_native_owner import NativeOwner
+        from mop.node.host_phase_manifest import Capacity, path
+        from mop.node.host_phase_supervisor import PhaseOwner, Attempt, Body
+        from mop.node.host_phases import Projection
+        from mop.node.host_scope import Reference
+        a, scope, delivery = model_delivery()
+        if bounded:
+            w = replace(a.work, owner_id=2**62, generation=2**62, revision=2**62)
+            a = replace(a, work=w, revision=2**62)
+        reference = Reference(scope, uuid4().hex, str(uuid4()))
+        r = Registration(a.work, delivery['bootstrap_revision'], delivery['bootstrap_digest'],
+            delivery['image_digest'], delivery['display_name'])
+        session = SessionScope(*(UUID(getattr(a.work, k)) for k in
+            ('epoch', 'target_id', 'incarnation_id', 'node_id', 'executor_epoch')), str(uuid4()), uuid4())
+        box = api().NativeMailbox(r, a, desired_model='m'*128 if bounded else 'fixture-desired')
+        box.producer_ack = ProducerAck(session, 1)
+        box.model_committed = Observation(session, 2**63-1 if bounded else 1,
+            'PostModelSwitch', None, box.desired_model, None, None, 0)
+        body = Body(scope, Projection.from_delivery(delivery), reference=reference)
+        item = Attempt(SimpleNamespace(admission=a, descriptor=SimpleNamespace(scope=scope)),
+            None, 1e12, status='succeeded')
+        body.native = NativeOwner(None, body, item, box)
+        native = '/opt/'+'n'*235 if bounded else '/opt/runtime/native'
+        tmux = '/opt/'+'t'*235 if bounded else '/usr/bin/tmux'
+        if escaped:
+            native, tmux = '/opt/'+'\"'*235, '/opt/'+'\\'*235
+        body.native.physical = dict(reference=reference.wire(),
+            runner=Process(12344, 12345677, reference.boot_id).wire(), session_id=session.session_id,
+            native=dict(process=Process(12345, 12345678, reference.boot_id).wire(), executable=str(path(native))),
+            tmux=dict(process=Process(12346, 12345679, reference.boot_id).wire(), executable=str(path(tmux))))
+        root = PhaseOwner.__new__(PhaseOwner)
+        root.bodies = {scope: body}
+        root._attempt = lambda *args: item
+        capacity = Capacity(4000, 100, 128, 8192, 8000, 'shared-reservation')
+        root.manifest = SimpleNamespace(content_digest='a'*64,
+            tools=dict(native=path(native), tmux=path(tmux)), project=lambda p: capacity.project(p.image_policy))
+        return root, body, item
+
+    async def status_exchange(self, root, item, *, ack=False):
+        from mop.node.host_scope import encode, decode
+        scope = item.submission.descriptor.scope
+        request = dict(schema_version=1, action='phase_status', scope=scope.wire(),
+            attempt_id=item.submission.admission.attempt_id)
+        if ack:
+            a = item.submission.admission
+            request.update(action='phase_ack', receipt=item.phase_receipt,
+                committed=dict(receipt_id=item.phase_receipt, attempt_id=a.attempt_id,
+                    revision=str(a.revision+1), outcome='succeeded', evidence='native-started'))
+        reader = asyncio.StreamReader()
+        reader.feed_data(encode(dict(schema_version=1, action='phase_response_ack'))+b'\n')
+        class Writer:
+            def __init__(self): self.frames = []
+            def write(self, raw): self.frames.append(raw)
+            async def drain(self): pass
+        writer = Writer()
+        try:
+            await root.handle_planned(reader, writer, encode(request))
+        except Refused as error:
+            raw = json.dumps(dict(schema_version=1, status='ok', phase=root.status(item), error=None),
+                separators=(',', ':'), ensure_ascii=True).encode()
+            self.fail(f'{error}: {len(raw)} bytes, {len(writer.frames)} frames written')
+        self.assertEqual(len(writer.frames), 1)
+        self.assertLessEqual(len(writer.frames[0])-1, 4096)
+        response = decode(writer.frames[0][:-1])
+        self.assertEqual(response['status'], 'ok')
+        return response, len(writer.frames[0])-1
+
+    async def test_populated_short_status_and_ack_fit_complete_frames(self):
+        root, body, item = self.populated()
+        response, size = await self.status_exchange(root, item)
+        self.assertEqual(response['phase']['receipt'], item.phase_receipt)
+        response, _ = await self.status_exchange(root, item, ack=True)
+        self.assertTrue(response['phase']['acknowledged'])
+        self.assertEqual(body.completed, ['native_exec'])
+
+    async def test_schema_valid_populated_status_at_legal_paths_models_and_counters(self):
+        root, body, item = self.populated(bounded=True)
+        response, size = await self.status_exchange(root, item)
+        self.assertEqual(response['phase']['reference'], body.reference.wire())
+        await self.status_exchange(root, item, ack=True)
+
+    async def test_json_escaping_is_counted_in_complete_populated_frame(self):
+        root, body, item = self.populated(bounded=True, escaped=True)
+        await self.status_exchange(root, item)
+
+    async def test_node_decodes_exact_proof_and_ack_recovery_without_cached_identity(self):
+        from types import SimpleNamespace
+        from mop.node.host_backend_client import _Session
+        from mop.node.host_scope import encode
+        root, body, item = self.populated(bounded=True)
+        response, size = await self.status_exchange(root, item)
+        reader = asyncio.StreamReader()
+        reader.feed_data(encode(response)+b'\n')
+        class Writer:
+            def write(self, raw): pass
+            async def drain(self): pass
+        session = _Session(SimpleNamespace(timeout=5.), reader, Writer(), None, None)
+        session.check = lambda proof: None
+        decoded = await session.planned(dict(schema_version=1, action='phase_status',
+            scope=body.scope.wire(), attempt_id=item.submission.admission.attempt_id))
+        self.assertEqual(decoded, root.status(item), 'wire compaction lost exact proof or Admission')
+        self.assertEqual(decoded['native']['attachment'], body.native.status()['attachment'])
+        self.assertEqual(decoded['native']['producer'], body.native.mailbox.producer_ack.wire())
+        self.assertEqual(decoded['native']['committed'], body.native.mailbox.model_committed.wire())
+        self.assertFalse(decoded['acknowledged'])
+        await self.status_exchange(root, item, ack=True)
+
+    async def test_budget_reserves_maximum_physical_fields_and_escaped_paths(self):
+        from types import SimpleNamespace
+        from uuid import UUID
+        from mop.node.host_backend import Process
+        from mop.node.host_native import phase_parse, status_budget
+        root, body, item = self.populated(bounded=True, escaped=True)
+        status_budget(SimpleNamespace(reference=body.reference, admission=item.submission.admission,
+            projection=body.projection, pins=SimpleNamespace(desired_model='m'*128)), root.manifest)
+        box = body.native.mailbox
+        scope = replace(box.producer_ack.scope, session_id='s'*128)
+        box.producer_ack = ProducerAck(scope, 1)
+        box.model_committed = replace(box.model_committed, scope=scope, turn_id=UUID(int=1))
+        physical = body.native.physical
+        physical['session_id'] = scope.session_id
+        physical['runner'] = Process(2**31-1, 2**64-1, body.reference.boot_id).wire()
+        for name in ('native', 'tmux'):
+            physical[name]['process'] = physical['runner']
+        item.pending = SimpleNamespace(effect='producer-attach', sequence=3, approved=False)
+        response, size = await self.status_exchange(root, item)
+        self.assertEqual(phase_parse(response['phase']), root.status(item))
+        response, ack_size = await self.status_exchange(root, item, ack=True)
+        self.assertEqual(ack_size, size-1)
+        await self.status_exchange(root, item, ack=True)
+        self.assertEqual(body.completed, ['native_exec'])
+
+    async def test_inconsistent_proof_is_refused_not_silently_rebound(self):
+        from mop.node.host_native import phase_wire, phase_parse
+        root, body, item = self.populated()
+        phase = root.status(item)
+        phase['native']['attachment']['reference'] = {**phase['reference'], 'boot_id': str(uuid4())}
+        with self.assertRaisesRegex(Refused, 'reference'):
+            phase_wire(phase)
+        encoded = phase_wire(root.status(item))
+        encoded['native']['committed']['scope'] = body.native.mailbox.producer_ack.scope.wire()
+        with self.assertRaisesRegex(Refused, 'scope'):
+            phase_parse(encoded)
+
+    async def test_unsupported_escaped_installation_rejects_before_native_dispatch(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from host_native import model_delivery
+        from mop.node.host_inputs import pack
+        from mop.node.host_native import NativeSubmission, ModelInputs, ProviderProfile
+        from mop.node.host_native_owner import submit_native
+        from mop.node.host_phases import Projection
+        from mop.node.host_scope import Reference
+        a, scope, delivery = model_delivery()
+        profile = ProviderProfile('owned-fixture-v1', 'https://provider.invalid', Path('/opt/ca'), 'api-key-v1')
+        projection = Projection.from_delivery(delivery)
+        reference = Reference(scope, uuid4().hex, str(uuid4()))
+        request = NativeSubmission(a, pack(a, scope, delivery).descriptor, projection,
+            reference, ModelInputs.parse(delivery, profile).pins())
+        root, _, _ = self.populated()
+        root.bodies = {scope: SimpleNamespace(reference=reference, native=None, projection=projection,
+            completed=['prepare_body', 'bootstrap_body', 'initial_identity'], attempts=[], cleanup=None)}
+        root._closed, root._confirmed, root._bound_epoch, root._backend_epoch = False, True, scope.epoch, scope.executor_epoch
+        root.identity = SimpleNamespace(node_id=scope.node_id)
+        root.installed = SimpleNamespace(runner=Path('/fixed/release/mop/node/host_body.py'))
+        root._owned, root.attempts, root.capacity = {scope: reference}, {}, 256
+        root.manifest.tools = dict(native=Path('/opt/'+'\x01'*235), tmux=Path('/opt/'+'\x02'*235))
+        root.manifest.require_native_release = Mock(side_effect=AssertionError('budget check was too late'))
+        root._store = Mock(side_effect=AssertionError('unsupported combination reached snapshot/dispatch'))
+        with self.assertRaisesRegex(Refused, 'status.*budget|frame.*budget'):
+            submit_native(root, request)
+        root._store.assert_not_called()
+        self.assertIsNone(root.bodies[scope].native)
+        self.assertEqual(root.attempts, {})
+
+
 if __name__ == '__main__':
     unittest.main()

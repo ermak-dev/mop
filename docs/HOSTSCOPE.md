@@ -156,6 +156,26 @@ Reconciliation server epoch и полного native lifecycle подключа�
 composition task. `UnboundHostScopes` до этого явно отказывает; никаких
 `supports_*`/`scope_retirement_v1` flags, подкреплённых fake SessionApi, нет.
 
+## Initial native status frame
+
+Native status использует замкнутую `shared-v1` projection внутри обычного
+response envelope. Полные Admission и Reference остаются в этом же frame;
+attachment наследует только проверенные равные Reference/boot ID, producer
+наследует пять равных scope UUID и session ID attachment, committed observation
+наследует exact producer scope. Несовпадение — refusal, не перепривязка proof.
+Node восстанавливает прежний полный logical status без cache/discovery; SQL
+result receipt и повторный Root ACK сохраняют прежнюю identity/idempotency.
+
+До snapshot, task и physical native dispatch Root кодирует максимальный
+populated success/recovery response с actual Admission/resources/model/tool
+paths: session ID 128, максимальные PID/start/sequence, optional turn UUID,
+checkpoint и mailbox capacity. Считается весь envelope и JSON escaping, не
+длина paths по отдельности. Unsupported combination отказывает до эффекта.
+Frame cap остаётся 4096; transport ACK не подтверждает SQL result. Это protocol
+budget/recovery proof, не actual vendor cold-start/readiness acceptance (#781).
+Новые исходники не добавлены: codec находится в уже hashed native release
+closure `host_native.py`; старые non-native phases не импортируют native codec.
+
 ## Проверки и честная граница acceptance
 
 `mop dev test host_scope` — finite parsing/peer/path/epoch/token/refusal,
