@@ -19,8 +19,9 @@ from mop.client import control as api
 
 # HYPOTHESIS: готовый DispatchCommand недоступен canonical client/CLI/MCP.
 # SOLUTION: отдельный finite dispatch intent/route, общий transport и GET recovery.
-# RESULT: до реализации проверяем missing consumer и unsupported CLI, не import failure.
-# STATUS: RED — see #757
+# RESULT: RED — missing consumer/commandlet и unsupported CLI; GREEN — 7 cases,
+# 55 real PostgreSQL17/TLS checks + UID5; native delivery здесь не запускалась.
+# STATUS: FIXED — see #757
 class DispatchClient(unittest.TestCase):
     def setUp(self):
         self.fixture = Fixture()
@@ -64,10 +65,15 @@ class DispatchClient(unittest.TestCase):
         self.fixture.responses.append(Response(200,
             {'schema_version': 1, 'epoch': EPOCH, 'puppet': puppet_row()}))
         self.fixture.responses.append(Response(202, send_operation()))
-        with _control.use(self.context), patch.object(api, 'new_request_id', return_value=KEY) as key:
+        def context(*args):
+            self.assertTrue(key.called, 'request identity must precede context/detail I/O')
+            self.assertTrue(deadline.called, 'validated deadline must precede context/detail I/O')
+            return self.context
+        with patch.object(api, 'new_request_id', return_value=KEY) as key, \
+                patch.object(api, 'admission_deadline', wraps=api.admission_deadline) as deadline, \
+                patch.object(_control, 'context', side_effect=context):
             out, err, code = run_command(cli.main, ['dispatch', PUPPET, 'private-dispatch'])
         self.assertEqual(code, 3, err)
-        self.assertGreaterEqual(key.call_count, 1)
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'POST'])
         body = json.loads(self.fixture.calls[-1][2])
         self.assertEqual((body['request_id'], body['epoch'], body['incarnation'],

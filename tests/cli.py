@@ -1617,6 +1617,7 @@ def check_role_declarations_585(c):
         "project_list": ["catalog.view_project"],
         "restart": ["execution.restart_puppet", "operations.view_operation"],
         "send": ["execution.send_message", "operations.view_operation"],
+        "dispatch": ["execution.dispatch_task", "operations.view_operation"],
         "stat": ["execution.view_usage"],
         "stop": ["operations.stop_puppet_job", "operations.view_operation"],
         "wipe": ["execution.wipe_puppet", "operations.view_operation"],
@@ -1716,6 +1717,8 @@ def check_canonical_mcp_arguments_642(c):
          ["recover-take", PROJECT, "--epoch", EPOCH, "--expected-revision", revision, "--owner-id", "7"],
          {"action", "project_id"}),
         ("send", {**binding, "message": "line one\nline two"},
+         [PUPPET, "line one\nline two", *suffix], set(binding) | {"message"}),
+        ("dispatch", {**binding, "message": "line one\nline two"},
          [PUPPET, "line one\nline two", *suffix], set(binding) | {"message"}),
     ]
     cases.extend((name, dict(binding), [PUPPET, *suffix], set(binding))
