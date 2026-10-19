@@ -51,6 +51,10 @@ class Gateway:
         self.interval,self.maximum=min(recheck_interval,3),maximum
         self.run_id=uuid4()
         self.connections=set()
+        from mop.server.controller.endpointroot import PrivateDeliveryRoot
+        self.private_root=PrivateDeliveryRoot(runtime)
+        self.delivery=self.private_root.delivery
+        self.protected=self.private_root.protected
         self.closed=False
 
     async def start(self):
@@ -63,6 +67,8 @@ class Gateway:
                 await self.subscriber.aclose()
                 raise
 
+        await self.private_root.start()
+
     @property
     def active(self):
         return len(self.connections)
@@ -72,7 +78,12 @@ class Gateway:
             await send({'type':'websocket.close','code':4429})
             return
         path=scope.get('path','')
-        consumer=Events if path=='/ws/v1/events' else Terminal if path.startswith('/ws/v1/terminal/') else None
+        from .private import PrivateInbox
+        consumer=(Events if path=='/ws/v1/events' else Terminal if path.startswith('/ws/v1/terminal/')
+                  else PrivateInbox if path.startswith('/ws/v1/inbox/') else None)
+        if consumer is PrivateInbox and sum(isinstance(value,PrivateInbox) for value in self.connections)>=16:
+            await send({'type':'websocket.close','code':4429})
+            return
         if consumer is None:
             await send({'type':'websocket.close','code':4404})
             return
@@ -83,12 +94,18 @@ class Gateway:
         finally:
             self.connections.discard(instance)
 
-    async def aclose(self):
+    def stop_accepting(self):
         self.closed=True
+        self.private_root.stop_accepting()
         for consumer in tuple(self.connections):
-            await consumer.finish(1012)
+            consumer.begin_close()
+
+    async def aclose(self):
+        self.stop_accepting()
+        await asyncio.gather(*(consumer.finish(1012) for consumer in tuple(self.connections)))
         if self.connections:
             await asyncio.gather(*(consumer.done.wait() for consumer in tuple(self.connections)))
+        await self.private_root.aclose()
         await self.subscriber.aclose()
         self.streams.require_retired()
 
@@ -114,6 +131,7 @@ class OwnedConsumer(AsyncJsonWebsocketConsumer):
                 await dispatch
         finally:
             async def shutdown():
+                self.begin_close()
                 dispatch.cancel()
                 stopped.cancel()
                 for task in self.tasks:
@@ -140,8 +158,8 @@ class OwnedConsumer(AsyncJsonWebsocketConsumer):
     async def finish(self, code, reason=None):
         if not self.stopped.is_set():
             try:
-                async with self.send_lock:
-                    async with asyncio.timeout(2):
+                async with asyncio.timeout(2):
+                    async with self.send_lock:
                         if reason is not None:
                             reason=reason.encode('utf-8')[:120].decode('utf-8',errors='ignore')
                         await self.close(code=code,reason=reason)
@@ -204,6 +222,9 @@ class OwnedConsumer(AsyncJsonWebsocketConsumer):
             await self.finish(4400)
         except Exception:
             await self.finish(1011)
+
+    def begin_close(self):
+        pass
 
     async def cleanup(self):
         pass

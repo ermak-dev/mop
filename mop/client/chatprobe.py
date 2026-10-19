@@ -1225,15 +1225,19 @@ def _run_peer_receipts(terminal, report, ready, home, runtime, timeout, snapshot
         report["scenarios"][name] = dict(outcome=outcome(observed), evidence=evidence)
 
 
-def run(root, timeout=30, history_module=None, model_hooks=False, isolated_normal=False, mcp_activation=False):
+def run(root, timeout=30, history_module=None, model_hooks=False, isolated_normal=False, mcp_activation=False, private_inbox=False):
     """Normal opt-in всегда создаёт Docker fixture, никогда не host argv."""
+    if private_inbox and (not isolated_normal or model_hooks or mcp_activation or history_module):
+        raise ValueError('private inbox probe requires only isolated normal fixture')
     if mcp_activation and (not model_hooks or not isolated_normal or history_module):
         raise ValueError("MCP activation requires --model-hooks --isolated-normal and no history module")
     if isolated_normal:
-        if not model_hooks or history_module:
-            raise ValueError("isolated normal mode requires --model-hooks and no history module")
+        if not (model_hooks or private_inbox) or history_module:
+            raise ValueError("isolated normal mode requires fixed hooks or private inbox experiment")
         from mop.client import chatprobe_isolation
         options = {"mcp_activation": True} if mcp_activation else {}
+        if private_inbox:
+            options['private_inbox'] = True
         return chatprobe_isolation.run(root, timeout, managed_paths(), **options)
     return _run_fixture(root, timeout, history_module, model_hooks)
 
@@ -1247,14 +1251,14 @@ def _normal_guard():
     isolation.verify_normal_runtime()
 
 
-def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _normal=False, mcp_activation=False):
+def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _normal=False, mcp_activation=False, private_inbox=False):
     """Внутренний normal путь требует kernel proof, не доверяет caller flag."""
     if mcp_activation and (not _normal or not model_hooks or history_module):
         raise ValueError("MCP activation is only available inside the fixed normal fixture")
     if _normal:
         _normal_guard()
-        if not model_hooks or history_module:
-            raise ValueError("normal fixture only supports fixed model hook scenarios")
+        if not (model_hooks or private_inbox) or history_module:
+            raise ValueError("normal fixture only supports fixed hook or inbox scenarios")
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
     os.chmod(root, 0o700)
@@ -1390,6 +1394,18 @@ def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _norm
         report["initial_identity"] = before
         terminal.track_owned()
         ready_registry = capture_live("ready")
+        if private_inbox:
+            if not _normal or report['claude_version'].split()[0] != '2.1.302':
+                raise RuntimeError('private inbox native proof requires owned normal 2.1.302')
+            from mop.client import inboxprobe
+            details = inboxprobe.run(terminal, ready_registry, home, runtime, root)
+            # Контракт 2.1.302: accepted+idle не критерий обычной доставки (#785).
+            verdict = inboxprobe.classify(details)
+            details['contract_verdict'] = verdict
+            report['scenarios']['native-private-inbox'] = dict(
+                outcome=verdict['outcome'], evidence=details)
+            snapshot('native-private-inbox')
+            return report
         if mcp_activation:
             _run_mcp_activation(terminal, fixture, report, toy_script, ready_registry, capture_live, snapshot, turn, timeout)
             return report

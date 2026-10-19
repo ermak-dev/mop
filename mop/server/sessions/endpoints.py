@@ -413,14 +413,39 @@ class Endpoints:
                 raise Denied('sending conversation ownership changed')
             self._human(actor, 'deliver_report', source.project_id, source.session.client_id)
 
+    def _authorize_sent_delivery(self, actor, row):
+        self._sender(actor, row.endpoint.project_id)
+        self._permission(actor, 'view_delivery')
+
+    def delivery_for_message(self, actor, *, expected_epoch, message_id):
+        """Только metadata собственного sender key, не разрешение повторить POST."""
+        uuid_value(expected_epoch)
+        uuid_value(message_id)
+        if type(actor) is not ActorContext:
+            raise Denied('trusted actor required')
+        # Короткий SQL-only снимок под общим restore/installation fence:
+        # ни claim, ни retention cleanup, ни protected cipher port здесь нет.
+        with self._transaction() as authority:
+            current_actor(actor, grants=self.grants)
+            if expected_epoch != authority.epoch:
+                raise Conflict('installation epoch changed; refresh before querying')
+            row = m.MessageDelivery.objects.select_related('endpoint__session').defer(
+                'payload', 'payload_key_id', 'payload_nonce').filter(
+                sender_user_id=actor.user_id, message_id=message_id).first()
+            if row is None:
+                raise NotVisible('resource not found')
+            self._authorize_sent_delivery(actor, row)
+            if row.epoch != authority.epoch:
+                raise Conflict('delivery belongs to a previous installation epoch')
+            return self._result(row)
+
     def delivery(self, actor, delivery_id):
         self.authority()
         row = m.MessageDelivery.objects.select_related('endpoint__session').filter(pk=uuid_value(delivery_id)).first()
         if row is None:
             raise NotVisible('resource not found')
         if actor.user_id == row.sender_user_id:
-            self._sender(actor, row.endpoint.project_id)
-            self._permission(actor, 'view_delivery')
+            self._authorize_sent_delivery(actor, row)
         elif actor.kind is ActorKind.HUMAN and actor.user_id == row.endpoint.session.owner_id:
             self._human(actor, 'view_delivery', row.endpoint.project_id, row.endpoint.session.client_id)
         else:

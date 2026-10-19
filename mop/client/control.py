@@ -89,9 +89,20 @@ class UnknownProjectLimit(ClientError):
         super().__init__('project limit outcome unknown; observe the project, do not repeat automatically')
 
 
+class UnknownReport(ClientError):
+    """Неизвестный POST: только чтение по исходным epoch/message_id."""
+
+    def __init__(self, intent):
+        self.intent = intent
+        self.message_id = intent.message_id
+        super().__init__('report outcome unknown; recover by epoch and message_id; never repost')
+
+
 def _unknown_submission(command):
     if type(command) is ProjectLimitIntent:
         return UnknownProjectLimit(command)
+    if type(command) is ReportIntent:
+        return UnknownReport(command)
     return UnknownLanding(command) if type(command) is LandingIntent else UnknownSubmission(command)
 
 
@@ -224,6 +235,48 @@ class Limits:
                               ("max_response_bytes", 16 * 1024 * 1024), ("max_pages", 1000)):
             value = getattr(self, name)
             _require(type(value) is int and 0 < value <= maximum)
+
+
+def report_text(value):
+    """Отдельный private bound, не расширение старого machine send."""
+    valid = False
+    if type(value) is str and value.strip() and '\x00' not in value:
+        try:
+            valid = len(value.encode('utf-8')) <= 65536
+        except UnicodeError:
+            pass
+    _require(valid)
+    return value
+
+
+@dataclass(frozen=True, repr=False)
+class ReportIntent:
+    epoch: str
+    address: str
+    message_id: str
+    text: str
+    not_after: str
+    operation_request_id: str | None = None
+    priority: str = 'next'
+    notify_when_idle: bool = False
+
+    def __post_init__(self):
+        _key(self.epoch)
+        _key(self.message_id)
+        _require(type(self.address) is str and self.address.startswith('private:'))
+        _key(self.address[8:])
+        report_text(self.text)
+        admission_deadline(self.not_after)
+        if self.operation_request_id is not None:
+            _key(self.operation_request_id)
+            _require(self.operation_request_id != self.message_id)
+        _require(self.priority in ('now', 'next') and type(self.notify_when_idle) is bool)
+
+    @property
+    def body(self):
+        return json.dumps(dict(schema_version=1, **{
+            name: getattr(self, name) for name in self.__dataclass_fields__}),
+            ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
 @dataclass(frozen=True)
@@ -966,9 +1019,132 @@ class Client:
         return BuildCommand(project_id, policy_id, epoch, new_request_id(request_id),
                             not_after, expected_revision, target_nodes, mode)
 
-    def _exchange(self, method, path, body=None, *, command=None, budget=None):
+    def prepare_report(self, *, epoch, address, text, not_after, message_id=None,
+                       operation_request_id=None, priority='next', notify_when_idle=False):
+        return ReportIntent(epoch, address, new_request_id(message_id), text, not_after,
+            operation_request_id, priority, notify_when_idle)
+
+    @staticmethod
+    def _delivery(data):
+        from mop.common.endpoint import inbox_validate, DeliveryResult
+        try:
+            _require(set(data) == {'schema_version', 'delivery'} and
+                type(data['schema_version']) is int and data['schema_version'] == 1)
+            row = dict(data['delivery'])
+            inbox_validate(dict(schema_version=1, type='receipt', connection_nonce=str(UUID(int=0)), result=row))
+            return DeliveryResult(UUID(row['id']), UUID(row['message_id']),
+                UUID(row['operation_request_id']) if row['operation_request_id'] else None,
+                row['state'], row['idle'])
+        except (TypeError, KeyError, ValueError, ClientError):
+            raise ProtocolError('invalid private delivery response') from None
+
+    @classmethod
+    def _report_result(cls, data, intent):
+        result = cls._delivery(data)
+        _require(str(result.message_id) == intent.message_id and
+            (str(result.operation_request_id) if result.operation_request_id else None) == intent.operation_request_id)
+        return result
+
+    def report(self, intent, *, holder=None):
+        _require(type(intent) is ReportIntent)
+        body = intent.body
+        _require(len(body) <= 401408)
+        if holder is not None:
+            # Локальный отказ известен до сети; проверка перед write повторяется.
+            self._holder_headers(holder)
+        failed = False
+        try:
+            status, data = self._exchange('POST', '/api/v1/reports', body,
+                command=intent, holder=holder, budget=5)
+        except ProtocolError:
+            failed = True
+        if failed:
+            raise UnknownReport(intent)
+        try:
+            _require(status in (200, 202))
+            return self._report_result(data, intent)
+        except (ClientError, ValueError, TypeError):
+            failed = True
+        if failed:
+            raise UnknownReport(intent)
+
+    def lookup_delivery(self, *, epoch, message_id):
+        _key(epoch); _key(message_id)
+        try:
+            data = self._get('/api/v1/deliveries?' + urlencode(dict(schema_version=1,
+                epoch=epoch, message_id=message_id)), budget=5)
+        except APIError as error:
+            if error.error.http_status == 404:
+                return None
+            raise
+        result = self._delivery(data)
+        _require(str(result.message_id) == message_id)
+        return result
+
+    def recover_report(self, intent):
+        _require(type(intent) is ReportIntent)
+        result = self.lookup_delivery(epoch=intent.epoch, message_id=intent.message_id)
+        if result is not None:
+            _require((str(result.operation_request_id) if result.operation_request_id else None) == intent.operation_request_id)
+        return result
+
+    def delivery(self, delivery_id):
+        result = self._delivery(self._get('/api/v1/deliveries/'+_key(delivery_id), budget=5))
+        _require(str(result.id) == delivery_id)
+        return result
+
+    def register_endpoint(self, *, client_id, project_id, external_session_id, display_name):
+        _key(client_id)
+        _key(project_id)
+        _require(type(external_session_id) is str and 0 < len(external_session_id.encode()) <= 256)
+        _require(type(display_name) is str and 0 < len(display_name) <= 128)
+        body = json.dumps(dict(schema_version=1, client_id=client_id, project_id=project_id,
+            external_session_id=external_session_id, display_name=display_name), separators=(',', ':')).encode()
+        status, data = self._exchange('POST', '/api/v1/endpoints', body, budget=5)
+        try:
+            _require(status == 201 and set(data) == {'schema_version', 'endpoint'})
+            value = self._address(data['endpoint'])
+            _require(value.project_id == project_id and value.external_session_id == external_session_id)
+            return value
+        except (ClientError, ValueError, KeyError, TypeError):
+            raise ProtocolError('invalid endpoint registration response') from None
+
+    def renew_endpoint(self, holder):
+        headers = self._holder_headers(holder)
+        endpoint_id = headers['X-Mop-Endpoint']
+        status, data = self._exchange('POST', '/api/v1/endpoints/'+endpoint_id+'/renew',
+            b'{"schema_version":1}', holder=holder, budget=5)
+        _require(status == 200)
+        value = self._address(data['endpoint'])
+        _require(value.id == endpoint_id)
+        return value
+
+    def retire_endpoint(self, holder):
+        endpoint_id = self._holder_headers(holder)['X-Mop-Endpoint']
+        status, _ = self._exchange('DELETE', '/api/v1/endpoints/'+endpoint_id,
+            b'{"schema_version":1}', holder=holder, budget=5)
+        _require(status == 204)
+
+    def ack_delivery(self, delivery_id, outcome, *, holder):
+        _require(outcome in ('accepted', 'unknown', 'unavailable'))
+        status, data = self._exchange('POST', '/api/v1/deliveries/'+_key(delivery_id)+'/ack',
+            json.dumps(dict(schema_version=1, outcome=outcome)).encode(), holder=holder, budget=5)
+        _require(status == 200)
+        result = self._delivery(data)
+        _require(str(result.id) == delivery_id)
+        return result
+
+    def _holder_headers(self, holder):
+        from .private_inbox import BoundInbox
+        _require(type(holder) is BoundInbox)
+        headers = holder._headers()
+        _require(holder._owner.context == self._context)
+        return headers
+
+    def _exchange(self, method, path, body=None, *, command=None, budget=None, holder=None):
         limits = self._limits
-        _require(body is None or len(body) <= limits.max_request_bytes)
+        maximum = 401408 if type(command) is ReportIntent else limits.max_request_bytes
+        _require(body is None or len(body) <= maximum)
         # Body owner проверяет cancel/binding перед каждым I/O, включая
         # recovery после unknown POST; один запрос не продлевает общий бюджет.
         if self._before_request is not None:
@@ -993,6 +1169,8 @@ class Client:
             connection.debuglevel = 0
             connection.connect()
             connection.sock = _DeadlineSocket(connection.sock, deadline, limits.read_timeout)
+            if holder is not None:
+                headers.update(self._holder_headers(holder))
             possible_mutation = method in ("POST", "PUT")
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
@@ -1003,28 +1181,29 @@ class Client:
             if response.getheader("Content-Encoding", "identity").lower() not in ("", "identity"):
                 raise ProtocolError("unsupported response encoding")
             media = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
-            if media != "application/json":
-                raise ProtocolError("invalid control API response media type")
-            length = response.getheader("Content-Length")
-            if length is not None and (not length.isdecimal() or len(length) > 10 or
-                                       int(length) > limits.max_response_bytes):
-                raise ProtocolError("control API response exceeds size limit")
-            chunks, size = [], 0
-            while True:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("control request deadline exceeded")
-                chunk = response.read1(min(16384, limits.max_response_bytes + 1 - size))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                size += len(chunk)
-                if size > limits.max_response_bytes:
+            if status != 204 or method != 'DELETE':
+                if media != "application/json":
+                    raise ProtocolError("invalid control API response media type")
+                length = response.getheader("Content-Length")
+                if length is not None and (not length.isdecimal() or len(length) > 10 or
+                                           int(length) > limits.max_response_bytes):
                     raise ProtocolError("control API response exceeds size limit")
-            if length is not None and size != int(length):
-                raise ProtocolError("truncated control API response")
-            retry_header = response.getheader("Retry-After", "")
-            retry_after = int(retry_header) if retry_header.isdecimal() and len(retry_header) <= 6 else None
-            raw = b"".join(chunks)
+                chunks, size = [], 0
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("control request deadline exceeded")
+                    chunk = response.read1(min(16384, limits.max_response_bytes + 1 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > limits.max_response_bytes:
+                        raise ProtocolError("control API response exceeds size limit")
+                if length is not None and size != int(length):
+                    raise ProtocolError("truncated control API response")
+                retry_header = response.getheader("Retry-After", "")
+                retry_after = int(retry_header) if retry_header.isdecimal() and len(retry_header) <= 6 else None
+                raw = b"".join(chunks)
         except (OSError, http.client.HTTPException, TimeoutError, ValueError):
             failed = True
         finally:
@@ -1041,6 +1220,8 @@ class Client:
             if command is not None and possible_mutation:
                 raise _unknown_submission(command)
             raise TransportError("control API transport unavailable")
+        if status == 204 and method == 'DELETE':
+            return status, None
         data = _json(raw)
         if not 200 <= status < 300:
             error = _api_error(data, status, retry_after)

@@ -1608,6 +1608,8 @@ def check_role_declarations_585(c):
         "addresses": ["execution.view_delivery", "catalog.view_project"],
         "build": ["catalog.build_project", "operations.view_operation"],
         "delete": ["execution.delete_puppet", "operations.view_operation"],
+        "delivery": ["execution.view_delivery"],
+        "report": ["execution.deliver_report"],
         "detail": ["catalog.view_pool"], "diagnose": [], "health": [],
         "landing": ["execution.view_landing", "execution.acquire_landing", "execution.release_landing"],
         "list": ["catalog.view_pool"],
@@ -4102,10 +4104,12 @@ def check_dev_help_433(c):
     # #613: отдельный интерактивный probe добавляет ещё один обязательный глагол.
     # #615: локальный integration smoke -- самостоятельный обязательный глагол.
     # #696: регенерация публичного OpenAPI артефакта -- обязательный глагол.
-    if not c.check("#433/#632 dev subtree: 4 groups, 28 verbs including controller fixture",
+    # #773: owned native inbox probe — ещё один конечный обязательный глагол.
+    if not c.check("#433/#632/#773 dev subtree: 4 groups, 29 verbs including inbox fixture",
                    len([d for d in docs if d.endswith("__init__.py")]) == 4
                    and len([d for d in docs
-                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 28
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 29
+                   and docs.get("dev/inbox-probe.py", "").startswith("mop dev inbox-probe")
                    and docs.get("dev/controller.py", "").startswith("mop dev controller")
                    and docs.get("dev/chat-smoke.py", "").startswith("mop dev chat-smoke")
                    and docs.get("dev/chat-probe.py", "").startswith("mop dev chat-probe")

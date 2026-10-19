@@ -261,7 +261,8 @@ test:py3.12:
         # исходных credential IDs и не разрешает wildcard/class discovery.
         private_ids, private_source, _ = self._test_inventory('_endpoint_credential_uid_gate.py')
         self.assertEqual(private_ids, {('EndpointCredentialUids',
-            'test_private_reports_cross_real_uid_without_root_or_caller_authority')})
+            'test_private_reports_cross_real_uid_without_root_or_caller_authority'),
+            ('EndpointCredentialUids','test_private_wss_default_root_crosses_actual_frontend_uid')})
         self.assertNotIn('skipTest', private_source)
         expected += [f'_endpoint_credential_uid_gate.{cls}.{method}' for cls, method in private_ids]
         self.assertEqual(sorted(labels), sorted(expected))

@@ -36,6 +36,33 @@ from django.utils import timezone
 
 class GatewayBoundary(TransactionTestCase):
     serialized_rollback = True
+    # HYPOTHESIS: default root не маршрутизирует private inbox к текущей auth.
+    # SPEC: fixed UUID route, исходный Token/session, без pool-view permission.
+    # SOLUTION: конечный private consumer включён в существующий ASGI gateway.
+    # RESULT: 4404 вместо 4401 дал RED; проверка текущей auth прошла GREEN.
+    # STATUS: FIXED — see #763.
+    def test_actual_asgi_private_inbox_requires_authentication_not_unbound_route(self):
+        from mop.server.controller.asgi import ControllerApplication
+        from mop.server.controller.runtime import Runtime
+        async def run():
+            runtime = Runtime()
+            app = ControllerApplication(runtime=runtime, startup=lambda: None)
+            app.started = True
+            socket = ApplicationCommunicator(app, {'type':'websocket',
+                'path':'/ws/v1/inbox/'+str(uuid4()), 'headers':[], 'query_string':b'',
+                'scheme':'wss', 'server':('testserver',443), 'subprotocols':[]})
+            try:
+                await socket.send_input({'type':'websocket.connect'})
+                self.assertEqual(await socket.receive_output(2),
+                    {'type':'websocket.close','code':4401},
+                    'private route must authenticate, not disappear as an unknown route')
+            finally:
+                socket.stop()
+                await app.gateway.aclose()
+                await runtime.aclose()
+        with override_settings(ALLOWED_HOSTS=['testserver']):
+            async_to_sync(run)()
+
     def test_actual_asgi_events_route_requires_live_authentication(self):
         from mop.server.controller.asgi import ControllerApplication
         from mop.server.controller.runtime import Runtime

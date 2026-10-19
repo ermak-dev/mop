@@ -67,6 +67,7 @@ urlpatterns = [
     path('api/v1/addresses', endpoint.Addresses.as_view()),
     path('api/v1/addresses/<uuid:endpoint_id>', endpoint.Address.as_view()),
     path('api/v1/reports', endpoint.Reports.as_view()),
+    path('api/v1/deliveries', endpoint.Deliveries.as_view()),
     path('api/v1/deliveries/<uuid:delivery_id>', endpoint.Delivery.as_view()),
     path('api/v1/deliveries/<uuid:delivery_id>/ack', endpoint.Ack.as_view()),
     path('api/v1/puppets', projection.PoolSnapshot.as_view()),

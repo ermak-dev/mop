@@ -1335,6 +1335,37 @@ Admission returns 202 and a delivery Location, never proof of receipt. Private
 content is retained only as purpose/recipient/delivery-bound AEAD bytes, purged
 on terminal delivery state. Results expose only IDs, state and idle evidence.
 
+`GET /api/v1/deliveries?schema_version=1&epoch=<uuid>&message_id=<uuid>` (#772)
+recovers existing metadata when a report's POST response was lost after COMMIT.
+All three query fields are required and single-valued; unknown fields, boolean or
+nonliteral schema versions, and noncanonical UUID strings are rejected with 400.
+The sender key is `(current authenticated Actor.user_id, message_id)`: the caller
+cannot select a sender, credential, grant or project. Different senders may use
+the same message ID without seeing one another's rows. A recipient cannot use
+this sender-key query to look up somebody else's report.
+
+The query reuses the sender branch of by-ID authorization: current send authority
+(project membership/view plus `execution.deliver_report` for humans, or current
+delegation/project/approval and `execution.send_message` authority for agents)
+and `execution.view_delivery`. It does not require the original credential to
+remain usable when the same sender has a new current credential with these
+permissions. A short SQL-only transaction holds the restore/installation fence;
+a closed restore guard refuses with 503, and either a stale requested epoch or a
+stored delivery from a previous installation epoch refuses with 409, never an
+empty success. Row-specific epoch errors still require current sender/project
+authorization. Disabled effects do not hide existing metadata.
+
+Success is HTTP 200, `Cache-Control: no-store`, with the existing exact envelope:
+`{"schema_version":1,"delivery":{"id":"<delivery-uuid>","message_id":"<message-uuid>","operation_request_id":null,"state":"queued","idle":false}}`.
+`operation_request_id` is the stored UUID string or null; state and idle reflect
+stored evidence, not a new receipt. The query never decrypts, claims, cleans up
+payloads, writes delivery state or receipts, or submits an operation. An unknown
+key returns the normal private 404 error envelope, also no-store. A 404 is not
+proof that the POST did not COMMIT and never authorizes resending an effect.
+The route remains part of the private runtime contract documented/tested here,
+not the public human/CI OpenAPI schema. This metadata query alone makes no
+WS, client/native availability or actual message-receipt claim.
+
 `GET /api/v1/deliveries/<id>` is private to the original sending Actor or
 recipient human, under current project/client authority. A current connection
 can `POST /api/v1/deliveries/<id>/ack` with exactly `schema_version`, `outcome`
@@ -1345,6 +1376,11 @@ and endpoint DELETE. An acknowledgment before a durable attempt, changed receipt
 foreign recipient or old connection is rejected. `accepted` means explicit
 application acceptance, not successful completion of a task. Idle observation is
 a separate correlated immutable receipt, not acceptance or task correctness.
+On native 2.1.302 an ordinary delivery has no positive receipt: its committed
+state remains `unknown` and is terminal. The receipt model admits an idle
+observation only for an `accepted` delivery with `notify_when_idle`
+(`DeliveryReceipt.save`), so a `notify_when_idle` subscription on an
+ordinary delivery is never satisfied.
 No message content is exposed through events, audit or these metadata reads.
 Expired queued payloads are purged by bounded admission cleanup; they cannot
 permanently occupy shared queue capacity. Expired attempts become unknown, not
@@ -1365,24 +1401,80 @@ with the exact own CLI socket, process and external conversation ID; remote JSON
 cannot supply them. The bridge checks canonical private UDS ownership and kernel
 peer PID/UID, never scans neighboring sockets or reads primary/legacy state files.
 It sends bounded native `msgV:1` user frames with the admitted message ID and a
-private ephemeral callback socket. Only a matching `message_accepted` callback
-confirms application acceptance; an explicit `message_refused` means unavailable.
-Successful socket writes without that evidence are unknown. `notify_when_idle`
-uses a distinct control message ID and matching `peer_idle_notice`; terminal
-input/keystrokes are never queued or replayed. The launch adapter must replace
-this binding on external conversation changes even when PID/path remain the
-same; a socket alone cannot attest to a conversation ID. Same-UID OS processes
-are not a sandbox.
+private ephemeral callback socket. Only a matching native `peer_message_status`
+with `status=delivered` confirms application acceptance; matched
+`denied|expired|refused|dropped` means unavailable. `held` is not acceptance.
+Successful socket writes without that evidence are unknown. `unknown` is the
+truthful terminal outcome for an ordinary delivery on native 2.1.302 and is never
+re-sent: drain, idle, provider or UI activity never upgrade it. The receipt
+contract belongs to that native version and is re-verified on a version change
+(see CHANNEL). Native `notify_when_idle` uses a distinct control message ID and
+matching `peer_idle_notice`; it is a separate observation, and for an ordinary
+delivery the outcome stays `unknown`, so the subscribed idle never fires.
+Terminal input/keystrokes are never queued or replayed. The launch adapter must
+replace this binding on external conversation changes even when PID/path remain
+the same; a socket alone cannot attest to a conversation ID. Same-UID OS
+processes are not a sandbox.
 
-These core use cases and an actual isolated Unix peer are implemented/tested by
-#649. Production Channels/WS authentication, broker routing and connection loop
-binding remain #628; native CLI launch/conversation lifecycle and MCP wiring remain
-#642; protected cipher deployment remains #669/#644. The DRF root deliberately
-leaves the cipher and grant resolver unbound until that composition supplies
-them, refusing private content admission instead of giving web/gateway a root
-key. The isolated fixture explicitly binds the real AEAD provider and current
-Access/delegation authority. No old pool or native vendor CLI acceptance is
-implied by that fixture.
+`mop.client.private_inbox.InboxOwner` (#773) is an internal, one-shot composition
+port requiring an exact typed `OwnSession`, explicit API context, existing client
+and project IDs, and a synchronous trusted current-conversation guard. No CLI,
+MCP JSON, environment value, registry scan, socket or PID flag supplies this
+proof. The owner verifies current human authority, native readiness and the
+#763 `peer_ready → bound → bound_received` handshake before exposing a transient
+holder. Holder headers may be borrowed only by that exact API context while the
+physical conversation remains current. Trusted composition may inject that same
+owner into several `Management(..., inbox=owner)` instances: tool calls borrow
+headers through the existing commandlet dispatcher without creating another
+receiver or owning its teardown. The port must match the exact credential,
+client and project scope. `private_status()` reports its current state rather
+than caching initialization availability; loss refuses a holder-aware report
+instead of silently downgrading it. No public stdio launcher supplies this port
+or publishes dynamic receiver availability yet. Agent report senders use their
+own Actor and do not register a human receiver or acquire that holder.
+
+The WSS client imports declared `aiohttp` lazily, verifies TLS, disables ambient
+proxies/cookies/compression and refuses redirects. One reader, one native attempt,
+at most 16 writer admissions and 64 lifetime correlations are owned and drained.
+The prewrite permit is obtained immediately before the native user write; the
+bridge repeats physical checks after that wait. Native evidence has a five-second
+absolute budget; WS controls have two-second budgets. Native idle is sent only
+after matched acceptance and a corresponding committed server receipt. At the
+lifetime cap a bounded idle drain closes the connection generation without
+retiring an unchanged conversation or evicting uncertain identities. A closed
+owner cannot start again. Trusted composition may construct a fresh owner after
+fresh native proof; no frame, uncertain write or pending queue is replayed.
+Conversation change, native loss, authority closure or EOF clears the holder and
+closes the owned tasks, bridge callback, WSS and HTTPS resources. Cleanup failures
+remain explicit; cancellation is not assumed to prove quiescence.
+
+The finite `Client` methods cover endpoint registration/presence/renew/retire,
+report intent/submission, result-by-ID and sender-key recovery. The existing REST
+ACK consumer remains available, but InboxOwner uses only WSS evidence/receipts
+and never races it with a REST ACK. `mop report` and `mop delivery` use the same
+commandlet declarations and dispatcher as MCP. Message identity is fixed before
+I/O and differs from optional operation correlation. Queued/attempting admission
+is pending, not delivered. A lost POST recovers by the #772 GET key only; a 404
+is still unknown and never causes an automatic repost. Sender-key recovery does
+not need private text. The old assignment-target `send` and its 16,384-byte text
+limit are unchanged; private text has its independent 65,536-byte UTF-8 bound.
+
+No production human launcher is invented here; `_mcp.PRIVATE_INBOX` remains false
+by default and body standby/native startup are unchanged. Managed-root unit 3
+and trusted production launcher composition remain availability blockers. Real
+PG17/verified HTTPS/WSS integration with a controlled Unix peer is distinct from
+native evidence. `mop dev inbox-probe` runs the actual owned native 2.1.302 in the
+existing offline nonroot Docker fixture, with an explicit hashed source closure,
+fixture-owned physical proof and no real config/credentials. Its controlled WSS
+receipt is not PostgreSQL COMMIT evidence; its HOME is a prepared owned fixture,
+not cold-boot onboarding proof. It classifies the run against the 2.1.302
+contract: exactly one native user write and no re-send; `observed` only for
+`unknown` or an explicit `delivered`→accepted / refusal→unavailable outcome;
+verified holder, task and callback cleanup. A provider response, UI display,
+socket write, idle or drain never substitutes for a missing native callback:
+the observed native application outcome remains unknown when that callback is
+absent, and no probe result is a claim of acceptance without an explicit
+`delivered`.
 
 ## Sync/async and resource lifecycle
 
