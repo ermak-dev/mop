@@ -1335,6 +1335,37 @@ Admission returns 202 and a delivery Location, never proof of receipt. Private
 content is retained only as purpose/recipient/delivery-bound AEAD bytes, purged
 on terminal delivery state. Results expose only IDs, state and idle evidence.
 
+`GET /api/v1/deliveries?schema_version=1&epoch=<uuid>&message_id=<uuid>` (#772)
+recovers existing metadata when a report's POST response was lost after COMMIT.
+All three query fields are required and single-valued; unknown fields, boolean or
+nonliteral schema versions, and noncanonical UUID strings are rejected with 400.
+The sender key is `(current authenticated Actor.user_id, message_id)`: the caller
+cannot select a sender, credential, grant or project. Different senders may use
+the same message ID without seeing one another's rows. A recipient cannot use
+this sender-key query to look up somebody else's report.
+
+The query reuses the sender branch of by-ID authorization: current send authority
+(project membership/view plus `execution.deliver_report` for humans, or current
+delegation/project/approval and `execution.send_message` authority for agents)
+and `execution.view_delivery`. It does not require the original credential to
+remain usable when the same sender has a new current credential with these
+permissions. A short SQL-only transaction holds the restore/installation fence;
+a closed restore guard refuses with 503, and either a stale requested epoch or a
+stored delivery from a previous installation epoch refuses with 409, never an
+empty success. Row-specific epoch errors still require current sender/project
+authorization. Disabled effects do not hide existing metadata.
+
+Success is HTTP 200, `Cache-Control: no-store`, with the existing exact envelope:
+`{"schema_version":1,"delivery":{"id":"<delivery-uuid>","message_id":"<message-uuid>","operation_request_id":null,"state":"queued","idle":false}}`.
+`operation_request_id` is the stored UUID string or null; state and idle reflect
+stored evidence, not a new receipt. The query never decrypts, claims, cleans up
+payloads, writes delivery state or receipts, or submits an operation. An unknown
+key returns the normal private 404 error envelope, also no-store. A 404 is not
+proof that the POST did not COMMIT and never authorizes resending an effect.
+The route remains part of the private runtime contract documented/tested here,
+not the public human/CI OpenAPI schema. This metadata query alone makes no
+WS, client/native availability or actual message-receipt claim.
+
 `GET /api/v1/deliveries/<id>` is private to the original sending Actor or
 recipient human, under current project/client authority. A current connection
 can `POST /api/v1/deliveries/<id>/ack` with exactly `schema_version`, `outcome`

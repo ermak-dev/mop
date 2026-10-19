@@ -225,6 +225,53 @@ class DefaultDelegationRoots(TransactionTestCase):
         self.assert_denied('addresses', {'schema_version':'1', 'project_id':str(self.project.pk)})
         self.assert_denied('addresses/'+str(self.endpoint.id))
 
+    # #772: metadata recovery не является новым delegation/crypto port.
+    # HYPOTHESIS: key lookup обходит sender action или exact approval root.
+    # SPEC: те же текущие owner/subject/issuer, project и approval, что by-id.
+    # SOLUTION: общий sender authorization и production SQL grant root.
+    # RESULT: три проверки прошли в PG17 scoped gate (152 + 6 UID), без crypto.
+    # STATUS: FIXED — see #772
+    def delivery_lookup_query(self, row=None):
+        row = row or self.delivery
+        return {'schema_version': '1', 'epoch': str(self.epoch), 'message_id': str(row.message_id)}
+
+    def test_sender_key_delivery_metadata_uses_real_exact_approval_without_crypto(self):
+        with patch.object(type(self.provider), 'encrypt', side_effect=AssertionError('provider in key read')), \
+                patch.object(type(self.provider), 'decrypt', side_effect=AssertionError('provider in key read')), \
+                patch('mop.server.controller.adminservices.credential_client',
+                      side_effect=AssertionError('protected service in key read')):
+            value = self.assert_ok('deliveries', self.delivery_lookup_query())
+            by_id = self.assert_ok('deliveries/'+str(self.delivery.id))
+            self.assertEqual(value, by_id)
+            self.assert_denied('addresses', {'schema_version': '1', 'project_id': str(self.project.pk)})
+            self.preparation.revoke(self.human, self.approval.id)
+            self.assert_denied('deliveries', self.delivery_lookup_query())
+
+    def test_sender_key_delivery_rechecks_owner_subject_issuer_and_project_scope(self):
+        for user in (self.owner, self.subject, self.issuer):
+            with self.subTest(user=user.pk):
+                self.assert_ok('deliveries', self.delivery_lookup_query())
+                self.remove_permission(user, 'execution.send_message')
+                self.assert_denied('deliveries', self.delivery_lookup_query())
+                permit_actions(user, 'execution.send_message')
+        self.remove_permission(self.subject, 'execution.view_delivery')
+        self.assert_denied('deliveries', self.delivery_lookup_query())
+        permit_actions(self.subject, 'execution.view_delivery')
+        from mop.server.sessions.endpoint_models import Endpoint
+        foreign_endpoint = Endpoint.objects.create(session_id=self.endpoint.session_id, project=self.foreign,
+            expires_at=timezone.now()+timedelta(hours=1))
+        foreign = self.delivery_row(foreign_endpoint.id)
+        self.assert_denied('deliveries', self.delivery_lookup_query(foreign))
+        self.a.CredentialBinding.objects.filter(token_user=self.issuer).delete()
+        self.assert_denied('deliveries', self.delivery_lookup_query())
+
+    def test_sender_key_delivery_revoked_grant_is_not_metadata_authority(self):
+        self.assert_ok('deliveries', self.delivery_lookup_query())
+        self.grants.revoke(self.human, self.child.id, expected_revision=self.child.revision)
+        response = self.assert_denied('deliveries', self.delivery_lookup_query())
+        self.assertNotIn(str(self.delivery.id), response.content.decode())
+        self.assertNotIn(str(self.delivery.message_id), response.content.decode())
+
     def test_foreign_project_target_and_node_are_not_disclosed(self):
         from mop.server.sessions.models import Assignment, ExecutionIncarnation
         for project, node in ((self.project, self.other_node), (self.foreign, self.node)):
