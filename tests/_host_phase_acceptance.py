@@ -238,6 +238,40 @@ async def frontend(document):
             assert not calls and not writer.retained, '#759 actual eligibility leaked private input: '+repr(evidence)
             print(json.dumps(dict(status='refused-before-delivery')), flush=True)
             return
+        if mode == 'partial_staging':
+            from contextlib import asynccontextmanager
+            from unittest.mock import patch
+            from mop.node import host_input_files as files
+            for observation in document.get('observations', []):
+                await executor.observe(Scope.parse(observation['scope']), observation['attempt_id'])
+            work = Work.parse({**document['works'][0], 'executor_epoch': runtime.executor_epoch})
+            admission = await client.claim(work, str(uuid4()))
+            original, hit, connections, paths = os.fsync, [], [], []
+            @asynccontextmanager
+            async def unexpected_connect():
+                connections.append(True)
+                raise AssertionError('partial staging reached backend connect')
+                yield
+            backend.connect = unexpected_connect
+            def fail_once(fd):
+                if fd == writer.directory.fd and not hit:
+                    hit.append(True)
+                    source = writer.retained[0]
+                    path = writer.directory.path/source.descriptor.filename
+                    paths.append(path)
+                    assert path.stat().st_uid == NODE and path.stat().st_size > 0
+                    raise OSError('controlled actual directory fsync before staging token')
+                return original(fd)
+            with patch.object(files.os, 'fsync', fail_once):
+                try: await executor.execute(work, phase_guard(admission))
+                except Refused: pass
+                else: raise AssertionError('actual partial stage did not fail')
+            await executor.aclose()
+            assert hit == [True] and not connections and not executor._owned
+            assert not writer.retained and paths and all(not path.exists() for path in paths)
+            print(json.dumps(dict(status='compensated-partial-stage', action=work.action,
+                backend_calls=0, executor_owners=0, writer_slots=0, private_bytes=0)), flush=True)
+            return
         if mode == 'ingress_failure':
             from contextlib import asynccontextmanager
             from types import SimpleNamespace
@@ -836,6 +870,20 @@ async def accept():
 
         await launch([], mode='deny_token')
         negatives.append('wrong-node-token')
+        # BUG #765: настоящий node UID пишет private input, fsync каталога падает
+        # до выдачи token; backend ещё не вызван, stage сам компенсирует exact inode.
+        # STATUS: FIXED — see #765
+        case = extra_case()
+        result = await launch([case[0]['work']], mode='partial_staging')
+        assert result['private_bytes'] == result['writer_slots'] == result['backend_calls'] == 0
+        case = extra_case()
+        await launch([case[0]['work']])
+        observed = observation(case[0])
+        result = await launch([case[1]['work']], [observed], mode='partial_staging')
+        assert result['private_bytes'] == result['writer_slots'] == result['backend_calls'] == 0
+        await launch([], [observed], mode='cleanup_observed')
+        await removed(case)
+        negatives.extend(('prepare-partial-staging-compensated', 'bootstrap-partial-staging-compensated'))
         # BUG #759 / HYPOTHESIS: valid delivery уходил в ingress до eligibility.
         # SOLUTION: проверка action/reference до delivery; exact staging owner
         # убирает только definite pre-submit failure, unknown dispatch не replay.

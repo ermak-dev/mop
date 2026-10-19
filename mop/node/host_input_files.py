@@ -314,12 +314,29 @@ class NodeWriter(_Closable):
         self.node_uid, self.limits = node_uid, limits
         self.directory = _Directory(ingress, uid=node_uid, gid=None, mode=0o700, ancestors=(0, node_uid), locking=True)
         self._owned = {}
+        self._operations, self._closing = 0, False
 
     @property
     def retained(self):
         return tuple(self._owned.values())
 
+    @contextmanager
+    def _operation(self):
+        if self._closing:
+            raise Refused('phase input writer is closed')
+        self._operations += 1
+        try:
+            yield
+        finally:
+            self._operations -= 1
+            if self._closing and not self._operations:
+                self._close_fds()
+
     def write(self, admission, scope, delivery):
+        with self._operation():
+            return self._write(admission, scope, delivery)
+
+    def _write(self, admission, scope, delivery, *, created=None):
         _running_as(self.node_uid)
         envelope = pack(admission, scope, delivery)
         limit = self.limits.file_bytes(admission.work.action)
@@ -345,6 +362,9 @@ class NodeWriter(_Closable):
                 {name: item.limit for name, item in self._owned.items()})
             source = _Source(descriptor, limit, receipt=StagedInput(descriptor))
             self._owned[name] = source
+            if created is not None:
+                # Stage владеет exact token ещё до первого filesystem effect.
+                created.append(source.receipt)
             def retain(value):
                 source.physical = value
                 if source.anchor is None:
@@ -359,8 +379,23 @@ class NodeWriter(_Closable):
             return descriptor
 
     def stage(self, admission, scope, delivery):
-        descriptor = self.write(admission, scope, delivery)
-        return self._owned[descriptor.filename].receipt
+        with self._operation():
+            created = []
+            try:
+                descriptor = self._write(admission, scope, delivery, created=created)
+                if self._closing:
+                    raise Refused('phase input writer closed before staging handoff')
+                return self._owned[descriptor.filename].receipt
+            except BaseException as error:
+                if created:
+                    try:
+                        self._cleanup(created[0], partial=True)
+                    except Refused as cleanup_error:
+                        # Exact source/receipt остаётся в retained, а не теряется
+                        # вместе с исключением; foreign inode не становится owned.
+                        reason = str(error) if isinstance(error, Refused) else type(error).__name__
+                        raise Refused('phase input staging failed: '+reason+'; retained cleanup owner: '+str(cleanup_error)) from error
+                raise
 
     def cleanup(self, receipt):
         """Только pre-dispatch owner; descriptor/close не дают права unlink.
@@ -368,6 +403,10 @@ class NodeWriter(_Closable):
         Node-private capture закрывает stat/unlink race в ingress; private lock
         остаётся прежним отдельным inode. Чужой capture сохраняется без overwrite.
         """
+        with self._operation():
+            return self._cleanup(receipt)
+
+    def _cleanup(self, receipt, *, partial=False):
         _running_as(self.node_uid)
         if type(receipt) is not StagedInput:
             raise Refused('exact retained node staging receipt required')
@@ -378,6 +417,20 @@ class NodeWriter(_Closable):
                 raise Refused('exact retained node staging receipt required')
             if source.conflict:
                 raise Refused('node input cleanup retains a foreign capture conflict')
+            if partial and not source.complete and source.anchor is not None:
+                # Последний record мог не выполниться. Только original pinned FD
+                # обновляет partial proof; pathname/Descriptor такого права не дают.
+                physical = _fingerprint(os.fstat(source.anchor))
+                if source.physical is None or physical[:2] != source.physical[:2]:
+                    raise Refused('partial node input original anchor identity changed')
+                source.physical = physical
+            if source.physical is None:
+                if self.directory.stat(name) is not None:
+                    raise Refused('partial node input has no retained creation proof')
+                del self._owned[name]
+                return True
+            if source.anchor is None:
+                raise Refused('partial node input has no retained inode anchor')
             quarantine = name+'.node-cleanup'
             if not source.moved:
                 with self.directory.pin(name, source.physical):
@@ -438,6 +491,15 @@ class NodeWriter(_Closable):
             del self._owned[descriptor.filename]
 
     def close(self):
+        # Stage/compensation держит FD до выхода, даже если close пришёл в середине
+        # write. Сам close по-прежнему не получает права удаления private bytes.
+        if self._closing:
+            return
+        self._closing = True
+        if not self._operations:
+            self._close_fds()
+
+    def _close_fds(self):
         # Только FD: unknown dispatch/foreign input не становятся cleanup authority.
         for source in self._owned.values():
             if source.anchor is not None:

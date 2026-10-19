@@ -260,6 +260,39 @@ class IngressOwnershipTests(unittest.IsolatedAsyncioTestCase):
         guard = EffectGuard(authorize, lambda: None, a)
         return executor, a, scope, guard, calls, directory
 
+    # BUG #765: stage падает до выдачи token, private bytes теряют cleanup owner.
+    # HYPOTHESIS: executor получает ownership только после успешного stage.
+    # SOLUTION: stage сохраняет exact receipt до create и компенсирует свой failure;
+    # close не отбирает FD до завершения owned write/compensation.
+    # RESULT: filesystem RED 3471/3577 bytes; GREEN 0 slots/bytes, backend calls=0.
+    # STATUS: FIXED — see #765
+    async def test_stage_directory_fsync_failure_compensates_before_token_returns(self):
+        import os
+        from unittest.mock import patch
+        from mop.node import host_input_files as files
+        from mop.node.host_scope import Reference
+        for action in ('prepare_body', 'bootstrap_body'):
+            with self.subTest(action=action):
+                executor, a, scope, guard, calls, directory = self.executor(action)
+                if action == 'bootstrap_body':
+                    executor._references[scope] = Reference(scope, uuid4().hex, str(uuid4()))
+                original, hit = os.fsync, []
+                def fail_once(fd):
+                    if fd == executor.writer.directory.fd and not hit:
+                        hit.append(True)
+                        raise OSError('controlled directory fsync after private bytes')
+                    return original(fd)
+                with patch.object(files.os, 'fsync', fail_once), self.assertRaises(Refused):
+                    await executor.execute(a.work, guard)
+                self.assertEqual(hit, [True], 'fault missed actual directory fsync')
+                await executor.aclose()
+                private = [p for p in directory.iterdir() if p.name != '.phase-input.lock']
+                self.assertNotIn('connect', calls)
+                self.assertEqual(executor._owned, {})
+                self.assertEqual(len(executor.writer.retained), 0,
+                    'stage orphaned writer slots; private bytes='+str(sum(p.stat().st_size for p in private)))
+                self.assertEqual(private, [])
+
     async def test_missing_previous_reference_refuses_before_private_delivery_or_staging(self):
         from mop.node.http_execution import Unavailable
         for action in ('bootstrap_body', 'initial_identity'):
