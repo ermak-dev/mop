@@ -1,5 +1,7 @@
 """Стандартный Auth Admin с текущим actor; предметные adapters регистрируются явно."""
+from django import forms
 from django.contrib import admin
+from django.contrib.admin.utils import unquote
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin, GroupAdmin
 from django.contrib.auth.models import Group
@@ -7,6 +9,7 @@ from django.core.exceptions import PermissionDenied
 
 from mop.server.access import services as access
 from mop.server.access.models import LoginIdentity
+from mop.server.access.rbac import ActorMemberships
 from .admincommon import GuardedAdmin, IdentifierFreeSuccess, allowed, safe_view
 from mop.server.catalog.models import Project
 from mop.server.sessions.models import Assignment
@@ -72,21 +75,87 @@ class GlobalAuthAdmin(IdentifierFreeSuccess):
         raise PermissionDenied('inline mutation is disabled')
 
 
+class NonhumanMembershipForm(forms.ModelForm):
+    class Meta:
+        model = get_user_model()
+        fields = ('groups', 'user_permissions')
+
+
 class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
     def get_queryset(self, request):
-        # Машина/делегат не может получить human password/staff через Auth UI:
-        # вид читается с самого Actor (#684), не с deprecated Principal rows.
-        return super().get_queryset(request).exclude(kind__in=('service', 'agent'))
+        rows = super().get_queryset(request)
+        # Неавторизованный query hook по-прежнему не раскрывает nonhuman (#684).
+        if not hasattr(request, 'session') or not (
+                self.has_view_permission(request) or self.has_change_permission(request)):
+            return rows.exclude(kind__in=('service', 'agent'))
+        return rows
+
+    @safe_view
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        self._reject_bypass(request)
+        nonhuman = False
+        if object_id is None:
+            if request.method == 'POST' and 'kind' in request.POST:
+                raise PermissionDenied('nonhuman identity requires its named lifecycle')
+        else:
+            permitted = self.has_change_permission(request) if request.method == 'POST' else (
+                self.has_view_permission(request) or self.has_change_permission(request))
+            if not permitted:
+                raise PermissionDenied('user administration permission required')
+            obj = self.get_object(request, unquote(object_id))
+            nonhuman = obj is not None and obj.kind != 'human'
+            if nonhuman and request.method == 'POST':
+                # Readonly/unknown поля ModelForm игнорирует: здесь это явный отказ,
+                # включая совпавшие значения canonical identity и будущие поля.
+                writable = {'groups', 'user_permissions', 'csrfmiddlewaretoken', '_save', '_continue', '_addanother'}
+                if set(request.POST) - writable:
+                    raise PermissionDenied('only groups and user_permissions may be changed for a nonhuman actor')
+        response = super().changeform_view(request, object_id, form_url, extra_context)
+        if nonhuman and request.method == 'POST' and response.status_code == 200:
+            response.status_code = 400
+        return response
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is not None and obj.kind != 'human':
+            return ((None, {'fields': ('id', 'username', 'kind')}), ('Django RBAC', {
+                'fields': ('groups', 'user_permissions'),
+                'description': 'Revoking membership does not stop a running workload and does not delete the Actor.'}))
+        return super().get_fieldsets(request, obj)
+
+    def get_form(self, request, obj=None, **kwargs):
+        if obj is not None and obj.kind != 'human':
+            kwargs['form'] = NonhumanMembershipForm
+        return super().get_form(request, obj, **kwargs)
 
     def save_model(self, request, obj, form, change):
         if change and obj.kind != 'human':
-            raise PermissionDenied('nonhuman identity requires its named lifecycle')
+            # Не перевычисляем filtered queryset после form validation: managed
+            # group мог сменить owner, и новый query молча выкинул бы выбранный ID.
+            identifiers = {name: [row.pk for row in form.cleaned_data[name]]
+                           for name in ('groups', 'user_permissions') if name in form.cleaned_data}
+            ActorMemberships().replace(access.session_context(request.session.session_key), obj.pk,
+                group_ids=identifiers.get('groups', []), permission_ids=identifiers.get('user_permissions', []))
+            obj._rbac_memberships = identifiers
+            return
         permitted = self.has_change_permission(request) if change else self.has_add_permission(request)
         if not permitted:
             raise PermissionDenied('user administration permission required')
         super().save_model(request, obj, form, change)
         if not change:
             access.bind_local_identity(obj.pk)
+
+    def save_related(self, request, form, formsets, change):
+        if form.instance.kind != 'human':
+            if formsets:
+                raise PermissionDenied('inline mutation is disabled')
+            # Named owner уже применил M2M; generic form.save_m2m обошёл бы его.
+            return
+        return super().save_related(request, form, formsets, change)
+
+    def log_change(self, request, obj, message):
+        if obj.kind != 'human':
+            message = 'Django RBAC memberships replaced: ' + str(obj._rbac_memberships)
+        return super().log_change(request, obj, message)
 
     def user_change_password(self, request, id, form_url=''):
         if not self.has_change_permission(request):
@@ -98,6 +167,8 @@ class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         fields = tuple(super().get_readonly_fields(request, obj))
+        if obj is not None and obj.kind != 'human':
+            fields += ('id', 'username', 'kind')
         if obj and LoginIdentity.objects.filter(user=obj, source__kind='ldap').exists():
             return fields + ('username', 'groups', 'user_permissions')
         return fields
@@ -110,6 +181,13 @@ class ScopedUserAdmin(GlobalAuthAdmin, UserAdmin):
 
 
 class ScopedGroupAdmin(GlobalAuthAdmin, GroupAdmin):
+    @safe_view
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        if request.method == 'POST' and set(request.POST) - {
+                'name', 'permissions', 'csrfmiddlewaretoken', '_save', '_continue', '_addanother', '_popup', '_to_field'}:
+            raise PermissionDenied('group reverse membership mutation is disabled')
+        return super().changeform_view(request, object_id, form_url, extra_context)
+
     def get_queryset(self, request):
         # Проекция правила — общая группа, редактирование через admin запрещено.
         return super().get_queryset(request).filter(directory_rule__isnull=True)
