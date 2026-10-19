@@ -623,7 +623,7 @@ async def early_start_cleanup(config, authority, template, values, launch):
             finally: await adapter.aclose()
 
 
-async def accept():
+async def accept(*, native_fixture=None):
     assert os.geteuid() == 0 and Path('/proc/1/comm').read_text().strip() == 'systemd'
     assert sys.version_info[:2] == (3, 12)
     assert (ROOT/'mop/node/host_body.py').exists(), 'actual installed body-UID lifecycle broker is missing (#752)'
@@ -721,7 +721,11 @@ async def accept():
             values.append(value)
             case.append(value)
         cases.append(case)
+    if native_fixture is not None:
+        native_fixture.prepare(base, cases, values)
     server.authority = Authority(db, values, epoch, node, previous)
+    if native_fixture is not None:
+        native_fixture.authority(server.authority)
     installed = dict(node_uid=NODE, body_uid=BODY, body_gid=BODY, runner=str(ROOT/'mop/node/host_body.py'),
                      body_root='/var/lib/mop-bodies', node_private='/var/lib/mop-node')
     for p, mode, uid, gid in (('/var/lib/mop-bodies', 0o755, 0, 0), ('/var/lib/mop-node', 0o700, NODE, NODE),
@@ -740,6 +744,8 @@ async def accept():
         '--property=CPUWeight=75', '/usr/bin/true'), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert resource_probe.returncode == 0, 'owned fixed resource property probe: '+resource_probe.stderr.decode()
     manifest = content_manifest(image, policy)
+    if native_fixture is not None:
+        native_fixture.manifest(manifest)
     (ROOT/'host-runtime.json').write_text(json.dumps(manifest))
     config = dict(schema_version=1, installed=installed, runtime_manifest=str(ROOT/'host-runtime.json'),
         ingress='/var/lib/mop-node/inputs', snapshots='/var/lib/mop-snapshots', control_root='/run/mop-phase')
@@ -823,6 +829,9 @@ async def accept():
                         data = p.read_bytes()
                         assert TOKEN.encode() not in data and SOURCE_PASSWORD.encode() not in data
                         assert credentials[1]['private_key'].encode() not in data
+        if native_fixture is not None:
+            await native_fixture.run(server.authority, cases, values)
+            return
         assert [r['evidence'] for r in server.authority.results] == ['body-prepared', 'body-bootstrapped', 'initial-identity-applied']*2
         assert all(r['outcome'] == 'succeeded' for r in server.authority.results)
         assert len(server.authority.checks) >= 32, 'no actual finite recheck before compiled effects'

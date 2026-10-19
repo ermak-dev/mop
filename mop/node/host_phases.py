@@ -18,6 +18,12 @@ CHECKPOINTS = {
 }
 
 
+def checkpoint_plan(action):
+    if action == 'native_exec':
+        return ('native-input', 'native-launch', 'producer-attach', 'desired-switch')
+    return CHECKPOINTS[action]
+
+
 def require_frame(value, expected):
     """Точное JSON equality без Python True==1/False==0 coercion."""
     if canonical_json(value) != canonical_json(expected):
@@ -155,7 +161,7 @@ class Submission:
 class Checkpoint:
     """Один finite effect; соединение не может запасти approval для другого."""
     def __init__(self, effect, sequence):
-        if effect not in {item for plan in CHECKPOINTS.values() for item in plan} or type(sequence) is not int or sequence < 0:
+        if effect not in {item for plan in (*CHECKPOINTS.values(), checkpoint_plan('native_exec')) for item in plan} or type(sequence) is not int or sequence < 0:
             raise Refused('finite compiled checkpoint required')
         self.effect, self.sequence = effect, sequence
         self.approved = False
