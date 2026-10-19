@@ -28,9 +28,11 @@ def fake_execute(calls, version=b'3.13.5\n'):
             # ветки без резерва -- фикстура видит оба.
             venv = Path(kwargs['cwd']) if kwargs.get('cwd') else Path(argv[3])
             (venv / 'bin').mkdir(parents=True, exist_ok=True)
-            for name in ('python', 'pip'):
-                (venv / 'bin' / name).write_text('')
-                (venv / 'bin' / name).chmod(0o755)
+            # bin/python -- symlink на проверенный интерпретатор, как у
+            # настоящего `python -m venv` без `--copies` (#811).
+            (venv / 'bin' / 'python').symlink_to(PYTHON)
+            (venv / 'bin' / 'pip').write_text('')
+            (venv / 'bin' / 'pip').chmod(0o755)
             (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
             (venv / 'pyvenv.cfg').chmod(0o644)
             return subprocess.CompletedProcess(argv, 0, b'', b'')
@@ -385,10 +387,11 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
                 module.prepare(document, execute=execute)
         self.assertTrue(swapped, 'the apt window never opened')
         self.assertFalse(marker.exists(), 'the planted interpreter ran as root')
-        # Резерв сверяется ДО первого шага venv, а не после: ни создание
-        # дерева, ни pip не должны начаться в подменённом каталоге (#811).
-        # Без этой первичной проверки отказ придёт только после pip, и тест
-        # краснеет одним снятием проверки, а не только обеих сразу.
+        # Отказ приходит на входе в create_venv: `_check_reservation` сверяет
+        # путь с удержанным inode до первого шага venv. Pre-exec проверка в
+        # create_venv -- защита того же рода для ручного setup, где резерва
+        # нет; её одну краснит tests/install_runtime.py
+        # (test_a_swap_between_verification_and_exec_never_reaches_a_step).
         self.assertFalse([argv for argv in steps
                           if argv[1:3] == ['-m', 'venv'] or argv[:1] == ['bin/python']],
                          'venv steps ran even though the reserved path had been swapped')
@@ -406,9 +409,10 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
             if argv[1:3] == ['-m', 'venv']:
                 venv = Path(kwargs['cwd']) if kwargs.get('cwd') else Path(argv[3])
                 (venv / 'bin').mkdir(parents=True, exist_ok=True)
-                for name in ('python', 'pip'):
-                    (venv / 'bin' / name).write_text('')
-                    (venv / 'bin' / name).chmod(0o755)
+                # Форма настоящего venv: symlink на проверенный интерпретатор.
+                (venv / 'bin' / 'python').symlink_to(PYTHON)
+                (venv / 'bin' / 'pip').write_text('')
+                (venv / 'bin' / 'pip').chmod(0o755)
                 (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
                 (venv / 'pyvenv.cfg').chmod(0o644)
                 return subprocess.CompletedProcess(argv, 0, b'', b'')

@@ -10,6 +10,9 @@
 `sys.executable` и не перечитывает PATH после гейта (#811). Venv создаётся
 только в свежезарезервированном каталоге, а существующий принимается лишь
 как принадлежащий установке; чужой `bin/python` не исполняется (#811).
+Принимается только форма настоящего venv: `bin/python` -- symlink на
+проверенный интерпретатор; regular file (`--copies` и чужие скрипты) --
+отказ.
 
 Проверка и исполнение идут через один удержанный descriptor каталога venv:
 интерпретатор запускается как `bin/python` с cwd, привязанным к fd, а не
@@ -196,10 +199,14 @@ def _owned(info):
     Группа не должна быть чужой: root-owned файл с mode 0775 и группой
     атакующего -- это файл, который атакующий перепишет, и проверка,
     смотревшая только `st_uid`, исполняла его от root.
+
+    setgid -- тот же чужой контроль над записью, что и group-write: каталог
+    02755 с gid доверенной группы даёт группе право менять содержимое.
+    `_reserve` создаёт 0755/0700, поэтому легитимному пути setgid не нужен.
     """
     if info.st_uid not in (0, os.geteuid()):
         return False
-    if info.st_mode & 0o022:
+    if info.st_mode & (0o022 | stat.S_ISGID):
         return False
     return info.st_gid in _trusted_groups()
 
@@ -237,26 +244,38 @@ def _open_dir(name, label, *, dir_fd=None, owned=True):
     return descriptor
 
 
-def _verified_regular(directory, name, label, *, system_target=False):
-    """Файл принадлежит установке; symlink -- только на установленный python.
+def _verified_regular(directory, name, label):
+    """Обычный файл установки; symlink здесь не принимается (#811).
 
-    `venv` штатно делает `bin/python` symlink'ом на базовый интерпретатор;
-    любой другой symlink (в том числе на чужой файл) -- не venv установки
-    (#811). Разрешение symlink ничего не исполняет: сверяется realpath.
-
-    Проверяются dev/ino и владелец: файл под чужим именем между lstat и
-    чтением уже не тот, что проверен (#811).
+    `pyvenv.cfg` -- файл, который пишет `python -m venv`; symlink на него
+    позволил бы подставить чужой конфиг, поэтому форма строгая. Проверка
+    идёт относительно fd каталога: файл под чужим именем уже не тот, что
+    проверен.
     """
     try:
         info = os.stat(name, dir_fd=directory, follow_symlinks=False)
     except OSError:
         raise RuntimeError('existing venv is not installation-owned: ' + label) from None
-    if stat.S_ISLNK(info.st_mode):
-        if not system_target or not _system_target(directory, name):
-            raise RuntimeError('existing venv is not installation-owned: ' + label)
-        return
     if not stat.S_ISREG(info.st_mode) or not _owned(info):
         raise RuntimeError('existing venv is not installation-owned: ' + label)
+
+
+def _interpreter_entry(directory):
+    """`bin/python` -- только symlink на проверенный интерпретатор (#811).
+
+    Реальный `python -m venv` без `--copies` (форма установки) кладёт в
+    `bin/python` symlink; regular file с exec-битом -- не venv, а чужой
+    скрипт, который был бы исполнен от root. `--copies` установка не
+    использует, поэтому regular file отвергается, а не угадывается по
+    содержимому.
+    """
+    try:
+        info = os.stat('python', dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        raise RuntimeError('existing venv is not installation-owned: bin/python') from None
+    if not stat.S_ISLNK(info.st_mode) or not _system_target(directory, 'python'):
+        raise RuntimeError('existing venv is not installation-owned: bin/python')
+
 
 def _system_target(directory, name):
     """Symlink ведёт на уже проверенный системный интерпретатор (#811)."""
@@ -279,7 +298,7 @@ def _verify_venv(descriptor, venv):
     _verified_regular(descriptor, 'pyvenv.cfg', label)
     bin_descriptor = _open_dir('bin', label, dir_fd=descriptor)
     try:
-        _verified_regular(bin_descriptor, 'python', label, system_target=True)
+        _interpreter_entry(bin_descriptor)
     finally:
         os.close(bin_descriptor)
 
@@ -388,24 +407,17 @@ def _python(descriptor):
     дерево, а не имя. Корневой fd остаётся открытым на всё время шагов,
     поэтому вложенные процессы pip видят `bin/python` так же (#811).
     Стандартный `bin/python` -- symlink на проверенный системный
-    интерпретатор; иной symlink и неисполняемый файл отвергаются.
-    Владение деревом уже доказано резервом или `_verify_venv`; здесь
-    проверяется форма интерпретатора. Открытый fd закрывает вызывающий.
+    интерпретатор; regular file и иной symlink отвергаются: `--copies` --
+    не форма этой установки, и исполнять файл по одному exec-биту нельзя
+    (#811). Владение деревом уже доказано резервом или `_verify_venv`.
+    Открытый fd закрывает вызывающий.
     """
     bin_descriptor = _open_dir('bin', 'bin', dir_fd=descriptor, owned=False)
     try:
-        info = os.stat('python', dir_fd=bin_descriptor, follow_symlinks=False)
-        if stat.S_ISLNK(info.st_mode):
-            target = os.path.realpath('/proc/self/fd/%d/python' % bin_descriptor)
-            if target != interpreter():
-                raise RuntimeError('existing venv is not installation-owned: bin/python')
-            handle = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
-        elif stat.S_ISREG(info.st_mode) and info.st_mode & 0o111:
-            handle = os.open('python', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=bin_descriptor)
-        else:
-            raise RuntimeError('existing venv is not installation-owned: bin/python')
+        _interpreter_entry(bin_descriptor)
     finally:
         os.close(bin_descriptor)
+    handle = os.open(interpreter(), os.O_RDONLY | os.O_NOFOLLOW)
     # Оба fd наследуются: cwd ребёнка и его executable -- это /proc/self/fd
     # ребёнка, поэтому числа обязаны быть открыты и в нём (#811).
     return handle, {'executable': '/proc/self/fd/%d' % handle,
