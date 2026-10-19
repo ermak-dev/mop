@@ -211,6 +211,209 @@ class NodeWriterTests(unittest.TestCase):
     def write(self, a=None, s=None, value=None):
         return self.writer.write(a or self.a, s or self.s, self.value if value is None else value)
 
+    # BUG #759 / HYPOTHESIS: descriptor не является physical cleanup authority.
+    # SOLUTION: exact saved receipt, pinned original inode и private capture;
+    # foreign capture сохраняется без overwrite, close закрывает только FD.
+    # Отказ нового anchor проверяется отдельно: creator FD закрывается даже
+    # тогда, когда callback записи physical facts бросил исключение в finally.
+    # RESULT: 25 narrow проверок прошли; actual UID fixture — 27 проверок.
+    # STATUS: FIXED — see #759.
+    def test_node_stage_owner_cleans_only_its_exact_inode_and_releases_slot(self):
+        stage = getattr(self.writer, 'stage', None)
+        self.assertTrue(callable(stage), 'retained node staging receipt is missing')
+        owned = stage(self.a, self.s, self.value)
+        path = self.path/owned.descriptor.filename
+        self.assertTrue(path.exists())
+        for forged in (owned.descriptor, replace(owned)):
+            with self.assertRaises(Refused): self.writer.cleanup(forged)
+            self.assertTrue(path.exists())
+        self.assertTrue(self.writer.cleanup(owned))
+        self.assertFalse(path.exists())
+        self.assertEqual(self.writer.retained, ())
+
+    # BUG #765 / HYPOTHESIS: partial stage имеет source receipt, но caller
+    # не получает его при исключении; write/record/anchor/close оставляют bytes.
+    # SOLUTION: saved token до create, compensation с original inode anchor;
+    # close ждёт owned operation и не выполняет unlink сам.
+    # RESULT: все partial boundaries GREEN; foreign replacement/capture сохранены.
+    # STATUS: FIXED — see #765
+    def test_partial_stage_failures_compensate_exact_created_inode(self):
+        import asyncio
+        for boundary in ('partial-write', 'record', 'final-record', 'anchor', 'cancel', 'close', 'open'):
+            with self.subTest(boundary=boundary):
+                self.path = Path(self.tmp.name)/boundary
+                self.path.mkdir(mode=0o700)
+                self.writer = self.f.NodeWriter(self.path, node_uid=os.geteuid())
+                self.addCleanup(self.writer.close)
+                a, scope, value = selected()
+                original_write, original_open, original_sync = os.write, os.open, os.fsync
+                original_create = self.f._Directory.create
+                calls = []
+                def writing(fd, raw):
+                    if boundary == 'partial-write':
+                        if not calls:
+                            calls.append('partial')
+                            return original_write(fd, raw[:23])
+                        raise OSError('controlled partial write failure')
+                    return original_write(fd, raw)
+                def opening(name, flags, *args, **kw):
+                    if str(name).endswith('.json') and kw.get('dir_fd') == self.writer.directory.fd and not calls:
+                        if boundary == 'open' and flags & os.O_EXCL or boundary == 'anchor' and not flags & os.O_EXCL:
+                            calls.append(boundary)
+                            raise OSError('controlled '+boundary+' failure')
+                    return original_open(name, flags, *args, **kw)
+                def creating(directory, name, raw, *, gid, mode, record):
+                    records = []
+                    def recording(physical):
+                        records.append(physical)
+                        if boundary == 'record' and len(records) == 1 or boundary == 'final-record' and len(records) == 2:
+                            calls.append(boundary)
+                            raise Refused('controlled record failure')
+                        return record(physical)
+                    return original_create(directory, name, raw, gid=gid, mode=mode, record=recording)
+                def syncing(fd):
+                    if fd == self.writer.directory.fd and boundary in ('cancel', 'close') and not calls:
+                        calls.append(boundary)
+                        if boundary == 'close': self.writer.close()
+                        if boundary == 'cancel': raise asyncio.CancelledError()
+                        raise OSError('controlled directory fsync after close request')
+                    return original_sync(fd)
+                with patch.object(self.f.os, 'write', writing), patch.object(self.f.os, 'open', opening), \
+                        patch.object(self.f.os, 'fsync', syncing), patch.object(self.f._Directory, 'create', creating), \
+                        self.assertRaises(asyncio.CancelledError if boundary == 'cancel' else Refused):
+                    self.writer.stage(a, scope, value)
+                self.assertTrue(calls, 'fault did not reach '+boundary)
+                self.assertEqual(self.writer.retained, (), boundary+' lost exact staging compensation')
+                self.assertEqual(data_entries(self.path), [], boundary+' leaked private bytes')
+                if boundary == 'close':
+                    self.assertIsNone(self.writer.directory.fd)
+
+    def test_close_request_during_successful_stage_does_not_deliver_unusable_token(self):
+        sync, hit = os.fsync, []
+        def closing_sync(fd):
+            if fd == self.writer.directory.fd and not hit:
+                hit.append(True)
+                self.writer.close()
+            return sync(fd)
+        with patch.object(self.f.os, 'fsync', closing_sync), self.assertRaisesRegex(Refused, 'clos'):
+            self.writer.stage(self.a, self.s, self.value)
+        self.assertEqual(hit, [True])
+        self.assertEqual(self.writer.retained, ())
+        self.assertEqual(data_entries(self.path), [])
+        self.assertIsNone(self.writer.directory.fd)
+
+    def test_failed_partial_stage_preserves_foreign_replacement_and_exact_token(self):
+        sync, foreign = os.fsync, []
+        def failing_sync(fd):
+            if fd == self.writer.directory.fd and not foreign:
+                source = self.writer.retained[0]
+                path = self.path/source.descriptor.filename
+                path.rename(self.path/'displaced-original')
+                path.write_bytes(b'foreign-during-partial-stage')
+                path.chmod(0o600)
+                foreign.append((path, path.stat().st_ino))
+                raise OSError('controlled directory fsync after replacement')
+            return sync(fd)
+        with patch.object(self.f.os, 'fsync', failing_sync), self.assertRaises(Refused):
+            self.writer.stage(self.a, self.s, self.value)
+        self.assertEqual(len(self.writer.retained), 1)
+        source = self.writer.retained[0]
+        self.assertIsNotNone(source.receipt, 'partial failure lost unforgeable receipt')
+        for forged in (source.descriptor, replace(source.receipt)):
+            with self.assertRaises(Refused): self.writer.cleanup(forged)
+        path, inode = foreign[0]
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual(path.read_bytes(), b'foreign-during-partial-stage')
+        self.writer.close()
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertTrue((self.path/'displaced-original').exists())
+
+    def test_partial_stage_compensation_capture_race_preserves_foreign_inode(self):
+        sync, rename, foreign = os.fsync, os.rename, []
+        def failing_sync(fd):
+            if fd == self.writer.directory.fd:
+                raise OSError('controlled stage directory fsync failure')
+            return sync(fd)
+        def race(src, dst, **kw):
+            if kw.get('src_dir_fd') == self.writer.directory.fd and not foreign:
+                path = self.path/src
+                rename(path, self.path/'displaced-partial')
+                path.write_bytes(b'foreign-partial-capture')
+                path.chmod(0o600)
+                foreign.append(path.stat().st_ino)
+            return rename(src, dst, **kw)
+        with patch.object(self.f.os, 'fsync', failing_sync), patch.object(self.f.os, 'rename', race), self.assertRaises(Refused):
+            self.writer.stage(self.a, self.s, self.value)
+        self.assertTrue(foreign, 'partial staging did not attempt owned compensation')
+        copies = [p for p in self.path.rglob('*') if p.is_file() and p.stat().st_ino == foreign[0]]
+        self.assertTrue(copies, 'partial compensation deleted foreign inode')
+        self.assertTrue(all(p.read_bytes() == b'foreign-partial-capture' for p in copies))
+        self.assertEqual(len(self.writer.retained), 1)
+
+    def test_node_stage_pin_failure_closes_creator_fd_without_deleting_retained_input(self):
+        # HYPOTHESIS: отказ нового inode anchor не должен прервать finally close.
+        original, created = os.open, []
+        def opening(name, flags, *args, **kw):
+            if str(name).endswith('.json') and kw.get('dir_fd') == self.writer.directory.fd:
+                if flags & os.O_EXCL:
+                    fd = original(name, flags, *args, **kw)
+                    created.append(fd)
+                    return fd
+                raise OSError('controlled staging anchor failure')
+            return original(name, flags, *args, **kw)
+        with patch('os.open', side_effect=opening), self.assertRaises(Refused):
+            self.writer.stage(self.a, self.s, self.value)
+        self.assertEqual(len(created), 1)
+        self.addCleanup(lambda: os.close(created[0]) if leaked else None)
+        try:
+            os.fstat(created[0])
+            leaked = True
+        except OSError:
+            leaked = False
+        self.assertFalse(leaked, 'staging pin failure leaked original creation FD')
+        self.assertEqual(len(self.writer.retained), 1)
+        self.assertTrue((self.path/self.writer.retained[0].descriptor.filename).exists())
+
+    def test_node_stage_cleanup_never_unlinks_a_foreign_replacement_or_close_deletes(self):
+        stage = getattr(self.writer, 'stage', None)
+        self.assertTrue(callable(stage), 'retained node staging receipt is missing')
+        owned = stage(self.a, self.s, self.value)
+        path = self.path/owned.descriptor.filename
+        path.rename(self.path/'displaced-owned')
+        path.write_bytes(b'foreign-private-input')
+        path.chmod(0o600)
+        before = path.stat().st_ino
+        with self.assertRaises(Refused): self.writer.cleanup(owned)
+        self.assertEqual(path.stat().st_ino, before)
+        self.assertEqual(path.read_bytes(), b'foreign-private-input')
+        self.assertEqual(len(self.writer.retained), 1)
+        self.writer.close()
+        self.assertTrue((self.path/'displaced-owned').exists())
+        self.assertEqual(path.stat().st_ino, before)
+
+    def test_node_cleanup_capture_race_preserves_foreign_inode_and_retained_owner(self):
+        stage = getattr(self.writer, 'stage', None)
+        self.assertTrue(callable(stage), 'retained node staging receipt is missing')
+        owned = stage(self.a, self.s, self.value)
+        path = self.path/owned.descriptor.filename
+        rename = os.rename
+        foreign = None
+        def race(src, dst, **kw):
+            nonlocal foreign
+            if src == path.name and kw.get('src_dir_fd') == self.writer.directory.fd:
+                rename(path, self.path/'displaced-owned')
+                path.write_bytes(b'foreign-capture-race')
+                path.chmod(0o600)
+                foreign = path.stat().st_ino
+            return rename(src, dst, **kw)
+        with patch('os.rename', side_effect=race), self.assertRaises(Refused):
+            self.writer.cleanup(owned)
+        self.assertIsNotNone(foreign, 'cleanup did not use an owned capture boundary')
+        copies = [p for p in self.path.rglob('*') if p.is_file() and p.stat().st_ino == foreign]
+        self.assertTrue(copies, 'cleanup deleted a foreign captured inode')
+        self.assertTrue(all(p.read_bytes() == b'foreign-capture-race' for p in copies))
+        self.assertEqual(len(self.writer.retained), 1)
+
     def test_node_creates_private_exclusive_derived_file_and_same_repeat_is_read_only(self):
         descriptor = self.write()
         path = self.path/descriptor.filename

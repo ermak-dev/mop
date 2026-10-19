@@ -58,6 +58,9 @@ class Supervisor:
         self.installed, self.adapter = installed, adapter
         self.capacity, self.timeout = capacity, timeout
         self.active = {}
+        # Original start живёт столько же, сколько bounded replay fence. Active
+        # содержит также inspect и не является владельцем исходного OS effect.
+        self._starts = {}
         # Завершённый OS start ещё принадлежит root до exact receipt ACK.
         # Inspect может идти параллельно ожиданию ACK, но не cleanup.
         self._receipts = {}
@@ -184,6 +187,8 @@ class Supervisor:
             # Fences не вытесняются: неизвестный эффект нельзя превратить в retry.
             self._fences.add(request.scope)
         action = _Action(request, asyncio.create_task(self._perform(request)))
+        if request.action == 'start':
+            self._starts[request.scope] = action
         self.active[request.scope] = action
         try:
             async with asyncio.timeout(self.timeout):
@@ -218,8 +223,11 @@ class Supervisor:
                     raise Unknown('abandoned HOST start absent; cleanup unknown')
                 facts.verify(self.installed, snapshot.reference.scope, snapshot.reference)
                 empty = await self.adapter.retire(snapshot.reference)
-                if empty.verify(self.installed, snapshot.reference.scope, snapshot.reference).populated:
+                snapshot = empty.verify(self.installed, snapshot.reference.scope, snapshot.reference)
+                if snapshot.populated:
                     raise Unknown('abandoned HOST start remains populated')
+            # Phase owner использует исходный empty proof, не повторяет retire.
+            return snapshot
         except (Refused, Unknown) as error:
             self.last_error = str(error)
         except asyncio.CancelledError:
@@ -271,7 +279,7 @@ class Supervisor:
             raise Unknown(self.last_error)
 
 
-async def serve(installed, path, stop, *, identity=None):
+async def serve(installed, path, stop, *, identity=None, phase_config=None):
     """Production daemon entry для будущего installer composition.
 
     Никаких env/config.json/credentials: только проверенный root-installed
@@ -279,7 +287,11 @@ async def serve(installed, path, stop, *, identity=None):
     """
     from mop.node.host_scope_systemd import SystemdCgroupAdapter
     adapter = SystemdCgroupAdapter(installed)
-    owner = Supervisor(installed, adapter, identity=identity)
+    if phase_config is None:
+        owner = Supervisor(installed, adapter, identity=identity)
+    else:
+        from mop.node.host_phase_supervisor import PhaseOwner
+        owner = PhaseOwner(installed, adapter, identity=identity, phase_config=phase_config)
     server = SocketServer(owner, path)
     try:
         await server.start()
@@ -347,6 +359,18 @@ class SocketServer:
             raise Refused('root installed HOST backend authority is unavailable')
         process = Process.read(peer[0])
         for _ in range(4):
+            value = decode(raw)
+            if (type(value) is dict and value.get('action') in (
+                    'prepare_body', 'bootstrap_body', 'initial_identity', 'phase_status',
+                    'phase_checkpoint', 'phase_ack', 'retire_owned', 'cleanup_owned')):
+                if not hasattr(self.supervisor, 'handle_planned'):
+                    raise Refused('installed HOST planned phase broker unavailable')
+                if (peer_credentials(writer.get_extra_info('socket')) != peer
+                        or Process.read(peer[0]) != process):
+                    raise Refused('HOST node peer process changed')
+                async with asyncio.timeout(5.):
+                    await self.supervisor.handle_planned(reader, writer, raw)
+                return
             request = BackendRequest.decode(raw)
             if (peer_credentials(writer.get_extra_info('socket')) != peer
                     or Process.read(peer[0]) != process):
