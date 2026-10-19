@@ -192,6 +192,158 @@ class CheckpointDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(item, 'last_effect', None), 'git-fetch')
 
 
+class IngressOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    # BUG #759: ineligible phase и definite pre-submit failure оставляют ingress.
+    # HYPOTHESIS: eligibility после write, а NodeWriter.close не cleanup owner.
+    # SOLUTION: eligibility до delivery; exact staged receipt убирается только
+    # после definite pre-submit failure, possible dispatch сохраняет original owner.
+    # HYPOTHESIS (WRONG): aclose вправе убирать любой ещё не submitted input.
+    # Его red race показал: живой execute всё ещё владеет staging; исправлено
+    # отдельным definite_failure, а не передачей cleanup authority методу close.
+    # RESULT: 44 phase проверки прошли; actual root/node/body fixture — 147 recheck,
+    # без delivery для ineligible input, с exact cleanup и удержанием unknown owner.
+    # STATUS: FIXED — see #759.
+    def selected(self, action):
+        import base64
+        from mop.common.soul import from_manifest
+        from mop.node.host_inputs import pack
+        a, scope, value = selected(action)
+        if action in ('initial_identity', 'native_exec'):
+            prompt = b'Approved test role\n'
+            role = from_manifest(dict(soul='builder', version=1,
+                runtime=dict(driver='any', receives_dispatch=False),
+                capabilities=dict(node_verbs=[], cluster_verbs=[], dispatch=False, spawn=[]), prompt='prompt.md'), prompt)
+            a = replace(a, work=replace(a.work, bundle_digest=role.digest))
+            value['work'] = a.work.wire()
+            value['role'] = dict(manifest=role.manifest.to_dict(), prompt=base64.b64encode(prompt).decode())
+        if action == 'native_exec':
+            pin = next(p for p in value['selection']['consumers'] if p['purpose'] == 'model_config')
+            value['consumers'] = [dict(**pin, name='model', kind='file', value=base64.b64encode(b'{}').decode())]
+        pack(a, scope, value)  # Valid bytes: отказ не должен быть codec/setup failure.
+        return a, scope, value
+
+    def executor(self, action='prepare_body', failure='connect'):
+        from contextlib import asynccontextmanager
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from mop.node.host_input_files import NodeWriter
+        from mop.node.host_phase_client import PlannedExecutor
+        from mop.node.host_scope import Unknown
+        from mop.node.http_execution import Unavailable
+        a, scope, value = self.selected(action)
+        tmp = tempfile.TemporaryDirectory(prefix='mop-759-')
+        self.addCleanup(tmp.cleanup)
+        directory = Path(tmp.name)/'inputs'
+        directory.mkdir(mode=0o700)
+        writer = NodeWriter(directory, node_uid=os.geteuid())
+        self.addCleanup(writer.close)
+        calls = []
+        async def delivery(work):
+            calls.append('delivery')
+            return value
+        async def authorize(): calls.append('guard')
+        async def planned(request, **kw):
+            calls.append('possible-dispatch')
+            raise Unknown('controlled lost submission outcome')
+        @asynccontextmanager
+        async def connect():
+            self.assertTrue(writer.retained, 'failure was not after actual staging')
+            calls.append('connect')
+            if failure == 'connect': raise Unavailable('controlled pre-submit connection failure')
+            if failure == 'cancel': raise asyncio.CancelledError()
+            yield SimpleNamespace(planned=planned)
+        executor = PlannedExecutor.__new__(PlannedExecutor)
+        executor.client = SimpleNamespace(read_initial_launch=delivery)
+        executor.backend = SimpleNamespace(connect=connect)
+        executor.writer, executor._owned, executor._references = writer, {}, {}
+        guard = EffectGuard(authorize, lambda: None, a)
+        return executor, a, scope, guard, calls, directory
+
+    async def test_missing_previous_reference_refuses_before_private_delivery_or_staging(self):
+        from mop.node.http_execution import Unavailable
+        for action in ('bootstrap_body', 'initial_identity'):
+            with self.subTest(action=action):
+                executor, a, _, guard, calls, directory = self.executor(action)
+                with self.assertRaises((Refused, Unavailable)):
+                    await executor.execute(a.work, guard)
+                self.assertNotIn('delivery', calls, 'private delivery preceded reference eligibility')
+                self.assertEqual(executor.writer.retained, ())
+                self.assertEqual([p.name for p in directory.iterdir() if p.name != '.phase-input.lock'], [])
+
+    async def test_unsupported_valid_native_input_refuses_before_private_delivery(self):
+        from mop.node.host_scope import Reference
+        executor, a, scope, guard, calls, _ = self.executor('native_exec')
+        executor._references[scope] = Reference(scope, uuid4().hex, str(uuid4()))
+        with self.assertRaises(Refused): await executor.execute(a.work, guard)
+        self.assertNotIn('delivery', calls, 'unsupported action staged valid model material')
+        self.assertEqual(executor.writer.retained, ())
+
+    async def test_foreign_previous_reference_refuses_before_private_delivery(self):
+        from mop.node.host_scope import Reference
+        from mop.node.http_execution import Unavailable
+        executor, a, scope, guard, calls, _ = self.executor('bootstrap_body')
+        executor._references[scope] = Reference(selected()[1], uuid4().hex, str(uuid4()))
+        with self.assertRaises((Refused, Unavailable)): await executor.execute(a.work, guard)
+        self.assertNotIn('delivery', calls)
+        self.assertEqual(executor.writer.retained, ())
+
+    async def test_definite_poststage_connection_failure_removes_exact_file_and_slot(self):
+        from mop.node.http_execution import Unavailable
+        executor, a, _, guard, calls, directory = self.executor()
+        with self.assertRaisesRegex(Unavailable, 'pre-submit'): await executor.execute(a.work, guard)
+        self.assertIn('connect', calls)
+        self.assertEqual(executor.writer.retained, (), 'definite pre-submit failure leaked ownership slot')
+        self.assertEqual([p.name for p in directory.iterdir() if p.name != '.phase-input.lock'], [])
+        await executor.aclose()
+
+    async def test_close_cannot_delete_input_under_a_still_running_pre_submit_owner(self):
+        from contextlib import asynccontextmanager
+        executor, a, _, guard, _, directory = self.executor()
+        entered, release = asyncio.Event(), asyncio.Event()
+        @asynccontextmanager
+        async def connect():
+            entered.set()
+            await release.wait()
+            raise Refused('controlled connection failure')
+            yield
+        executor.backend.connect = connect
+        task = asyncio.create_task(executor.execute(a.work, guard))
+        await entered.wait()
+        source = executor.writer.retained[0]
+        path = directory/source.descriptor.filename
+        try:
+            await executor.aclose()
+            self.assertTrue(path.exists(), 'close took cleanup authority from an in-flight owner')
+            self.assertEqual(len(executor.writer.retained), 1)
+        finally:
+            task.cancel()
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertFalse(path.exists())
+        self.assertEqual(executor.writer.retained, ())
+
+    async def test_pre_submit_cancellation_cleans_but_unknown_dispatch_retains_owner(self):
+        from mop.node.host_scope import Unknown
+        for failure in ('cancel', 'unknown'):
+            with self.subTest(failure=failure):
+                executor, a, _, guard, calls, directory = self.executor(failure=failure)
+                with self.assertRaises(asyncio.CancelledError if failure == 'cancel' else Unknown):
+                    await executor.execute(a.work, guard)
+                await executor.aclose()
+                if failure == 'cancel':
+                    self.assertEqual(executor.writer.retained, (), 'pre-submit cancellation leaked input')
+                else:
+                    self.assertIn(a.attempt_id, executor._owned)
+                    self.assertEqual(len(executor.writer.retained), 1)
+                    source = executor.writer.retained[0]
+                    before = (directory/source.descriptor.filename).stat().st_ino
+                    with self.assertRaisesRegex(Refused, 'replay'):
+                        await executor.execute(a.work, guard)
+                    self.assertEqual((directory/source.descriptor.filename).stat().st_ino, before)
+                    self.assertEqual(calls.count('delivery'), 1)
+
+
 class EarlyStartCleanupTests(unittest.IsolatedAsyncioTestCase):
     # BUG #758: отмена prepare во время physical start теряет cleanup owner.
     # HYPOTHESIS: phase override ломает _abandon, а phase cleanup не ждёт start.

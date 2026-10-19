@@ -169,6 +169,68 @@ class ActualPrivateInputTests(unittest.TestCase):
             _, status = os.waitpid(pid, 0)
             self.assertEqual(os.waitstatus_to_exitcode(status), 0, 'UID lock child failed')
 
+    # BUG #759 / HYPOTHESIS: node pre-submit cleanup требует retained inode owner,
+    # не descriptor; close не вправе удалять replacement или uncertain input.
+    # SOLUTION: exact saved receipt и private capture; original inode pinned.
+    # RESULT: 27 actual UID проверок прошли на Python 3.12, root/node/body раздельны.
+    # STATUS: FIXED — see #759.
+    def test_actual_node_uid_stage_cleanup_requires_same_receipt_and_exact_inode(self):
+        def produce():
+            from dataclasses import replace
+            self.owner.close()
+            with self.f.NodeWriter(self.ingress, node_uid=NODE) as writer:
+                assert callable(getattr(writer, 'stage', None)), 'node staging receipt missing'
+                receipt = writer.stage(self.a, self.s, self.value)
+                path = self.ingress/receipt.descriptor.filename
+                for forged in (receipt.descriptor, replace(receipt)):
+                    try: writer.cleanup(forged)
+                    except Refused: pass
+                    else: raise AssertionError('forged node cleanup authority accepted')
+                    assert path.exists()
+                assert writer.cleanup(receipt) and not path.exists() and not writer.retained
+                receipt = writer.stage(self.a, self.s, self.value)
+                path.rename(self.ingress/'original-owned')
+                path.write_bytes(b'foreign-input-never-delete')
+                path.chmod(0o600)
+                inode = path.stat().st_ino
+                try: writer.cleanup(receipt)
+                except Refused: pass
+                else: raise AssertionError('foreign node inode accepted')
+                writer.close()
+                assert path.stat().st_ino == inode and path.read_bytes() == b'foreign-input-never-delete'
+                assert (self.ingress/'original-owned').exists() and len(writer.retained) == 1
+            return True
+        result = as_uid(NODE, produce)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uid'], NODE)
+
+    def test_actual_node_uid_capture_race_never_unlinks_foreign_input(self):
+        def produce():
+            self.owner.close()
+            with self.f.NodeWriter(self.ingress, node_uid=NODE) as writer:
+                assert callable(getattr(writer, 'stage', None)), 'node staging receipt missing'
+                receipt = writer.stage(self.a, self.s, self.value)
+                path = self.ingress/receipt.descriptor.filename
+                rename, foreign = os.rename, []
+                def race(src, dst, **kw):
+                    if src == path.name and kw.get('src_dir_fd') == writer.directory.fd:
+                        rename(path, self.ingress/'original-owned')
+                        path.write_bytes(b'foreign-race-preserve')
+                        path.chmod(0o600)
+                        foreign.append(path.stat().st_ino)
+                    return rename(src, dst, **kw)
+                try:
+                    with patch('os.rename', side_effect=race): writer.cleanup(receipt)
+                except Refused: pass
+                else: raise AssertionError('foreign capture was deleted')
+                copies = [p for p in self.ingress.rglob('*') if p.is_file() and p.stat().st_ino in foreign]
+                assert foreign and copies and len(writer.retained) == 1
+                assert all(p.read_bytes() == b'foreign-race-preserve' for p in copies)
+            return True
+        result = as_uid(NODE, produce)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uid'], NODE)
+
     def test_body_readonly_directory_flock_cannot_block_root_snapshot_or_cleanup(self):
         # BUG: body O_RDONLY directory fd удерживает flock всего root transport.
         # HYPOTHESIS: доступный body inode нельзя использовать как root lock.

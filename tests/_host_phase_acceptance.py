@@ -220,6 +220,71 @@ async def frontend(document):
                     raise Refused('original fixture admission expired or backend changed')
             async def authorize(): await client.recheck(admission)
             return EffectGuard(authorize, check, admission)
+        if mode == 'ingress_eligibility':
+            calls, evidence = [], []
+            original = client.read_initial_launch
+            async def delivery(work):
+                calls.append(work['action'])
+                return await original(work)
+            client.read_initial_launch = delivery
+            for value in document['works']:
+                work = Work.parse({**value, 'executor_epoch': runtime.executor_epoch})
+                admission = await client.claim(work, str(uuid4()))
+                try: await executor.execute(work, phase_guard(admission))
+                except (Refused, Unavailable): pass
+                else: raise AssertionError('ineligible actual planned action executed')
+                evidence.append(dict(action=work.action, slots=len(writer.retained),
+                    files=sum((writer.directory.path/s.descriptor.filename).exists() for s in writer.retained)))
+            assert not calls and not writer.retained, '#759 actual eligibility leaked private input: '+repr(evidence)
+            print(json.dumps(dict(status='refused-before-delivery')), flush=True)
+            return
+        if mode == 'ingress_failure':
+            from contextlib import asynccontextmanager
+            from types import SimpleNamespace
+            from mop.node.host_scope import Unknown
+            work = Work.parse({**document['works'][0], 'executor_epoch': runtime.executor_epoch})
+            admission = await client.claim(work, str(uuid4()))
+            guard = phase_guard(admission)
+            original, staged_paths = backend.connect, []
+            @asynccontextmanager
+            async def boundary():
+                assert len(writer.retained) == 1, 'fault missed actual poststage boundary'
+                staged_paths.append(writer.directory.path/writer.retained[0].descriptor.filename)
+                assert staged_paths[-1].exists()
+                async with original() as session:
+                    if document['failure'] == 'definite':
+                        raise Unavailable('controlled actual pre-submit failure')
+                    async def dispatch(request, **kw):
+                        await session.planned(request, **kw)
+                        raise Unknown('controlled actual lost phase outcome')
+                    yield SimpleNamespace(planned=dispatch)
+            backend.connect = boundary
+            try:
+                try: await executor.execute(work, guard)
+                except (Unavailable, Unknown): pass
+                else: raise AssertionError('controlled actual boundary did not fail')
+            finally:
+                backend.connect = original
+            await executor.aclose()
+            if document['failure'] == 'definite':
+                assert not writer.retained, '#759 actual definite pre-submit failure leaked slot'
+                assert admission.attempt_id not in executor._owned
+                assert staged_paths and all(not path.exists() for path in staged_paths)
+            else:
+                owned = executor._owned[admission.attempt_id]
+                assert len(writer.retained) == 1 and owned.possible_dispatch
+                path = writer.directory.path/owned.descriptor.filename
+                inode = path.stat().st_ino
+                try: await executor.execute(work, guard)
+                except Refused as error: assert 'replay' in str(error)
+                else: raise AssertionError('unknown actual dispatch permitted replay')
+                assert path.stat().st_ino == inode, 'unknown dispatch deleted/replaced owned input'
+                await executor.exchange(executor.address(owned, 'cleanup_owned'))
+                async with asyncio.timeout(10.):
+                    while path.exists(): await asyncio.sleep(.02)
+                writer.forget(owned.descriptor)
+            print(json.dumps(dict(status='accepted-boundary', failure=document['failure'])), flush=True)
+            return
         if mode == 'deny_token':
             bad = MachineClient(HttpsTransport(document['origin'], 'wrong-owned-fixture-token',
                 timeout=5., tls=ssl.create_default_context(cafile='/opt/runtime/ca.pem')))
@@ -295,6 +360,10 @@ async def frontend(document):
                 scope=executor.scope(original.work).wire(), attempt_id=original.attempt_id), guard=phase_guard(original))
             print(json.dumps(dict(status='accepted-start')), flush=True)
             return
+        if mode == 'cleanup_observed':
+            observation = document['observations'][0]
+            phase = await executor.observe(Scope.parse(observation['scope']), observation['attempt_id'])
+            document['admission'], mode = phase['admission'], 'cleanup'
         if mode in ('checkpoint_denied', 'cleanup'):
             original = parse_admission(document['admission'])
             scope = executor.scope(original.work)
@@ -739,6 +808,22 @@ async def accept():
 
         await launch([], mode='deny_token')
         negatives.append('wrong-node-token')
+        # BUG #759 / HYPOTHESIS: valid delivery уходил в ingress до eligibility.
+        # SOLUTION: проверка action/reference до delivery; exact staging owner
+        # убирает только definite pre-submit failure, unknown dispatch не replay.
+        # RESULT: actual Python 3.12/PG17 fixture — 147 recheck, все пути ниже прошли.
+        # STATUS: FIXED — see #759.
+        identity_case, native_case, bootstrap_case = extra_case(), extra_case(), extra_case()
+        native = native_case[2]
+        native['phase'] = native['work']['action'] = 'native_exec'
+        model = next(p for p in native['selection']['consumers'] if p['purpose'] == 'model_config')
+        native['consumers'] = [dict(**model, name='model', kind='file', value=base64.b64encode(b'{}').decode())]
+        await launch([bootstrap_case[1]['work'], identity_case[2]['work'], native['work']], mode='ingress_eligibility')
+        negatives.append('ineligible-before-private-delivery')
+        for failure in ('definite', 'unknown'):
+            case = extra_case()
+            await launch([case[0]['work']], mode='ingress_failure', failure=failure)
+            negatives.append('poststage-'+failure+'-ownership')
         for negative in ('snapshot', 'phase', 'source-format', 'source-origin'):
             case = extra_case()
             value = case[1] if negative == 'phase' else case[0]
@@ -751,9 +836,15 @@ async def accept():
             assert not (Path('/var/lib/mop-bodies')/value['work']['operation_id']).exists(), 'invalid input caused a workspace effect'
             negatives.append('wrong-'+negative)
         case = extra_case()
+        # Role codec проверяется на eligible identity с настоящим prior ACK, а не
+        # теряется за новым более ранним missing-reference отказом (#759).
+        await launch([case[0]['work']])
+        await launch([case[1]['work']], [observation(case[0])])
         case[2]['role']['prompt'] = base64.b64encode(prompt+b'unapproved changed role prompt\n').decode()
-        await launch([case[2]['work']], mode='expect_failure', error_contains='approved initial launch role pin changed')
-        assert not (Path('/var/lib/mop-bodies')/case[2]['work']['operation_id']).exists(), 'wrong approved role caused a workspace effect'
+        await launch([case[2]['work']], [observation(case[1])], mode='expect_failure', error_contains='approved initial launch role pin changed')
+        assert not (Path('/var/lib/mop-bodies')/case[2]['work']['operation_id']/'role').exists(), 'wrong approved role caused an identity effect'
+        await launch([], [observation(case[1])], mode='cleanup_observed')
+        await removed(case)
         negatives.append('wrong-approved-role-prompt')
 
         case = extra_case()

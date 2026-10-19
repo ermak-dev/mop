@@ -18,6 +18,9 @@ class _Owned:
     descriptor: object = None
     phase_receipt: str | None = None
     succeeded: bool = False
+    staged: object = None
+    possible_dispatch: bool = False
+    definite_failure: bool = False
 
 
 class PlannedExecutor:
@@ -67,20 +70,34 @@ class PlannedExecutor:
         admission = admitted(guard, work)
         if admission.attempt_id in self._owned:
             raise Refused('planned execution replay forbidden; observe retained original attempt')
+        if work.action not in PLANNED:
+            raise Refused('only three planned HOST phases are enabled')
+        scope = self.scope(work)
+        previous = None if work.action == 'prepare_body' else self._references.get(scope)
+        if work.action != 'prepare_body' and (type(previous) is not Reference or previous.scope != scope):
+            # Eligibility до чтения private delivery, не после записи input.
+            raise Unavailable('planned phase requires an explicitly observed retained root reference')
         await guard()
         value = await self.client.read_initial_launch(work.wire())
         guard.check()
-        scope = self.scope(work)
-        descriptor = self.writer.write(admission, scope, value)
-        previous = None if work.action == 'prepare_body' else self._references.get(scope)
-        if previous is None and work.action != 'prepare_body':
-            # Frontend replacement наблюдает exact owner prepare attempt, но не
-            # угадывает Reference из label/SQL marker.
-            raise Unavailable('planned phase requires an explicitly observed retained root reference')
-        submission = Submission(admission, descriptor, Projection.from_delivery(value), previous)
-        owned = _Owned(admission, scope, descriptor)
+        staged = self.writer.stage(admission, scope, value)
+        owned = _Owned(admission, scope, staged.descriptor, staged=staged)
         self._owned[admission.attempt_id] = owned
-        phase = await self.exchange(submission)
+        try:
+            submission = Submission(admission, staged.descriptor, Projection.from_delivery(value), previous)
+            submission.encode()
+            # connect делает только backend query. До входа в planned root
+            # не мог получить submission; после входа любой сбой сохраняет owner.
+            async with self.backend.connect() as session:
+                guard.check()
+                owned.possible_dispatch = True
+                phase = await session.planned(submission)
+        except BaseException:
+            if not owned.possible_dispatch:
+                owned.definite_failure = True
+                self.writer.cleanup(staged)
+                self._owned.pop(admission.attempt_id)
+            raise
         return await self._drive(owned, guard, phase)
 
     async def resume(self, work, guard):
@@ -168,5 +185,9 @@ class PlannedExecutor:
             raise Unavailable('planned exact result ACK outcome unknown')
 
     async def aclose(self):
-        # Успешный passive broker остаётся root-owned, даже когда frontend ушёл.
-        return None
+        # Успешный/uncertain broker остаётся root-owned. Повторить можно только
+        # definite pre-submit cleanup, чей exact retained owner ещё здесь.
+        for attempt, owned in tuple(self._owned.items()):
+            if owned.staged is not None and owned.definite_failure and not owned.possible_dispatch:
+                self.writer.cleanup(owned.staged)
+                self._owned.pop(attempt)
