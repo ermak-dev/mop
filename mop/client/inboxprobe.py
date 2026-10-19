@@ -11,13 +11,122 @@ import os
 from pathlib import Path
 import ssl
 import subprocess
-from uuid import uuid4
+import time
+from uuid import UUID, uuid4
 
 from mop import session
 from mop.common.endpoint import inbox_encode, inbox_decode
 from .control import ServerContext
-from .local_bridge import OwnSession
+from .local_bridge import LocalBridge, OwnSession, _unique_object, _invalid_constant
 from .private_inbox import InboxOwner
+
+
+class NativeTrace:
+    """Конечная fixture-only проекция, никогда не acceptance adapter."""
+    KINDS = frozenset(('native_write_started', 'native_write_drained', 'native_write_failed',
+        'prewrite_guard_passed', 'native_callback_peer_verified',
+        'native_callback', 'native_callback_invalid', 'native_delivery_result',
+        'wss_bound', 'wss_delivery', 'wss_prewrite', 'wss_write_allowed',
+        'wss_application_acceptance', 'wss_idle_observed', 'wss_receipt',
+        'diagnostic_idle_started', 'diagnostic_idle_finished', 'owner_closed'))
+
+    def __init__(self, *, clock=time.monotonic_ns):
+        self.clock, self.origin = clock, clock()
+        self.events, self.dropped_events = [], 0
+        self.user_id = self.diagnostic_id = None
+        self.diagnostic_idle = asyncio.Event()
+
+    def event(self, kind, **fields):
+        if kind not in self.KINDS:
+            return
+        if len(self.events) >= 128:
+            self.dropped_events += 1
+            return
+        row = dict(event=kind, at_ns=self.clock()-self.origin)
+        for name in ('message_id', 'subscription_id', 'delivery_id', 'orig_msg_id'):
+            value = fields.get(name)
+            try:
+                if type(value) is str and str(UUID(value)) == value:
+                    row[name] = value
+            except ValueError:
+                pass
+        allowed = dict(action=('peer_message_status', 'peer_idle_notice', 'notify_when_idle'),
+            status=('held', 'delivered', 'denied', 'expired', 'refused', 'dropped'),
+            state=('idle', 'exited', 'unavailable', 'accepted', 'unknown'),
+            outcome=('accepted', 'unknown', 'unavailable'), frame_type=('user', 'control'),
+            correlation=('user', 'delivery-idle', 'diagnostic-only', 'unmatched'),
+            failure=('OSError', 'TimeoutError', 'PermissionError', 'ValueError', 'CancelledError'))
+        for name, values in allowed.items():
+            if type(fields.get(name)) is str and fields[name] in values:
+                row[name] = fields[name]
+        for name in ('idle', 'matched', 'holder_cleared', 'tasks_drained', 'callback_removed'):
+            if type(fields.get(name)) is bool:
+                row[name] = fields[name]
+        self.events.append(row)
+
+    def callback(self, raw, subscriptions=()):
+        """Вызывается только после физической проверки callback peer."""
+        try:
+            if len(raw) > 8192:
+                raise ValueError('bounded callback')
+            value = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+            if (type(value) is not dict or type(value.get('msgV')) is not int or value['msgV'] != 1
+                    or value.get('type') != 'control'):
+                raise ValueError('callback shape')
+            action, key = value.get('action'), value.get('orig_msg_id')
+            if type(key) is not str or str(UUID(key)) != key:
+                raise ValueError('callback correlation')
+            if action == 'peer_message_status' and value.get('status') in (
+                    'held', 'delivered', 'denied', 'expired', 'refused', 'dropped'):
+                correlation = 'user' if key == self.user_id else 'unmatched'
+            elif action == 'peer_idle_notice' and value.get('state') in ('idle', 'exited', 'unavailable'):
+                correlation = ('diagnostic-only' if key == self.diagnostic_id else
+                    'delivery-idle' if key in subscriptions else 'unmatched')
+                if correlation == 'diagnostic-only' and value['state'] == 'idle':
+                    self.diagnostic_idle.set()
+            else:
+                raise ValueError('callback action')
+            self.event('native_callback', action=action, orig_msg_id=key, correlation=correlation,
+                status=value.get('status'), state=value.get('state'))
+        except (ValueError, TypeError, RecursionError):
+            self.event('native_callback_invalid')
+
+
+class ObservedBridge(LocalBridge):
+    """Тот же production bridge и те же fences; наблюдение без изменения verdict."""
+    def __init__(self, own, trace, **kwargs):
+        super().__init__(own, **kwargs)
+        self.trace = trace
+
+    async def _write(self, frame, guard=None):
+        fields = dict(frame_type=frame['type'], message_id=frame['msg_id'], action=frame.get('action'))
+        self.trace.event('native_write_started', **fields)
+        async def observed_guard():
+            await guard()
+            self.trace.event('prewrite_guard_passed', **fields)
+        try:
+            await super()._write(frame, observed_guard if guard is not None else None)
+        except (OSError, TimeoutError, PermissionError, ValueError, asyncio.CancelledError) as error:
+            self.trace.event('native_write_failed', **fields, failure=type(error).__name__)
+            raise
+        self.trace.event('native_write_drained', **fields)
+
+    async def _receive(self, reader, writer):
+        bridge = self
+        class ProjectedReader:
+            async def readline(self):
+                raw = await reader.readline()
+                # Повтор после read: failed physical proof не даёт fake evidence.
+                bridge._peer(writer)
+                bridge.trace.event('native_callback_peer_verified')
+                bridge.trace.callback(raw, (pair[0] for pair in bridge._idle.values()))
+                return raw
+        await super()._receive(ProjectedReader(), writer)
+
+    async def _deliver(self, frame, guard):
+        result = await super()._deliver(frame, guard)
+        self.trace.event('native_delivery_result', message_id=str(frame.message_id), outcome=result.outcome)
+        return result
 
 
 def run(terminal, ready, home, runtime, output):
@@ -41,6 +150,8 @@ def run(terminal, ready, home, runtime, output):
         from aiohttp import web, WSMsgType
         endpoint, epoch, client, project, nonce, delivery, message = [str(uuid4()) for _ in range(7)]
         evidence = asyncio.Queue(maxsize=4)
+        trace = NativeTrace()
+        trace.user_id = message
         async def capabilities(request):
             return web.json_response(dict(schema_version=1,catalogue_version=1,epoch=epoch,
                 actor=dict(user_id=1,kind='human',human_owner_id=1,node_id=None,grant_id=None),
@@ -65,6 +176,7 @@ def run(terminal, ready, home, runtime, output):
                     external_session_id=own.external_session_id,epoch=epoch,generation='1',connection_nonce=nonce,lease_seconds=15)))
                 value=inbox_decode((await ws.receive()).data,direction='client')
                 if value['type']!='bound_received': raise ValueError('missing native bound confirmation')
+                trace.event('wss_delivery', delivery_id=delivery, message_id=message)
                 await ws.send_str(inbox_encode(dict(schema_version=1,type='delivery',connection_nonce=nonce,
                     frame=dict(id=delivery,message_id=message,external_session_id=own.external_session_id,
                         text='probe:after-model owned WSS native inbox fixture '+message,
@@ -73,12 +185,16 @@ def run(terminal, ready, home, runtime, output):
                     if raw.type!=WSMsgType.TEXT: break
                     value=inbox_decode(raw.data,direction='client')
                     if value['type']=='prewrite':
+                        trace.event('wss_prewrite', delivery_id=delivery, message_id=message)
                         await ws.send_str(inbox_encode(dict(value,type='write_allowed')))
+                        trace.event('wss_write_allowed', delivery_id=delivery, message_id=message)
                     elif value['type']=='application_acceptance':
+                        trace.event('wss_application_acceptance', delivery_id=delivery, message_id=message, outcome=value['outcome'])
                         await evidence.put(dict(outcome=value['outcome']))
                         await ws.send_str(inbox_encode(dict(schema_version=1,type='receipt',connection_nonce=nonce,
                             result=dict(id=delivery,message_id=message,operation_request_id=None,state=value['outcome'],idle=False))))
                     elif value['type']=='idle_observed':
+                        trace.event('wss_idle_observed', delivery_id=delivery, message_id=message)
                         await evidence.put(dict(idle=True))
                         await ws.send_str(inbox_encode(dict(schema_version=1,type='receipt',connection_nonce=nonce,
                             result=dict(id=delivery,message_id=message,operation_request_id=None,state='accepted',idle=True))))
@@ -98,13 +214,28 @@ def run(terminal, ready, home, runtime, output):
         active=True
         owner=InboxOwner(ServerContext('https://127.0.0.1:'+str(port),'owned-fixture-only-token',str(cert)),
             own,client_id=client,project_id=project,display_name='owned native fixture',current=lambda: active)
+        owner.bridge = ObservedBridge(own, trace, timeout=2)
         details=dict(native_version='2.1.302',trusted_provenance='owned Terminal launcher; exact PID/start/namespace/cwd/fixture conversation',
             verified_https=True,actual_wss=True,native_outcome='unknown',native_idle=False,
             controller_receipt='controlled WSS peer only; not committed PostgreSQL evidence',
-            production_launcher=False,paid_provider_tested=False)
+            production_launcher=False,paid_provider_tested=False,
+            cold_home_onboarding=False, prepared_owned_fixture_only=True,
+            diagnostic_idle_is_delivery_evidence=False,
+            event_timeline=trace.events,
+            physical=dict(pid=own.pid, process_start=own.process_start, uid=own.uid,
+                namespaces=own.namespaces, cwd=str(own.cwd), external_session_id=own.external_session_id,
+                cgroup=Path('/proc/'+str(own.pid)+'/cgroup').read_text().strip()))
         try:
             await owner.start()
             details['bound']=owner.holder() is not None
+            trace.event('wss_bound')
+            # Независимый control, как в #729/#735: проверяет callback путь,
+            # но не подтверждает user enqueue и не публикуется owner-ом как idle.
+            trace.diagnostic_id = str(uuid4())
+            trace.event('diagnostic_idle_started', subscription_id=trace.diagnostic_id)
+            await owner.bridge._write(dict(msgV=1, type='control', msg_id=trace.diagnostic_id,
+                session_id=own.external_session_id, action='notify_when_idle',
+                **{'from': 'uds:'+str(owner.bridge._callback)}))
             end=asyncio.get_running_loop().time()+8
             while asyncio.get_running_loop().time()<end:
                 await asyncio.to_thread(terminal.pump,.05)
@@ -114,13 +245,20 @@ def run(terminal, ready, home, runtime, output):
                     if value.get('idle'): details['native_idle']=True
                 if details['native_outcome']!='accepted' and details['native_outcome']!='unknown': break
                 if details['native_idle']: break
+            details['diagnostic_idle_observed']=trace.diagnostic_idle.is_set()
+            trace.event('diagnostic_idle_finished', subscription_id=trace.diagnostic_id,
+                idle=details['diagnostic_idle_observed'])
         finally:
             active=False
             await owner.aclose()
             details['holder_cleared']=owner.holder() is None
             details['tasks_drained']=not owner.tasks
             details['callback_removed']=owner.bridge._callback is None
+            trace.event('owner_closed', holder_cleared=details['holder_cleared'],
+                tasks_drained=details['tasks_drained'], callback_removed=details['callback_removed'])
             await runner.cleanup()
+        details['trace_dropped_events']=trace.dropped_events
+        details['native_user_writes']=sum(row['event']=='native_write_drained' and row.get('frame_type')=='user' for row in trace.events)
         details['no_fabricated_acceptance']=True
         return details
     return asyncio.run(experiment())

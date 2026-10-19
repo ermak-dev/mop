@@ -137,6 +137,98 @@ class NativeBoundary(unittest.TestCase):
             chatprobe.run('/must-not-create', private_inbox=True)
 
 
+class NativeTimeline(unittest.IsolatedAsyncioTestCase):
+    # HYPOTHESIS: #785 у prepared native fixture нет causal trace: unknown
+    # нельзя отличить от guard/callback отказа, а прежний idle был независимым.
+    # SPEC: bounded projection только типов/timings/UUID; trace не меняет
+    # acceptance, не повторяет user-frame и не превращает diagnostic idle в ACK.
+    # SOLUTION: fixture-only subclass делегирует production bridge, проецируя
+    # конечные события; независимый control не заявляет controller guard.
+    # RESULT: два missing-capability RED и отдельный false-guard RED воспроизведены;
+    # пять узких файлов GREEN. Ранний выход observer по unknown отменён:
+    # сохранено исходное окно 8 секунд, native остаётся unknown без replay.
+    # STATUS: FIXED — see #785 (диагностика; native acceptance не подтверждён).
+    async def test_trace_is_bounded_payload_free_and_correlates_only_exact_ids(self):
+        from mop.client import inboxprobe
+        self.assertTrue(hasattr(inboxprobe, 'NativeTrace'), 'safe native event timeline is missing')
+        message, subscription = key(), key()
+        trace = inboxprobe.NativeTrace(clock=lambda: 100)
+        trace.user_id = message
+        trace.diagnostic_id = subscription
+        trace.callback((json.dumps(dict(msgV=1, type='control', action='peer_message_status',
+            orig_msg_id=message, status='held', token='private-marker', reason='private-marker'))+'\n').encode())
+        trace.callback((json.dumps(dict(msgV=1, type='control', action='peer_idle_notice',
+            orig_msg_id=subscription, state='idle', detail='private-marker'))+'\n').encode())
+        trace.callback(b'{"type":"control","action":"private-marker","token":"private-marker"}\n')
+        trace.callback(b'{"type":"control","msgV":1,"msgV":1}\n')
+        trace.event('private-marker', token='private-marker')
+        self.assertNotIn('private-marker', json.dumps(trace.events))
+        receipts = [row for row in trace.events if row['event'] == 'native_callback']
+        self.assertEqual([(row['action'], row['correlation']) for row in receipts],
+            [('peer_message_status', 'user'), ('peer_idle_notice', 'diagnostic-only')])
+        self.assertTrue(trace.diagnostic_idle.is_set())
+        self.assertEqual(receipts[0]['at_ns'], 0)
+        for _ in range(200): trace.event('native_write_started', message_id=message, text='private-marker')
+        self.assertEqual(len(trace.events), 128)
+        self.assertGreater(trace.dropped_events, 0)
+        self.assertNotIn('private-marker', json.dumps(trace.events))
+
+    async def test_diagnostic_control_does_not_claim_a_controller_prewrite_guard(self):
+        from mop.client import inboxprobe
+        with tempfile.TemporaryDirectory(prefix='m785-', dir='/tmp') as directory:
+            path = Path(directory)/'native.sock'
+            async def native(reader, writer):
+                await reader.readline()
+                writer.close(); await writer.wait_closed()
+            server = await asyncio.start_unix_server(native, path=str(path))
+            path.chmod(0o600)
+            trace = inboxprobe.NativeTrace()
+            bridge = inboxprobe.ObservedBridge(own_session(path, 'own-native'), trace, timeout=.05)
+            try:
+                await bridge._write(dict(msgV=1, type='control', msg_id=key(),
+                    session_id='own-native', action='notify_when_idle'))
+                self.assertIn('native_write_drained', [row['event'] for row in trace.events])
+                self.assertNotIn('prewrite_guard_passed', [row['event'] for row in trace.events],
+                    'independent diagnostic control must not claim controller authorization')
+            finally:
+                await bridge.aclose()
+                server.close(); await server.wait_closed()
+
+    async def test_observed_bridge_preserves_silent_enqueue_unknown_and_single_write(self):
+        from mop.client import inboxprobe
+        self.assertTrue(hasattr(inboxprobe, 'ObservedBridge'), 'fixture-only observed bridge is missing')
+        from mop.common.endpoint import DeliveryFrame
+        with tempfile.TemporaryDirectory(prefix='m785-', dir='/tmp') as directory:
+            path = Path(directory)/'native.sock'
+            received = []
+            async def native(reader, writer):
+                line = await reader.readline()
+                if line: received.append(json.loads(line))
+                writer.close(); await writer.wait_closed()
+            server = await asyncio.start_unix_server(native, path=str(path))
+            path.chmod(0o600)
+            trace = inboxprobe.NativeTrace()
+            bridge = inboxprobe.ObservedBridge(own_session(path, 'own-native'), trace, timeout=.05)
+            frame = DeliveryFrame(uuid4(), uuid4(), 'own-native', 'private-marker', 'now', True)
+            trace.user_id = str(frame.message_id)
+            try:
+                await bridge.start()
+                guards = []
+                async def guard(): guards.append(True)
+                first = await bridge.deliver_guarded(frame, guard)
+                second = await bridge.deliver_guarded(frame, guard)
+                self.assertEqual((first.outcome, second.outcome), ('unknown', 'unknown'))
+                self.assertEqual([row['type'] for row in received], ['user'])
+                self.assertEqual(len(guards), 1)
+                events = [row['event'] for row in trace.events]
+                self.assertIn('prewrite_guard_passed', events)
+                self.assertIn('native_write_drained', events)
+                self.assertNotIn('private-marker', json.dumps(trace.events))
+            finally:
+                await bridge.aclose()
+                server.close(); await server.wait_closed()
+
+
 class Commandlets(Reports):
     def test_declarative_report_dispatch_pending_and_recovery_without_post_retry(self):
         from mop.cli import _control, _mcp
