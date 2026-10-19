@@ -412,5 +412,144 @@ class SchedulerFinalization(unittest.TestCase):
         self.assertIn('owned joined worker cleanup refused', str(caught.exception.exceptions[0]))
 
 
+class FreshOwnerDeath(unittest.TestCase):
+    # BUG: смерть owner не ограничивает communicate, пока body держит PIPE.
+    # HYPOTHESIS: deadline ставит только внешний cancel, а EOF не является
+    # наблюдением смерти owner. Проверка убивает настоящий owner через pidfd.
+    # SOLUTION: pidfd death запускает прежний bounded drain без внешнего
+    # cancel. По deadline закрывается лишь reader, а не живые дети; exit owner
+    # не заменяет receipt и не разрешает удаление принадлежащего body HOME.
+    # RESULT: RED — pending после 8 s, только probe kill освобождает PIPE;
+    # GREEN — CLI exit 1 через 6.319 s без probe kill, тот же body жив,
+    # чужая группа не тронута; 39 focused + 5 UID на Python 3.12/PG17.
+    # STATUS: FIXED — see #775
+    def prepare(self, root, *, close_streams):
+        import textwrap
+        (root / 'tests').mkdir()
+        (root / 'pyproject.toml').write_text('[tool.pytest.ini_options]\npython_files = ["*.py"]\n')
+        child_record, owner_record, result_record = [root / name for name in
+            ('child.json', 'owner.json', 'result.json')]
+        streams = ('fd = os.open(os.devnull, os.O_WRONLY)\n'
+                   'os.dup2(fd, 1)\nos.dup2(fd, 2)\nos.close(fd)\n') if close_streams else ''
+        (root / 'tests/boundary.py').write_text('import os, sys, json, pathlib, time\n'
+            f'sys.path.insert(0, {hermetic.TESTS!r})\nimport hermetic\n' + streams +
+            f'path = pathlib.Path({str(child_record)!r})\n'
+            'path.with_suffix(".tmp").write_text(json.dumps({"pid": os.getpid(), "home": hermetic.HOME}))\n'
+            'path.with_suffix(".tmp").replace(path)\ntime.sleep(60)\n')
+        driver = root / 'driver.py'
+        driver.write_text(textwrap.dedent(f'''
+            import json, os, pathlib, signal, subprocess, sys, time
+            sys.path.insert(0, {hermetic.TESTS!r})
+            import hermetic
+            import _pytest_process as lifecycle
+            from mop.cli.dev import test as command
+            original = subprocess.Popen
+            homes = []
+            class Reader:
+                def __init__(self, *args, **kwargs):
+                    self.process = original(*args, **kwargs)
+                    self.first = True
+                    homes.append(kwargs['env']['TMPDIR'])
+                def __getattr__(self, name):
+                    return getattr(self.process, name)
+                def communicate(self, *args, **kwargs):
+                    if self.first:
+                        self.first = False
+                        expires = time.monotonic() + 10
+                        while not pathlib.Path({str(child_record)!r}).exists():
+                            if time.monotonic() >= expires:
+                                raise AssertionError('real body did not start')
+                            time.sleep(.01)
+                        row = lifecycle.snapshot(self.process.pid)
+                        fd = os.pidfd_open(self.process.pid)
+                        try:
+                            if lifecycle.snapshot(self.process.pid) != row:
+                                raise AssertionError('probe owner identity changed')
+                            signal.pidfd_send_signal(fd, signal.SIGKILL)
+                        finally:
+                            os.close(fd)
+                        pathlib.Path({str(owner_record)!r}).write_text(json.dumps(row))
+                    return self.process.communicate(*args, **kwargs)
+            lifecycle.subprocess.Popen = Reader
+            command.root = lambda: {str(root)!r}
+            code = command.main(['boundary', '--strict'])
+            child = json.loads(pathlib.Path({str(child_record)!r}).read_text())
+            pathlib.Path({str(result_record)!r}).write_text(json.dumps({{
+                'code': code, 'tmpdir': homes[0], 'home': child['home'],
+                'home_before_exit': pathlib.Path(child['home']).exists(),
+                'tmpdir_before_exit': pathlib.Path(homes[0]).exists(),
+            }}))
+            raise SystemExit(code)
+        '''))
+        return driver, child_record, owner_record, result_record
+
+    def wait_record(self, path, process):
+        expires = time.monotonic() + 12
+        while not path.exists():
+            if process.poll() is not None:
+                self.fail('probe exited before readiness: ' + process.communicate()[0])
+            if time.monotonic() >= expires:
+                self.fail('probe did not create readiness record')
+            time.sleep(.01)
+        return json.loads(path.read_text())
+
+    def launch(self, driver, root):
+        return subprocess.Popen([sys.executable, str(driver)], cwd=root,
+            env=hermetic.child_env({'PYTHONPATH': os.pathsep.join((hermetic.ROOT, hermetic.TESTS))}),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+
+    def test_owner_death_is_bounded_while_live_body_holds_stdout_without_external_cancel(self):
+        with tempfile.TemporaryDirectory(prefix='mop-775-pipe-') as directory, probe_children() as register:
+            root = Path(directory)
+            driver, child_record, owner_record, result_record = self.prepare(root, close_streams=False)
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            outsider = register(unrelated.pid)
+            process = self.launch(driver, root)
+            child = self.wait_record(child_record, process)
+            body = register(child['pid'])
+            owner = self.wait_record(owner_record, process)
+            stuck = False
+            started = time.monotonic()
+            try:
+                try:
+                    output = process.communicate(timeout=8)[0]
+                except subprocess.TimeoutExpired:
+                    stuck = True
+                    # RED finalizer освобождает только зарегистрированный body,
+                    # не посылает cancel читателю и не сигналит чужую группу.
+                    self.assertEqual(identity(child['pid']), body)
+                    fd = os.pidfd_open(child['pid'])
+                    try:
+                        self.assertEqual(identity(child['pid']), body)
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                    finally:
+                        os.close(fd)
+                    output = process.communicate(timeout=10)[0]
+                result = json.loads(result_record.read_text())
+                state = Path(f"/proc/{child['pid']}/stat").read_text().rsplit(')', 1)[1].split()[0]
+                live = identity(child['pid']) == body and state not in ('Z', 'X')
+                self.evidence('#775 actual owner death: ' + json.dumps({
+                    'owner': owner, 'owner_gone': identity(owner['pid']) is None,
+                    'body': body, 'body_alive_at_outer_exit': live,
+                    'pending_after_8s': stuck, 'outer_exit': process.returncode,
+                    'elapsed': round(time.monotonic() - started, 3),
+                    'tmpdir_before_exit': result['tmpdir_before_exit'],
+                    'missing_receipt_reported': 'quiescence receipt' in output,
+                    'unrelated_group_survived': identity(unrelated.pid) == outsider}))
+                self.assertEqual(process.returncode, 1, output)
+                self.assertIn('quiescence receipt', output)
+                self.assertIsNone(identity(owner['pid']))
+                self.assertEqual(identity(unrelated.pid), outsider)
+                self.assertFalse(stuck, 'dead owner was not observed independently of a live body output pipe')
+                self.assertTrue(live, 'probe or runner killed the body instead of bounding the reader')
+                self.assertTrue(result['tmpdir_before_exit'], result)
+            finally:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGINT)
+                    process.communicate(timeout=15)
+
+
 if __name__ == '__main__':
     raise SystemExit(main(sys.argv[1:] or ['pytest_ownership']))

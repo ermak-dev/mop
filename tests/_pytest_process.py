@@ -255,9 +255,29 @@ class OwnedProcess:
                 try:
                     self.output = self.process.communicate(timeout=.1)
                     break
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as error:
+                    # EOF может держать ещё живой body после смерти owner.
+                    # Только его зарегистрированный pidfd, не обход чужих PID.
+                    exited = bool(select.select([self.handle.fd], [], [], 0)[0])
+                    with self.lock:
+                        if exited and self.until is None:
+                            self.until = time.monotonic() + OWNER_SECONDS
                     if self.until is not None and time.monotonic() >= self.until:
-                        raise RuntimeError(f'owned process cleanup deadline exceeded; pending owner: {self.handle.row}') from None
+                        if exited:
+                            # Reap именно owner; потомки от этого не quiescent.
+                            # Больше не читаем удерживаемый ими PIPE, но close
+                            # всё равно требует приватный quiescence receipt.
+                            self.process.poll()
+                            text = error.output or b''
+                            if isinstance(text, bytes):
+                                text = text.decode(self.process.stdout.encoding, errors='replace')
+                            self.output = text, None
+                            self.process.stdout.close()
+                        self.cleanup_error = RuntimeError('owned process cleanup deadline exceeded; '
+                            f'quiescence receipt unproven; owner={self.handle.row}, exit={self.returncode}')
+                        raise self.cleanup_error from None
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
         return self.output
 
     def close(self):
