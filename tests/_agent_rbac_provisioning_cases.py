@@ -69,7 +69,9 @@ class AgentRBACProvisioning(TransactionTestCase):
             if action == 'native_exec':
                 create_fixture.native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence=evidence)
+                outcome='succeeded', evidence=evidence, ready_evidence=(
+                    create_fixture.ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if action == 'confirm_ready' else None))
         self.ops.activations.activator = create_fixture.CreateActivation.activator(self)
         self.assertIsNotNone(self.ops.activations.run(row.id))
         row.refresh_from_db()
@@ -137,6 +139,26 @@ class AgentRBACProvisioning(TransactionTestCase):
         self.assertEqual(revoked.profile_id, profile.id)
         self.assertEqual(AgentRBACProfiles().revoke(self.actor, profile.id).id, revoked.id)
         self.assertEqual(ProfileRevocation.objects.filter(profile=profile).count(), 1)
+
+    def test_fresh_profile_scope_and_revocation_fit_one_unlocked_snapshot(self):
+        # HYPOTHESIS (#755 + #747): отдельный revocation SELECT на каждый
+        # checkpoint переполняет прежний 4096 SQL budget bootstrap batch.
+        # Unlocked proof обязан видеть fresh profile/revocation одним SQL;
+        # locked activation/apply по-прежнему проверяют отзыв после row lock.
+        # SOLUTION: Exists annotation только у unlocked live proof, без cache.
+        # RESULT: RED 2 != 1; GREEN fresh read и отзыв — по одному SQL,
+        # все 30 #747 cases и 135 merged bootstrap/RBAC cases прошли на PG17.
+        # STATUS: FIXED — see #755.
+        self.configured()
+        from mop.server.access.rbac import AgentRBACProfiles, require_profile
+        arguments = dict(definition_id=self.definition.id, owner_id=self.user.pk,
+            project_id=self.project.pk)
+        with self.assertNumQueries(1):
+            row = require_profile(self.rbac.id, self.rbac.digest, **arguments)
+        self.assertEqual(row.id, self.rbac.id)
+        AgentRBACProfiles().revoke(self.actor, self.rbac.id)
+        with self.assertNumQueries(1), self.assertRaisesRegex(PermissionError, 'profile is revoked'):
+            require_profile(self.rbac.id, self.rbac.digest, **arguments)
 
     def test_profile_rejects_unbounded_noncanonical_foreign_and_directory_group_inputs(self):
         self.configured()
@@ -275,7 +297,9 @@ class AgentRBACProvisioning(TransactionTestCase):
             if action == 'native_exec':
                 create_fixture.native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence=evidence)
+                outcome='succeeded', evidence=evidence, ready_evidence=(
+                    create_fixture.ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if action == 'confirm_ready' else None))
         grant_id = row.restartbinding.grant_id
         self.assertIsNotNone(CurrentBindings().activation(grant_id))
         AgentRBACProfiles().revoke(self.actor, self.rbac.id)
@@ -503,7 +527,9 @@ class AgentRBACProvisioning(TransactionTestCase):
             if action == 'native_exec':
                 create_fixture.native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence=evidence)
+                outcome='succeeded', evidence=evidence, ready_evidence=(
+                    create_fixture.ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if action == 'confirm_ready' else None))
         from mop.server.access.models import Grant
         return row, Grant.objects.get(pk=row.restartbinding.grant_id)
 

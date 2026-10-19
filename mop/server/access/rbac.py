@@ -1,4 +1,4 @@
-"""Разовое явное назначение обычных Django Groups (#747), не role permissions.
+"""Ручное управление Django RBAC (#756) и разовая Group recipe (#747).
 
 Recipe не владеет membership после применения. Даже отозванная recipe не
 становится вторым permission engine у активного Actor; receipt хранит прошлое.
@@ -8,8 +8,10 @@ import hashlib
 import json
 from uuid import UUID
 
-from django.contrib.auth.models import Group
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group, Permission
 from django.db import transaction
+from django.db.models import Exists, OuterRef
 
 from . import models as m, services as auth
 
@@ -41,13 +43,19 @@ def require_profile(profile_id, digest, *, definition_id, owner_id, project_id, 
     rows = m.AgentRBACProfile.objects.select_related('definition')
     if lock:
         rows = rows.select_for_update(of=('self',))
+    elif live:
+        # Каждый unlocked checkpoint читает profile + revocation одним fresh
+        # snapshot; следующий вызов не переиспользует прежнюю ORM row.
+        rows = rows.annotate(current_revocation=Exists(m.ProfileRevocation.objects.filter(profile_id=OuterRef('pk'))))
     row = rows.filter(pk=profile_id).first()
     if (row is None or (row.digest, row.definition_id, row.definition.owner_id, row.definition.project_id) !=
             (digest, definition_id, owner_id, project_id)
             or canonical_groups(row.group_ids) != row.group_ids
             or profile_digest(row.definition_id, row.group_ids) != row.digest):
         raise auth.Denied('selected agent RBAC profile scope or immutable proof changed')
-    if live and m.ProfileRevocation.objects.filter(profile=row).exists():
+    # После ожидания row lock нужен новый snapshot: revoke мог завершиться,
+    # пока SELECT FOR UPDATE ждал. Его нельзя переносить в annotation выше.
+    if live and (m.ProfileRevocation.objects.filter(profile=row).exists() if lock else row.current_revocation):
         raise auth.Denied('selected agent RBAC profile is revoked')
     return row
 
@@ -60,6 +68,37 @@ class InitialRBACSelection:
     policy_id: UUID
     policy_digest: str
     reservation_id: UUID
+
+
+class ActorMemberships:
+    """Явная замена ручного RBAC nonhuman Actor; identity/lifecycle не меняются."""
+    def replace(self, actor, user_id, *, group_ids, permission_ids):
+        for identifiers in (group_ids, permission_ids):
+            if (type(identifiers) is not list or any(type(value) is not int or value < 1 for value in identifiers)
+                    or len(set(identifiers)) != len(identifiers)):
+                raise ValueError('distinct positive Django membership IDs required')
+        with transaction.atomic():
+            auth.Access().authorize(actor, 'auth.change_user')
+            # Сериализация с identity/lifecycle; target берётся заново, не из формы.
+            users = {row.pk: row for row in get_user_model().objects.select_for_update()
+                     .filter(pk__in=(actor.user_id, user_id)).order_by('pk')}
+            target = users.get(user_id)
+            if target is None:
+                raise auth.NotVisible('actor not found')
+            if target.kind not in ('agent', 'service'):
+                raise auth.Denied('nonhuman membership command required')
+            if m.LoginIdentity.objects.filter(user=target, source__kind='ldap').exists():
+                raise auth.Denied('memberships are managed by the enrolled identity source')
+            groups = ordinary_groups(group_ids, lock=True)
+            permissions = tuple(Permission.objects.select_for_update().filter(pk__in=permission_ids).order_by('pk'))
+            if len(permissions) != len(permission_ids):
+                raise auth.Denied('ordinary Django Permissions required')
+            managed = tuple(target.groups.filter(directory_rule__isnull=False))
+            auth.Access().authorize(actor, 'auth.change_user')
+            # Форма владеет только ручными участиями: LDAP projection не снимаем.
+            target.groups.set((*managed, *groups))
+            target.user_permissions.set(permissions)
+            return target
 
 
 class AgentRBACProfiles:

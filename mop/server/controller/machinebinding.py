@@ -143,24 +143,21 @@ class OperationWork:
     def launch_definition(self, work, attempt_id):
         return self.operations.launch_machine.launch_definition(MachineStep(**asdict(work)), attempt_id)
 
+    def initial_bootstrap(self, work, attempt_id):
+        current, definition, selected = self.operations.launch_machine.initial_bootstrap(
+            MachineStep(**asdict(work)), attempt_id)
+        return WorkV1(**asdict(current)), definition, selected
+
     def initial_native_attempt(self, work):
-        """Historical locator для readiness; не admission нового эффекта."""
-        from mop.server.operations import models as om
-        from mop.server.operations.launch import STAGES
-        from mop.server.sessions.services import Conflict
-        row = om.Operation.objects.get(pk=work.operation_id)
-        if row.action != 'create':
-            return None
-        stages = tuple(row.step_set.order_by('ordinal'))
-        if tuple(step.name for step in stages) != STAGES:
-            raise Conflict('fixed initial create phases required for readiness producer')
-        native = stages[STAGES.index('native_exec')]
-        if (native.token is None or native.attempt_id != native.token or native.outcome != 'succeeded'
-                or native.dispatched_at is None or native.quiescent_at is None
-                or not om.EffectReceipt.objects.filter(step=native, token=native.token, epoch=row.epoch,
-                    node_id=row.node_id, source_revision=row.expected_revision, applied=True).exists()):
-            raise Conflict('confirmed initial native producer attempt required')
-        return native.attempt_id
+        """Historical locator принадлежит Operations, не composition SQL."""
+        from mop.server.operations.launch import CreateMachine
+        return CreateMachine(self.operations).initial_native_attempt(MachineStep(**asdict(work)))
+
+    def ready_launch(self, work, attempt_id):
+        from mop.server.sessions.services import Unavailable
+        if self.operations.launch_machine is None:
+            raise Unavailable('initial launch support is not bound')
+        return self.operations.launch_machine.ready_launch(MachineStep(**asdict(work)), attempt_id)
 
 
 def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,

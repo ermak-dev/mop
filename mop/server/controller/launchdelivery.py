@@ -30,6 +30,23 @@ class LaunchAuthority:
         """Старый role-only response не расширяет layout-контракт."""
         return None
 
+    def admission(self):
+        from mop.server.operations.models import Operation
+        from .createbinding import LaunchSupport
+        work = self.work
+        current, attempt_id = self.execution.action_admission(self.actor,
+            operation_id=work.operation_id, step_id=work.step_id)
+        if current != work:
+            raise Conflict('addressed launch work changed')
+        binding = Assignments().target(work.target_id, lock=True)
+        if binding is None:
+            raise access.Denied('current launch assignment required')
+        access.Access().authorize(self.actor, 'execution.read_launch', project_ids=(binding.project_id,),
+            node_ids=(binding.node_id,))
+        definition = self.execution.work.launch_definition(work, attempt_id)
+        operation = Operation.objects.get(pk=work.operation_id, action='create')
+        return current, attempt_id, binding, definition, LaunchSupport().selection(binding, operation)
+
     def selection(self):
         from mop.server.sessions.models import IncarnationLaunch
         from mop.server.preparation.models import BootstrapApproval
@@ -38,16 +55,7 @@ class LaunchAuthority:
         with transaction.atomic():
             app.fence()
             access.node_executor(actor, work.node_id)
-            current, attempt_id = self.execution.action_admission(actor,
-                operation_id=work.operation_id, step_id=work.step_id)
-            if current != work:
-                raise Conflict('addressed launch work changed')
-            binding = Assignments().target(work.target_id, lock=True)
-            if binding is None:
-                raise access.Denied('current launch assignment required')
-            access.Access().authorize(actor, 'execution.read_launch', project_ids=(binding.project_id,),
-                node_ids=(binding.node_id,))
-            definition = self.execution.work.launch_definition(work, attempt_id)
+            current, attempt_id, binding, definition, self.selected = self.admission()
             launch = IncarnationLaunch.objects.select_related('image_revision__policy',
                 'incarnation__assignment').get(incarnation_id=work.incarnation_id)
             approved = BootstrapApproval.objects.filter(revision_id=launch.bootstrap_revision,
@@ -62,10 +70,6 @@ class LaunchAuthority:
             from .machinebinding import owner_identity
             identity = owner_identity(binding.owner_id)
             pins = (str(launch.bootstrap_revision), launch.bootstrap_digest, launch.image_digest)
-            from mop.server.operations.models import Operation
-            from .createbinding import LaunchSupport
-            operation = Operation.objects.get(pk=work.operation_id, action='create')
-            self.selected = LaunchSupport().selection(binding, operation)
             layout = self.metadata(launch)
             proof = (current, attempt_id, binding, definition, pins, identity, self.selected, layout)
             if self.proof is not None and proof != self.proof:
@@ -99,6 +103,15 @@ class BootstrapAuthority:
 
 
 class InitialAuthority(LaunchAuthority):
+    def admission(self):
+        if self.work.action != 'bootstrap_body':
+            return super().admission()
+        attempt_id, definition, selected = self.execution.initial_bootstrap_admission(self.actor, self.work)
+        binding = Assignments().target(self.work.target_id, lock=True)
+        if binding is None:
+            raise access.Denied('current launch assignment required')
+        return self.work, attempt_id, binding, definition, selected
+
     def metadata(self, launch):
         from mop.common.initialcreate import layout_metadata
         # Только уже выбранные rows: новая authority-петля и latest lookup
@@ -115,9 +128,25 @@ class InitialAuthority(LaunchAuthority):
             raise access.Denied(str(error)) from None
 
     def check_consumer(self, actor, scope):
+        self.selection()
+        self._consumer_scope(actor, scope)
+
+    def check_bootstrap_consumers(self, actor, scopes):
+        if self.work.action != 'bootstrap_body':
+            raise access.Denied('claimed initial bootstrap batch required')
+        self.selection()
+        from mop.server.secrets.services import InitialConsumerScope
+        expected = tuple(InitialConsumerScope(self.selected.project_id, self.selected.owner_id,
+            self.selected.policy_id, purpose, version) for purpose, version in self.selected.consumers
+            if purpose == 'bootstrap_input')
+        if type(scopes) is not tuple or scopes != expected:
+            raise access.Denied('exact selected bootstrap batch required')
+        for scope in scopes:
+            self._consumer_scope(actor, scope)
+
+    def _consumer_scope(self, actor, scope):
         from mop.common.initialcreate import PHASE_CONSUMERS
         from mop.server.secrets.services import InitialConsumerScope
-        self.selection()
         selected = self.selected
         if (actor != self.actor or type(scope) is not InitialConsumerScope
                 or (scope.project_id, scope.owner_id, scope.policy_id) !=
@@ -148,20 +177,24 @@ def deliver_initial(application, actor, metadata):
             bootstrap = application.preparation.read_initial_launch(actor, selected.bootstrap_revision,
                 authority=BootstrapAuthority(gate))
         reader = InitialLaunchSecrets(provider=application.store.provider, authority=gate)
+        scopes = tuple(InitialConsumerScope(selected.project_id, selected.owner_id,
+            selected.policy_id, purpose, version_id) for purpose, version_id in selected.consumers
+            if purpose in PHASE_CONSUMERS[work.action])
+        if work.action == 'bootstrap_body':
+            values = reader.read_bootstrap_batch(actor, scopes)
+        else:
+            values = tuple(reader.read(actor, scope) for scope in scopes)
         consumers = []
-        for purpose, version_id in selected.consumers:
-            if purpose in PHASE_CONSUMERS[work.action]:
-                value = reader.read(actor, InitialConsumerScope(selected.project_id, selected.owner_id,
-                    selected.policy_id, purpose, version_id))
-                if purpose == 'model_config' and hashlib.sha256(value['value']).hexdigest() != selected.model_config_digest:
-                    raise access.Denied('selected model configuration digest mismatch')
-                consumers.append({**value, 'value': p.encoded(value['value'])})
+        for value in values:
+            if value['purpose'] == 'model_config' and hashlib.sha256(value['value']).hexdigest() != selected.model_config_digest:
+                raise access.Denied('selected model configuration digest mismatch')
+            consumers.append({**value, 'value': p.encoded(value['value'])})
         gate.selection()
         return dict(schema_version=1, work=protocol.work_to_wire(work), phase=work.action,
             bootstrap_revision=pins[0], bootstrap_digest=pins[1], image_digest=pins[2],
             **gate.layout, selection=selected.public(), git_name=identity.name, git_email=identity.email,
             role=None if content is None else dict(manifest=json.loads(content.manifest), prompt=p.encoded(content.prompt)),
-            bootstrap=None if bootstrap is None else dict(tasks=p.encoded(bootstrap.tasks), variables=p.encoded(bootstrap.variables)),
+            bootstrap=None if bootstrap is None else dict(envelope=p.encoded(bootstrap)),
             consumers=consumers)
     except ObjectDoesNotExist:
         raise access.Denied('current initial launch work is unavailable') from None

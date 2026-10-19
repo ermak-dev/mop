@@ -163,9 +163,51 @@ class ReadyReceipt:
     process_start: str
     receipt_id: str
     model: str | None
+    evidence: object = None
+
+
+@dataclass(frozen=True)
+class AddressedReadinessSource:
+    authority: object
+    desired_model: str
+    native_attempt_id: str
+
+    def __post_init__(self):
+        from mop.node.producer_views import CurrentLaunchAuthority
+        from mop.common.telemetry import text, uuid
+        if type(self.authority) is not CurrentLaunchAuthority or not text(self.desired_model):
+            raise Refused('authenticated readiness authority and immutable desired model required')
+        try:
+            uuid(self.native_attempt_id)
+        except ValueError as error:
+            raise Refused(str(error)) from error
+        self.authority.check()
+
+    async def ready(self, work, proof):
+        from mop.common.readiness import ReadyRequest, work_document
+        a, r = self.authority.admission, self.authority.registration
+        self.authority.check()
+        if not r.matches(work) or proof.registration != r:
+            raise Refused('exact current readiness registration and physical proof required')
+        try:
+            request = ReadyRequest(work_document(work.wire()), UUID(a.attempt_id), UUID(a.request_id),
+                a.revision, a.lease_until, proof.scope, proof.pid, proof.process_start)
+        except ValueError as error:
+            raise Refused(str(error)) from error
+        async with asyncio.timeout(5):
+            evidence = await self.authority.client.read_ready_receipt(request.wire())
+        self.authority.check()
+        if (evidence.model != self.desired_model or str(evidence.native_attempt_id) != self.native_attempt_id
+                or any(str(getattr(evidence, name)) != getattr(r, name) for name in
+                    ('bootstrap_revision', 'bootstrap_digest', 'image_digest', 'display_name'))):
+            raise Refused('readiness evidence differs from immutable desired model or native registration')
+        return ReadyReceipt(r, proof.scope, proof.pid, proof.process_start, str(evidence.receipt_id),
+            evidence.model, evidence)
 
 
 class ReadinessSource(Protocol):
+    desired_model: str
+
     async def ready(self, work: Work, proof: SessionProof) -> ReadyReceipt:
         """Только committed addressed receipt текущего процесса и model hook."""
         ...
@@ -174,8 +216,10 @@ class ReadinessSource(Protocol):
 class ReadyConfirmation:
     def __init__(self, resolver: BindingsResolver, source: ReadinessSource):
         self.resolver, self.source = resolver, source
+        self.evidence = None
 
     async def confirmed(self, work, target):
+        self.evidence = None
         target.check(work)
         proof = await self.resolver.proof(work)
         layout = self.resolver.layout
@@ -189,15 +233,20 @@ class ReadyConfirmation:
                 or receipt.scope != proof.scope or receipt.pid != proof.pid
                 or receipt.process_start != proof.process_start
                 or type(receipt.model) is not str or not 1 <= len(receipt.model) <= 128
+                or receipt.model != getattr(self.source, 'desired_model', None)
                 or any(ord(c) < 32 or ord(c) == 127 for c in receipt.model)):
             return False
         try:
-            if type(receipt.receipt_id) is not str or str(UUID(receipt.receipt_id)) != receipt.receipt_id:
-                return False
+            from mop.common.telemetry import counter
+            counter(receipt.receipt_id)
         except ValueError:
             return False
-        # HTTP ACK не переживает смену процесса во время await.
-        return await self.resolver.proof(work) == proof
+        # HTTP ACK не переживает смену процесса во время await. Только после
+        # второго physical observe proof разрешено передать в result.
+        if await self.resolver.proof(work) != proof:
+            return False
+        self.evidence = receipt.evidence
+        return True
 
 
 class ProducerRegistration(Protocol):

@@ -602,6 +602,7 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         receipt = None
         class Receipts:
+            desired_model = 'owned-model'
             async def ready(inner, work, proof):
                 calls.append(proof)
                 return receipt
@@ -609,11 +610,12 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await ready.confirmed(self.current, target))
         proof = target.session_proof
         receipt = ReadyReceipt(self.registration, proof.scope, proof.pid, proof.process_start,
-                               str(uuid4()), 'owned-model')
+                               '42', 'owned-model')
         self.assertFalse(await ready.confirmed(self.current, target), 'lifetime receipt is not current ready proof')
         receipt = replace(receipt, registration=self.current_registration)
         self.assertTrue(await ready.confirmed(self.current, target))
         class RevokingReceipts:
+            desired_model = 'owned-model'
             async def ready(inner, work, proof):
                 self.revoked = True
                 return receipt

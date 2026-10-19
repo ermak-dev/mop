@@ -382,9 +382,10 @@ class DjangoTLS(http.server.BaseHTTPRequestHandler):
                 HTTP_HOST='localhost', HTTP_AUTHORIZATION=self.headers.get('Authorization', ''))
             self.server.after(self.command, response)
             drop = (self.command == 'POST' and self.server.drop_post or
+                    self.command == 'PUT' and getattr(self.server, 'drop_put', False) or
                     self.command == 'GET' and self.server.drop_get)
             if drop:
-                self.server.drop_post = self.server.drop_get = False
+                self.server.drop_post = self.server.drop_get = self.server.drop_put = False
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
                 self.connection.close()
@@ -402,6 +403,7 @@ class DjangoTLS(http.server.BaseHTTPRequestHandler):
 
     do_GET = serve_django
     do_POST = serve_django
+    do_PUT = serve_django
 
 
 @override_settings(ALLOWED_HOSTS=['localhost', 'testserver'])

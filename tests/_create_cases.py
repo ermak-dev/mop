@@ -77,6 +77,48 @@ def native_ack(case, work, key):
     return scope
 
 
+def ready_evidence(case, execution, actor, work, attempt, key, *, ingest=True):
+    """Reference lifecycle: настоящий telemetry POST и read-only ready query (#749).
+
+    Process report принадлежит fixture native_ack, не vendor acceptance. Никаких
+    прямых insert ModelObservation/TelemetryReceipt и synthetic receipt identities.
+    """
+    from unittest.mock import patch
+    from django.contrib.auth import get_user_model
+    from django.db import transaction
+    from django.test import Client
+    from mop.common.readiness import ReadyEvidence
+    from mop.common.telemetry import Observation, SessionScope
+    from mop.server.sessions.protocol import work_to_wire
+    from mop.server.sessions.producer_models import SessionProducer
+    from mop.server.sessions.telemetry_models import SessionObservation, TelemetryReceipt
+    producer = SessionProducer.objects.get(currentproducer__incarnation_id=work.incarnation_id)
+    scope = SessionScope(producer.epoch, producer.assignment_id, producer.incarnation_id, producer.node_id,
+        producer.executor_epoch, producer.session_id, producer.producer_epoch)
+    client = Client(HTTP_AUTHORIZATION='Token '+key)
+    if ingest:
+        get_user_model().objects.get(pk=actor.user_id).user_permissions.add(
+            Permission.objects.get(content_type__app_label='execution', codename='ingest_telemetry'))
+        with transaction.atomic():
+            pins, _ = execution.work.ready_launch(work, attempt.id)
+        previous = SessionObservation.objects.filter(incarnation_id=scope.incarnation_id,
+            producer_epoch=scope.producer_epoch).first()
+        sequence = 1 if previous is None else previous.sequence+1
+        observed = Observation(scope, sequence, 'PostModelSwitch', None, pins['desired_model'], None, None, 0)
+        response = client.post('/api/v1/machine/telemetry', observed.wire(), content_type='application/json', secure=True)
+        case.assertEqual(response.status_code, 200, response.content)
+    metadata = dict(schema_version=1, work=work_to_wire(work), admission=dict(attempt_id=str(attempt.id),
+        request_id=str(attempt.request_id), revision=str(attempt.revision), lease_until=attempt.lease_until.isoformat()),
+        scope=scope.wire(), physical=dict(pid=str(producer.pid), process_start=producer.process_start))
+    with patch('mop.server.controller.machineviews.execution', execution):
+        response = client.post('/api/v1/machine/work/ready-receipt', metadata, content_type='application/json', secure=True)
+    case.assertEqual(response.status_code, 200, response.content)
+    evidence = ReadyEvidence.parse(response.json())
+    case.assertTrue(TelemetryReceipt.objects.filter(pk=evidence.receipt_id,
+        observation__producer_epoch=scope.producer_epoch, sequence=evidence.confirmed_sequence).exists())
+    return evidence
+
+
 class Scheduler:
     """Только capability и identity порта: admission не пишет в планировщик."""
     def __init__(self):
@@ -976,7 +1018,9 @@ class CreateMachineSteps(TransactionTestCase):
             if action == 'native_exec':
                 native_ack(self, work, self._executor_key)
             service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                           outcome='succeeded', evidence=evidence)
+                           outcome='succeeded', evidence=evidence, ready_evidence=(
+                               ready_evidence(self, service, actor, work, attempt, self._executor_key)
+                               if action == 'confirm_ready' else None))
         from mop.server.operations.models import Operation, Step
         self.assertEqual(service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2), ())
         steps = dict(Step.objects.filter(operation_id=operation).values_list('name', 'outcome'))
@@ -1233,7 +1277,9 @@ class CreateActivation(TransactionTestCase):
             if action == 'native_exec':
                 native_ack(self, work, self._executor_key)
             service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                           outcome='succeeded', evidence=evidence)
+                           outcome='succeeded', evidence=evidence, ready_evidence=(
+                               ready_evidence(self, service, actor, work, attempt, self._executor_key)
+                               if action == 'confirm_ready' else None))
 
     def activator(self, **options):
         from mop.server.access.grants import Grants
@@ -1255,7 +1301,8 @@ class CreateActivation(TransactionTestCase):
         work, = service.poll(actor, self.node.pk, executor_epoch=self.boot, limit=2)
         attempt = service.claim(actor, work, request_id=uuid4())
         service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                       outcome='succeeded', evidence='ready')
+                       outcome='succeeded', evidence='ready',
+                       ready_evidence=ready_evidence(self, service, actor, work, attempt, self._executor_key))
         self.assertIn(operation, self.ops.pending(limit=8, handlers=('activate_grant',)))
         self.ops.activations.run(operation)
         from mop.server.access.models import Grant

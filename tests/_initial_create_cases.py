@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 from django.test import TransactionTestCase, override_settings
 
-from _create_cases import CreateVertical
+from _create_cases import CreateVertical, ready_evidence
 
 
 PHASES = ('prepare_body', 'bootstrap_body', 'initial_identity', 'scheduler_register',
@@ -461,10 +461,11 @@ class InitialCreatePhases(TransactionTestCase):
         from mop.server.sessions.services import Conflict
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
+        proof = ready_evidence(self, execution, actor, work, attempt, self.machine_key)
         CurrentProducer.objects.filter(incarnation_id=work.incarnation_id).delete()
         with self.assertRaisesRegex(Conflict, 'producer'):
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence='ready')
+                outcome='succeeded', evidence='ready', ready_evidence=proof)
 
     def test_reference_lifecycle_activates_only_after_all_seven_exact_phases(self):
         from mop.server.access import services as auth
@@ -474,7 +475,8 @@ class InitialCreatePhases(TransactionTestCase):
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
         execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready',
+            ready_evidence=ready_evidence(self, execution, actor, work, attempt, self.machine_key))
         key = auth.enroll_service('phase-activator', self.node.pk, project_ids=(self.project.pk,),
             permissions=('access.activate_grant',), use_case='grant-activator')
         from _create_cases import CreateActivation as Fixture
@@ -518,7 +520,8 @@ class InitialCreatePhases(TransactionTestCase):
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
         execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready',
+            ready_evidence=ready_evidence(self, execution, actor, work, attempt, self.machine_key))
         self.ops.activations.activator = Fixture.activator(self)
         om.ResourceClaim.objects.filter(operation=row, resource_id='target:'+str(row.target_id)).update(released_at=timezone.now())
         self.assertIsNone(self.ops.activations.claim(row.id))
@@ -531,7 +534,8 @@ class InitialCreatePhases(TransactionTestCase):
         row, execution, actor, scope = self.native()
         work, attempt = self.claim_next(execution, actor, row, 'confirm_ready')
         execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-            outcome='succeeded', evidence='ready')
+            outcome='succeeded', evidence='ready',
+            ready_evidence=ready_evidence(self, execution, actor, work, attempt, self.machine_key))
         self.ops.activations.activator = Fixture.activator(self)
         with patch('mop.server.operations.launch.timezone.now', return_value=row.not_after-timedelta(seconds=29)):
             self.assertIsNone(self.ops.activations.claim(row.id))
@@ -625,6 +629,36 @@ class InitialCreatePhases(TransactionTestCase):
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
                 outcome='succeeded', evidence=CONFIRMATIONS[phase])
 
+    # HYPOTHESIS #751: настоящая approved выдача допускает замену fragments
+    # при прежнем digest полного retained envelope, которого body не получал.
+    # SPEC: один canonical envelope, проверяемый body без ORM/provider.
+    # RED: PG17 — ValueError not raised: real delivery accepts fragments
+    # unrelated to selected digest (после настоящих create/prepare claims).
+    # SOLUTION: owner читает original retained bytes, wire несёт только envelope.
+    # RESULT: PG17 — genuine выдача проходит, legacy mixed fragments отказаны;
+    # все phase purpose/consumer restrictions и exact approval pins прежние.
+    # STATUS: FIXED — see #751.
+    def test_bootstrap_body_rejects_mixed_content_from_real_approved_delivery(self):
+        from copy import deepcopy
+        from mop.server.controller.launchdelivery import deliver_initial
+        from mop.server.sessions.protocol import work_to_wire
+        from mop.common.initialcreate import parse_delivery
+        from mop.common import credentials as p
+        row = self.create()
+        execution, actor = self.machine()
+        work, attempt = self.claim_next(execution, actor, row, 'prepare_body')
+        execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+            outcome='succeeded', evidence='body-prepared')
+        work, _ = self.claim_next(execution, actor, row, 'bootstrap_body')
+        wire = work_to_wire(work)
+        value = deliver_initial(self.credential_app(), actor, wire)
+        self.assertEqual(parse_delivery(value, wire), value)
+        mixed = deepcopy(value)
+        mixed['bootstrap'] = dict(tasks=p.encoded(b'- command: unapproved-private\n'),
+            variables=p.encoded(b'answer: 0\n'))
+        with self.assertRaises(ValueError, msg='real delivery accepts fragments unrelated to selected digest'):
+            parse_delivery(mixed, wire)
+
     def test_approved_bootstrap_bytes_are_delivered_only_to_bootstrap_phase(self):
         from mop.server.controller import launchdelivery
         from mop.server.sessions.protocol import work_to_wire
@@ -638,8 +672,12 @@ class InitialCreatePhases(TransactionTestCase):
         deliver = getattr(launchdelivery, 'deliver_initial', None)
         self.assertIsNotNone(deliver, 'purpose-specific bootstrap delivery is missing')
         payload = deliver(self.credential_app(), actor, work_to_wire(work))
-        self.assertEqual(p.binary(payload['bootstrap']['tasks']), b'- debug: msg=hello\n')
-        self.assertEqual(p.binary(payload['bootstrap']['variables']), b'answer: 42\n')
+        from mop.common.bootstrap_envelope import decode_base64
+        self.assertEqual(set(payload['bootstrap']), {'envelope'})
+        content = decode_base64(payload['bootstrap']['envelope'], payload['bootstrap_digest'])
+        self.assertEqual(content.tasks, b'- debug: msg=hello\n')
+        self.assertEqual(content.variables, b'answer: 42\n')
+        self.assertEqual(content.secret_refs, ())
         self.assertIsNone(payload['role'])
         self.assertEqual(payload['consumers'], [])
 
@@ -695,10 +733,17 @@ class InitialCreatePhases(TransactionTestCase):
             if payload['role'] is not None:
                 self.assertEqual(p.binary(payload['role']['prompt']), b'fixture role')
             self.assertEqual(payload['bootstrap'] is not None, phase == 'bootstrap_body')
+            if phase == 'bootstrap_body':
+                from mop.common.bootstrap_envelope import decode_base64
+                content = decode_base64(payload['bootstrap']['envelope'], payload['bootstrap_digest'])
+                self.assertEqual((content.tasks, content.variables, content.secret_refs),
+                    (b'- debug: msg=approved\n', b'approved: true\n', (boot.active_version_id,)))
             if phase == 'native_exec':
                 native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence='ready' if phase == 'confirm_ready' else CONFIRMATIONS[phase])
+                outcome='succeeded', evidence='ready' if phase == 'confirm_ready' else CONFIRMATIONS[phase],
+                ready_evidence=(ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if phase == 'confirm_ready' else None))
 
     def test_unknown_preparation_keeps_cleanup_and_never_replays_even_after_late_confirmation(self):
         from datetime import timedelta

@@ -606,6 +606,77 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await transport.aclose()
 
+    async def test_absolute_canonical_codec_maximum_crosses_actual_verified_tls(self):
+        # Transport boundary, не SQL admission: codec разрешает 32 refs,
+        # тогда как SQL create резервирует один consumer slot для model_config.
+        import base64
+        import hashlib
+        import http.server
+        from uuid import uuid4
+        from _control_fixture import own_tls
+        from _host_inputs_data import selected
+        from mop.common.bootstrap_envelope import bounded_content, encode, decode_base64
+        a, _, value = selected('bootstrap_body')
+        raw = encode(bounded_content(b'x'*262144, b'y'*131072, '\U0001f600'*1024,
+            'a'*64, tuple(uuid4() for _ in range(32))))
+        self.assertEqual(len(raw), 537974)
+        encoded = base64.b64encode(raw).decode()
+        self.assertEqual(len(encoded), 717300)
+        value['bootstrap_digest'] = hashlib.sha256(raw).hexdigest()
+        value['bootstrap'] = dict(envelope=encoded)
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                body = json.dumps(value, separators=(',', ':')).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        with own_tls(Handler) as (_, origin, cert, _):
+            client = MachineClient(HttpsTransport(origin, 'owned-fixture-token',
+                tls=ssl.create_default_context(cafile=str(cert))))
+            try:
+                delivered = await client.read_initial_launch(a.work.wire())
+                self.assertEqual(encode(decode_base64(delivered['bootstrap']['envelope'], delivered['bootstrap_digest'])), raw)
+            finally:
+                await client.aclose()
+
+    async def test_bootstrap_https_allowance_is_phase_specific_and_explicit_caps_stay_hard(self):
+        import http.server
+        from _control_fixture import own_tls
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                raw = json.dumps(dict(payload='x'*300000)).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            do_GET = do_POST
+        with own_tls(Handler) as (_, origin, cert, _):
+            for options, method, path, action, accepted in (
+                ({}, 'POST', 'work/initial-launch', 'bootstrap_body', True),
+                ({'response_limit': 262144}, 'POST', 'work/initial-launch', 'bootstrap_body', False),
+                ({'response_limit': 1024}, 'POST', 'work/initial-launch', 'bootstrap_body', False),
+                ({}, 'POST', 'work/initial-launch', 'native_exec', False),
+                ({}, 'POST', 'work/launch', 'bootstrap_body', False),
+                ({}, 'GET', 'work', 'bootstrap_body', False)):
+                transport = HttpsTransport(origin, 'owned-fixture-token',
+                    tls=ssl.create_default_context(cafile=str(cert)), **options)
+                try:
+                    self.assertEqual(transport.timeout, 10.)
+                    if accepted:
+                        self.assertEqual(len((await transport.request(method, path, payload=dict(action=action)))['payload']), 300000)
+                    else:
+                        with self.assertRaisesRegex(Refused, 'exceeds limit'):
+                            await transport.request(method, path, payload=dict(action=action))
+                finally:
+                    await transport.aclose()
+
     async def test_bounded_json_duplicate_fields_redirect_and_no_raw_error_leak(self):
         class Response:
             status = 200
