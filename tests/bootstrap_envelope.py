@@ -10,10 +10,15 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import hermetic  # noqa: F401
+import _lib  # noqa: F401 — общий lifetime исполняемых checks
 from _host_inputs_data import selected
 from mop.common.initialcreate import parse_delivery
 
 
+# HYPOTHESIS (#762): standalone check не подключает общий test lifetime.
+# SOLUTION: явный import _lib; codec/assertions и checker не меняются.
+# RESULT: tests_lib RED 1/571; GREEN 9/9 связанных файлов.
+# STATUS: FIXED — see #762
 def canonical(value):
     # Формат существующего retained owner, не новый алгоритм сериализации.
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
