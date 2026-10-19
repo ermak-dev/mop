@@ -35,7 +35,7 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete', 'add', 'send', 'landing'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add', 'send', 'landing', 'project limit'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -391,6 +391,19 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         elif words == 'detail':
             p.add_argument('puppet_id')
             args = p.parse_args(argv)
+        elif words == 'project limit':
+            p.add_argument('project_id')
+            p.add_argument('limit')
+            p.add_argument('--expected-revision')
+            args = p.parse_args(argv)
+            if args.limit == 'none':
+                args.limit = None
+            elif (not args.limit.isascii() or not args.limit.isdecimal()
+                    or len(args.limit) > 10 or str(int(args.limit)) != args.limit):
+                raise api.ClientError('project limit must be a canonical integer or none')
+            else:
+                args.limit = int(args.limit)
+            api.project_limit_binding(args.project_id, args.limit, args.expected_revision)
         elif words == 'project list':
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
@@ -574,6 +587,10 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             view = client.read_puppet(args.puppet_id)
             emit({'schema_version': view.schema_version, 'epoch': view.epoch, 'puppet': view.data},
                  credential=selected.token)
+        elif words == 'project limit':
+            project = client.project(args.project_id)
+            intent = client.prepare_project_limit(project, args.limit, expected_revision=args.expected_revision)
+            emit({'schema_version': 1, **asdict(client.set_project_limit(intent))}, credential=selected.token)
         elif words == 'project list':
             page = client.projects_page(cursor=args.cursor, page_size=args.page_size)
             emit({'schema_version': 1, 'results': plain(page.items), 'next_cursor': page.next_cursor},
@@ -602,6 +619,11 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                 operation = client.wait_operation(operation.id, timeout=args.wait, initial=operation)
             return _render_operation(operation, credential=selected.token)
         return 0
+    except api.UnknownProjectLimit as error:
+        print('project limit outcome unknown; project_id=' + error.intent.project.id +
+              '; expected_revision=' + error.intent.expected_revision +
+              '; observe the project; do not repeat automatically', file=sys.stderr)
+        return 3
     except api.UnknownSubmission as error:
         print('submission unknown; request_id=' + error.request_id + '; epoch=' + error.command.epoch +
               '; recover with operation lookup; do not repeat the effect', file=sys.stderr)

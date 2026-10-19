@@ -17,8 +17,9 @@ from mop.client import control as api
 
 # HYPOTHESIS: готовый Project PUT недоступен новому CLI/MCP.
 # SOLUTION: immutable limit-only intent из точного authorized GET, один CAS PUT.
-# RESULT: до реализации отсутствующий consumer и unsupported CLI дают RED.
-# STATUS: RED — see #761
+# RESULT: RED missing consumer/unsupported CLI; GREEN — 10 pure cases,
+# 10 real PostgreSQL17/TLS checks + UID5, без physical операций.
+# STATUS: FIXED — see #761
 class ProjectLimitClient(unittest.TestCase):
     def setUp(self):
         self.fixture = Fixture()
@@ -56,6 +57,15 @@ class ProjectLimitClient(unittest.TestCase):
             self.assertIs(caught.exception.intent, intent)
             self.assertNotIn(TOKEN, str(caught.exception))
         self.assertEqual([call[0] for call in self.fixture.calls], ['PUT', 'PUT'])
+
+    def test_known_catalogue_conflict_is_not_unknown_or_retried(self):
+        self.assertTrue(hasattr(self.client, 'prepare_project_limit'), 'missing finite project-limit intent')
+        self.fixture.responses.append(Response(409, {'schema_version': 1, 'error': {
+            'code': 'catalog_conflict', 'message': 'catalog revision changed', 'retryable': False}}))
+        with self.assertRaises(api.Conflict) as caught:
+            self.client.set_project_limit(self.client.prepare_project_limit(self.project, 3))
+        self.assertEqual(caught.exception.error.code, 'catalog_conflict')
+        self.assertEqual([call[0] for call in self.fixture.calls], ['PUT'])
 
     def test_invalid_or_misbound_success_is_unknown_not_a_receipt(self):
         self.assertTrue(hasattr(self.client, 'prepare_project_limit'), 'missing finite project-limit intent')
@@ -110,6 +120,22 @@ class ProjectLimitClient(unittest.TestCase):
         self.assertEqual([call[0] for call in self.fixture.calls], ['GET'])
         self.assertIn('revision', err)
         self.assertEqual(out, '')
+
+    def test_mcp_requires_exact_actions_and_explicit_revision_with_same_handler(self):
+        declaration = cli.declared(os.path.join(cli.PACKAGE, 'project', 'limit.py'))
+        actions = frozenset(('catalog.view_project', 'catalog.change_project', 'catalog.set_project_limit'))
+        self.assertEqual(frozenset(declaration.get('actions', [])), actions)
+        from mop.cli import _mcp
+        self.assertEqual(set(_mcp.schema(declaration)['required']), {'project_id', 'limit', 'expected_revision'})
+        for absent in actions:
+            self.assertFalse(_control.allowed(declaration,
+                api.Identity(1, 'human', 1, None, None, actions-{absent})))
+        self.fixture.responses.extend((Response(200, self.response('7', 2)), Response(200, self.response())))
+        with _control.use(self.context):
+            result = _control.tool_call(['project', 'limit'], declaration,
+                {'project_id': PROJECT, 'limit': '3', 'expected_revision': '7'})
+        self.assertEqual(json.loads(result)['puppet_limit'], 3)
+        self.assertEqual([call[0] for call in self.fixture.calls], ['GET', 'PUT'])
 
     def test_typed_limits_are_finite_and_noop_accepts_original_revision(self):
         self.assertTrue(hasattr(self.client, 'prepare_project_limit'), 'missing finite project-limit intent')
