@@ -4,9 +4,7 @@
 самих checks. Это переходный адаптер, не второй счётчик результатов.
 Hook-модуль без assert: PYTEST_DONT_REWRITE позволяет вложенный session.
 """
-import shutil
-import tempfile
-
+from _lib import OwnedProcessDirectory
 from _pytest_process import OwnedProcess
 
 from _pytest_runtime import load_pytest
@@ -53,20 +51,20 @@ class LegacyFile(pytest.File):
 
 @pytest.fixture
 def owned_legacy_process(request):
-    # Каталог удаляется только после доказанного завершения owner. При отказе
-    # он остаётся для диагностики; никакой atexit не сносит pending child HOME.
-    directory = tempfile.mkdtemp(prefix='mp-')
+    # Lease создаётся до запуска body; process.close проверяет receipt, а
+    # общий lifetime не даёт atexit предка удалить retained HOME (#776).
+    directory = OwnedProcessDirectory(request.node.path)
     try:
         process = OwnedProcess(request.node.path, cwd=request.node.path.parent.parent,
-                               env=hermetic.child_env({'TMPDIR': directory}))
-    except BaseException:
-        shutil.rmtree(directory)
+                               env=hermetic.child_env({'TMPDIR': directory.path}))
+        directory.bind(process)
+    except BaseException as error:
+        directory.retain(error)
         raise
     try:
         yield process
     finally:
-        process.close()
-        shutil.rmtree(directory)
+        directory.close()
 
 
 def legacy_check(request, owned_legacy_process):

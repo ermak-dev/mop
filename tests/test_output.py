@@ -1,6 +1,7 @@
 """Диагностика отказа видна до следующего файла, не после всего CI suite."""
 import io
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import tempfile
 import unittest
@@ -35,6 +36,8 @@ class FailureOutput(unittest.TestCase):
         class Process:
             def __init__(self, result):
                 self.returncode, self.output = result.returncode, result.stdout
+                self.handle = SimpleNamespace(row={'pid': 1, 'start': 'synthetic',
+                    'group': 1, 'namespace': 'synthetic'})
 
             def communicate(self):
                 return self.output, None

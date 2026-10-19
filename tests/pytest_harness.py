@@ -473,6 +473,7 @@ class ProcessOwnership(unittest.TestCase):
     # pytest_ownership, а не fake PID, который раньше принимали за эксперимент.
     def fixture(self, process):
         import _pytest_plugin
+        process.handle.row = {'pid': 1, 'start': 'synthetic', 'group': 1, 'namespace': 'synthetic'}
         request = SimpleNamespace(node=SimpleNamespace(path=ROOT / 'tests/state.py'))
         with patch.object(_pytest_plugin, 'OwnedProcess', return_value=process) as start:
             fixture = _pytest_plugin.owned_legacy_process.__wrapped__(request)

@@ -423,7 +423,7 @@ class FreshOwnerDeath(unittest.TestCase):
     # GREEN — CLI exit 1 через 6.319 s без probe kill, тот же body жив,
     # чужая группа не тронута; 39 focused + 5 UID на Python 3.12/PG17.
     # STATUS: FIXED — see #775
-    def prepare(self, root, *, close_streams):
+    def prepare(self, root, *, close_streams, kill_owner=True):
         import textwrap
         (root / 'tests').mkdir()
         (root / 'pyproject.toml').write_text('[tool.pytest.ini_options]\npython_files = ["*.py"]\n')
@@ -435,7 +435,7 @@ class FreshOwnerDeath(unittest.TestCase):
             f'sys.path.insert(0, {hermetic.TESTS!r})\nimport hermetic\n' + streams +
             f'path = pathlib.Path({str(child_record)!r})\n'
             'path.with_suffix(".tmp").write_text(json.dumps({"pid": os.getpid(), "home": hermetic.HOME}))\n'
-            'path.with_suffix(".tmp").replace(path)\ntime.sleep(60)\n')
+            f'path.with_suffix(".tmp").replace(path)\ntime.sleep({60 if kill_owner else .1})\n')
         driver = root / 'driver.py'
         driver.write_text(textwrap.dedent(f'''
             import json, os, pathlib, signal, subprocess, sys, time
@@ -453,7 +453,7 @@ class FreshOwnerDeath(unittest.TestCase):
                 def __getattr__(self, name):
                     return getattr(self.process, name)
                 def communicate(self, *args, **kwargs):
-                    if self.first:
+                    if self.first and {kill_owner!r}:
                         self.first = False
                         expires = time.monotonic() + 10
                         while not pathlib.Path({str(child_record)!r}).exists():
@@ -476,6 +476,7 @@ class FreshOwnerDeath(unittest.TestCase):
             child = json.loads(pathlib.Path({str(child_record)!r}).read_text())
             pathlib.Path({str(result_record)!r}).write_text(json.dumps({{
                 'code': code, 'tmpdir': homes[0], 'home': child['home'],
+                'run_root': __import__('_lib').RUN_ROOT,
                 'home_before_exit': pathlib.Path(child['home']).exists(),
                 'tmpdir_before_exit': pathlib.Path(homes[0]).exists(),
             }}))
@@ -549,6 +550,101 @@ class FreshOwnerDeath(unittest.TestCase):
                 if process.poll() is None:
                     process.send_signal(signal.SIGINT)
                     process.communicate(timeout=15)
+        self.remove_probe_root(result, child)
+
+    # BUG: fixture сохраняет pending HOME, но atexit удаляет его RUN_ROOT.
+    # HYPOTHESIS: quiescence должна владеть и lifetime предков каталога,
+    # а не только локальным finally. До/после в одном процессе недостаточно.
+    # SOLUTION: shared directory lifetime держит durable process lease до
+    # успешного close/receipt. Atexit видит незакрытые leases и в дочерних
+    # RUN_ROOT, сохраняя metadata и всё ещё используемые HOME/TMPDIR.
+    # RESULT: RED — CLI 1, body S, HOME/TMPDIR/root исчезли после exit;
+    # GREEN — CLI 1 и тот же живой body S, все три пути и owner evidence
+    # сохранены. Safe CLI 0 удаляет свои пути, не чужой каталог. 72 focused
+    # и 5 UID checks прошли на Python 3.12/PostgreSQL 17.
+    # STATUS: FIXED — see #776
+    def test_missing_receipt_retains_live_body_home_and_tempdir_after_actual_cli_exit(self):
+        result = child = None
+        try:
+            with tempfile.TemporaryDirectory(prefix='mop-776-retained-') as directory, probe_children() as register:
+                root = Path(directory)
+                driver, child_record, owner_record, result_record = self.prepare(root, close_streams=True)
+                unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                outsider = register(unrelated.pid)
+                process = self.launch(driver, root)
+                child = self.wait_record(child_record, process)
+                body = register(child['pid'])
+                owner = self.wait_record(owner_record, process)
+                try:
+                    output = process.communicate(timeout=15)[0]
+                    result = json.loads(result_record.read_text())
+                    state = Path(f"/proc/{child['pid']}/stat").read_text().rsplit(')', 1)[1].split()[0]
+                    self.evidence('#776 post-interpreter-exit retention: ' + json.dumps({
+                        **result, 'outer_exit': process.returncode, 'owner': owner,
+                        'owner_gone': identity(owner['pid']) is None, 'body': body, 'body_state': state,
+                        'same_body_after_exit': identity(child['pid']) == body,
+                        'home_after_exit': Path(result['home']).exists(),
+                        'tmpdir_after_exit': Path(result['tmpdir']).exists(),
+                        'run_root_after_exit': Path(result['run_root']).exists(),
+                        'unrelated_group_survived': identity(unrelated.pid) == outsider}))
+                    self.assertEqual(process.returncode, 1, output)
+                    self.assertIn('quiescence receipt', output)
+                    self.assertIsNone(identity(owner['pid']))
+                    self.assertEqual(identity(child['pid']), body)
+                    self.assertNotIn(state, ('Z', 'X'), 'a zombie is not evidence of a live body')
+                    self.assertEqual(identity(unrelated.pid), outsider)
+                    self.assertTrue(result['home_before_exit'], result)
+                    self.assertTrue(result['tmpdir_before_exit'], result)
+                    self.assertTrue(Path(result['home']).exists(),
+                        'actual interpreter atexit deleted the live body HOME after cleanup refusal')
+                    self.assertTrue(Path(result['tmpdir']).exists(), result)
+                    self.assertTrue(Path(result['run_root']).exists(), result)
+                    metadata = json.loads((Path(result['tmpdir']) / '.mop-owned-process.json').read_text())
+                    self.assertEqual(metadata['owner'], owner)
+                    self.assertEqual(metadata['state'], 'retained')
+                    self.assertIn('quiescence receipt', metadata['error'])
+                    self.assertIn('retained owned process directories', output)
+                    self.evidence('#776 retained process lease: ' + json.dumps(metadata))
+                finally:
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGINT)
+                        process.communicate(timeout=15)
+        finally:
+            # Только после exact PID wait/reap probe_children. Это внешняя
+            # аварийная уборка проверки, не признание quiescence CLI-ом.
+            if result is not None:
+                self.remove_probe_root(result, child)
+
+    def remove_probe_root(self, result, child):
+        import _lib
+        self.assertIsNone(identity(child['pid']), 'retained directories cannot be removed while body exists')
+        root = Path(result['run_root'])
+        self.assertEqual(root.parent, Path(_lib.RUN_ROOT), 'probe may clean only its own child run root')
+        if root.exists():
+            shutil.rmtree(root)
+
+    def test_successful_fixture_still_removes_its_owned_root_after_actual_cli_exit(self):
+        with tempfile.TemporaryDirectory(prefix='mop-776-safe-') as directory:
+            root = Path(directory)
+            foreign = root / 'unrelated-directory'
+            foreign.mkdir()
+            (foreign / 'sentinel').write_text('not owned by the CLI lifetime')
+            driver, child_record, _, result_record = self.prepare(root, close_streams=False, kill_owner=False)
+            process = self.launch(driver, root)
+            output = process.communicate(timeout=15)[0]
+            result = json.loads(result_record.read_text())
+            child = json.loads(child_record.read_text())
+            self.assertEqual(process.returncode, 0, output)
+            self.assertIsNone(identity(child['pid']))
+            for name in ('home', 'tmpdir', 'run_root'):
+                self.assertFalse(Path(result[name]).exists(), (name, result))
+            self.assertEqual((foreign / 'sentinel').read_text(), 'not owned by the CLI lifetime')
+            self.evidence('#776 successful post-exit cleanup: ' + json.dumps({
+                **result, 'outer_exit': process.returncode, 'body_reaped': True,
+                'home_after_exit': False, 'tmpdir_after_exit': False, 'run_root_after_exit': False,
+                'unrelated_directory_survived': True}))
 
 
 if __name__ == '__main__':
