@@ -1615,6 +1615,7 @@ def check_role_declarations_585(c):
         "node_up": ["catalog.enable_node", "operations.view_operation"],
         "operation": ["operations.view_operation"], "profile": [],
         "project_list": ["catalog.view_project"],
+        "project_limit": ["catalog.view_project", "catalog.change_project", "catalog.set_project_limit"],
         "restart": ["execution.restart_puppet", "operations.view_operation"],
         "send": ["execution.send_message", "operations.view_operation"],
         "dispatch": ["execution.dispatch_task", "operations.view_operation"],
@@ -1624,7 +1625,7 @@ def check_role_declarations_585(c):
     }
     legacy = {"recycle": (["wipe"], ["spec", "alloc", "delete", "update", "bootstrap_result"]),
               "update": ([], ["spec", "update", "bootstrap_result"])}
-    silent = {"node", "project_add", "project_limit", "models", "server_diagnose",
+    silent = {"node", "project_add", "models", "server_diagnose",
               "session_history", "session_terminal"}
     human_only = {"add", "addresses", "landing"}
     from mop.common import soul

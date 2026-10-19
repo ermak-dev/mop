@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop dispatch`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop dispatch`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project limit`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop driver build`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
+Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop driver build`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -1215,20 +1215,25 @@ working with no one able to reach them — delete its puppets first
 #### mop project limit
 
 ```text
-puppet limit of a project: mop project limit [<name> <N|none>]
+mop project limit <project-id> <N|none> [--expected-revision N]
 
-  mop project limit                 every project's limit
-  mop project limit rugent 3        at most 3 puppets for rugent
-  mop project limit rugent 0        frozen: no new puppets
-  mop project limit rugent none     no limit
+Change only the desired puppet limit of an existing project through its Django
+catalogue configuration endpoint. The target is a canonical project UUID, not a
+project name or local checkout. Zero blocks new creation; none lifts the limit.
+Existing running puppets are not stopped, rebuilt, moved or redeployed.
 
-The limit is the project's, not a person's: the cluster service sees which
-project a request is about, not who sent it. It is checked by the add verb
-(mop add), against the project's jobs that are not dead; puppets already
-running above a newly lowered limit are left alone.
+An authorized project read supplies the exact unchanged origin and current CAS
+revision. --expected-revision pins the revision explicitly: a different read
+revision refuses without mutation, never replaces the submitted expectation.
+MCP requires the explicit revision. Ordinary Django project view/change/limit
+permissions and current project scope are enforced by the server.
 
-Kept on the server and set by the operator's verb project_limit; the
-service reads it on every add, so no restart is needed.
+One configuration request is sent. This catalogue CAS has no operation request
+key. A lost response or uncertain commit exits 3 as unknown; it never repeats the
+mutation or declares a later matching observation a historical success receipt.
+Known conflicts refuse. Use mop project to observe the desired catalogue. No
+bus, SSH, local state, .env or credential-store fallback. HTTPS origin/CA and the
+transient Django token follow mop health.
 ```
 
 #### mop project list
