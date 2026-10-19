@@ -7,9 +7,9 @@ from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from _lib import run_command
-from _control_client_cases import NativeControlClient
-from _restart_vertical_cases import RestartVertical
-from _send_dispatch_cases import SendDispatch
+import _control_client_cases as control_fixture
+import _restart_vertical_cases as restart_fixture
+import _send_dispatch_cases as send_fixture
 from mop import cli
 from mop.client import control as api
 from mop.server.operations.models import Operation
@@ -18,16 +18,16 @@ from mop.server.operations.models import Operation
 @override_settings(ALLOWED_HOSTS=['localhost', 'testserver'])
 class NativeDispatchClient(TransactionTestCase):
     serialized_rollback = True
-    fixture = RestartVertical.fixture
-    body = RestartVertical.body
-    https = NativeControlClient.https
+    fixture = restart_fixture.RestartVertical.fixture
+    body = restart_fixture.RestartVertical.body
+    https = control_fixture.NativeControlClient.https
 
     def setUp(self):
-        RestartVertical.setUp(self)
+        restart_fixture.RestartVertical.setUp(self)
         self.token = self.key
 
     def test_real_tls_lost_reply_keeps_one_distinct_dispatch_admission(self):
-        SendDispatch.prepare(self)
+        send_fixture.SendDispatch.prepare(self)
         key = str(uuid4())
         deadline = (timezone.now()+timedelta(minutes=2)).isoformat()
         with self.https() as (server, client):
@@ -50,7 +50,7 @@ class NativeDispatchClient(TransactionTestCase):
             self.assertNotIn(private, out+err)
 
     def test_send_permission_does_not_authorize_real_dispatch(self):
-        SendDispatch.prepare(self)
+        send_fixture.SendDispatch.prepare(self)
         from _grant_cases import permit_actions
         from mop.server.access.models import IdentitySource, ProjectMembership
         self.user.is_superuser = False

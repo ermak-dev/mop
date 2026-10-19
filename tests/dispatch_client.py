@@ -20,7 +20,7 @@ from mop.client import control as api
 # HYPOTHESIS: готовый DispatchCommand недоступен canonical client/CLI/MCP.
 # SOLUTION: отдельный finite dispatch intent/route, общий transport и GET recovery.
 # RESULT: RED — missing consumer/commandlet и unsupported CLI; GREEN — 7 cases,
-# 55 real PostgreSQL17/TLS checks + UID5; native delivery здесь не запускалась.
+# 26 real PostgreSQL17/TLS checks + UID5; native delivery здесь не запускалась.
 # STATUS: FIXED — see #757
 class DispatchClient(unittest.TestCase):
     def setUp(self):
