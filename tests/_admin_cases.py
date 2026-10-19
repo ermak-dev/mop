@@ -581,3 +581,421 @@ class OperationBackedAdmin(TransactionTestCase):
         self.assertNotContains(self.get('/admin/'), '/llm/management.html')
         self.assertTrue(self.user.user_permissions.filter(
             content_type__app_label='catalog', codename='view_project').exists())
+
+
+# FEATURE: #756 — обычный Django RBAC nonhuman Actor без generic identity CRUD.
+# HYPOTHESIS: queryset целиком скрывает agent/service; простое снятие фильтра
+# откроет UserAdmin password/staff и silently ignored protected POST fields.
+# SPEC: реальные PG17 GET/POST, общий Access и named membership owner; stable
+# Actor/Token/identity/enrollment/profile/delegation, LDAP source ownership.
+# RED: PG17/Python3.12 — список не содержит agent/service, GET/POST дают 302;
+# protected/add forgeries — 302 вместо 403, membership owner отсутствует.
+# SOLUTION: узкая nonhuman ModelForm + общий ActorMemberships с fresh Access;
+# canonical поля readonly, неизвестные POST отвергаются, LDAP owner сохранён.
+# RED (дополнительно): новый filtered values_list после validation молча
+# терял ставший managed Group и принимал POST; передаём уже проверенные IDs.
+# RESULT: PG17/Python3.12 — 16 новых request/application checks и все прежние
+# Admin/Auth/RBAC/LDAP/provisioning checks: 182/182; fixture UID gate 5/5.
+# STATUS: FIXED — see #756. Полный strict CI — gate интеграции на точном SHA.
+@override_settings(ALLOWED_HOSTS=['testserver'])
+class NonhumanMembershipAdmin(TransactionTestCase):
+    serialized_rollback = True
+    def allow(self, *names):
+        from _grant_cases import permit_actions
+        permit_actions(self.user, *names)
+
+    global_scope = OperationBackedAdmin.global_scope
+    post = OperationBackedAdmin.post
+    get = OperationBackedAdmin.get
+    node = OperationBackedAdmin.node
+
+    def setUp(self):
+        OperationBackedAdmin.setUp(self)
+        self.global_scope()
+        self.allow('auth.view_user', 'auth.change_user', 'auth.add_user',
+            'auth.view_group', 'auth.change_group', 'access.view_role', 'access.approve_role',
+            'access.issue_grant', 'access.revoke_grant', 'secrets.manage_project_secret',
+            'execution.create_puppet', 'catalog.view_pool')
+        self.human = self.user
+        self.actor = access.token_context(access.issue_token(self.user.pk))
+        self.operator = access.session_context(self.client.session.session_key)
+
+    def targets(self):
+        if hasattr(self, '_targets'):
+            return self._targets
+        from _actor_auth_cases import _grant_scaffolding
+        from rest_framework.authtoken.models import Token
+        self.api, reserved = _grant_scaffolding(self)
+        provisioned = self.api.provision(self.actor, reserved.id, expected_revision=reserved.revision)
+        provisioned = self.api.get(self.actor, reserved.id)
+        self.api.bindings.bindings[(self.project.pk, provisioned.target_id)] = provisioned.binding
+        self.api.bindings.receipts[provisioned.id] = provisioned.binding
+        self.api.activate(provisioned.id, expected_revision=provisioned.revision)
+        self.grant = a.Grant.objects.get(pk=reserved.id)
+        agent = get_user_model().objects.get(pk=reserved.subject_id)
+        self.agent_key = Token.objects.get(user=agent).key
+        self.agent_context = access.token_context(self.agent_key, grants=self.api.local_authority())
+        self.service_node = self.node()
+        c.NodeProject.objects.create(node=self.service_node, project=self.project)
+        self.service_key = access.enroll_service('admin-service-756', self.service_node.pk,
+            project_ids=(self.project.pk,), permissions=('catalog.observe_node',))
+        service = get_user_model().objects.get(username='admin-service-756')
+        self.service_context = access.token_context(self.service_key)
+        self._targets = (agent, service)
+        return self._targets
+
+    @staticmethod
+    def url(target):
+        return f'/admin/actor/actor/{target.pk}/change/'
+
+    @staticmethod
+    def form(**changes):
+        return {'groups': [], 'user_permissions': [], '_save': 'Save', **changes}
+
+    @staticmethod
+    def permissions(*codes):
+        return list(Permission.objects.filter(content_type__app_label='catalog', codename__in=codes).order_by('pk'))
+
+    @staticmethod
+    def stable():
+        from rest_framework.authtoken.models import Token
+        # Полные synthetic rows: сравниваем также generation/enrollment/lifecycle,
+        # а не только число субъектов. В сообщениях и LogEntry этих bytes нет.
+        return [list(model.objects.order_by('pk').values()) for model in
+            (get_user_model(), Token, a.LoginIdentity, a.CredentialBinding, a.ServiceEnrollment,
+             a.AgentProfile, a.Grant, a.AgentRBACProvisioning, a.CredentialEvent)]
+
+    def memberships(self):
+        return [(list(row.groups.order_by('pk').values_list('pk', flat=True)),
+                 list(row.user_permissions.order_by('pk').values_list('pk', flat=True)))
+                for row in self.targets()]
+
+    def test_global_operator_lists_and_edits_agent_and_service_groups_and_direct_permissions(self):
+        from django.contrib.auth.models import Group
+        group = Group.objects.create(name='manual-rbac-756')
+        group.permissions.add(*self.permissions('view_pool'))
+        direct = self.permissions('view_project')[0]
+        targets = self.targets()
+        before = self.stable()
+        response = self.get('/admin/actor/actor/')
+        self.assertEqual(response.status_code, 200)
+        for target in targets:
+            with self.subTest(kind=target.kind):
+                self.assertContains(response, target.username)
+                page = self.get(self.url(target))
+                self.assertEqual(page.status_code, 200)
+                self.assertEqual(set(page.context['adminform'].form.fields), {'groups', 'user_permissions'})
+                self.assertContains(page, target.username)
+                self.assertContains(page, target.kind)
+                self.assertContains(page, 'does not stop')
+                self.assertContains(page, 'does not delete')
+                self.assertNotContains(page, 'id_password')
+                for marker in (self.agent_key, self.service_key, target.password, 'token_digest', 'credential_version'):
+                    self.assertNotIn(marker, page.content.decode())
+                saved = self.post(self.url(target), self.form(groups=[str(group.pk)], user_permissions=[str(direct.pk)]))
+                self.assertEqual(saved.status_code, 302)
+                self.assertEqual(list(target.groups.values_list('pk', flat=True)), [group.pk])
+                self.assertEqual(list(target.user_permissions.values_list('pk', flat=True)), [direct.pk])
+        self.assertEqual(self.stable(), before)
+        entries = LogEntry.objects.filter(object_id__in=[str(row.pk) for row in targets])
+        self.assertEqual(entries.count(), 2)
+        for entry in entries:
+            self.assertIn('groups', entry.change_message)
+            for marker in (self.agent_key, self.service_key, 'token_digest', 'credential_version'):
+                self.assertNotIn(marker, entry.change_message + entry.object_repr)
+
+    def test_view_only_global_operator_sees_readonly_nonhuman_but_cannot_mutate(self):
+        targets = self.targets()
+        self.user.user_permissions.remove(*Permission.objects.filter(content_type__app_label='actor', codename='change_actor'))
+        before = self.stable(), self.memberships()
+        for target in targets:
+            page = self.get(self.url(target))
+            self.assertEqual(page.status_code, 200)
+            self.assertNotContains(page, 'name="groups"')
+            self.assertEqual(self.post(self.url(target), self.form()).status_code, 403)
+        self.assertEqual((self.stable(), self.memberships()), before)
+
+    def test_scoped_or_permissionless_staff_cannot_list_read_or_change_nonhuman(self):
+        targets = self.targets()
+        before = self.stable(), self.memberships()
+        for downgrade in ('scope', 'permission'):
+            with self.subTest(downgrade=downgrade):
+                if downgrade == 'scope':
+                    a.AllProjectMembership.objects.filter(user=self.user).delete()
+                else:
+                    self.global_scope()
+                    self.user.user_permissions.clear()
+                self.assertEqual(self.get('/admin/actor/actor/').status_code, 403)
+                for target in targets:
+                    self.assertEqual(self.get(self.url(target)).status_code, 403)
+                    self.assertEqual(self.post(self.url(target), self.form()).status_code, 403)
+        self.assertEqual((self.stable(), self.memberships()), before)
+
+    def test_permission_revoke_and_scope_downgrade_between_get_and_post_deny_unchanged(self):
+        targets = self.targets()
+        before = self.stable(), self.memberships()
+        for target in targets:
+            for downgrade in ('scope', 'permission'):
+                self.global_scope()
+                self.allow('auth.change_user')
+                self.assertEqual(self.get(self.url(target)).status_code, 200)
+                if downgrade == 'scope':
+                    a.AllProjectMembership.objects.filter(user=self.user).delete()
+                else:
+                    self.user.user_permissions.remove(*Permission.objects.filter(
+                        content_type__app_label='actor', codename='change_actor'))
+                self.assertEqual(self.post(self.url(target), self.form()).status_code, 403)
+        self.assertEqual((self.stable(), self.memberships()), before)
+
+    def test_every_nonhuman_protected_field_forgery_is_denied_not_silently_accepted(self):
+        from django.contrib.auth.models import Group
+        targets = self.targets()
+        group = Group.objects.create(name='forged-mixed-write-756')
+        direct = self.permissions('view_project')[0]
+        before = self.stable(), self.memberships()
+        fields = ('id', 'pk', 'username', 'kind', 'password', 'password1', 'password2',
+            'usable_password', 'old_password', 'is_staff', 'is_superuser', 'is_active',
+            'first_name', 'last_name', 'email', 'last_login', 'date_joined', 'identity',
+            'loginidentity', 'source', 'external_subject', 'authorized', 'validated_at',
+            'service_enrollment', 'node', 'use_case', 'agent_profile', 'owner', 'project',
+            'target_id', 'definition', 'revision', 'token', 'key', 'credentialbinding',
+            'token_digest', 'grant', 'state', 'retired_at', 'unknown_protected_field')
+        for target in targets:
+            for name in fields:
+                with self.subTest(kind=target.kind, field=name):
+                    self.assertEqual(self.post(self.url(target), self.form(groups=[str(group.pk)],
+                        user_permissions=[str(direct.pk)], **{name: 'forged-756'})).status_code, 403)
+                    self.assertEqual((self.stable(), self.memberships()), before)
+        self.assertFalse(LogEntry.objects.exists())
+
+    def test_directory_managed_group_injection_is_denied_and_owned_membership_preserved(self):
+        from django.contrib.auth.models import Group
+        ordinary = Group.objects.create(name='ordinary-756')
+        managed = Group.objects.create(name='directory-managed-756')
+        source = a.IdentitySource.objects.create(name='directory-756', kind='ldap')
+        a.DirectoryGroupRule.objects.create(source=source, group_dn='cn=managed', group=managed)
+        for target in self.targets():
+            before = self.stable(), self.memberships()
+            response = self.post(self.url(target), self.form(groups=[str(ordinary.pk), str(managed.pk)]))
+            self.assertIn(response.status_code, (400, 403))
+            self.assertEqual((self.stable(), self.memberships()), before)
+            # Даже уже существующее source-owned участие не принадлежит форме.
+            target.groups.add(managed)
+            page = self.get(self.url(target))
+            self.assertEqual(page.status_code, 200)
+            self.assertNotIn(managed.pk, page.context['adminform'].form.fields['groups'].queryset.values_list('pk', flat=True))
+            self.assertEqual(self.post(self.url(target), self.form(groups=[str(ordinary.pk)])).status_code, 302)
+            self.assertEqual(set(target.groups.values_list('pk', flat=True)), {ordinary.pk, managed.pk})
+
+    def test_nonhuman_password_delete_bulk_inline_and_save_as_new_paths_deny_unchanged(self):
+        targets = self.targets()
+        before = self.stable(), self.memberships()
+        for target in targets:
+            root = f'/admin/actor/actor/{target.pk}/'
+            self.assertEqual(self.get(root + 'password/').status_code, 403)
+            self.assertEqual(self.post(root + 'password/', {'password1': 'forged-password',
+                'password2': 'forged-password'}).status_code, 403)
+            self.assertEqual(self.post(root + 'delete/', {'post': 'yes'}).status_code, 403)
+            for data in ({'_saveasnew': 'Save as new'}, {'action': 'delete_selected'},
+                         {'actor_groups-TOTAL_FORMS': '1', 'actor_groups-INITIAL_FORMS': '0'}):
+                self.assertEqual(self.post(self.url(target), self.form(**data)).status_code, 403)
+            self.assertEqual(self.post('/admin/actor/actor/', {'action': 'delete_selected',
+                '_selected_action': [str(target.pk)], 'post': 'yes'}).status_code, 403)
+        self.assertEqual((self.stable(), self.memberships()), before)
+
+    def test_forged_nonhuman_add_and_group_reverse_membership_are_denied(self):
+        from django.contrib.auth.models import Group
+        targets = self.targets()
+        before = self.stable(), self.memberships()
+        for kind in ('agent', 'service'):
+            response = self.post('/admin/actor/actor/add/', {'username': 'forged-' + kind, 'kind': kind,
+                'password1': 'test-only-password-756', 'password2': 'test-only-password-756', '_save': 'Save'})
+            self.assertEqual(response.status_code, 403)
+        group = Group.objects.create(name='reverse-756')
+        for name in ('user_set', 'users', 'actor_set', 'user_ids'):
+            self.assertEqual(self.post(f'/admin/auth/group/{group.pk}/change/',
+                {'name': group.name, name: [str(row.pk) for row in targets], '_save': 'Save'}).status_code, 403)
+        self.assertEqual((self.stable(), self.memberships()), before)
+
+    def test_standard_human_change_and_ldap_readonly_behavior_are_preserved(self):
+        from django.contrib.auth.models import Group
+        human = get_user_model().objects.create_user('local-human-756', password='test-only-password')
+        access.bind_local_identity(human.pk)
+        ordinary = Group.objects.create(name='human-ordinary-756')
+        direct = self.permissions('view_project')[0]
+        response = self.post(self.url(human), {'username': human.username, 'first_name': 'Edited',
+            'last_name': 'Human', 'email': 'human@example.invalid', 'is_active': 'on',
+            'date_joined_0': human.date_joined.strftime('%Y-%m-%d'), 'date_joined_1': human.date_joined.strftime('%H:%M:%S'),
+            'groups': [str(ordinary.pk)], 'user_permissions': [str(direct.pk)], '_save': 'Save'})
+        self.assertEqual(response.status_code, 302,
+            response.context['adminform'].form.errors if response.status_code == 200 else '')
+        human.refresh_from_db()
+        self.assertEqual(human.first_name, 'Edited')
+        self.assertEqual(list(human.groups.values_list('pk', flat=True)), [ordinary.pk])
+        self.assertEqual(list(human.user_permissions.values_list('pk', flat=True)), [direct.pk])
+        source = a.IdentitySource.objects.create(name='ldap-human-756', kind='ldap')
+        ldap = get_user_model().objects.create_user('ldap-human-756', password=None)
+        a.LoginIdentity.objects.create(user=ldap, source=source, external_subject='ldap-subject-756')
+        page = self.get(self.url(ldap))
+        self.assertEqual(page.status_code, 200)
+        for field in ('username', 'groups', 'user_permissions'):
+            self.assertNotIn(field, page.context['adminform'].form.fields)
+        self.assertEqual(self.post(f'/admin/actor/actor/{ldap.pk}/password/',
+            {'password1': 'forged-password', 'password2': 'forged-password'}).status_code, 403)
+        ldap.refresh_from_db()
+        self.assertFalse(ldap.has_usable_password())
+        self.assertEqual(self.post(f'/admin/actor/actor/{human.pk}/password/',
+            {'password1': 'another-test-only-password', 'password2': 'another-test-only-password',
+             'usable_password': 'true'}).status_code, 302)
+        human.refresh_from_db()
+        self.assertTrue(human.check_password('another-test-only-password'))
+
+    def test_memberships_change_fresh_access_not_token_identity_or_delegation_bounds(self):
+        from django.contrib.auth.models import Group
+        agent, service = self.targets()
+        before = self.stable()
+        group = Group.objects.create(name='live-rbac-756')
+        group.permissions.add(*self.permissions('view_pool', 'observe_node'))
+        direct = self.permissions('record_node_application')[0]
+        for target in (agent, service):
+            self.assertEqual(self.post(self.url(target), self.form(groups=[str(group.pk)],
+                user_permissions=[str(direct.pk)])).status_code, 302)
+        delegated = access.Access(grants=self.api.local_authority())
+        delegated.authorize(self.agent_context, 'catalog.view_pool', project_ids=(self.project.pk,))
+        access.Access().authorize(self.service_context, 'catalog.observe_node',
+            project_ids=(self.project.pk,), node_ids=(self.service_node.pk,))
+        access.Access().authorize(self.service_context, 'catalog.record_node_application',
+            project_ids=(self.project.pk,), node_ids=(self.service_node.pk,))
+        # Широкая membership субъекта не обходит human issuer или foreign scope.
+        permission = self.permissions('view_pool')[0]
+        self.user.user_permissions.remove(permission)
+        with self.assertRaises(access.Denied):
+            delegated.authorize(self.agent_context, 'catalog.view_pool', project_ids=(self.project.pk,))
+        self.user.user_permissions.add(permission)
+        with self.assertRaises(access.Denied):
+            delegated.authorize(self.agent_context, 'catalog.view_pool', project_ids=(self.foreign.pk,))
+        for target in (agent, service):
+            self.assertEqual(self.post(self.url(target), self.form()).status_code, 302)
+        for owner, context, action, refs in (
+            (delegated, self.agent_context, 'catalog.view_pool', {'project_ids': (self.project.pk,)}),
+            (access.Access(), self.service_context, 'catalog.observe_node',
+                {'project_ids': (self.project.pk,), 'node_ids': (self.service_node.pk,)}),
+            (access.Access(), self.service_context, 'catalog.record_node_application',
+                {'project_ids': (self.project.pk,), 'node_ids': (self.service_node.pk,)})):
+            with self.assertRaises(access.Denied):
+                owner.authorize(context, action, **refs)
+        self.assertEqual(self.stable(), before)
+        self.assertEqual(a.Grant.objects.get(pk=self.grant.pk).state, 'active')
+
+    def test_change_user_alone_with_global_scope_is_sufficient_without_recipe_or_group_admin_rights(self):
+        from django.contrib.auth.models import Group
+        targets = self.targets()
+        self.user.user_permissions.set(Permission.objects.filter(content_type__app_label='actor', codename='change_actor'))
+        group = Group.objects.create(name='change-user-only-756')
+        for target in targets:
+            self.assertEqual(self.get(self.url(target)).status_code, 200)
+            self.assertEqual(self.post(self.url(target), self.form(groups=[str(group.pk)])).status_code, 302)
+            self.assertEqual(list(target.groups.values_list('pk', flat=True)), [group.pk])
+
+    def test_application_owner_revalidates_after_admin_form_validation(self):
+        from django.contrib.auth.models import Group
+        from mop.server.controller.admin import ScopedUserAdmin
+        targets = self.targets()
+        original = ScopedUserAdmin.save_model
+        group = Group.objects.create(name='late-validation-756')
+        source = a.IdentitySource.objects.create(name='late-directory-756', kind='ldap')
+        for target in targets:
+            for downgrade in ('permission', 'scope', 'directory'):
+                with self.subTest(kind=target.kind, downgrade=downgrade):
+                    self.allow('auth.change_user')
+                    self.global_scope()
+                    a.DirectoryGroupRule.objects.filter(source=source).delete()
+                    before = self.stable(), self.memberships()
+                    calls = []
+                    def revoked(adapter, request, obj, form, change):
+                        calls.append(set(form.cleaned_data))
+                        if downgrade == 'permission':
+                            self.user.user_permissions.remove(*Permission.objects.filter(
+                                content_type__app_label='actor', codename='change_actor'))
+                        elif downgrade == 'scope':
+                            a.AllProjectMembership.objects.filter(user=self.user).delete()
+                        else:
+                            a.DirectoryGroupRule.objects.create(source=source, group_dn='cn=late', group=group)
+                        return original(adapter, request, obj, form, change)
+                    with patch.object(ScopedUserAdmin, 'save_model', revoked):
+                        response = self.post(self.url(target), self.form(groups=[str(group.pk)]))
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(calls, [{'groups', 'user_permissions'}])
+                    self.assertEqual((self.stable(), self.memberships()), before)
+        self.assertFalse(LogEntry.objects.exists())
+
+    def test_ldap_agent_memberships_remain_source_owned_and_not_generic_admin_mutation(self):
+        from django.contrib.auth.models import Group
+        agent, _ = self.targets()
+        source = a.IdentitySource.objects.create(name='agent-directory-756', kind='ldap')
+        a.LoginIdentity.objects.filter(user=agent).update(source=source, validated_revision=source.revision,
+            validated_at=timezone.now())
+        managed = Group.objects.create(name='agent-managed-756')
+        a.DirectoryGroupRule.objects.create(source=source, group_dn='cn=agent', group=managed)
+        agent.groups.add(managed)
+        before = self.stable(), self.memberships()
+        page = self.get(self.url(agent))
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(set(page.context['adminform'].form.fields), set())
+        for data in (self.form(), self.form(groups=[]), self.form(user_permissions=[])):
+            self.assertEqual(self.post(self.url(agent), data).status_code, 403)
+        self.assertEqual((self.stable(), self.memberships()), before)
+
+    def test_revoked_delegation_stays_revoked_after_explicit_subject_rbac_edit(self):
+        from django.contrib.auth.models import Group
+        from rest_framework.authtoken.models import Token
+        agent, _ = self.targets()
+        group = Group.objects.create(name='revoked-delegation-756')
+        group.permissions.add(*self.permissions('view_pool'))
+        self.api.revoke(self.actor, self.grant.pk, expected_revision=self.grant.revision)
+        self.assertEqual(self.post(self.url(agent), self.form(groups=[str(group.pk)])).status_code, 302)
+        self.assertEqual(Token.objects.get(user=agent).key, self.agent_key)
+        self.assertEqual(a.Grant.objects.get(pk=self.grant.pk).state, 'revoked')
+        with self.assertRaises(access.Denied):
+            access.Access(grants=self.api.local_authority()).authorize(self.agent_context,
+                'catalog.view_pool', project_ids=(self.project.pk,))
+        with self.assertRaises(access.Denied):
+            access.token_context(self.agent_key, grants=self.api.local_authority())
+
+    def test_standard_group_permission_edit_stays_available_without_reverse_membership(self):
+        from django.contrib.auth.models import Group
+        group = Group.objects.create(name='standard-group-756')
+        permission = self.permissions('view_pool')[0]
+        self.assertEqual(self.post(f'/admin/auth/group/{group.pk}/change/',
+            {'name': group.name, 'permissions': [str(permission.pk)], '_save': 'Save'}).status_code, 302)
+        self.assertEqual(list(group.permissions.values_list('pk', flat=True)), [permission.pk])
+
+    def test_named_application_owner_rechecks_saved_context_and_rejects_directory_groups(self):
+        from mop.server.access import rbac
+        from django.contrib.auth.models import Group
+        targets = self.targets()
+        self.assertTrue(hasattr(rbac, 'ActorMemberships'), 'named access membership owner is missing')
+        owner = rbac.ActorMemberships()
+        group = Group.objects.create(name='owner-756')
+        direct = self.permissions('view_project')[0]
+        before = self.stable()
+        for target in targets:
+            owner.replace(self.operator, target.pk, group_ids=[group.pk], permission_ids=[direct.pk])
+            self.assertEqual(list(target.groups.values_list('pk', flat=True)), [group.pk])
+        memberships = self.memberships()
+        self.user.user_permissions.remove(*Permission.objects.filter(content_type__app_label='actor', codename='change_actor'))
+        with self.assertRaises(access.Denied):
+            owner.replace(self.operator, targets[0].pk, group_ids=[], permission_ids=[])
+        self.allow('auth.change_user')
+        a.AllProjectMembership.objects.filter(user=self.user).delete()
+        with self.assertRaises(access.Denied):
+            owner.replace(self.operator, targets[0].pk, group_ids=[], permission_ids=[])
+        self.global_scope()
+        source = a.IdentitySource.objects.create(name='owner-ldap-756', kind='ldap')
+        a.DirectoryGroupRule.objects.create(source=source, group_dn='cn=owner', group=group)
+        with self.assertRaises(access.Denied):
+            owner.replace(self.operator, targets[0].pk, group_ids=[group.pk], permission_ids=[])
+        self.assertEqual(self.memberships(), memberships)
+        with self.assertRaises(access.Denied):
+            owner.replace(self.operator, self.user.pk, group_ids=[], permission_ids=[])
+        self.assertEqual(self.stable(), before)
