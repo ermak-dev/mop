@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from mop.server.sessions import endpoints as s
 from .models import Installation
 from .runtime import require_restore_ready
-from .strict import StrictJSONParser, uid, strict_document
+from .strict import StrictJSONParser, uid, strict_document, query_document
 
 
 def authority(*, lock=False):
@@ -140,6 +140,14 @@ class Reports(EndpointView):
         response = Response({'schema_version': 1, 'delivery': result(delivery)}, status=202)
         response['Location'] = '/api/v1/deliveries/'+str(delivery.id)
         return response
+
+
+class Deliveries(EndpointView):
+    def get(self, request):
+        value = query_document(request.query_params, ('schema_version', 'epoch', 'message_id'))
+        delivery = endpoints.delivery_for_message(request.actor,
+            expected_epoch=uid(value['epoch']), message_id=uid(value['message_id']))
+        return Response({'schema_version': 1, 'delivery': result(delivery)})
 
 
 class Delivery(EndpointView):
