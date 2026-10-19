@@ -238,6 +238,40 @@ async def frontend(document):
             assert not calls and not writer.retained, '#759 actual eligibility leaked private input: '+repr(evidence)
             print(json.dumps(dict(status='refused-before-delivery')), flush=True)
             return
+        if mode == 'partial_staging':
+            from contextlib import asynccontextmanager
+            from unittest.mock import patch
+            from mop.node import host_input_files as files
+            for observation in document.get('observations', []):
+                await executor.observe(Scope.parse(observation['scope']), observation['attempt_id'])
+            work = Work.parse({**document['works'][0], 'executor_epoch': runtime.executor_epoch})
+            admission = await client.claim(work, str(uuid4()))
+            original, hit, connections, paths = os.fsync, [], [], []
+            @asynccontextmanager
+            async def unexpected_connect():
+                connections.append(True)
+                raise AssertionError('partial staging reached backend connect')
+                yield
+            backend.connect = unexpected_connect
+            def fail_once(fd):
+                if fd == writer.directory.fd and not hit:
+                    hit.append(True)
+                    source = writer.retained[0]
+                    path = writer.directory.path/source.descriptor.filename
+                    paths.append(path)
+                    assert path.stat().st_uid == NODE and path.stat().st_size > 0
+                    raise OSError('controlled actual directory fsync before staging token')
+                return original(fd)
+            with patch.object(files.os, 'fsync', fail_once):
+                try: await executor.execute(work, phase_guard(admission))
+                except Refused: pass
+                else: raise AssertionError('actual partial stage did not fail')
+            await executor.aclose()
+            assert hit == [True] and not connections and not executor._owned
+            assert not writer.retained and paths and all(not path.exists() for path in paths)
+            print(json.dumps(dict(status='compensated-partial-stage', action=work.action,
+                backend_calls=0, executor_owners=0, writer_slots=0, private_bytes=0)), flush=True)
+            return
         if mode == 'ingress_failure':
             from contextlib import asynccontextmanager
             from types import SimpleNamespace
@@ -468,10 +502,14 @@ async def early_start_cleanup(config, authority, template, values, launch):
     import copy
     from mop.node.host_backend import Identity, Process
     from mop.node.host_phase_supervisor import PhaseConfig, PhaseOwner
-    from mop.node.host_scope import Scope, Refused, Unknown
+    from mop.node.host_scope import Scope, Refused, Unknown, Request
     from mop.node.host_scope_supervisor import SocketServer
     from mop.node.host_scope_systemd import SystemdCgroupAdapter
-    for mode in ('cancel', 'timeout'):
+    # BUG #764: successful original start теряется при concurrent inspect.
+    # HYPOTHESIS: transient active slot ошибочно используется как start owner.
+    # SOLUTION: original action retained при создании в physical supervisor.
+    # STATUS: FIXED — see #764
+    for mode in ('cancel', 'timeout', 'inspect'):
         case = copy.deepcopy(template)
         target, incarnation, operation = (str(uuid4()) for _ in range(3))
         for value in case:
@@ -490,8 +528,9 @@ async def early_start_cleanup(config, authority, template, values, launch):
             result = await command(*args)
             if args[0] == '/usr/bin/systemd-run' and '--scope' in args:
                 starts.append(args)
-                entered.set()
-                await release.wait()
+                if mode != 'inspect':
+                    entered.set()
+                    await release.wait()
             return result
         adapter.command.run = barrier
         retire = adapter.retire
@@ -501,22 +540,40 @@ async def early_start_cleanup(config, authority, template, values, launch):
             return result
         adapter.retire = retirement
         await endpoint.start()
+        observation = None
         print('early-start '+mode+': stage', file=sys.stderr, flush=True)
         try:
-            staged = await launch([case[0]['work']], mode='stage', stop_before='start-broker')
-            print('early-start '+mode+': approve physical start', file=sys.stderr, flush=True)
+            staged = await launch([case[0]['work']], mode='stage',
+                stop_before='git-fetch' if mode == 'inspect' else 'start-broker')
             scope = Scope.parse(staged['scope'])
             item = owner._attempt(scope, staged['admission']['attempt_id'])
             body = owner.bodies[scope]
-            if mode == 'timeout': owner.timeout = .5
-            await launch([], mode='approve_start', admission=staged['admission'])
+            if mode == 'inspect':
+                reference = body.reference
+                assert reference is not None and scope not in owner.active
+                inspect = adapter.inspect
+                async def delayed(address):
+                    entered.set()
+                    await release.wait()
+                    return await inspect(address)
+                adapter.inspect = delayed
+                observation = asyncio.create_task(owner.execute(NODE,
+                    Request('inspect', scope, str(uuid4()), reference)))
+            else:
+                print('early-start '+mode+': approve physical start', file=sys.stderr, flush=True)
+                if mode == 'timeout': owner.timeout = .5
+                await launch([], mode='approve_start', admission=staged['admission'])
             async with asyncio.timeout(10.): await entered.wait()
-            print('early-start '+mode+': original physical start barrier', file=sys.stderr, flush=True)
+            print('early-start '+mode+': original physical start/inspect barrier', file=sys.stderr, flush=True)
             process = Process.read(int(run('/usr/bin/systemctl', 'show', '--value', '--property=MainPID', '--', scope.unit)))
             assert Path('/proc', str(process.pid), 'status').read_text().split('Uid:')[1].splitlines()[0].split() == [str(BODY)]*4
             assert scope.cgroup in Path('/proc', str(process.pid), 'cgroup').read_text()
-            assert body.reference is None and scope not in owner._owned, 'barrier missed original physical start'
-            if mode == 'cancel': item.task.cancel()
+            if mode == 'inspect':
+                assert owner.active[scope].request.action == 'inspect', 'barrier missed supported concurrent inspect'
+                assert body.reference == reference == owner._owned[scope]
+            else:
+                assert body.reference is None and scope not in owner._owned, 'barrier missed original physical start'
+            if mode != 'timeout': item.task.cancel()
             async with asyncio.timeout(10.):
                 while item.status == 'accepted': await asyncio.sleep(.01)
             # Повторная отмена caller не вправе бросить retained cleanup task.
@@ -530,8 +587,12 @@ async def early_start_cleanup(config, authority, template, values, launch):
             assert body.workspace is not None and body.socket_identity is not None
             assert item.receipt is not None and not kills, 'artifacts removed before exact retirement'
             release.set()
+            if observation is not None:
+                observed = await observation
+                assert observed.reference == reference and observed.populated
             async with asyncio.timeout(25.): await asyncio.shield(body.cleanup)
             await asyncio.gather(item.task, return_exceptions=True)
+            for _ in range(3): await owner._cleanup_phase(body)
             assert body.reference == owner._owned[scope], 'cleanup reminted instead of retaining the original reference'
             assert len(starts) == 1 and kills == [body.reference], 'cleanup replayed start/retirement or changed incarnation'
             assert body.workspace is None and body.socket_identity is None and item.receipt is None
@@ -552,6 +613,7 @@ async def early_start_cleanup(config, authority, template, values, launch):
             raise
         finally:
             release.set()
+            if observation is not None: await asyncio.gather(observation, return_exceptions=True)
             try:
                 await endpoint.aclose()
                 # Manager GC асинхронен: cold-bind не усыновляет даже empty unit.
@@ -808,6 +870,20 @@ async def accept():
 
         await launch([], mode='deny_token')
         negatives.append('wrong-node-token')
+        # BUG #765: настоящий node UID пишет private input, fsync каталога падает
+        # до выдачи token; backend ещё не вызван, stage сам компенсирует exact inode.
+        # STATUS: FIXED — see #765
+        case = extra_case()
+        result = await launch([case[0]['work']], mode='partial_staging')
+        assert result['private_bytes'] == result['writer_slots'] == result['backend_calls'] == 0
+        case = extra_case()
+        await launch([case[0]['work']])
+        observed = observation(case[0])
+        result = await launch([case[1]['work']], [observed], mode='partial_staging')
+        assert result['private_bytes'] == result['writer_slots'] == result['backend_calls'] == 0
+        await launch([], [observed], mode='cleanup_observed')
+        await removed(case)
+        negatives.extend(('prepare-partial-staging-compensated', 'bootstrap-partial-staging-compensated'))
         # BUG #759 / HYPOTHESIS: valid delivery уходил в ingress до eligibility.
         # SOLUTION: проверка action/reference до delivery; exact staging owner
         # убирает только definite pre-submit failure, unknown dispatch не replay.
@@ -938,6 +1014,7 @@ async def accept():
         assert not list(Path('/var/lib/mop-snapshots').glob('*.json'))
         print(json.dumps(dict(status='accepted', python='3.12', postgres=17, root_uid=0, node_uid=NODE, body_uid=BODY,
             actual_negatives=negatives, early_start_cleanup=['cancel', 'timeout'],
+            concurrent_inspect_cleanup=True,
             actual_phases=['prepare_body', 'bootstrap_body', 'initial_identity'],
             source_transports=['https', 'ssh'], frontend_replacement=True,
             lost_submission_ack=True, lost_status_ack=True, lost_result_ack=True, original_attempt_resume=True,

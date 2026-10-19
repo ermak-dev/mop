@@ -58,6 +58,9 @@ class Supervisor:
         self.installed, self.adapter = installed, adapter
         self.capacity, self.timeout = capacity, timeout
         self.active = {}
+        # Original start живёт столько же, сколько bounded replay fence. Active
+        # содержит также inspect и не является владельцем исходного OS effect.
+        self._starts = {}
         # Завершённый OS start ещё принадлежит root до exact receipt ACK.
         # Inspect может идти параллельно ожиданию ACK, но не cleanup.
         self._receipts = {}
@@ -184,6 +187,8 @@ class Supervisor:
             # Fences не вытесняются: неизвестный эффект нельзя превратить в retry.
             self._fences.add(request.scope)
         action = _Action(request, asyncio.create_task(self._perform(request)))
+        if request.action == 'start':
+            self._starts[request.scope] = action
         self.active[request.scope] = action
         try:
             async with asyncio.timeout(self.timeout):

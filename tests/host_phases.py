@@ -260,6 +260,39 @@ class IngressOwnershipTests(unittest.IsolatedAsyncioTestCase):
         guard = EffectGuard(authorize, lambda: None, a)
         return executor, a, scope, guard, calls, directory
 
+    # BUG #765: stage падает до выдачи token, private bytes теряют cleanup owner.
+    # HYPOTHESIS: executor получает ownership только после успешного stage.
+    # SOLUTION: stage сохраняет exact receipt до create и компенсирует свой failure;
+    # close не отбирает FD до завершения owned write/compensation.
+    # RESULT: filesystem RED 3471/3577 bytes; GREEN 0 slots/bytes, backend calls=0.
+    # STATUS: FIXED — see #765
+    async def test_stage_directory_fsync_failure_compensates_before_token_returns(self):
+        import os
+        from unittest.mock import patch
+        from mop.node import host_input_files as files
+        from mop.node.host_scope import Reference
+        for action in ('prepare_body', 'bootstrap_body'):
+            with self.subTest(action=action):
+                executor, a, scope, guard, calls, directory = self.executor(action)
+                if action == 'bootstrap_body':
+                    executor._references[scope] = Reference(scope, uuid4().hex, str(uuid4()))
+                original, hit = os.fsync, []
+                def fail_once(fd):
+                    if fd == executor.writer.directory.fd and not hit:
+                        hit.append(True)
+                        raise OSError('controlled directory fsync after private bytes')
+                    return original(fd)
+                with patch.object(files.os, 'fsync', fail_once), self.assertRaises(Refused):
+                    await executor.execute(a.work, guard)
+                self.assertEqual(hit, [True], 'fault missed actual directory fsync')
+                await executor.aclose()
+                private = [p for p in directory.iterdir() if p.name != '.phase-input.lock']
+                self.assertNotIn('connect', calls)
+                self.assertEqual(executor._owned, {})
+                self.assertEqual(len(executor.writer.retained), 0,
+                    'stage orphaned writer slots; private bytes='+str(sum(p.stat().st_size for p in private)))
+                self.assertEqual(private, [])
+
     async def test_missing_previous_reference_refuses_before_private_delivery_or_staging(self):
         from mop.node.http_execution import Unavailable
         for action in ('bootstrap_body', 'initial_identity'):
@@ -405,6 +438,49 @@ class EarlyStartCleanupTests(unittest.IsolatedAsyncioTestCase):
         finally:
             adapter.release.set()
             await asyncio.gather(task, cleanup, return_exceptions=True)
+
+    # BUG #764: поздний inspect занимает active и становится ложным start owner.
+    # HYPOTHESIS: cleanup захватывает transient slot вместо исходного action.
+    # SOLUTION: physical supervisor сохраняет original start при создании;
+    # phase cleanup ждёт его outcome и concurrent inspect, не принимает inspect.
+    # RESULT: exact delayed-inspect regression и adjacent supervisor checks GREEN.
+    # STATUS: FIXED — see #764
+    async def test_completed_original_start_survives_concurrent_inspect_and_repeated_cleanup(self):
+        from mop.node.host_scope import Request
+        owner, adapter, body = self.owner()
+        adapter.release.set()
+        snapshot = await owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4())))
+        body.reference = snapshot.reference
+        inspect_entered, inspect_release = asyncio.Event(), asyncio.Event()
+        original = adapter.inspect
+        async def delayed(scope):
+            inspect_entered.set()
+            await inspect_release.wait()
+            return await original(scope)
+        adapter.inspect = delayed
+        observation = asyncio.create_task(owner.execute(owner.installed.node_uid,
+            Request('inspect', body.scope, str(uuid4()), snapshot.reference)))
+        await inspect_entered.wait()
+        waiter = asyncio.create_task(owner._cleanup_phase(body))
+        try:
+            await asyncio.sleep(0)
+            inspect_release.set()
+            await observation
+            await waiter
+            retained = body.cleanup
+            for _ in range(3):
+                await owner._cleanup_phase(body)
+                self.assertIs(body.cleanup, retained)
+            self.assertEqual(body.reference, snapshot.reference)
+            self.assertFalse(adapter.units[body.scope].populated)
+            self.assertEqual([name for name, _ in adapter.calls].count('start'), 1)
+            self.assertEqual([name for name, _ in adapter.calls].count('retire'), 1)
+            self.assertEqual(owner.active, {})
+            with self.assertRaisesRegex(Refused, 'replay'):
+                await owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4())))
+        finally:
+            inspect_release.set()
+            await asyncio.gather(observation, waiter, return_exceptions=True)
 
     async def test_uncertain_original_start_never_adopts_a_later_matching_unit(self):
         from mop.node.host_scope import Request, Unknown
