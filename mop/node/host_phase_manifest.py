@@ -1,13 +1,13 @@
 """Root-installed runtime content и честные HOST resource units, не image UUID."""
 from dataclasses import dataclass
 import hashlib
-import os
 from pathlib import Path
 import re
-import stat
 from decimal import Decimal, InvalidOperation
 
-from mop.node.host_inputs import _json, _sha, canonical_json
+from mop.common import installed_content
+from mop.common.installed_content import TOOLS, DIRECTORIES, NATIVE_TOOLS, RuntimeContent
+from mop.node.host_inputs import _json, canonical_json
 from mop.node.host_scope import canonical, exact
 from mop.node.http_execution import Refused
 
@@ -92,43 +92,13 @@ def path(value):
     return Path(value)
 
 
-def verify_artifact(filename, expected, *, root_owned=True, executable=False):
-    """Не-follow всей цепочки, hash actual bytes и stability на том же inode."""
-    from mop.node.host_scope_systemd import open_directory
-    filename = path(str(filename))
-    _sha(expected)
-    directory = open_directory(filename.parent, owner=0 if root_owned else None, immutable=root_owned)
+def verify_artifact(filename, expected, *, root_owned=True, executable=False, native_size=None):
+    """Один read-only verifier общий с isolated body MCP; node сохраняет Refused."""
     try:
-        fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
-        try:
-            before = os.fstat(fd)
-            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                    or root_owned and (before.st_uid != 0 or before.st_mode & 0o022)
-                    or before.st_mode & 0o6000 or executable and not before.st_mode & 0o111
-                    or not 0 <= before.st_size <= 67108864):
-                raise Refused('immutable bounded single-link installed runtime artifact required')
-            h = hashlib.sha256()
-            remaining = before.st_size
-            while remaining:
-                raw = os.read(fd, min(65536, remaining))
-                if not raw: raise Refused('installed runtime artifact truncated')
-                h.update(raw)
-                remaining -= len(raw)
-            after = os.fstat(fd)
-            keys = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
-            if any(getattr(before, k) != getattr(after, k) for k in keys) or os.read(fd, 1) or h.hexdigest() != expected:
-                raise Refused('installed runtime artifact content changed')
-            return expected
-        finally:
-            os.close(fd)
-    except OSError as error:
-        raise Refused('installed runtime artifact unavailable: '+type(error).__name__) from None
-    finally:
-        os.close(directory)
-
-
-TOOLS = ('python', 'git', 'ssh', 'ansible', 'runner', 'ca', 'ansible_config')
-DIRECTORIES = ('empty', 'git_exec', 'python_root', 'ansible_plugins')
+        return installed_content.verify_artifact(filename, expected, root_owned=root_owned,
+            executable=executable, native_size=native_size)
+    except ValueError as error:
+        raise Refused(str(error)) from None
 
 
 @dataclass(frozen=True)
@@ -143,31 +113,13 @@ class RuntimeManifest:
     @classmethod
     def parse(cls, raw):
         value = _json(raw)
-        exact(value, ('schema_version', 'capacity', 'images', 'tools', 'directories', 'artifacts'))
-        if type(value['schema_version']) is not int or value['schema_version'] != 1:
-            raise Refused('unsupported installed runtime manifest')
+        try:
+            content = RuntimeContent.parse(value)
+        except ValueError as error:
+            raise Refused(str(error)) from None
         exact(value['capacity'], Capacity.__dataclass_fields__)
         capacity = Capacity(**value['capacity'])
-        exact(value['tools'], TOOLS)
-        exact(value['directories'], DIRECTORIES)
-        tools = {k: path(v) for k, v in value['tools'].items()}
-        directories = {k: path(v) for k, v in value['directories'].items()}
-        artifacts = value['artifacts']
-        if type(artifacts) is not list or not 1 <= len(artifacts) <= 16384:
-            raise Refused('explicit bounded runtime content closure required')
-        names = set()
-        for item in artifacts:
-            exact(item, ('path', 'sha256', 'executable'))
-            filename = path(item['path'])
-            _sha(item['sha256'])
-            if type(item['executable']) is not bool or filename in names:
-                raise Refused('unique installed runtime artifact required')
-            names.add(filename)
-        if not set(tools.values()) <= names:
-            raise Refused('every fixed runtime executable/input requires an actual content hash')
-        executables = {item['path'] for item in artifacts if item['executable']}
-        if any(str(tools[key]) not in executables for key in TOOLS if key not in ('ca', 'ansible_config')):
-            raise Refused('every fixed runtime executable requires executable content proof')
+        tools, directories, artifacts = content.tools, content.directories, content.artifacts
         images = value['images']
         if type(images) is not list or not 1 <= len(images) <= 256:
             raise Refused('explicit installed image mapping required')
@@ -191,32 +143,10 @@ class RuntimeManifest:
             raise Refused('installed runtime manifest unavailable: '+type(error).__name__) from None
 
     def verify(self):
-        from mop.node.host_scope_systemd import open_directory
-        names = {item['path'] for item in self.artifacts}
-        for item in self.artifacts:
-            verify_artifact(item['path'], item['sha256'], executable=item['executable'])
-        for key, directory in self.directories.items():
-            fd = open_directory(directory, owner=0, immutable=True)
-            os.close(fd)
-            if key == 'empty':
-                if any(directory.iterdir()): raise Refused('installed Git templates/hooks directory must be empty')
-                continue
-            # Только root-owned installed trees, никогда project-controlled workspace.
-            pending, count = [directory], 0
-            while pending:
-                current = pending.pop()
-                fd = open_directory(current, owner=0, immutable=True)
-                try:
-                    with os.scandir(fd) as entries:
-                        for entry in entries:
-                            count += 1
-                            if count > 20000: raise Refused('installed runtime closure exceeds bound')
-                            filename = current/entry.name
-                            if entry.is_dir(follow_symlinks=False): pending.append(filename)
-                            elif str(filename) not in names:
-                                raise Refused('unhashed installed runtime entry is unavailable')
-                finally:
-                    os.close(fd)
+        try:
+            RuntimeContent(self.tools, self.directories, self.artifacts).verify()
+        except ValueError as error:
+            raise Refused(str(error)) from None
 
     def require_release(self, release):
         """Receipt включает весь fixed product closure, не только сторонние tools."""
@@ -226,6 +156,22 @@ class RuntimeManifest:
         if (self.tools['runner'] != release/'mop/node/host_body.py'
                 or not required <= {item['path'] for item in self.artifacts}):
             raise Refused('installed runtime must bind the exact lifecycle broker and complete root/body source closure')
+
+    def require_native_release(self, release):
+        """Native profile привязан к fixed hook/MCP entry и его product imports."""
+        self.require_release(release)
+        try:
+            RuntimeContent(self.tools, self.directories, self.artifacts).require_mcp(release)
+        except ValueError as error:
+            raise Refused(str(error)) from None
+
+    def verify_mcp_declarations(self, release):
+        """CLI discovery читает AST, но каждый discovered file тоже hashed input."""
+        self.require_native_release(release)
+        try:
+            RuntimeContent(self.tools, self.directories, self.artifacts).verify_tree(release/'mop/cli', maximum=4096)
+        except ValueError as error:
+            raise Refused(str(error)) from None
 
     def project(self, projection):
         if not any((item['image_revision'], item['logical_pin'], item['policy_id']) ==

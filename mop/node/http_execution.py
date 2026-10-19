@@ -599,6 +599,18 @@ class Runtime:
                 outcome, evidence = 'unknown', 'connection-lost'
             result_identity = getattr(self.executor, 'result_identity', None)
             result_options = {}
+            if outcome == 'succeeded' and work.action == 'confirm_ready':
+                from mop.common.readiness import ReadyEvidence
+                source = getattr(self.executor, 'result_evidence', None)
+                ready = source(admission) if source is not None else None
+                if (type(ready) is not ReadyEvidence or evidence != 'ready'
+                        or ready.request.work != admission.work.wire()
+                        or str(ready.request.attempt_id) != admission.attempt_id
+                        or str(ready.request.request_id) != admission.request_id
+                        or ready.request.revision != admission.revision
+                        or ready.request.lease_until != admission.lease_until):
+                    raise Refused('exact original typed readiness evidence required before result')
+                result_options['ready_evidence'] = ready
             if outcome == 'succeeded' and result_identity is not None:
                 result_options['receipt_id'] = uuid(result_identity(admission))
             committed = await self.client.result(admission, outcome, evidence, **result_options)

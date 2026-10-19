@@ -24,7 +24,7 @@ PHASE_ROOT_SOURCES = (
     'mop/node/host_phase_supervisor.py', 'mop/node/host_phases.py',
     'mop/node/host_phase_source.py', 'mop/node/host_phase_manifest.py',
     'mop/node/host_inputs.py', 'mop/node/host_input_files.py',
-    'mop/common/credentials.py',
+    'mop/common/credentials.py', 'mop/common/installed_content.py',
 )
 
 
