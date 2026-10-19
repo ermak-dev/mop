@@ -80,6 +80,73 @@ async def node():
     print(json.dumps(snap.wire()), flush=True)
 
 
+async def socket_proof(installed, reference, record):
+    """Actual Root/body UID + socket helper; не native_launch/vendor acceptance."""
+    from dataclasses import replace
+    from mop.node.host_backend import Process
+    from mop.node.host_scope import Refused
+    from mop.node.host_scope_systemd import _NativeSocket
+    body = installed.body(reference.scope)
+    path = body/'r/session.sock'
+    native = Process.read(record['pid'])
+    # Unit намеренно имеет собственный mount view, но общий PID/user domain.
+    for kind in ('pid', 'user'):
+        if os.readlink(f'/proc/{native.pid}/ns/{kind}') != os.readlink(f'/proc/self/ns/{kind}'):
+            raise AssertionError('fixture does not exercise installed shared PID/user domain')
+    if os.readlink(f'/proc/{native.pid}/ns/mnt') == os.readlink('/proc/self/ns/mnt'):
+        raise AssertionError('fixture must exercise distinct body/root mount views')
+    pin = _NativeSocket(installed, reference, native)
+    try:
+        await pin.observe()
+        inode = pin.inode
+        await pin.observe()
+        if inode != [path.stat().st_dev, path.stat().st_ino] or path.stat().st_uid != BODY_UID:
+            raise AssertionError('root did not independently observe actual body socket inode')
+        for label, process, ref in (
+                ('same-uid-wrong-pid', Process.read(record['opaque_names'][1]['pid']), reference),
+                ('wrong-start', replace(native, start=native.start+1), reference),
+                ('wrong-cgroup', Process.read(os.getpid()), reference)):
+            candidate = None
+            try:
+                candidate = _NativeSocket(installed, ref, process)
+                await candidate.observe()
+            except Refused as error:
+                if label == 'wrong-cgroup' and 'cgroup' not in str(error):
+                    raise AssertionError('foreign cgroup negative was confounded') from error
+            else:
+                raise AssertionError('root socket accepted '+label)
+            finally:
+                if candidate is not None: candidate.close()
+        os.chown(path, NODE_UID, NODE_UID)
+        try:
+            try:
+                pin.check()
+            except Refused:
+                pass
+            else:
+                raise AssertionError('root accepted foreign socket ownership')
+        finally:
+            os.chown(path, BODY_UID, BODY_UID)
+        (body/'socket-replace').write_text('fixture-only same-PID replacement')
+        async with asyncio.timeout(3):
+            while not (body/'socket-replaced').exists():
+                await asyncio.sleep(.01)
+        if Process.read(native.pid) != native:
+            raise AssertionError('socket replacement was confounded by process replacement')
+        try:
+            await pin.observe()
+        except Refused:
+            pass
+        else:
+            raise AssertionError('original socket pin adopted a same-PID replacement inode')
+        return dict(root_uid=os.getuid(), body_uid=BODY_UID, peer_pid=native.pid,
+            socket_inode=inode, distinct_mount_view=True, same_pid_replacement='refused',
+            foreign_owner='refused', same_uid_wrong_pid='refused', wrong_start='refused',
+            wrong_cgroup='refused', native_vendor=False)
+    finally:
+        pin.close()
+
+
 async def acceptance():
     if os.getuid() != 0 or Path('/proc/1/comm').read_text().strip() != 'systemd':
         raise RuntimeError('acceptance requires the private fixture systemd PID 1')
@@ -230,6 +297,9 @@ async def acceptance():
                 raise AssertionError('actual opaque-name child did not retain owned containment')
         if stat.S_IMODE(body.stat().st_mode) != 0o755:
             raise AssertionError('owned body did not change its consumer cwd permissions')
+        body.chmod(0o700)
+        socket_acceptance = await socket_proof(p, started.reference, record)
+        body.chmod(0o755)
         observed = await call('inspect', started.reference)
         if observed.reference != started.reference or not observed.populated:
             raise AssertionError('detached descendant was not physically inspected')
@@ -422,7 +492,7 @@ async def acceptance():
             raise AssertionError('fixture repeated a physical start instead of exact observation/cleanup')
         # PID disappearance alone никогда не является positive criterion.
         print(json.dumps(dict(status='accepted', physical='systemd-cgroup-v2',
-            backend_epoch=backend_acceptance,
+            backend_epoch=backend_acceptance, native_socket_helper=socket_acceptance,
             starter_transition=normal_transition['changes'], starter_exit=normal_transition['starter_exit'],
             signalled_start=signalled_start,
             unknown_start=dict(status='unknown', snapshot=None, cleanup='exact empty cgroup', replay='refused'),

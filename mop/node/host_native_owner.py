@@ -31,6 +31,7 @@ class NativeOwner:
 
     async def check(self):
         await self.owner._peer(self.body)
+        self.owner.adapter.native_window(self.body.reference, self.item.submission.admission)
         if self.physical is not None:
             current = await self.owner.adapter.native_attachment(self.body.reference,
                 self.mailbox.producer_report, self.mailbox.attachment,
@@ -70,20 +71,31 @@ class NativeOwner:
             stage = operation if operation in ('checkpoint', 'native_launched', 'register_producer', 'ingest_telemetry') else 'operation'
             if operation == 'checkpoint':
                 exact(payload, ('effect', 'sequence'))
+                window = self.owner.adapter.native_window(self.body.reference, self.item.submission.admission)
+                window.check()
                 await self.owner.checkpoint(self.item, payload['effect'], payload['sequence'])
                 await self.check()
+                window.check()
                 answer = dict(approved=payload['effect'], sequence=payload['sequence'])
+                if payload['effect'] == 'native-input':
+                    answer['launcher_deadline'] = window.deadline.isoformat()
             elif operation == 'native_launched':
                 exact(payload, ('pid', 'process_start', 'session_id', 'tmux_pid', 'tmux_start'))
                 if self.item.last_effect != 'native-launch' or self.launched is not None:
                     raise Refused('native launch report cannot replay or replace original processes')
-                self.launched = await self.owner.adapter.native_launch(self.body.reference, payload,
+                window = self.owner.adapter.native_window(self.body.reference, self.item.submission.admission)
+                window.check()
+                launched = await self.owner.adapter.native_launch(self.body.reference, payload,
                     self.owner.manifest.tools, self.item.submission.pins)
+                window.check()
+                self.launched = launched
                 answer = dict(retained=True)
             else:
                 if operation == 'register_producer':
                     if self.item.last_effect not in ('producer-attach', 'desired-switch'):
                         raise Refused('producer registration before fresh native attachment checkpoint')
+                    window = self.owner.adapter.native_window(self.body.reference, self.item.submission.admission)
+                    window.check()
                     self.mailbox.validate(operation, payload)
                     physical = await self.owner.adapter.native_attachment(self.body.reference,
                         self.mailbox.producer_report, self.mailbox.attachment,
@@ -92,9 +104,12 @@ class NativeOwner:
                         raise Refused('native producer differs from original retained launched processes')
                     if self.physical is not None and self.physical != physical:
                         raise Refused('native lifetime cannot adopt replacement physical process')
+                    window.check()
                     self.physical = physical
                 answer = await self.mailbox.request(operation, payload)
                 await self.check()
+                if operation == 'register_producer':
+                    window.check()
             await self.reply(identifier, answer=answer)
         except (Refused, Unknown, Unavailable, OSError, TimeoutError, ValueError) as error:
             reason = str(error) if isinstance(error, (Refused, Unknown, Unavailable)) else 'native root '+stage+' failed: '+type(error).__name__
@@ -206,6 +221,8 @@ def submit_native(owner, request):
         value = _json(envelope.payload)
         if Projection.from_delivery(value) != request.projection or ModelInputs.parse(value, profile).pins() != request.pins:
             raise Refused('native root snapshot differs from admitted model/projection pins')
+        # Единственный Root capture: до передачи submission и любого body effect.
+        owner.adapter.retain_native_window(request.reference, a)
     except BaseException:
         store.cleanup_input(receipt)
         store.cleanup_snapshot(receipt)

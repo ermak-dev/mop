@@ -303,16 +303,22 @@ class LifetimeTests(unittest.IsolatedAsyncioTestCase):
         owner.inputs = SimpleNamespace(bootstrap_model='fixture-bootstrap', environment=Mock(return_value={}))
         owner.profile = None
         owner.runtime = SimpleNamespace(prepare=Mock(return_value={}))
-        owner.checkpoint = AsyncMock()
+        owner.launcher_deadline = None
+        root_deadline = (datetime.now(timezone.utc)+timedelta(seconds=25)).isoformat()
+        async def root_reply(operation, payload):
+            if operation == 'native_launched':
+                return dict(retained=True)
+            answer = dict(approved=payload['effect'], sequence=payload['sequence'])
+            return answer | dict(launcher_deadline=root_deadline) if payload['effect'] == 'native-input' else answer
         owner.tmux = AsyncMock(return_value=f'{os.getpid()}|{os.getpid()}'.encode())
-        owner.channel = SimpleNamespace(request=AsyncMock(return_value={'retained': True}))
+        owner.channel = SimpleNamespace(request=AsyncMock(side_effect=root_reply))
         with patch('os.readlink', return_value=str(tools['native'])):
             await owner.launch()
         command = shlex.split(owner.tmux.await_args_list[0].args[-1])[1:]
         config = json.loads(command[-1])['mcpServers']['mop']
         self.assertEqual(config['command'], str(tools['python']))
         self.assertEqual(config['args'], ['-I', '-S', '-B', '/fixed/release/mop/client/body_entry.py',
-            '--scope', broker.scope.unit, '--deadline', owner.window.deadline.isoformat()])
+            '--scope', broker.scope.unit, '--deadline', root_deadline])
         self.assertNotIn('-p', command)
         self.assertNotIn('--bare', command)
 
