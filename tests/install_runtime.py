@@ -26,6 +26,8 @@ RUNTIME = {
                         'libsasl2-dev', 'python3-dev', 'python3-venv', 'rsync'],
     'pip_extra': 'server',
 }
+# #811: интерпретатор берётся абсолютным путём, не повторным поиском в PATH.
+PYTHON = os.path.realpath(sys.executable)
 
 
 def installation(**overrides):
@@ -45,7 +47,7 @@ def installation(**overrides):
 
 
 class Executor:
-    """Подставной OS executor: версия python и успешные команды, без эффектов."""
+    """Подставной OS executor: версия python, venv-skeleton и успешные команды."""
     def __init__(self, version=b'3.13.5\n'):
         self.calls = []
         self.version = version
@@ -53,8 +55,26 @@ class Executor:
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
         stdout = b''
-        if len(argv) >= 3 and argv[0] == 'python3' and argv[1] == '-I' and 'sys.version_info' in argv[-1]:
+        if len(argv) >= 3 and (argv[0] == 'python3' or os.path.isabs(argv[0])) \
+                and argv[1] == '-I' and 'sys.version_info' in argv[-1]:
             stdout = self.version
+        elif len(argv) == 4 and argv[1] == '-m' and argv[2] == 'venv':
+            # #811: umask установщика 077 виден на реальных правах; фикстура
+            # повторяет его, чтобы нормализацию прав нельзя было не заметить.
+            venv = Path(argv[3])
+            (venv / 'bin').mkdir(parents=True, mode=0o700)
+            for name in ('python', 'pip'):
+                (venv / 'bin' / name).write_text('')
+                (venv / 'bin' / name).chmod(0o700)
+            (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+            (venv / 'pyvenv.cfg').chmod(0o600)
+        elif 'pip' in argv and any(str(item).endswith('[server]') for item in argv):
+            # pip тоже наследует umask: установленные файлы выходят 0600/0700.
+            site = Path(argv[0]).parent.parent / 'lib' / 'python3.13' / 'site-packages' / 'pkg'
+            site.mkdir(parents=True, mode=0o700)
+            (site / '__init__.py').write_text('')
+            (site / '__init__.py').chmod(0o600)
+            (site.parent / 'pkg-1.0.dist-info').mkdir(mode=0o700)
         return subprocess.CompletedProcess(argv, 0, stdout, b'')
 
     def commands(self, *prefix):
@@ -113,6 +133,10 @@ class RuntimeSpecification(unittest.TestCase):
         self.assertEqual(planned['runtime']['venv'], '/opt/mop-fresh/venv')
         self.assertEqual(planned['runtime']['pip_extra'], 'server')
         self.assertIn('python3-venv', planned['runtime']['system_packages'])
+        # #811: шаг setup -- это venv-цепочка установки, а не голый
+        # `python3 -m venv`, после которого контроллер всё ещё без Django.
+        self.assertNotIn('python3 -m venv', planned['setup'])
+        self.assertIn('/opt/mop-fresh/venv', planned['setup'])
         artifact = provisioning_artifact(spec)
         self.assertEqual(artifact['runtime']['python'], '>=3.12')
         apt = [task for task in artifact['playbook'][0]['tasks']
@@ -171,8 +195,8 @@ class ProvisioningRuntime(unittest.TestCase):
         executor = Executor()
         self.prepare(executor)
         venv = str(Path(self.tmp.name) / 'venv')
-        created = executor.commands('python3', '-m', 'venv')
-        self.assertEqual(created, [['python3', '-m', 'venv', venv]])
+        created = executor.commands(PYTHON, '-m', 'venv')
+        self.assertEqual(created, [[PYTHON, '-m', 'venv', venv]])
         pip = [argv for argv in executor.calls if argv[:4] == [venv + '/bin/python', '-m', 'pip', 'install']]
         self.assertTrue(pip, 'declared server extra was not installed into the venv')
         self.assertIn('--upgrade', pip[0])
@@ -188,6 +212,16 @@ class ProvisioningRuntime(unittest.TestCase):
         self.assertTrue(Path(venv).is_dir())
         self.assertEqual(Path(venv).stat().st_mode & 0o022, 0,
                          'venv must not be writable by group or other')
+        # #811: каталоги 0755 и bin/* 0755 -- службы читают venv при любом umask.
+        # Права нормализуются после pip: его файлы тоже наследуют umask.
+        for directory in (Path(venv), Path(venv) / 'bin',
+                          Path(venv) / 'lib' / 'python3.13' / 'site-packages' / 'pkg',
+                          Path(venv) / 'lib' / 'python3.13' / 'site-packages' / 'pkg-1.0.dist-info'):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755, str(directory))
+        self.assertEqual((Path(venv) / 'bin' / 'python').stat().st_mode & 0o777, 0o755)
+        self.assertEqual((Path(venv) / 'pyvenv.cfg').stat().st_mode & 0o777, 0o644)
+        self.assertEqual((Path(venv) / 'lib' / 'python3.13' / 'site-packages' / 'pkg' /
+                          '__init__.py').stat().st_mode & 0o777, 0o644)
 
     def test_offline_install_uses_the_declared_wheel_directory(self):
         executor = Executor()
@@ -220,18 +254,163 @@ class ProvisioningRuntime(unittest.TestCase):
 
 
 class VenvReuse(unittest.TestCase):
-    def test_existing_venv_is_reused_instead_of_recreated(self):
+    def made(self, venv):
+        """Принадлежащий установке venv: каталог, pyvenv.cfg, bin/python."""
+        (venv / 'bin').mkdir(parents=True)
+        (venv / 'bin/python').write_text('')
+        (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+
+    def test_existing_installation_owned_venv_is_reused_instead_of_recreated(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-venv-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            self.made(venv)
+            executor = Executor()
+            install_runtime.create_venv(venv, pip_extra='server',
+                                        wheels=None, execute=executor, timeout=60)
+            self.assertEqual(executor.commands(PYTHON, '-m', 'venv'), [],
+                             'an existing venv must not be recreated')
+            self.assertTrue(executor.commands(str(venv / 'bin/python'), '-m', 'pip', 'install'))
+
+    # HYPOTHESIS: preflight от `_absent` не резервирует venv, поэтому чужой
+    # `venv/bin/python` исполняется от root (#811).
+    # SOLUTION: reuse только для venv установки; непроверенный путь отвергается.
+    # RESULT: RED -- старый create_venv зовёт planted-интерпретатор.
+    # STATUS: FIXED — see #811.
+    def test_existing_unverified_interpreter_is_never_executed(self):
         from mop.server import install_runtime
         with tempfile.TemporaryDirectory(prefix='mfi-venv-', dir='/tmp') as directory:
             venv = Path(directory) / 'venv'
             (venv / 'bin').mkdir(parents=True)
-            (venv / 'bin/python').write_text('')
+            planted = venv / 'bin/python'
+            planted.write_text('#!/bin/sh\ntouch planted\n')
+            planted.chmod(0o755)
             executor = Executor()
-            install_runtime.create_venv(venv, pip_extra='server',
-                                        wheels=None, execute=executor, timeout=60)
-            self.assertEqual(executor.commands('python3', '-m', 'venv'), [],
-                             'an existing venv must not be recreated')
-            self.assertTrue(executor.commands(str(venv / 'bin/python'), '-m', 'pip', 'install'))
+            with self.assertRaisesRegex(RuntimeError, 'not installation-owned'):
+                install_runtime.create_venv(venv, pip_extra='server',
+                                            wheels=None, execute=executor, timeout=60)
+            self.assertEqual(executor.calls, [], 'a planted interpreter must never run')
+
+    def test_venv_python_symlink_outside_installation_is_refused(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-venv-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            self.made(venv)
+            (venv / 'bin/python').unlink()
+            (venv / 'bin/python').symlink_to('/bin/true')
+            executor = Executor()
+            with self.assertRaisesRegex(RuntimeError, 'not installation-owned'):
+                install_runtime.create_venv(venv, pip_extra='server',
+                                            wheels=None, execute=executor, timeout=60)
+            self.assertEqual(executor.calls, [])
+
+    def test_manual_setup_does_not_follow_a_symlink_ancestor(self):
+        """Ручной setup идёт тем же dirfd-путём, что установка (#811)."""
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-venv-', dir='/tmp') as directory:
+            outside = Path(directory) / 'outside'
+            outside.mkdir()
+            parent = Path(directory) / 'alias'
+            parent.symlink_to(outside, target_is_directory=True)
+            executor = Executor()
+            with self.assertRaisesRegex(RuntimeError, 'not creatable'):
+                install_runtime.create_venv(parent / 'venv', pip_extra='server',
+                                            wheels=None, execute=executor, timeout=60)
+            self.assertEqual(list(outside.iterdir()), [])
+
+
+# HYPOTHESIS: `_run` отбрасывает stderr, и настоящая причина отказа pip/ensurepip
+# до оператора не доходит (#811).
+# SOLUTION: безопасная последняя строка отказа в сообщении; частичный venv не
+# остаётся молча -- удаляется либо назван retained.
+# RESULT: RED -- сообщение было только `command exited 1`.
+# STATUS: FIXED — see #811.
+class FailureDiagnosis(unittest.TestCase):
+    def failing(self, step, stderr):
+        """Executor: venv создаётся, шаг `step` падает с заданным stderr."""
+        root = Path(tempfile.mkdtemp(prefix='mfi-fail-', dir='/tmp'))
+        self.addCleanup(lambda: __import__('shutil').rmtree(root, ignore_errors=True))
+        venv = root / 'venv'
+        def execute(argv, **kwargs):
+            if argv[1:3] == ['-m', 'venv']:
+                (venv / 'bin').mkdir(parents=True)
+                (venv / 'bin/python').write_text('')
+                (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+                return subprocess.CompletedProcess(argv, 0, b'', b'')
+            if step == argv[-1] or (step == '[server]' and str(argv[-1]).endswith('[server]')):
+                return subprocess.CompletedProcess(argv, 1, b'', stderr)
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        return venv, execute
+
+    def test_missing_build_backend_reason_reaches_the_operator(self):
+        from mop.server import install_runtime
+        venv, execute = self.failing('[server]', b'Collecting mop\n'
+            b'ERROR: Could not find a version that satisfies the requirement setuptools>=40.8.0\n')
+        with self.assertRaises(RuntimeError) as caught:
+            install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                        execute=execute, timeout=60)
+        message = str(caught.exception)
+        self.assertIn('Could not find a version that satisfies the requirement setuptools>=40.8.0', message)
+        self.assertIn('server extra', message)
+        self.assertFalse(venv.exists(), 'an incomplete venv must not be left silently')
+
+    def test_ensurepip_reason_survives_venv_creation(self):
+        from mop.server import install_runtime
+        root = Path(tempfile.mkdtemp(prefix='mfi-fail-', dir='/tmp'))
+        self.addCleanup(lambda: __import__('shutil').rmtree(root, ignore_errors=True))
+        venue = root / 'venv'
+        def execute(argv, **kwargs):
+            if argv[1:3] == ['-m', 'venv']:
+                return subprocess.CompletedProcess(argv, 1, b'',
+                    b'Error: ensurepip is not available: python3-venv is missing\n')
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        with self.assertRaises(RuntimeError) as caught:
+            install_runtime.create_venv(venue, pip_extra='server', source=ROOT,
+                                        execute=execute, timeout=60)
+        self.assertIn('python3-venv is missing', str(caught.exception))
+        self.assertFalse(venue.exists())
+
+    def test_generic_pip_wrapper_text_does_not_hide_the_real_error(self):
+        """pip заканчивает общим subprocess-exited-with-error; причина -- глубже."""
+        from mop.server import install_runtime
+        venv, execute = self.failing('[server]',
+            b'  error: subprocess-exited-with-error\n'
+            b'  \xe2\x94\x82 ERROR: Could not find a version that satisfies '
+            b'the requirement setuptools>=40.8.0 (from versions: none)\n'
+            b'  \xe2\x94\x82 ERROR: No matching distribution found for setuptools>=40.8.0\n'
+            b'  note: This error originates from a subprocess\n'
+            b'error: subprocess-exited-with-error\n')
+        with self.assertRaises(RuntimeError) as caught:
+            install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                        execute=execute, timeout=60)
+        message = str(caught.exception)
+        self.assertIn('No matching distribution found for setuptools>=40.8.0', message)
+        self.assertNotIn('subprocess-exited-with-error', message)
+
+    def test_index_credentials_are_not_copied_into_the_reason(self):
+        from mop.server import install_runtime
+        venv, execute = self.failing('[server]', b'ERROR: failed '
+            b'https://user:s3cret@index.example.invalid/simple\n')
+        with self.assertRaises(RuntimeError) as caught:
+            install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                        execute=execute, timeout=60)
+        self.assertNotIn('s3cret', str(caught.exception))
+
+    def test_existing_venv_is_named_retained_on_failure(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-venv-', dir='/tmp') as directory:
+            venue = Path(directory) / 'venv'
+            VenvReuse().made(venue)
+            def execute(argv, **kwargs):
+                if '[server]' in str(argv[-1]) and 'pip' in argv:
+                    return subprocess.CompletedProcess(argv, 1, b'', b'ERROR: offline wheel missing\n')
+                return subprocess.CompletedProcess(argv, 0, b'', b'')
+            with self.assertRaises(RuntimeError) as caught:
+                install_runtime.create_venv(venue, pip_extra='server', source=ROOT,
+                                            execute=execute, timeout=60)
+            self.assertIn('offline wheel missing', str(caught.exception))
+            self.assertIn('retained', str(caught.exception))
+            self.assertTrue(venue.is_dir())
 
 
 class RenderedUnits(unittest.TestCase):
@@ -260,7 +439,8 @@ class RenderedUnits(unittest.TestCase):
         for role in ('web', 'worker'):
             with self.subTest(role=role):
                 unit = result['units'][role]
-                self.assertIn('ExecStart=' + venv + '/bin/python -m mop.server.controller ', unit)
+                # -P: WorkingDirectory=<state> не попадает в sys.path, как в bin/mop.
+                self.assertIn('ExecStart=' + venv + '/bin/python -P -m mop.server.controller ', unit)
                 self.assertNotIn('ExecStart=' + venv + '/bin/mop server controller', unit)
                 self.assertIn('Environment=MOP_HOST_PYTHON=' + venv + '/bin/python', unit)
 

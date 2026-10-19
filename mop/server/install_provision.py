@@ -40,7 +40,13 @@ def _absent(path):
 
 
 def _reserve(path):
-    """Создать новое дерево через dirfd; preflight не даёт права следовать link."""
+    """Создать новое дерево через dirfd; preflight не даёт права следовать link.
+
+    Возвращает открытый descriptor последнего созданного каталога: venv
+    создаётся только по проверенному inode, а не по пути, чей symlink-предок
+    мог быть подменён между preflight и привилегированным шагом (#811).
+    Закрывает descriptor вызывающий.
+    """
     descriptor = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         parts = Path(path).parts[1:]
@@ -50,8 +56,13 @@ def _reserve(path):
                     info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
                 raise RuntimeError('fresh target has an unsafe ancestor')
             if index == len(parts) - 1:
-                os.mkdir(part, mode=0o700, dir_fd=descriptor)
-                return
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    raise RuntimeError('OS preparation requires a new target tree; '
+                                       'existing paths are never adopted') from None
+                return os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                               dir_fd=descriptor)
             created = False
             try:
                 os.mkdir(part, mode=0o755, dir_fd=descriptor)
@@ -78,6 +89,8 @@ def prepare(data, *, execute=subprocess.run):
     for path in paths.values():
         _absent(path)
     # Venv объявлена установкой (#807), но свежесть дерева -- то же правило.
+    # Preflight _absent -- только проверка; каталог резервируется ниже через
+    # dirfd вместе с остальными деревьями (#811).
     _absent(data['runtime']['venv'])
     for user in users.values():
         for lookup in (pwd.getpwnam, grp.getgrnam):
@@ -89,7 +102,7 @@ def prepare(data, *, execute=subprocess.run):
 
     # Версия python проверяется до первого изменения: установка не
     # даунгрейдит интерпретатор ради старых пакетов (#807).
-    from .install_runtime import create_venv, system_python
+    from .install_runtime import VENV_TIMEOUT, create_venv, system_python
     system_python(data['runtime']['python'], execute=execute)
 
     def command(argv):
@@ -99,53 +112,61 @@ def prepare(data, *, execute=subprocess.run):
             raise RuntimeError('OS preparation failed; partial resources retained; explicit maintenance required')
 
     # mkdir без exist_ok резервирует новые деревья до packages/accounts. Venv
-    # создаётся ниже, после пакетов сборки: python-ldap/ldap3/nkeys/pynacl --
-    # sdist и собираются на месте.
+    # резервируется тем же dirfd-механизмом, что и остальные деревья: её
+    # создание не следует symlink-предку, который мог появиться за время apt
+    # (#811). Сам venv заполняется ниже, после пакетов сборки:
+    # python-ldap/ldap3/nkeys/pynacl -- sdist и собираются на месте.
     for key in ('configuration', 'state', 'backup', 'root_trust'):
-        _reserve(paths[key])
-    # Один apt за прогон: matching postgresql-client и явный список из образа
-    # (#807). Без recommends и без пина версии, чтобы apt не притянул другой
-    # python вместо системного.
-    command(['apt-get', 'install', '-y', '--no-install-recommends',
-             'postgresql-client-' + str(data['database']['major']),
-             *data['runtime']['system_packages']])
-    for user in users.values():
-        command(['groupadd', '--system', user])
-        command(['useradd', '--system', '--gid', user, '--no-create-home',
-                 '--shell', '/usr/sbin/nologin', '--password', '!', user])
-    for base in ('configuration', 'state'):
-        for role, user in users.items():
-            path = Path(paths[base]) / role
-            path.mkdir(mode=0o700)
-            command(['chown', user + ':' + user, str(path)])
-        Path(paths[base]).chmod(0o755)
-    from .installation import CREDENTIAL_CLIENT_ROLES, shared_directories, specification
-    # Frontend-группа не читает private config/state credential-службы (0700).
-    for role in CREDENTIAL_CLIENT_ROLES:
-        command(['usermod', '--append', '--groups', users['credentials'], users[role]])
-    for item in shared_directories(specification(data)):
-        shared = Path(item['path'])
-        shared.mkdir(mode=int(item['mode'], 8))
-        shared.chmod(int(item['mode'], 8))
-        command(['chown', item['owner'] + ':' + item['group'], str(shared)])
-    signing = secrets.token_hex(32).encode('ascii')
-    for role in ('maintenance', 'web', 'worker', 'gateway', 'credentials'):
-        path = Path(paths['configuration']) / role / 'django.key'
-        _key(path, signing)
-        command(['chown', users[role] + ':' + users[role], str(path)])
-    # Maintenance recovery и runtime credential имеют разные private custody,
-    # но одинаковый root fingerprint; frontends не получают ни bytes, ни traversal.
-    root = secrets.token_bytes(32)
-    _key(Path(paths['root_trust']) / 'root.key', root)
-    credential_root = Path(paths['configuration']) / 'credentials' / 'root.key'
-    _key(credential_root, root)
-    command(['chown', users['credentials'] + ':' + users['credentials'], str(credential_root)])
-    for key in ('backup', 'root_trust'):
-        command(['chown', '-R', users['maintenance'] + ':' + users['maintenance'], paths[key]])
-    # Venv -- последним: пакеты сборки и заголовки уже стоят, а провал pip не
-    # откатывает OS, которую установка уже объявила частичной.
-    create_venv(Path(data['runtime']['venv']), pip_extra=data['runtime']['pip_extra'],
-                wheels=data['runtime'].get('wheels'), execute=execute, timeout=1800)
+        os.close(_reserve(paths[key]))
+    venv_descriptor = _reserve(data['runtime']['venv'])
+    try:
+        # Один apt за прогон: matching postgresql-client и явный список из образа
+        # (#807). Без recommends и без пина версии, чтобы apt не притянул другой
+        # python вместо системного.
+        command(['apt-get', 'install', '-y', '--no-install-recommends',
+                 'postgresql-client-' + str(data['database']['major']),
+                 *data['runtime']['system_packages']])
+        for user in users.values():
+            command(['groupadd', '--system', user])
+            command(['useradd', '--system', '--gid', user, '--no-create-home',
+                     '--shell', '/usr/sbin/nologin', '--password', '!', user])
+        for base in ('configuration', 'state'):
+            for role, user in users.items():
+                path = Path(paths[base]) / role
+                path.mkdir(mode=0o700)
+                command(['chown', user + ':' + user, str(path)])
+            Path(paths[base]).chmod(0o755)
+        from .installation import CREDENTIAL_CLIENT_ROLES, shared_directories, specification
+        # Frontend-группа не читает private config/state credential-службы (0700).
+        for role in CREDENTIAL_CLIENT_ROLES:
+            command(['usermod', '--append', '--groups', users['credentials'], users[role]])
+        for item in shared_directories(specification(data)):
+            shared = Path(item['path'])
+            shared.mkdir(mode=int(item['mode'], 8))
+            shared.chmod(int(item['mode'], 8))
+            command(['chown', item['owner'] + ':' + item['group'], str(shared)])
+        signing = secrets.token_hex(32).encode('ascii')
+        for role in ('maintenance', 'web', 'worker', 'gateway', 'credentials'):
+            path = Path(paths['configuration']) / role / 'django.key'
+            _key(path, signing)
+            command(['chown', users[role] + ':' + users[role], str(path)])
+        # Maintenance recovery и runtime credential имеют разные private custody,
+        # но одинаковый root fingerprint; frontends не получают ни bytes, ни traversal.
+        root = secrets.token_bytes(32)
+        _key(Path(paths['root_trust']) / 'root.key', root)
+        credential_root = Path(paths['configuration']) / 'credentials' / 'root.key'
+        _key(credential_root, root)
+        command(['chown', users['credentials'] + ':' + users['credentials'], str(credential_root)])
+        for key in ('backup', 'root_trust'):
+            command(['chown', '-R', users['maintenance'] + ':' + users['maintenance'], paths[key]])
+        # Venv -- последним: пакеты сборки и заголовки уже стоят, а провал pip не
+        # откатывает OS, которую установка уже объявила частичной. Каталог --
+        # именно зарезервированный: create_venv сверяет inode (#811).
+        create_venv(Path(data['runtime']['venv']), pip_extra=data['runtime']['pip_extra'],
+                    wheels=data['runtime'].get('wheels'), execute=execute,
+                    timeout=VENV_TIMEOUT, reserved=venv_descriptor)
+    finally:
+        os.close(venv_descriptor)
 
 
 def _key(path, value):
@@ -161,6 +182,7 @@ def apply(spec, *, apply=False, execute=subprocess.run):
     if apply is not True:
         raise ValueError('OS provisioning requires explicit apply')
     data = document(spec)
+    from .install_runtime import VENV_TIMEOUT
     if data['database']['topology'] != 'remote':
         raise RuntimeError('provisioned PostgreSQL requires explicit server TLS and network provisioning')
     # Explicit apply запускает именно выбранный installer source от root;
@@ -172,7 +194,7 @@ def apply(spec, *, apply=False, execute=subprocess.run):
         result = execute([*prefix, 'python3', '-I', '-c', launcher,
                           str(Path(__file__).resolve().parents[2])],
                          input=json.dumps(data).encode(), stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, timeout=900, check=False)
+                         stderr=subprocess.PIPE, timeout=VENV_TIMEOUT + 300, check=False)
     except (OSError, subprocess.SubprocessError):
         raise RuntimeError('OS preparation unavailable; partial resources retained; explicit maintenance required') from None
     if result.returncode:

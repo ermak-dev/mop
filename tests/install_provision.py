@@ -3,12 +3,16 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
 import _lib  # noqa: F401
 import hermetic  # noqa: F401
 from _fresh_install_fixture import FreshPlanFixture, ROOT
+
+# #811: интерпретатор -- абсолютный установленный путь, не `python3` из PATH.
+PYTHON = os.path.realpath(sys.executable)
 
 
 # HYPOTHESIS: provisioning описывает OS resources, но не имеет конечного apply.
@@ -53,7 +57,9 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertNotIn('shell', kwargs)
         document = json.loads(kwargs['input'])
         self.assertEqual(document['database']['topology'], 'remote')
-        self.assertEqual(kwargs['timeout'], 900)
+        # #811: внешний kill должен быть достижим -- он больше внутреннего
+        # venv-бюджета (1800 s), а не 900 s при 1800 s внутри.
+        self.assertGreater(kwargs['timeout'], 1800)
         self.assertTrue(result['os_prepared'])
         self.assertFalse(result['services_started'])
         self.assertFalse(result['installation_accepted'])
@@ -156,7 +162,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         paths = document['paths']
         # #807: venv создаёт сама установка, а не отдельный ручной setup.
         self.assertTrue(Path(document['runtime']['venv']).is_dir(), 'installation owns the venv')
-        self.assertIn(['python3', '-m', 'venv', document['runtime']['venv']], calls)
+        self.assertIn([PYTHON, '-m', 'venv', document['runtime']['venv']], calls)
         for role in document['identities']:
             for base in ('configuration', 'state'):
                 self.assertEqual((Path(paths[base]) / role).stat().st_mode & 0o777, 0o700)
@@ -252,8 +258,140 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
              patch.object(module.grp, 'getgrnam', side_effect=KeyError), \
              patch.object(module, '_absent', side_effect=race):
             with self.assertRaises((OSError, RuntimeError)):
-                module.prepare(document, execute=lambda *a, **k: subprocess.CompletedProcess(a, 0, b'3.13.5\n' if 'version_info' in a[-1] else b''))
+                module.prepare(document, execute=lambda *a, **k: subprocess.CompletedProcess(
+                    a[0], 0, b'3.13.5\n' if 'version_info' in a[0][-1] else b''))
         self.assertEqual(list(outside.iterdir()), [])
+
+    # #811: прежняя lambda получала `(argv,)` как `a`, поэтому a[-1] был
+    # списком argv, stdout пуст, system_python отказывал `found unusable`, и
+    # тест был зелёным, не доходя до `_reserve`. Здесь гейт получает свой
+    # version output, а снятая защита _reserve краснит соседнюю проверку.
+    # STATUS: FIXED — see #811.
+    def test_parent_replacement_reaches_the_reserve_gate(self):
+        module = self.module()
+        self.document()
+        parent = Path(self.tmp.name) / 'new-parent'
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir(mode=0o700)
+        for key in self.spec['paths']:
+            self.spec['paths'][key] = str(parent / key)
+        self.spec['runtime'] = {**self.spec['runtime'], 'venv': str(parent / 'venv')}
+        from mop.server.installation import specification
+        document = module.document(specification(self.spec))
+        absent = module._absent
+        count = 0
+        def gate(argv, **kwargs):
+            # Версия системного python доходит до гейта: иначе тест умирает
+            # на `found unusable` и никогда не входит в _reserve.
+            return subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
+        def race(path):
+            nonlocal count
+            absent(path)
+            count += 1
+            # После preflight venv: резерв идёт до apt и обязан увидеть symlink.
+            if count == len(document['paths']) + 1:
+                parent.symlink_to(outside, target_is_directory=True)
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError), \
+             patch.object(module, '_absent', side_effect=race):
+            with self.assertRaises((OSError, RuntimeError)):
+                module.prepare(document, execute=gate)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_reserve_refuses_a_symlink_ancestor_and_holds_the_created_inode(self):
+        """Защита, без которой гонка выше снова получает чужие артефакты.
+
+        Тест краснеет, если `_reserve` заменить на mkdir по пути: symlink
+        принимается, а возвращённый descriptor не совпадает с inode каталога.
+        """
+        module = self.module()
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir(mode=0o700)
+        parent = Path(self.tmp.name) / 'new-parent'
+        parent.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises((OSError, RuntimeError)):
+            descriptor = module._reserve(str(parent / 'configuration'))
+            if descriptor is not None:
+                os.close(descriptor)
+        self.assertEqual(list(outside.iterdir()), [])
+        clean = Path(self.tmp.name) / 'clean-parent' / 'configuration'
+        descriptor = module._reserve(str(clean))
+        self.assertIsInstance(descriptor, int,
+                              'reserve must hand back the created directory descriptor')
+        try:
+            self.assertEqual(os.fstat(descriptor).st_ino, os.lstat(clean).st_ino)
+        finally:
+            os.close(descriptor)
+
+    def test_venv_is_reserved_by_dirfd_before_any_privileged_step(self):
+        module = self.module()
+        document = module.document(self.document())
+        events = []
+        reserve = module._reserve
+        def observe(path):
+            events.append(('reserve', path))
+            return reserve(path)
+        def execute(argv, **kwargs):
+            events.append(('execute', argv))
+            return subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError), \
+             patch.object(module, '_reserve', side_effect=observe):
+            module.prepare(document, execute=execute)
+        reserved = [path for kind, path in events if kind == 'reserve']
+        self.assertIn(document['runtime']['venv'], reserved,
+                      'the venv tree must be reserved with the dirfd mechanism (#811)')
+        venv_at = events.index(('reserve', document['runtime']['venv']))
+        apt_at = next(index for index, (kind, argv) in enumerate(events)
+                      if kind == 'execute' and argv[:1] == ['apt-get'])
+        self.assertLess(venv_at, apt_at,
+                        'the venv reservation must precede apt')
+
+    def test_existing_venv_path_is_refused_before_changes(self):
+        module = self.module()
+        document = module.document(self.document())
+        venv = Path(document['runtime']['venv'])
+        venv.mkdir()
+        calls = []
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError):
+            with self.assertRaisesRegex(RuntimeError, 'new target'):
+                module.prepare(document, execute=lambda *a, **k: calls.append(a))
+        self.assertEqual(calls, [])
+
+    def test_swap_after_reservation_is_caught_by_the_reserved_inode(self):
+        module = self.module()
+        self.document()
+        base = Path(self.tmp.name) / 'base'
+        base.mkdir(mode=0o1777)
+        base.chmod(0o1777)
+        outside = Path(self.tmp.name) / 'outside'
+        (outside / 'venv' / 'bin').mkdir(parents=True)
+        marker = outside / 'executed-as-root'
+        (outside / 'venv' / 'bin' / 'python').write_text(
+            '#!/bin/sh\ntouch %s\nexit 0\n' % marker)
+        self.spec['runtime'] = {**self.spec['runtime'], 'venv': str(base / 'outer' / 'venv')}
+        from mop.server.installation import specification
+        document = module.document(specification(self.spec))
+        def execute(argv, **kwargs):
+            if argv[:1] == ['apt-get']:
+                # Окно apt: зарезервированный предок подменяется symlink'ом.
+                os.rename(base / 'outer', base / 'outer.reserved')
+                os.symlink(outside, base / 'outer')
+            return subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError):
+            with self.assertRaises((OSError, RuntimeError)):
+                module.prepare(document, execute=execute)
+        self.assertFalse(marker.exists(), 'the planted interpreter ran as root')
+        self.assertEqual([item.name for item in (outside / 'venv').iterdir()], ['bin'])
 
     def test_service_composition_uses_purpose_bootstrap_and_native_tls_without_claiming_runtime(self):
         from mop.server import installation
@@ -342,7 +480,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertIn('User=' + self.spec['identities']['credentials'], unit)
         self.assertIn('Group=' + self.spec['identities']['credentials'], unit)
         self.assertIn('-m mop.cli server credentials --bootstrap ' + config + '/bootstrap.json', unit)
-        self.assertIn(self.spec['runtime']['venv'] + '/bin/python -m mop.cli server credentials', unit)
+        self.assertIn(self.spec['runtime']['venv'] + '/bin/python -P -m mop.cli server credentials', unit)
         self.assertIn('--socket ' + socket_dir + '/service.sock --key-id root-v1', unit)
         self.assertIn('--socket-group 1944 --peer-uid 1945 --peer-uid 1946', unit)
         self.assertIn('ReadWritePaths=' + self.spec['paths']['state'] + '/credentials ' + socket_dir, unit)

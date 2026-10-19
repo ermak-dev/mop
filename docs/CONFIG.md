@@ -145,11 +145,24 @@ and pip installs the declared server extra into the private venv; Debian's
 older `python3-django` (4.2) is not a substitute. `--user` and
 `--break-system-packages` are never used on the controller path.
 
+The venv path is reserved with the same dirfd mechanism as the other
+installation trees, before apt and the accounts, and the venv is created only
+from that reserved directory; a symlink ancestor swapped in after the preflight
+cannot receive the created tree, and an existing `venv/bin/python` is trusted
+only for an installation-owned venv (owner and the reserved inode). The
+interpreter comes from the running installer's absolute `sys.executable`, not
+from a second `python3` lookup in PATH (#811). A failed venv/pip/ensurepip step
+carries the last meaningful stderr line into the error — index credentials are
+redacted — and a freshly created incomplete venv is removed; an existing one is
+named as retained.
+
 Rendered controller units execute the declared interpreter directly
-(`ExecStart=<venv>/bin/python -m mop.server.controller ...`) and pass it to the
-isolated HOST entries as `Environment=MOP_HOST_PYTHON=<venv>/bin/python` — the
-process-environment channel of #789/#804, never `node.env` and never a literal
-of the machine.
+(`ExecStart=<venv>/bin/python -P -m mop.server.controller ...`) and pass it to
+the isolated HOST entries as `Environment=MOP_HOST_PYTHON=<venv>/bin/python` —
+the process-environment channel of #789/#804, never `node.env` and never a
+literal of the machine. `-P` keeps `WorkingDirectory=<state>` out of
+`sys.path`, as `bin/mop` does; the venv directories and `bin/*` are 0755, so
+the service accounts read and execute it under any installer umask (#811).
 
 `MOP_CONTROLLER_BOOTSTRAP` is the one explicit absolute path to a private JSON
 file. It is a startup selector, not a general environment-over-ORM precedence
@@ -358,7 +371,7 @@ bootstrap emits no contents and never replaces an existing file. The plural
 `render` resolves the declared credential primary UID/GID and exact web/worker
 UIDs from provisioned OS accounts, refusing missing, root or aliased identities
 and a mismatched socket group. Its credential unit invokes the existing
-`mop server credentials` lifecycle (`<venv>/bin/python -m mop.cli server
+`mop server credentials` lifecycle (`<venv>/bin/python -P -m mop.cli server
 credentials --bootstrap ... --socket ... --key-id root-v1
 --socket-group GID --peer-uid WEB_UID --peer-uid WORKER_UID`), with the
 same derived endpoint as the clients. Only this explicit binding removes

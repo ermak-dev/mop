@@ -144,7 +144,10 @@ def plan(spec):
                             'roles': {role: 8 for role in DATABASE_ROLES}},
             'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS],
             'runtime': dict(spec.runtime),
-            'setup': 'python3 -m venv ' + dict(spec.runtime)['venv'],
+            # #811: не голый `python3 -m venv`: шаг venv -- это interpreter,
+            # pip upgrade, extra и import check внутри установки.
+            'setup': 'installation venv step (interpreter, pip upgrade, server extra, import check) at ' +
+                     dict(spec.runtime)['venv'],
             'provisioned_database': 'OS PostgreSQL package/service provisioning requires operator execution',
             'maintenance': 'direct configured remote PostgreSQL; HTTP and NATS are not prerequisites',
             'restore': 'native matching-major tools; stopped services; reconcile effects before enabling',
@@ -401,7 +404,9 @@ def _credential_unit(spec, *, credential_uid, credential_gid, frontend_uids):
     config, state = paths['configuration'] + '/credentials', paths['state'] + '/credentials'
     # Интерпретатор объявляет установка: venv из runtime, не литерал хоста (#807).
     python = dict(spec.runtime)['venv'] + '/bin/python'
-    command = (python + ' -m mop.cli server credentials'
+    # -P: WorkingDirectory=<state> не попадает в sys.path, как в bin/mop
+    # (#811); state принадлежит роли, но cwd не должен подменять модули.
+    command = (python + ' -P -m mop.cli server credentials'
                ' --bootstrap ' + config + '/bootstrap.json' +
                ' --socket ' + socket_dir + '/service.sock --key-id root-v1 --socket-group ' + str(credential_gid))
     for role in CREDENTIAL_CLIENT_ROLES:
@@ -441,7 +446,7 @@ def service_artifact(spec, values, *, credential_uid=None, credential_gid=None, 
     units = {}
     for role in ('web', 'worker'):
         config, state = paths['configuration'] + '/' + role, paths['state'] + '/' + role
-        command = python + ' -m mop.server.controller '
+        command = python + ' -P -m mop.server.controller '
         if role == 'web':
             command += ('serve --host ' + settings['http_bind'] + ' --port ' + str(settings['http_port']) +
                         ' --hostname ' + origin.hostname + ' --tls-cert ' + config + '/tls.crt' +
