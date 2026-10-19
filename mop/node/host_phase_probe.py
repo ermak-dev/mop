@@ -10,7 +10,8 @@ SOURCES = ('mop/node/host_body.py', 'mop/node/host_phase_supervisor.py', 'mop/no
     'mop/node/host_phases.py', 'mop/node/host_phase_manifest.py',
     'mop/node/host_phase_source.py', 'mop/node/host_inputs.py', 'mop/node/host_input_files.py',
     'mop/common/credentials.py', 'mop/common/soul.py', 'mop/common/busnames.py',
-    'mop/common/paths.py', 'mop/common/bootstrap_envelope.py', 'mop/common/installed_content.py')
+    'mop/common/paths.py', 'mop/common/bootstrap_envelope.py', 'mop/common/installed_content.py',
+    'mop/common/initial_transfer.py')
 
 DOCKERFILE = '''FROM python:3.12-slim-trixie
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus passwd git openssh-server openssl iproute2 postgresql-17 > /dev/null && rm -rf /var/lib/apt/lists/*
