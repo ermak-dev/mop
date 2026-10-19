@@ -1929,6 +1929,17 @@ bound. A transport export is not physical reconciliation or readiness evidence.
 No .env, bus.json, ready.json or previous login fallback is supported.
 ```
 
+#### mop host-body-mcp
+
+```text
+mop host-body-mcp --scope unit --deadline UTC: serve installed body-only standby MCP
+
+Internal isolated entry for the fixed host lifecycle broker. The immutable
+installation derives the private bootstrap/context siblings from the exact scope.
+No caller-supplied path, token, API origin, environment or command is accepted.
+A checkout or ordinary non-isolated Python invocation refuses before handoff.
+```
+
 #### mop host-root
 
 ```text

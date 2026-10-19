@@ -13,7 +13,7 @@ BODY_SOURCES = (
     'mop/node/host_phase_source.py', 'mop/node/host_phases.py', 'mop/node/host_inputs.py',
     'mop/node/host_input_files.py', 'mop/node/http_execution.py', 'mop/common/initialcreate.py',
     'mop/common/bootstrap_envelope.py', 'mop/common/credentials.py', 'mop/common/soul.py',
-    'mop/common/busnames.py', 'mop/common/paths.py',
+    'mop/common/busnames.py', 'mop/common/paths.py', 'mop/common/installed_content.py',
 )
 
 
