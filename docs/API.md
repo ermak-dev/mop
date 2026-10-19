@@ -1437,6 +1437,16 @@ fresh native proof; no frame, uncertain write or pending queue is replayed.
 Conversation change, native loss, authority closure or EOF clears the holder and
 closes the owned tasks, bridge callback, WSS and HTTPS resources. Cleanup failures
 remain explicit; cancellation is not assumed to prove quiescence.
+Teardown also owns an in-flight startup (#786): closing fences new resources
+before its first yield, cancels and collects the startup task, and drains the
+single HTTP worker through a stable reference to its own future: a queued
+request is cancelled, a running one is awaited and its thread joined within the
+five-second budget. A worker still alive past that budget, an unexpected cleanup
+error, or any task, callback, WSS, HTTPS session or executor still live afterwards
+is a recorded refusal that every later `aclose()` and `wait_closed()` raises
+again; success is the proven quiet state, not the absence of exceptions. A
+`start()` interrupted by another closer is refused with `ClientError`; a cancelled
+caller keeps its own cancellation.
 
 The finite `Client` methods cover endpoint registration/presence/renew/retire,
 report intent/submission, result-by-ID and sender-key recovery. The existing REST
