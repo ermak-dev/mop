@@ -81,7 +81,17 @@ class UnknownLanding(ClientError):
         super().__init__('landing outcome unknown; observe exact revision and owner, never retake automatically')
 
 
+class UnknownProjectLimit(ClientError):
+    """Catalogue CAS не имеет request_id; наблюдение не заменяет receipt."""
+
+    def __init__(self, intent):
+        self.intent = intent
+        super().__init__('project limit outcome unknown; observe the project, do not repeat automatically')
+
+
 def _unknown_submission(command):
+    if type(command) is ProjectLimitIntent:
+        return UnknownProjectLimit(command)
     return UnknownLanding(command) if type(command) is LandingIntent else UnknownSubmission(command)
 
 
@@ -314,7 +324,7 @@ class PreparedCommand:
         _identity(self.epoch)
         _key(self.request_id)
         admission_deadline(self.not_after)
-        _require(self.action in ("restart", "send", "wipe", "stop", "delete") and type(self.fresh) is bool and
+        _require(self.action in ("restart", "send", "dispatch", "wipe", "stop", "delete") and type(self.fresh) is bool and
                  type(self.notify_when_idle) is bool and self.priority in ("now", "next", "later") and
                  type(self.wait_seconds) is int and 0 <= self.wait_seconds <= 60)
         if self.action in ("restart", "wipe", "stop", "delete"):
@@ -330,7 +340,7 @@ class PreparedCommand:
     def body(self) -> bytes:
         if self.action == "restart":
             params = {"fresh": self.fresh}
-        elif self.action == "send":
+        elif self.action in ("send", "dispatch"):
             params = {"message": self.message, "priority": self.priority,
                       "wait_seconds": self.wait_seconds, "notify_when_idle": self.notify_when_idle}
         else:
@@ -338,7 +348,7 @@ class PreparedCommand:
         data = {"schema_version": 1, "epoch": self.epoch, "request_id": self.request_id,
                 "incarnation": self.target.incarnation, "expected_revision": self.target.revision,
                 "not_after": self.not_after, "params": params}
-        if self.action == "send":
+        if self.action in ("send", "dispatch"):
             data["target_id"] = self.target.id
         return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
@@ -500,6 +510,33 @@ class Project:
     origin: str
     revision: str
     puppet_limit: int | None
+
+
+def project_limit_binding(project_id, limit, expected_revision=None):
+    _key(project_id)
+    _require(limit is None or type(limit) is int and 0 <= limit <= 2147483647)
+    if expected_revision is not None:
+        _revision(expected_revision)
+        _require(1 <= int(expected_revision) <= 9223372036854775807)
+
+
+@dataclass(frozen=True)
+class ProjectLimitIntent:
+    project: Project
+    limit: int | None
+    expected_revision: str
+
+    def __post_init__(self):
+        _require(type(self.project) is Project)
+        project_limit_binding(self.project.id, self.limit, self.expected_revision)
+        _require(type(self.project.origin) is str and 0 < len(self.project.origin) <= 2048)
+        if self.project.revision != self.expected_revision:
+            raise ClientError('project detail revision differs from explicit expected revision')
+
+    @property
+    def body(self):
+        return json.dumps({'origin': self.project.origin, 'puppet_limit': self.limit,
+            'expected_revision': self.expected_revision}, separators=(',', ':'), ensure_ascii=True).encode('ascii')
 
 
 @dataclass(frozen=True)
@@ -724,7 +761,7 @@ def _operation(data, epoch):
 # Только известные безопасные категории. Неправильный envelope/сырой upstream
 # переводится один раз; известная библиотечная причина сохраняется буквально.
 _CODES = frozenset(("validation_error", "not_authenticated", "authentication_failed", "invalid_token",
-                    "permission_denied", "not_found", "request_conflict", "revision_conflict",
+                    "permission_denied", "not_found", "request_conflict", "revision_conflict", "catalog_conflict",
                     "incarnation_conflict", "resource_conflict", "epoch_conflict", "stale_epoch",
                     "result_expired", "cursor_expired", "invalid_cursor", "reset_required",
                     "rate_limited", "throttled", "unavailable", "authority_unavailable",
@@ -890,6 +927,13 @@ class Client:
                                not_after, message=message, priority=priority,
                                wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
 
+    def prepare_dispatch(self, target: Target, *, epoch: str, not_after: str, message: str,
+                         request_id: str | None = None, priority: str = "next", wait_seconds: int = 0,
+                         notify_when_idle: bool = False) -> PreparedCommand:
+        return PreparedCommand("dispatch", target, epoch, new_request_id(request_id),
+                               not_after, message=message, priority=priority,
+                               wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
+
     def prepare_wipe(self, target: Target, *, epoch: str, not_after: str,
                      request_id: str | None = None) -> PreparedCommand:
         return PreparedCommand("wipe", target, epoch, new_request_id(request_id), not_after)
@@ -934,7 +978,7 @@ class Client:
         deadline = time.monotonic() + min(limits.request_timeout, budget or limits.request_timeout)
         url = urlsplit(self._context.origin)
         connection = response = None
-        possible_post = failed = False
+        possible_mutation = failed = False
         headers = {"Authorization": "Token " + self._context.token, "Accept": "application/json",
                    "Accept-Encoding": "identity", "Cache-Control": "no-store"}
         if body is not None:
@@ -949,7 +993,7 @@ class Client:
             connection.debuglevel = 0
             connection.connect()
             connection.sock = _DeadlineSocket(connection.sock, deadline, limits.read_timeout)
-            possible_post = method == "POST"
+            possible_mutation = method in ("POST", "PUT")
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
             status = response.status
@@ -994,7 +1038,7 @@ class Client:
                         failed = True
         # Вне except: __context__ тоже не удерживает сырое исключение с секретами.
         if failed:
-            if command is not None and possible_post:
+            if command is not None and possible_mutation:
                 raise _unknown_submission(command)
             raise TransportError("control API transport unavailable")
         data = _json(raw)
@@ -1024,7 +1068,7 @@ class Client:
                     "wipe": f"/api/v1/puppets/{command.target.id}/commands/wipe",
                     "stop": f"/api/v1/puppets/{command.target.id}/commands/stop-job",
                     "delete": f"/api/v1/puppets/{command.target.id}/commands/delete",
-                    "send": "/api/v1/messages"}[command.action]
+                    "send": "/api/v1/messages", "dispatch": "/api/v1/dispatches"}[command.action]
         # Слишком большой локальный ввод — ещё не неизвестный admission.
         body = command.body
         _require(len(body) <= self._limits.max_request_bytes)
@@ -1327,6 +1371,33 @@ class Client:
         if failed:
             raise ProtocolError("invalid project response")
         return result
+
+    @staticmethod
+    def prepare_project_limit(project: Project, limit: int | None, *,
+                              expected_revision: str | None = None) -> ProjectLimitIntent:
+        _require(type(project) is Project)
+        return ProjectLimitIntent(project, limit,
+            project.revision if expected_revision is None else expected_revision)
+
+    def set_project_limit(self, intent: ProjectLimitIntent) -> Project:
+        _require(type(intent) is ProjectLimitIntent)
+        body = intent.body
+        _require(len(body) <= self._limits.max_request_bytes)
+        try:
+            status, data = self._exchange('PUT', '/api/v1/projects/' + intent.project.id,
+                body, command=intent)
+        except ProtocolError:
+            raise UnknownProjectLimit(intent) from None
+        try:
+            _require(status == 200 and type(data.get('schema_version')) is int and data['schema_version'] == 1)
+            result = self._project(data)
+            revision = int(intent.expected_revision) + (intent.project.puppet_limit != intent.limit)
+            _require(result.id == intent.project.id and result.origin == intent.project.origin
+                and result.name == intent.project.name and result.puppet_limit == intent.limit
+                and result.revision == str(revision))
+            return result
+        except (ClientError, KeyError, TypeError):
+            raise UnknownProjectLimit(intent) from None
 
     @staticmethod
     def _snapshot(data):
