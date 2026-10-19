@@ -4,12 +4,10 @@
 самих checks. Это переходный адаптер, не второй счётчик результатов.
 Hook-модуль без assert: PYTEST_DONT_REWRITE позволяет вложенный session.
 """
-import os
-from pathlib import Path
-import signal
-import subprocess
-import sys
+import shutil
 import tempfile
+
+from _pytest_process import OwnedProcess
 
 from _pytest_runtime import load_pytest
 pytest = load_pytest()
@@ -50,41 +48,37 @@ def pytest_pycollect_makemodule(module_path, parent):
 
 class LegacyFile(pytest.File):
     def collect(self):
-        yield LegacyCheck.from_parent(self, name='check')
+        yield pytest.Function.from_parent(self, name='check', callobj=legacy_check)
 
 
-class LegacyCheck(pytest.Item):
-    def runtest(self):
-        helper = Path(__file__).with_name('_pytest_legacy.py')
-        # Parent владеет TMPDIR даже при SIGKILL ребёнка: его atexit тогда
-        # не исполняется. Чужие process groups/каталоги не рассматриваются.
-        with tempfile.TemporaryDirectory(prefix='mp-') as directory:
-            env = hermetic.child_env({'TMPDIR': directory})
-            process = subprocess.Popen([sys.executable, str(helper), str(self.path)],
-                cwd=self.path.parent.parent, env=env, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, start_new_session=True)
-            completed = False
-            try:
-                output, _ = process.communicate()
-                completed = True
-            finally:
-                # И успешный entrypoint мог оставить потомка с закрытым PIPE.
-                # Группа принадлежит только этому item; прямой ребёнок reaped.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                if not completed:
-                    process.communicate()
-            if process.returncode:
-                reporter = self.config.pluginmanager.getplugin('terminalreporter')
-                reporter.write_sep('-', f'FAILED {self.path.name} (exit {process.returncode})')
-                reporter.write_line(output.rstrip('\n'))
-                reporter._tw.flush()
-                pytest.fail(f'{self.path.name} exited {process.returncode}', pytrace=False)
+@pytest.fixture
+def owned_legacy_process(request):
+    # Каталог удаляется только после доказанного завершения owner. При отказе
+    # он остаётся для диагностики; никакой atexit не сносит pending child HOME.
+    directory = tempfile.mkdtemp(prefix='mp-')
+    try:
+        process = OwnedProcess(request.node.path, cwd=request.node.path.parent.parent,
+                               env=hermetic.child_env({'TMPDIR': directory}))
+    except BaseException:
+        shutil.rmtree(directory)
+        raise
+    try:
+        yield process
+    finally:
+        process.close()
+        shutil.rmtree(directory)
 
-    def reportinfo(self):
-        return self.path, 0, self.path.name
+
+def legacy_check(request, owned_legacy_process):
+    process = owned_legacy_process
+    output, _ = process.communicate()
+    if process.returncode:
+        reporter = request.config.pluginmanager.getplugin('terminalreporter')
+        path = request.node.path
+        reporter.write_sep('-', f'FAILED {path.name} (exit {process.returncode})')
+        reporter.write_line(output.rstrip('\n'))
+        reporter._tw.flush()
+        pytest.fail(f'{path.name} exited {process.returncode}', pytrace=False)
 
 
 @pytest.hookimpl(hookwrapper=True)

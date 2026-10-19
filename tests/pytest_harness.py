@@ -257,33 +257,34 @@ class NativeInventory(unittest.TestCase):
 
 
 class ProcessOwnership(unittest.TestCase):
-    def test_successful_child_cannot_leave_an_owned_process_group_or_temp_root(self):
+    # Здесь контракт pytest fixture; настоящие группы/detach/reap проверяет
+    # pytest_ownership, а не fake PID, который раньше принимали за эксперимент.
+    def fixture(self, process):
         import _pytest_plugin
-        import signal
+        request = SimpleNamespace(node=SimpleNamespace(path=ROOT / 'tests/state.py'))
+        with patch.object(_pytest_plugin, 'OwnedProcess', return_value=process) as start:
+            fixture = _pytest_plugin.owned_legacy_process.__wrapped__(request)
+            self.assertIs(next(fixture), process)
+        return fixture, Path(start.call_args.kwargs['env']['TMPDIR'])
+
+    def test_successful_child_cannot_leave_an_owned_process_group_or_temp_root(self):
         from unittest.mock import Mock
-        process = SimpleNamespace(pid=43210, returncode=0,
-            communicate=Mock(side_effect=[('', None), ValueError('I/O operation on closed file')]))
-        with patch.object(_pytest_plugin.subprocess, 'Popen', return_value=process) as start, \
-                patch.object(_pytest_plugin.os, 'killpg') as kill:
-            _pytest_plugin.LegacyCheck.runtest(SimpleNamespace(path=ROOT / 'tests/state.py'))
-        self.assertTrue(start.call_args.kwargs['start_new_session'])
-        self.assertEqual(process.communicate.call_count, 1, 'completed PIPE must not be read twice')
-        kill.assert_called_once_with(process.pid, signal.SIGKILL)
-        self.assertFalse(Path(start.call_args.kwargs['env']['TMPDIR']).exists())
+        process = Mock()
+        fixture, directory = self.fixture(process)
+        process.close.side_effect = lambda: self.assertTrue(directory.exists(), 'HOME removed before join')
+        fixture.close()
+        process.close.assert_called_once_with()
+        self.assertFalse(directory.exists())
 
     def test_cancelled_reader_kills_only_its_group_reaps_and_removes_its_temp_root(self):
-        import _pytest_plugin
-        import signal
         from unittest.mock import Mock
-        process = SimpleNamespace(pid=43211, returncode=-signal.SIGKILL,
-            communicate=Mock(side_effect=[KeyboardInterrupt('owned cancellation'), ('', None)]))
-        with patch.object(_pytest_plugin.subprocess, 'Popen', return_value=process) as start, \
-                patch.object(_pytest_plugin.os, 'killpg') as kill:
-            with self.assertRaisesRegex(KeyboardInterrupt, 'owned cancellation'):
-                _pytest_plugin.LegacyCheck.runtest(SimpleNamespace(path=ROOT / 'tests/state.py'))
-        kill.assert_called_once_with(process.pid, signal.SIGKILL)
-        self.assertEqual(process.communicate.call_count, 2)
-        self.assertFalse(Path(start.call_args.kwargs['env']['TMPDIR']).exists())
+        process = Mock()
+        fixture, directory = self.fixture(process)
+        process.close.side_effect = lambda: self.assertTrue(directory.exists(), 'HOME removed before cancel/join')
+        with self.assertRaisesRegex(KeyboardInterrupt, 'owned cancellation'):
+            fixture.throw(KeyboardInterrupt('owned cancellation'))
+        process.close.assert_called_once_with()
+        self.assertFalse(directory.exists())
 
 
 if __name__ == '__main__':
