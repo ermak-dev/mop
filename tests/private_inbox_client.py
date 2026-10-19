@@ -21,6 +21,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -36,6 +38,20 @@ from _own_session_fixture import own_session
 
 def key():
     return str(uuid4())
+
+
+# Зелёный `mop dev test` молчит: opt-in файл сохраняет те же resource
+# snapshots как evidence зелёного прогона. На assertions не влияет, имя без
+# MOP_ — hermetic его не стирает.
+EVIDENCE = os.environ.get('PRIVATE_INBOX_EVIDENCE')
+
+
+def evidence(label, value):
+    line = label+' '+json.dumps(value)
+    print(line, flush=True)
+    if EVIDENCE:
+        with open(EVIDENCE, 'a') as out:
+            out.write(line+'\n')
 
 
 class Reports(unittest.TestCase):
@@ -445,6 +461,13 @@ class Receiver(unittest.IsolatedAsyncioTestCase):
         self.native_mode = 'delivered'
         self.permit = asyncio.Event(); self.permit.set()
         self.wire_seen = []
+        self.http_entered = {name: asyncio.Event() for name in ('capabilities', 'registration')}
+        self.http_release = {name: asyncio.Event() for name in self.http_entered}
+        for event in self.http_release.values(): event.set()
+        self.http_calls = dict.fromkeys(self.http_entered, 0)
+        self.ws_entered, self.ws_release = asyncio.Event(), asyncio.Event()
+        self.bound_entered, self.bound_release = asyncio.Event(), asyncio.Event()
+        self.ws_release.set(); self.bound_release.set()
         async def native(reader, writer):
             try:
                 line = await reader.readline()
@@ -463,6 +486,9 @@ class Receiver(unittest.IsolatedAsyncioTestCase):
         os.chmod(self.native_path, 0o600)
         self.own = own_session(self.native_path, self.external)
         async def capabilities(request):
+            self.http_calls['capabilities'] += 1
+            self.http_entered['capabilities'].set()
+            await self.http_release['capabilities'].wait()
             return self.web.json_response(dict(schema_version=1, catalogue_version=1, epoch=self.epoch,
                 actor=self.actor,
                 scope=dict(project_id=self.project, node_id=None, client_id=self.client_id),
@@ -470,6 +496,9 @@ class Receiver(unittest.IsolatedAsyncioTestCase):
         async def register(request):
             body = await request.json()
             self.assertEqual(body['external_session_id'], self.external)
+            self.http_calls['registration'] += 1
+            self.http_entered['registration'].set()
+            await self.http_release['registration'].wait()
             return self.web.json_response(dict(schema_version=1, endpoint=dict(id=self.endpoint,
                 session_id=key(), address='private:'+self.endpoint, project_id=self.project,
                 external_session_id=self.external, display_name='same display',
@@ -481,6 +510,10 @@ class Receiver(unittest.IsolatedAsyncioTestCase):
                 message_id=body['message_id'], operation_request_id=body['operation_request_id'], state='queued', idle=False)), status=202)
         async def ws(request):
             self.assertEqual(request.headers['Authorization'], 'Token fixture-private-token')
+            self.ws_entered.set()
+            await self.ws_release.wait()
+            if request.transport is None or request.transport.is_closing():
+                return self.web.Response(status=503)
             socket = self.web.WebSocketResponse(compress=False, max_msg_size=8192)
             await socket.prepare(request)
             self.socket = socket
@@ -488,9 +521,16 @@ class Receiver(unittest.IsolatedAsyncioTestCase):
             try:
                 ready = inbox_decode((await socket.receive()).data, direction='client')
                 self.assertEqual(ready['type'], 'peer_ready')
+                self.bound_entered.set()
+                await self.bound_release.wait()
+                if socket.closed or request.transport is None or request.transport.is_closing():
+                    return socket
                 await socket.send_str(inbox_encode(dict(schema_version=1, type='bound', endpoint_id=self.endpoint,
                     external_session_id=self.external, epoch=self.epoch, generation='1', connection_nonce=self.nonce, lease_seconds=15)))
-                self.assertEqual(inbox_decode((await socket.receive()).data, direction='client')['type'], 'bound_received')
+                raw = await socket.receive()
+                if raw.type != __import__('aiohttp').WSMsgType.TEXT:
+                    return socket
+                self.assertEqual(inbox_decode(raw.data, direction='client')['type'], 'bound_received')
                 async for raw in socket:
                     if raw.type != __import__('aiohttp').WSMsgType.TEXT: break
                     value = inbox_decode(raw.data, direction='client'); self.wire_seen.append(value)
@@ -544,6 +584,470 @@ class Receiver(unittest.IsolatedAsyncioTestCase):
             text='private-marker', priority='now', notify_when_idle=idle, reply_address=None), **changes)
         await self.socket.send_str(inbox_encode(dict(schema_version=1, type='delivery', connection_nonce=self.nonce, frame=frame)))
         return frame
+
+    # HYPOTHESIS (#786): startup не принадлежит cleanup; после HTTP await
+    # sweep уже прошёл session=None, а mutable future успел стать None.
+    # SPEC: реальные TLS registration/startup barriers, а не post-close flags;
+    # success требует quiet session/executor/thread/callback/task/holder.
+    # SOLUTION: startup — owned task, который cleanup отменяет и собирает;
+    # _check() после каждого await startup; локальная ссылка на future и
+    # ограниченный join настоящего worker; success — доказанное состояние
+    # (_remaining), неожиданный сбой — refusal на каждом waiter; start(),
+    # прерванный чужим close, — ClientError, отменённый вызывающий — cancel.
+    # RESULT: на 987e3900 эти проверки RED три раза из трёх (None.done,
+    # session после close, 1 live worker, повторный close = success; holder,
+    # tasks и native writes = 0). Ужесточение exit/proof RED и на первой
+    # попытке repair (CancelledError у неотменённого start, closed-success при
+    # шаге без эффекта); затем GREEN, snapshots печатаются до repair.
+    # STATUS: FIXED — see #786
+    async def repair_startup_fixture(self, owner, executor):
+        # Только аварийная уборка теста ПОСЛЕ snapshot/assertion: RED не должен
+        # оставлять настоящий worker/socket. Эти действия не служат evidence.
+        for event in self.http_release.values(): event.set()
+        self.ws_release.set(); self.bound_release.set()
+        future = owner._http_future
+        if future is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), 5)
+            except (Exception, asyncio.CancelledError):
+                pass
+        if owner._ws is not None:
+            await owner._ws.close()
+        if owner._session is not None:
+            await owner._session.close()
+        await owner.bridge.aclose()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        self.owner = self.module.InboxOwner(self.context, self.own, client_id=self.client_id,
+            project_id=self.project, display_name='same display', current=lambda: self.current)
+
+    def shutdown_snapshot(self, owner, executor, callback, startup=None):
+        return dict(closed=owner._closed.is_set(), error=owner._close_error,
+            session_closed=owner._session is None or owner._session.closed,
+            ws_closed=owner._ws is None or owner._ws.closed,
+            executor_released=owner._executor is None,
+            executor_shutdown=executor is None or executor._shutdown,
+            live_workers=sum(thread.is_alive() for thread in executor._threads) if executor else 0,
+            future_drained=owner._http_future is None or owner._http_future.done(),
+            tasks=len(owner.tasks), startup_done=startup is None or startup.done(),
+            callback_gone=callback is None or not callback.exists(),
+            bridge_stopped=owner.bridge._stopped, bridge_server_closed=owner.bridge._server is None,
+            bridge_tasks=len(owner.bridge._tasks | owner.bridge._outbound),
+            bridge_writers=len(owner.bridge._writers), bridge_pending=len(owner.bridge._pending),
+            bridge_idle=len(owner.bridge._idle), holder=owner.holder() is not None,
+            native_writes=self.frames.qsize())
+
+    def assert_start_exit(self, value, *, cancelled):
+        if cancelled:
+            self.assertIsInstance(value, asyncio.CancelledError)
+        else:
+            self.assertIsInstance(value, api.ClientError,
+                'close interrupting startup must refuse start(), not cancel an uncancelled caller')
+            self.assertIsNone(value.__context__, 'refusal keeps no raw context')
+
+    def assert_shutdown_quiet(self, snapshot):
+        self.assertEqual(snapshot, dict(closed=True, error=None, session_closed=True, ws_closed=True,
+            executor_released=True, executor_shutdown=True, live_workers=0, future_drained=True,
+            tasks=0, startup_done=True, callback_gone=True, bridge_stopped=True,
+            bridge_server_closed=True, bridge_tasks=0, bridge_writers=0, bridge_pending=0,
+            bridge_idle=0, holder=False, native_writes=0))
+
+    async def http_close_race(self, phase, *, cancel_start=False, cancel_close=False):
+        owner = self.owner
+        entered, release = self.http_entered[phase], self.http_release[phase]
+        entered.clear(); release.clear()
+        waiting = asyncio.Event()
+        wrap = asyncio.wrap_future
+        watched, wraps = None, 0
+        def observe(future, *args, **kwargs):
+            nonlocal wraps
+            if future is watched:
+                wraps += 1
+                waiting.set()
+            return wrap(future, *args, **kwargs)
+        import aiohttp
+        session_factory = aiohttp.ClientSession
+        created_after_close = []
+        def session(*args, **kwargs):
+            created_after_close.append(owner._closing)
+            return session_factory(*args, **kwargs)
+        start = asyncio.create_task(owner.start())
+        await asyncio.wait_for(entered.wait(), 3)
+        executor, callback = owner._executor, owner.bridge._callback
+        watched = owner._http_future
+        self.assertIsNotNone(watched)
+        self.assertFalse(watched.done(), 'barrier must own the actual unfinished HTTP worker')
+        self.assertEqual(sum(thread.is_alive() for thread in executor._threads), 1)
+        close = None
+        try:
+            with patch.object(asyncio, 'wrap_future', observe), patch.object(aiohttp, 'ClientSession', session):
+                if cancel_start:
+                    start.cancel()
+                else:
+                    close = asyncio.create_task(owner.aclose())
+                await asyncio.wait_for(waiting.wait(), 3)
+                premature = start.done() if cancel_start else close.done()
+                self.assertIsNone(owner.holder())
+                self.assertFalse(self.frames.qsize())
+                if cancel_close:
+                    close.cancel()
+                    await asyncio.gather(close, return_exceptions=True)
+                    close = asyncio.create_task(owner.aclose())
+                release.set()
+                results = await asyncio.wait_for(asyncio.gather(start,
+                    *([close] if close is not None else []), return_exceptions=True), 10)
+                repeats = await asyncio.wait_for(asyncio.gather(owner.aclose(), owner.wait_closed(),
+                    return_exceptions=True), 10)
+                snapshot = self.shutdown_snapshot(owner, executor, callback, start)
+                evidence('registration-close resources:', dict(phase=phase,
+                    cancel_start=cancel_start, cancel_close=cancel_close,
+                    exits=[type(value).__name__ for value in results],
+                    repeat_exits=[type(value).__name__ for value in repeats],
+                    allocations_after_close=created_after_close, **snapshot))
+            self.assertFalse(premature, 'successful drain cannot precede actual worker completion')
+            self.assertGreaterEqual(wraps, 1)
+            self.assertTrue(all(value is None for value in repeats), repeats)
+            if close is not None:
+                self.assertIsNone(results[-1], results)
+            # Отменённый вызывающий получает свой cancel; startup, прерванный
+            # чужим close, — отказ, а не CancelledError у неотменённой задачи.
+            self.assert_start_exit(results[0], cancelled=cancel_start)
+            self.assertFalse(any(created_after_close), 'startup allocated a session after closing')
+            self.assert_shutdown_quiet(snapshot)
+        finally:
+            release.set()
+            await asyncio.gather(start, *([close] if close is not None else []), return_exceptions=True)
+            await self.repair_startup_fixture(owner, executor)
+
+    async def test_registration_close_actual_tls_worker_three_reproductions(self):
+        # Три независимые регистрации: исходный None.done и поздняя session
+        # наблюдаются до любого repair. Никакого native acceptance здесь нет.
+        for attempt in range(3):
+            with self.subTest(attempt=attempt):
+                await self.http_close_race('registration')
+        self.assertEqual(self.http_calls, dict(capabilities=3, registration=3))
+        self.assertEqual(self.connected, 0)
+
+    async def test_close_during_actual_capability_http_worker(self):
+        await self.http_close_race('capabilities')
+        self.assertEqual(self.http_calls, dict(capabilities=1, registration=0))
+
+    async def test_start_cancellation_during_actual_registration_retains_worker(self):
+        await self.http_close_race('registration', cancel_start=True)
+
+    async def test_cancelled_close_waiter_cannot_abandon_registration_cleanup(self):
+        await self.http_close_race('registration', cancel_close=True)
+
+    async def test_cancel_after_registration_before_wss_still_owns_startup(self):
+        owner = self.owner
+        entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        real_http = owner._http
+        completed = 0
+        async def completed_http(function):
+            nonlocal completed
+            value = await real_http(function)
+            completed += 1
+            if completed == 2:
+                entered.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    # Реальный HTTP уже закончен. Даже кооперативный finally,
+                    # уступивший loop после cancel, не должен создать session.
+                    cancelled.set()
+                    await release.wait()
+            return value
+        with patch.object(owner, '_http', completed_http):
+            start = asyncio.create_task(owner.start())
+            await asyncio.wait_for(entered.wait(), 3)
+            executor, callback = owner._executor, owner.bridge._callback
+            start.cancel()
+            await asyncio.wait_for(cancelled.wait(), 3)
+            close = asyncio.create_task(owner.aclose())
+            await asyncio.sleep(0)
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(start, close, return_exceptions=True), 10)
+        snapshot = self.shutdown_snapshot(owner, executor, callback, start)
+        evidence('post-registration cancellation resources:', dict(
+            exits=[type(value).__name__ for value in results], **snapshot))
+        try:
+            self.assertIsNone(results[1], results)
+            self.assert_start_exit(results[0], cancelled=True)
+            self.assertIsNone(owner._session, 'no session may be created beyond the closing fence')
+            self.assertEqual(self.connected, 0)
+            self.assert_shutdown_quiet(snapshot)
+        finally:
+            await self.repair_startup_fixture(owner, executor)
+
+    async def test_native_startup_close_interleavings_do_not_allocate_after_sweep(self):
+        for phase in ('native_ready', 'callback_ready', 'bound_native_ready'):
+            with self.subTest(phase=phase):
+                owner = self.owner
+                entered, release, cleaning = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                name = 'start' if phase == 'callback_ready' else 'ready'
+                real_operation, real_close = getattr(owner.bridge, name), owner.bridge.aclose
+                calls = 0
+                async def operation():
+                    nonlocal calls
+                    result = await real_operation()
+                    calls += 1
+                    if calls == (2 if phase == 'bound_native_ready' else 1):
+                        entered.set()
+                        await release.wait()
+                    return result
+                async def observed_close():
+                    cleaning.set()
+                    await real_close()
+                start = close = executor = None
+                try:
+                    with patch.object(owner.bridge, name, operation), patch.object(owner.bridge, 'aclose', observed_close):
+                        start = asyncio.create_task(owner.start())
+                        await asyncio.wait_for(entered.wait(), 3)
+                        executor, callback = owner._executor, owner.bridge._callback
+                        close = asyncio.create_task(owner.aclose())
+                        await asyncio.wait_for(cleaning.wait(), 3)
+                        release.set()
+                        results = await asyncio.wait_for(asyncio.gather(start, close, return_exceptions=True), 10)
+                    executor = executor or owner._executor
+                    snapshot = self.shutdown_snapshot(owner, executor, callback, start)
+                    evidence('native startup close resources:', dict(phase=phase,
+                        exits=[type(value).__name__ for value in results], **snapshot))
+                    self.assertIsNone(results[1], results)
+                    self.assert_start_exit(results[0], cancelled=False)
+                    self.assert_shutdown_quiet(snapshot)
+                finally:
+                    release.set()
+                    await asyncio.gather(*(task for task in (start, close) if task is not None), return_exceptions=True)
+                    await self.repair_startup_fixture(owner, executor or owner._executor)
+
+    async def test_actual_wss_startup_close_interleavings(self):
+        for phase, entered, release in (('handshake', self.ws_entered, self.ws_release),
+                ('binding', self.bound_entered, self.bound_release)):
+            with self.subTest(phase=phase):
+                owner = self.owner
+                entered.clear(); release.clear()
+                cleaning = asyncio.Event()
+                real_close = owner.bridge.aclose
+                async def observed_close():
+                    cleaning.set()
+                    await real_close()
+                start = close = executor = None
+                try:
+                    with patch.object(owner.bridge, 'aclose', observed_close):
+                        start = asyncio.create_task(owner.start())
+                        await asyncio.wait_for(entered.wait(), 3)
+                        executor, callback = owner._executor, owner.bridge._callback
+                        close = asyncio.create_task(owner.aclose())
+                        await asyncio.wait_for(cleaning.wait(), 3)
+                        release.set()
+                        results = await asyncio.wait_for(asyncio.gather(start, close, return_exceptions=True), 10)
+                    snapshot = self.shutdown_snapshot(owner, executor, callback, start)
+                    evidence('WSS startup close resources:', dict(phase=phase,
+                        exits=[type(value).__name__ for value in results], **snapshot))
+                    self.assertIsNone(results[1], results)
+                    self.assert_start_exit(results[0], cancelled=False)
+                    self.assert_shutdown_quiet(snapshot)
+                finally:
+                    release.set()
+                    await asyncio.gather(*(task for task in (start, close) if task is not None), return_exceptions=True)
+                    await self.repair_startup_fixture(owner, executor)
+
+    async def test_node_report_authority_cannot_own_or_borrow_human_receiver(self):
+        from mop.cli import _mcp
+        scope = api.CapabilityScope(project_id=self.project, client_id=self.client_id)
+        owner = self.owner
+        await owner.start()
+        holder, callback, session = owner.holder(), owner.bridge._callback, owner._session
+        self.actor = dict(user_id=2, kind='service', human_owner_id=None, node_id=key(), grant_id=None)
+        with self.assertRaises(api.ClientError):
+            await asyncio.to_thread(_mcp.Management, self.context, scope, inbox=owner)
+        self.assertIs(owner.holder(), holder, 'a refused borrower cannot tear down the launcher owner')
+        self.assertIs(owner._session, session)
+        self.assertFalse(session.closed)
+        self.assertTrue(callback.exists())
+        other = self.module.InboxOwner(self.context, self.own, client_id=self.client_id,
+            project_id=self.project, display_name='node cannot receive', current=lambda: self.current)
+        try:
+            with self.assertRaises(api.ClientError):
+                await other.start()
+            self.assertIsNone(other.endpoint)
+            self.assertIsNone(other.holder())
+            self.assertIsNone(other._executor)
+            self.assertFalse(other.tasks)
+            self.assertEqual(self.http_calls['registration'], 1, 'Node cannot register another receiver')
+        finally:
+            await other.aclose()
+        self.assertFalse(_mcp.PRIVATE_INBOX['available'])
+        self.assertIs(owner.holder(), holder)
+
+    async def test_close_before_start_cannot_allocate_any_resource(self):
+        owner = self.owner
+        await owner.aclose()
+        with self.assertRaises((api.ClientError, RuntimeError)):
+            await owner.start()
+        self.assert_shutdown_quiet(self.shutdown_snapshot(owner, None, None))
+        self.assertEqual(self.http_calls, dict(capabilities=0, registration=0))
+
+    async def test_unexpected_executor_cleanup_error_is_retained_on_every_waiter(self):
+        owner = self.owner
+        await owner.start()
+        executor, callback = owner._executor, owner.bridge._callback
+        real_shutdown = executor.shutdown
+        def failing_shutdown(*args, **kwargs):
+            real_shutdown(wait=True, cancel_futures=True)
+            raise OSError('fixture-private-token')
+        try:
+            with patch.object(executor, 'shutdown', failing_shutdown):
+                first = await asyncio.gather(owner.aclose(), return_exceptions=True)
+            later = await asyncio.gather(owner.aclose(), owner.wait_closed(), return_exceptions=True)
+            snapshot = self.shutdown_snapshot(owner, executor, callback)
+            evidence('unexpected cleanup failure resources:', dict(
+                exits=[type(value).__name__ for value in [*first, *later]], **snapshot))
+            for error in [*first, *later]:
+                self.assertIsInstance(error, RuntimeError)
+                self.assertNotIn('fixture-private-token', str(error))
+                self.assertIsNone(error.__context__)
+                self.assertEqual(str(error), owner._close_error)
+            self.assertTrue(owner._close_error)
+            self.assertEqual(owner.failure, owner._close_error)
+            self.assertEqual(snapshot['live_workers'], 0)
+            self.assertTrue(snapshot['session_closed'])
+            self.assertTrue(snapshot['callback_gone'])
+            self.assertFalse(snapshot['holder'])
+        finally:
+            await self.repair_startup_fixture(owner, executor)
+
+    async def test_close_step_without_effect_is_not_successful_closure(self):
+        # HYPOTHESIS (#786): success выводится из отсутствия исключения; шаг,
+        # вернувшийся без эффекта, оставляет live callback/session за closed.
+        for name, attribute in (('native bridge', 'aclose'), ('HTTPS session', 'close')):
+            with self.subTest(resource=name):
+                owner = self.owner
+                await owner.start()
+                executor, callback = owner._executor, owner.bridge._callback
+                target = owner.bridge if name == 'native bridge' else owner._session
+                async def without_effect():
+                    return None
+                try:
+                    with patch.object(target, attribute, without_effect):
+                        first = await asyncio.gather(owner.aclose(), return_exceptions=True)
+                    later = await asyncio.gather(owner.aclose(), owner.wait_closed(), return_exceptions=True)
+                    snapshot = self.shutdown_snapshot(owner, executor, callback)
+                    evidence('close without effect resources:', dict(resource=name,
+                        exits=[type(value).__name__ for value in [*first, *later]], **snapshot))
+                    for error in [*first, *later]:
+                        self.assertIsInstance(error, RuntimeError, 'a live resource is not successful closure')
+                        self.assertEqual(str(error), owner._close_error)
+                    self.assertIn(name, owner._close_error)
+                    self.assertEqual(owner.failure, owner._close_error)
+                    self.assertFalse(snapshot['holder'])
+                    self.assertEqual(snapshot['live_workers'], 0)
+                    self.assertEqual(snapshot['native_writes'], 0)
+                finally:
+                    await self.repair_startup_fixture(owner, executor)
+
+    async def test_queued_http_worker_cancel_is_joined_before_close_success(self):
+        # HYPOTHESIS: cancel_futures=True отменяет ещё queued admission, но
+        # initializer настоящего executor остаётся живым до release.
+        owner = self.owner
+        loop = asyncio.get_running_loop()
+        entered, shutting_down = asyncio.Event(), asyncio.Event()
+        release = threading.Event()
+        real_executor = self.module.ThreadPoolExecutor
+        def executor_factory(*args, **kwargs):
+            def initialize():
+                loop.call_soon_threadsafe(entered.set)
+                if not release.wait(10):
+                    raise AssertionError('test did not release actual worker initializer')
+            return real_executor(*args, initializer=initialize, **kwargs)
+        start = close = executor = None
+        try:
+            with patch.object(self.module, 'ThreadPoolExecutor', executor_factory):
+                start = asyncio.create_task(owner.start())
+                await asyncio.wait_for(entered.wait(), 3)
+                executor, callback = owner._executor, owner.bridge._callback
+                future = owner._http_future
+                self.assertFalse(future.running())
+                real_shutdown = executor.shutdown
+                def observed_shutdown(*args, **kwargs):
+                    shutting_down.set()
+                    return real_shutdown(*args, **kwargs)
+                with patch.object(executor, 'shutdown', observed_shutdown):
+                    close = asyncio.create_task(owner.aclose())
+                    await asyncio.wait_for(shutting_down.wait(), 3)
+                    self.assertFalse(close.done())
+                    self.assertEqual(sum(thread.is_alive() for thread in executor._threads), 1)
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(start, close, return_exceptions=True), 10)
+            snapshot = self.shutdown_snapshot(owner, executor, callback, start)
+            evidence('queued HTTP cancellation resources:', dict(
+                exits=[type(value).__name__ for value in results], **snapshot))
+            self.assertTrue(future.cancelled())
+            self.assertIsNone(results[1], results)
+            self.assert_start_exit(results[0], cancelled=False)
+            self.assert_shutdown_quiet(snapshot)
+            self.assertEqual(self.http_calls, dict(capabilities=0, registration=0))
+        finally:
+            release.set()
+            await asyncio.gather(*(task for task in (start, close) if task is not None), return_exceptions=True)
+            await self.repair_startup_fixture(owner, executor)
+
+    async def test_actual_worker_beyond_drain_budget_cannot_report_success(self):
+        owner = self.owner
+        release, returned = threading.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        real_register = api.Client.register_endpoint
+        def late_register(client, **kwargs):
+            value = real_register(client, **kwargs)
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                if not release.wait(10):
+                    raise AssertionError('test did not release its actual registration worker')
+                return value
+            finally:
+                returned.set()
+        executor = None
+        start = None
+        try:
+            with patch.object(api.Client, 'register_endpoint', late_register):
+                start = asyncio.create_task(owner.start())
+                await asyncio.wait_for(entered.wait(), 3)
+                executor, callback = owner._executor, owner.bridge._callback
+                began = time.monotonic()
+                result = await asyncio.wait_for(asyncio.gather(owner.aclose(), return_exceptions=True), 10)
+                elapsed = time.monotonic()-began
+                snapshot = self.shutdown_snapshot(owner, executor, callback)
+                repeats = await asyncio.gather(owner.aclose(), owner.wait_closed(), return_exceptions=True)
+                evidence('bounded late worker resources:', dict(elapsed=round(elapsed, 3),
+                    exits=[type(value).__name__ for value in [*result, *repeats]], **snapshot))
+                self.assertLess(elapsed, 10)
+                self.assertFalse(returned.is_set(), 'test must observe a real worker still inside registration')
+                self.assertEqual(snapshot['live_workers'], 1)
+                self.assertTrue(snapshot['closed'])
+                self.assertTrue(snapshot['error'], 'a live worker is not successful closure')
+                for error in [*result, *repeats]:
+                    self.assertIsInstance(error, RuntimeError)
+                    self.assertEqual(str(error), owner._close_error)
+                self.assertFalse(snapshot['holder'])
+                self.assertTrue(snapshot['session_closed'])
+                self.assertEqual(snapshot['native_writes'], 0)
+                release.set()
+                start_exit, = await asyncio.wait_for(asyncio.gather(start, return_exceptions=True), 5)
+                self.assert_start_exit(start_exit, cancelled=False)
+                deadline = loop.time()+2
+                while any(thread.is_alive() for thread in executor._threads) and loop.time() < deadline:
+                    await asyncio.sleep(.01)
+                self.assertTrue(returned.is_set())
+                self.assertTrue(executor._shutdown, 'even failed drain must arrange eventual worker exit')
+                self.assertFalse(any(thread.is_alive() for thread in executor._threads))
+                with self.assertRaisesRegex(RuntimeError, 'shutdown incomplete'):
+                    await owner.wait_closed()
+        finally:
+            release.set()
+            if start is not None:
+                await asyncio.gather(start, return_exceptions=True)
+            await self.repair_startup_fixture(owner, executor)
 
     async def test_actual_wss_guard_one_native_write_and_matched_idle_after_receipt(self):
         self.assertIsNone(self.owner.holder())

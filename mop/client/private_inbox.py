@@ -56,12 +56,14 @@ class InboxOwner:
         self._senders = 0
         self._executor = None
         self._http_future = None
+        self._startup = self._cleanup_task = None
         self.failure = None
         self._close_error = None
 
     @property
     def tasks(self):
-        return frozenset(task for task in self._tasks if not task.done())
+        owned = self._tasks | {task for task in (self._startup, self._cleanup_task) if task is not None}
+        return frozenset(task for task in owned if not task.done())
 
     def _check(self):
         if self._closing or self.current() is not True:
@@ -80,13 +82,15 @@ class InboxOwner:
 
     async def _http(self, function):
         # Единственный worker и одна admission; cancel не забывает underlying I/O.
+        self._check()
         if self._http_future is not None:
             raise RuntimeError('private HTTP admission is occupied')
-        self._http_future = self._executor.submit(function)
+        future = self._executor.submit(function)
+        self._http_future = future
         try:
-            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(self._http_future)), 5)
+            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), 5)
         finally:
-            if self._http_future.done():
+            if future.done() and self._http_future is future:
                 self._http_future = None
 
     def _spawn(self, coroutine):
@@ -103,16 +107,38 @@ class InboxOwner:
         return task
 
     async def start(self):
-        if self._started:
+        if self._started or self._closing:
             raise RuntimeError('private inbox owner is single use')
         self._started = True
+        # Отдельный resource task: cleanup отменяет и собирает startup, но не
+        # ждёт вызывающего start(), который сам ожидает тот же cleanup.
+        self._startup = asyncio.create_task(self._start())
+        try:
+            return await asyncio.shield(self._startup)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                # Отменён сам вызывающий: его cancel не теряется, cleanup
+                # всё равно собран до выхода.
+                await asyncio.shield(self._begin_cleanup())
+                raise
+        except api.ClientError:
+            await asyncio.shield(self._begin_cleanup())
+            raise
+        # Startup отменил чужой close: неотменённый вызывающий получает отказ,
+        # а не CancelledError. Ошибка cleanup остаётся у aclose/wait_closed.
+        await asyncio.shield(self._begin_cleanup())
+        raise api.ClientError('private inbox closed during startup')
+
+    async def _start(self):
         failed = False
         try:
             # Импорт declared dependency только здесь, management остаётся stdlib.
             import aiohttp
             self._check()
             await self.bridge.ready()
+            self._check()
             await self.bridge.start()
+            self._check()
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='mop-inbox')
             limits = api.Limits(connect_timeout=2, read_timeout=2, request_timeout=5)
             client = api.Client(self.context, limits=limits)
@@ -124,6 +150,7 @@ class InboxOwner:
             self._check()
             self.endpoint = await self._http(lambda: client.register_endpoint(client_id=self.client_id,
                 project_id=self.project_id, external_session_id=self.own.external_session_id, display_name=self.display_name))
+            self._check()
             tls = ssl.create_default_context(cafile=self.context.ca_file)
             tls.minimum_version = ssl.TLSVersion.TLSv1_2
             # aiohttp следует redirects; trace отказывает до следующего запроса.
@@ -149,15 +176,14 @@ class InboxOwner:
                 await self.bridge.ready()
                 self._check()
                 await self._send('bound_received', unbound=True)
+            self._check()
             self._bound = True
             self._runner = self._spawn(self._run())
             self._spawn(self._monitor())
             self._spawn(self._idle())
         except (api.ClientError, asyncio.CancelledError):
-            await self._cleanup()
             raise
         except Exception:
-            await self._cleanup()
             failed = True
         if failed:
             # Как у HTTPS client: даже __context__ не удерживает raw exception.
@@ -233,7 +259,8 @@ class InboxOwner:
         except (Exception,):
             self.failure = 'private inbox closed without replay'
         finally:
-            await self._cleanup()
+            # Runner не ждёт cleanup, который обязан собрать сам runner.
+            self._begin_cleanup()
 
     async def _deliver(self, value):
         message = value['message_id']; row = self._records[message]
@@ -304,13 +331,72 @@ class InboxOwner:
                     row['idle'] = True
                     await self._send('idle_observed', delivery_id=row['id'], message_id=message)
 
-    async def _cleanup(self):
-        if self._closing:
-            # Второй waiter не отменяет владельца cleanup и не объявляет drain.
-            await self._closed.wait()
+    def _begin_cleanup(self):
+        if self._cleanup_task is None:
+            # Fence ставится до первого yield и до отмены startup/runner.
+            self._closing = True
+            self._bound = False
+            self._cleanup_task = asyncio.create_task(self._cleanup())
+        return self._cleanup_task
+
+    async def _drain_http(self, failures):
+        executor, future = self._executor, self._http_future
+        if executor is None:
             return
-        self._closing = True
-        self._bound = False
+        deadline = asyncio.get_running_loop().time()+5
+        shutdown = False
+        try:
+            # Даже при deadline настоящий worker получит sentinel после I/O.
+            # wait=True здесь блокировал бы event loop без конечного join.
+            executor.shutdown(wait=False, cancel_futures=True)
+            shutdown = True
+        except Exception:
+            failures.append('HTTP executor')
+        if future is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)),
+                    max(0, deadline-asyncio.get_running_loop().time()))
+            except (Exception, asyncio.CancelledError):
+                if asyncio.current_task().cancelling():
+                    raise
+                if not future.done():
+                    failures.append('HTTP worker')
+                elif not future.cancelled():
+                    # Request failure не означает живой worker; причина самого
+                    # запроса конечная, raw transport exception не сохраняется.
+                    self.failure = 'private inbox HTTP request failed during shutdown'
+            if future.done() and self._http_future is future:
+                self._http_future = None
+        # CPython ThreadPoolExecutor: admission уже закрыта, submit/startup
+        # собраны, новых _threads больше не будет. done Future не равен exit.
+        threads = tuple(executor._threads)
+        while any(thread.is_alive() for thread in threads):
+            remaining = deadline-asyncio.get_running_loop().time()
+            if remaining <= 0:
+                if 'HTTP worker' not in failures: failures.append('HTTP worker')
+                return
+            await asyncio.sleep(min(.01, remaining))
+        for thread in threads:
+            thread.join(timeout=0)
+        if shutdown and self._http_future is None:
+            self._executor = None
+
+    def _remaining(self):
+        # Success — доказанное состояние, а не отсутствие исключений по пути:
+        # шаг, вернувшийся без эффекта, не выдаёт live resource за closed.
+        # Cancel внутри finally bridge-callback оставляет в его set уже done
+        # task: это запись, а не live work, поэтому решает task.done().
+        bridge, current = self.bridge, asyncio.current_task()
+        return [name for name, live in (
+            ('tasks', bool(self.tasks - {current})),
+            ('native bridge', bridge._server is not None or bridge._callback is not None
+                or any(not task.done() for task in (bridge._tasks | bridge._outbound) - {current})),
+            ('WSS', self._ws is not None and not self._ws.closed),
+            ('HTTPS session', self._session is not None and not self._session.closed),
+            ('HTTP worker', self._http_future is not None),
+            ('HTTP executor', self._executor is not None)) if live]
+
+    async def _cleanup(self):
         failures = []
         async def close_one(name, operation):
             try:
@@ -328,24 +414,23 @@ class InboxOwner:
                     failures.append('tasks')
                 for task in done:
                     if not task.cancelled(): task.exception()
+            # Startup собран до sweep: он больше не создаст session/callback.
             await close_one('native bridge', self.bridge.aclose)
             if self._ws is not None:
                 await close_one('WSS', self._ws.close)
             if self._session is not None:
                 await close_one('HTTPS session', self._session.close)
-            if self._http_future is not None:
-                await close_one('HTTP worker', lambda: asyncio.shield(asyncio.wrap_future(self._http_future)))
-                if self._http_future.done():
-                    self._http_future = None
-            if self._executor is not None and self._http_future is None:
-                self._executor.shutdown(wait=True, cancel_futures=True)
-                self._executor = None
+            await self._drain_http(failures)
+        except (Exception, asyncio.CancelledError):
+            # Неожиданный сбой тоже terminal refusal, не closed-success.
+            failures.append('cleanup')
+        finally:
+            failures += [name for name in self._remaining() if name not in failures]
             if not failures:
                 self._records.clear()
             else:
                 self._close_error = 'private inbox shutdown incomplete: '+', '.join(failures)
                 self.failure = self._close_error
-        finally:
             self._closed.set()
 
     async def wait_closed(self):
@@ -354,21 +439,7 @@ class InboxOwner:
             raise RuntimeError(self._close_error)
 
     async def aclose(self):
-        self._bound = False
-        if self._closing:
-            await self._closed.wait()
-        elif self._runner is not None and self._runner is not asyncio.current_task() and not self._runner.done():
-            self._runner.cancel()
-            try:
-                # Cancel вызывающего waiter не прерывает finally владельца.
-                await asyncio.shield(self._runner)
-            except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
-                    raise
-            finally:
-                # Runner мог ещё не получить первый timeslice и не войти в try.
-                await self._cleanup()
-        else:
-            await self._cleanup()
+        # Ни первый, ни повторный waiter не владеет cancel cleanup task.
+        await asyncio.shield(self._begin_cleanup())
         if self._close_error:
             raise RuntimeError(self._close_error)
