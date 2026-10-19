@@ -61,8 +61,8 @@ class OwnedProcessDirectory:
     Владение ровно своим mkdtemp, не произвольным путём вызывающего. Receipt
     проверяет process owner; этот lifetime не сигналит PID и не удаляет DB.
     """
-    def __init__(self, script):
-        self.path = tempfile.mkdtemp(prefix='mp-')
+    def __init__(self, script, *, parent=None):
+        self.path = tempfile.mkdtemp(prefix='mp-', dir=parent)
         self.process = None
         self.metadata = {'script': os.fspath(script), 'owner': None, 'state': 'pending'}
         self._record()
@@ -72,6 +72,17 @@ class OwnedProcessDirectory:
         with open(path + '.tmp', 'w') as stream:
             json.dump(self.metadata, stream)
         os.replace(path + '.tmp', path)
+
+    def start(self, factory, *, cwd, env):
+        # Оба entrypoint (pytest fixture и direct HOME slot) запускают body
+        # только под lease. Унаследованный TMPDIR — предок, не объект rmtree.
+        try:
+            process = factory(self.metadata['script'], cwd=cwd, env={**env, 'TMPDIR': self.path})
+            self.bind(process)
+            return process
+        except BaseException as error:
+            self.retain(error)
+            raise
 
     def bind(self, process):
         self.process = process

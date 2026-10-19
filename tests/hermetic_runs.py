@@ -20,10 +20,19 @@ import signal
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+import shutil
 
 import hermetic
 from _lib import Checks
+
+
+class SyntheticOwner:
+    # Только double планировщика; настоящие identity/receipt проверяет kernel
+    # probe в pytest_ownership. Lease получает те же поля, что у pytest double.
+    handle = SimpleNamespace(row={'pid': 1, 'start': 'synthetic',
+                                 'group': 1, 'namespace': 'synthetic'})
 
 
 class Verdicts:
@@ -40,7 +49,7 @@ def check_bounded_runs(c):
     launches = []
     names = [f'/source/tests/case_{n}.py' for n in range(12)]
 
-    class Process:
+    class Process(SyntheticOwner):
         returncode = 0
 
         def __init__(self, script, **kwargs):
@@ -91,12 +100,14 @@ def check_bounded_runs(c):
 
 def check_failures(c):
     trace = 'Traceback: original failure\n' + '\n'.join(f'frame {n}' for n in range(20))
+    unstarted = []
 
-    class Process:
+    class Process(SyntheticOwner):
         returncode = 7
 
         def __init__(self, script, **kwargs):
             if script.endswith('missing.py'):
+                unstarted.append(kwargs['env']['TMPDIR'])
                 raise OSError('start refused: original reason')
 
         def communicate(self):
@@ -122,6 +133,11 @@ def check_failures(c):
     c.check('start failure preserves its exception traceback and reason', all(
         'Traceback (most recent call last)' in what and 'start refused: original reason' in what
         for what, _ in verdicts.rows if 'missing.py' in what))
+    # Double точно не запускал процесс. Его retained leases убирает только
+    # проверка; настоящий startup refusal не получает такого разрешения.
+    for path in unstarted:
+        c.check('startup refusal retains its unproven owned directory', Path(path).exists())
+        shutil.rmtree(path)
 
 
 def check_cancellation(c):
@@ -130,7 +146,7 @@ def check_cancellation(c):
     lock = threading.Lock()
     started, drained, killed = [], [], []
 
-    class Process:
+    class Process(SyntheticOwner):
         returncode = -signal.SIGKILL
 
         def __init__(self, script, **kwargs):
@@ -179,7 +195,7 @@ def check_cancellation(c):
 def check_communication_failure(c):
     calls, killed = [], []
 
-    class Process:
+    class Process(SyntheticOwner):
         pid = 12345
 
         def __init__(self, *args, **kwargs):

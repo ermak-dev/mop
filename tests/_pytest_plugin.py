@@ -54,13 +54,8 @@ def owned_legacy_process(request):
     # Lease создаётся до запуска body; process.close проверяет receipt, а
     # общий lifetime не даёт atexit предка удалить retained HOME (#776).
     directory = OwnedProcessDirectory(request.node.path)
-    try:
-        process = OwnedProcess(request.node.path, cwd=request.node.path.parent.parent,
-                               env=hermetic.child_env({'TMPDIR': directory.path}))
-        directory.bind(process)
-    except BaseException as error:
-        directory.retain(error)
-        raise
+    process = directory.start(OwnedProcess, cwd=request.node.path.parent.parent,
+                              env=hermetic.child_env({}))
     try:
         yield process
     finally:

@@ -263,8 +263,9 @@ def run_cases(cases):
         with lock:
             if stopping.is_set():
                 return None
+            directory = _lib.OwnedProcessDirectory(f, parent=env.get('TMPDIR'))
             try:
-                p = OwnedProcess(f, env=env, cwd=root)
+                p = directory.start(OwnedProcess, env=env, cwd=root)
             except OSError:
                 return label, f, -1, traceback.format_exc()
             active.add(p)
@@ -276,7 +277,7 @@ def run_cases(cases):
             raise
         finally:
             try:
-                p.close()
+                directory.close()
             except Exception as error:
                 with lock:
                     cleanup_errors.append(error)
