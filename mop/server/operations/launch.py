@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import UUID, uuid4, uuid5
 
 from django.db import IntegrityError
+from django.db.models import Q
 from django.utils import timezone
 
 from mop.common.credentials import Credential, CredentialRefused
@@ -130,6 +131,9 @@ class CreatePuppets:
             raise Refused('revision_conflict', safe_reason='the selected bootstrap or image is unavailable')
         if reservation is not None and reservation.policy_digest != selected.digest:
             raise Denied('pinned initial launch selection changed')
+        # До durable reservation, register_agent и credential provisioning:
+        # только immutable sizes/public metadata, никаких provider reads.
+        self.selections.require_transfer(selected)
         return epoch, approval.revision, selected.image_id, selected
 
     def _admit(self, actor, command, installation, reservation=None):
@@ -288,9 +292,12 @@ class CreatePuppets:
 def validate_claims(row, step, keys):
     """Четыре retained claims первого prepare и точные квитанции предшественников."""
     tuple(m.Resource.objects.select_for_update().filter(pk__in=keys).order_by('pk'))
-    held = m.ResourceClaim.objects.filter(resource_id__in=keys, released_at=None)
-    if (held.exclude(operation=row).exists() or set(held.values_list('resource_id', flat=True)) != set(keys)
-            or m.ResourceClaim.objects.filter(operation=row, released_at=None).exclude(resource_id__in=keys).exists()):
+    # Один bounded snapshot видит foreign holders и лишние claims операции;
+    # четыре resource locks выше остаются теми же, что у mutators.
+    held = tuple(m.ResourceClaim.objects.filter(Q(resource_id__in=keys) | Q(operation=row),
+        released_at=None).order_by('resource_id')[:len(keys)+1])
+    if (len(held) != len(keys) or any(claim.operation_id != row.pk for claim in held)
+            or {claim.resource_id for claim in held} != set(keys)):
         raise Denied('current create launch resource fences required')
     stages = tuple(row.step_set.order_by('ordinal'))
     if (tuple(item.name for item in stages) != STAGES
@@ -408,10 +415,27 @@ class CreateMachine(RestartHandler):
         """
         if work.action not in MACHINE:
             raise Denied('create launch machine step required')
-        if self.current(work.operation_id, work.step_id) != work:
+        current, row, step, _ = self._current_admission(work.operation_id, work.step_id)
+        if current != work:
             raise Denied('addressed launch work changed')
-        row = m.Operation.objects.get(pk=work.operation_id, action='create', state='running')
-        step = m.Step.objects.get(pk=work.step_id, operation=row)
+        return self._claimed_launch(row, step, attempt_id)
+
+    def initial_bootstrap(self, work, attempt_id):
+        """Полный current/issuer/grant/selection/claims proof за один обход.
+
+        Ничего не пропускает по boolean caller: конкретная bootstrap стадия и
+        её exact claim доказываются здесь заново после каждого provider wait.
+        """
+        if work.action != 'bootstrap_body':
+            raise Denied('claimed initial bootstrap step required')
+        current, row, step, selected = self._current_admission(work.operation_id, work.step_id)
+        if current != work or selected is None:
+            raise Denied('addressed bootstrap work changed')
+        return current, self._claimed_launch(row, step, attempt_id), selected
+
+    def _claimed_launch(self, row, step, attempt_id):
+        if row.action != 'create' or row.state != 'running':
+            raise Denied('running create launch required')
         if (type(attempt_id) is not UUID or step.token != attempt_id or step.attempt_id != attempt_id
                 or step.ordinal not in range(1, len(STAGES)+1) or STAGES[step.ordinal-1] != step.name
                 or step.dispatched_at is None or step.quiescent_at is not None or step.outcome
@@ -430,10 +454,11 @@ class CreateMachine(RestartHandler):
             raise Denied('fixed initial create phases required')
         step = row.step_set.exclude(outcome='succeeded').order_by('ordinal').first()
         if step is not None and step.name in PLANNED:
-            self.support.require_planned(target, row)
+            selected = self.support.require_planned(target, row)
         else:
-            self.support.require(target, row)
+            selected = self.support.require(target, row)
         self.ops.targets.authorize_launch(target)
+        return selected
 
     def effect_lease(self, work):
         if work.action not in MACHINE:

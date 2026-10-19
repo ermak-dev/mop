@@ -393,6 +393,11 @@ class ProbeContractTests(unittest.TestCase):
         self.assertNotIn('raw-secret-sentinel', message)
         self.assertNotIn('raw-secret-sentinel', report(b'raw-secret-sentinel'))
 
+    # HYPOTHESIS #751: прежний import-only probe не проверяет lazy body codec.
+    # RED: actual bootstrap parse в copied closure — missing bootstrap_envelope.
+    # SOLUTION: добавить общий codec в конечный source closure, не установку.
+    # RESULT: strict local checks и 25 actual root/node/body UID checks GREEN.
+    # STATUS: FIXED — see #751; private I/O/locks #746 не изменяются.
     def test_fixed_source_closure_imports_without_installation_or_other_node_modules(self):
         api()
         assert importlib.util.find_spec('mop.node.host_input_probe') is not None, 'owned actual-UID probe missing'
@@ -413,8 +418,11 @@ class ProbeContractTests(unittest.TestCase):
             self.assertEqual(copied, set(SOURCES) | {'Dockerfile', 'mop/__init__.py',
                 'mop/common/__init__.py', 'mop/node/__init__.py'})
             result = subprocess.run([sys.executable, '-ISB', '-c',
-                'import sys;sys.path.insert(0,sys.argv[1]);from mop.node import host_inputs,host_input_files;'
-                'assert "mop.common.config" not in sys.modules', str(context)],
+                'import sys;sys.path.insert(0,sys.argv[1]);sys.path.insert(0,sys.argv[1]+"/tests");'
+                'from mop.node import host_inputs,host_input_files;from _host_inputs_data import selected;'
+                'a,s,value=selected("bootstrap_body");body=host_inputs.parse_body(host_inputs.pack(a,s,value));'
+                'assert body.value==value;assert "mop.common.config" not in sys.modules;'
+                'assert not any(n=="django" or n.startswith("mop.server") for n in sys.modules)', str(context)],
                 cwd=directory, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
         args = fixture_args(str(uuid4()))

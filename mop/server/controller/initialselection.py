@@ -66,7 +66,7 @@ def validate_references(policy, refs):
     if (len(refs) > 32 or len({version for _, version in refs}) != len(refs)
             or sum(purpose == 'model_config' for purpose, _ in refs) != 1):
         raise Denied('exact initial launch model configuration and bounded consumers required')
-    versions = {row.id: row for row in SecretVersion.objects.select_related('secret').filter(
+    versions = {row.id: row for row in SecretVersion.objects.select_related('secret').defer('envelope', 'nonce').filter(
         pk__in=[version for _, version in refs])}
     for purpose, version_id in refs:
         row = versions.get(version_id)
@@ -108,6 +108,82 @@ class LaunchSelections:
         if reservation is not None:
             self.require_reservation(result, reservation)
         return result
+
+    def transfer_profile(self, selected):
+        """SQL-only byte proof: immutable sizes + выбранные public metadata.
+
+        Definition publisher seal связывает normalized manifest с retained bytes.
+        Полная v1 shape включает optional secrets и потому не короче исходного
+        manifest после JSON parsing. Порядок списков на длину не влияет, повторов
+        soul schema не допускает. Retained UTF-8 [manifest,prompt,provenance] имеет
+        длину >= UTF-8 prompt; это консервативный bound, не secret decrypt в SQL.
+        Display name ещё не выделен: wire validator ограничивает его 64 ASCII.
+        """
+        from mop.common import initial_transfer as transfer
+        from mop.common.initialcreate import MACHINE, PHASE_CONSUMERS
+        from mop.common.soul import Soul, Runtime, Capabilities, Secrets, VERSION
+        from mop.server.access import models as a
+        from mop.server.catalog.models import ImageRevision
+        from mop.server.secrets.models import SecretVersion
+        definition = a.AgentDefinitionVersion.objects.filter(pk=selected.definition_id,
+            project_id=selected.project_id, owner_id=selected.owner_id,
+            agentdefinitionseal__isnull=False).values('role', 'digest', 'driver',
+                'receives_dispatch', 'dispatch', 'prompt_name', 'content_version__size').first()
+        image = ImageRevision.objects.filter(pk=selected.image_id).values('policy_id',
+            'policy__cpu', 'policy__memory_mb', 'policy__disk_mb').first()
+        sizes = dict(SecretVersion.objects.filter(pk=selected.bootstrap_policy.version_id).values_list('id', 'size'))
+        versions = {row['id']: row for row in SecretVersion.objects.filter(
+            pk__in=[version for _, version in selected.consumers]).values('id', 'size', 'secret__name', 'secret__kind')}
+        if definition is None or image is None or selected.bootstrap_policy.version_id not in sizes or len(versions) != len(selected.consumers):
+            raise Denied('initial launch transfer metadata is unavailable')
+        capabilities = tuple(a.DefinitionCapability.objects.filter(definition_id=selected.definition_id).values_list('scope', 'verb'))
+        names = tuple(a.DefinitionSecretName.objects.filter(definition_id=selected.definition_id).values_list('kind', 'name'))
+        manifest = Soul(definition['role'], VERSION,
+            Runtime(definition['driver'], definition['receives_dispatch']),
+            Capabilities(tuple(verb for scope, verb in capabilities if scope == 'node'),
+                tuple(verb for scope, verb in capabilities if scope == 'cluster'), definition['dispatch'],
+                tuple(a.DefinitionSpawn.objects.filter(definition_id=selected.definition_id).values_list('role', flat=True))),
+            Secrets(tuple(name for kind, name in names if kind == 'files'), tuple(name for kind, name in names if kind == 'vars')),
+            definition['prompt_name']).to_dict()
+        result = {}
+        for phase in MACHINE:
+            binary_sizes = []
+            consumers = []
+            for purpose, version in selected.consumers:
+                if purpose in PHASE_CONSUMERS[phase]:
+                    row = versions[version]
+                    consumers.append(dict(purpose=purpose, version_id=str(version),
+                        name=row['secret__name'], kind=row['secret__kind'], value=''))
+                    binary_sizes.append(row['size'])
+            role = None
+            if phase in ('initial_identity', 'native_exec'):
+                role = dict(manifest=manifest, prompt='')
+                binary_sizes.append(definition['content_version__size'])
+            bootstrap = None
+            if phase == 'bootstrap_body':
+                bootstrap = dict(envelope='')
+                binary_sizes.append(sizes[selected.bootstrap_policy.version_id])
+            value = dict(schema_version=1, work=transfer.bound_work(definition['role'], definition['digest'], phase),
+                phase=phase, bootstrap_revision=str(selected.bootstrap_revision), bootstrap_digest=selected.bootstrap_policy.digest,
+                image_digest=hashlib.sha256(('image-revision:'+str(selected.image_id)).encode()).hexdigest(),
+                display_name='pu-'+'x'*59+'-1', image_revision=str(selected.image_id),
+                image_policy=dict(policy_id=str(image['policy_id']), cpu=image['policy__cpu'],
+                    memory_mb=image['policy__memory_mb'], disk_mb=image['policy__disk_mb']),
+                selection=selected.public(), git_name=selected.git_name, git_email=selected.git_email,
+                role=role, bootstrap=bootstrap, consumers=consumers)
+            measured = transfer.measure(value)
+            for size in binary_sizes:
+                measured = measured.add_binary(size)
+            result[phase] = measured
+        return result
+
+    def require_transfer(self, selected):
+        from mop.common.initial_transfer import TransferError
+        try:
+            for phase, profile in self.transfer_profile(selected).items():
+                profile.require(phase)
+        except TransferError as error:
+            raise Denied(str(error)) from None
 
     def require_reservation(self, selected, reservation):
         if ((selected.project_id, selected.owner_id, selected.digest) !=

@@ -120,6 +120,74 @@ class ActualPrivateInputTests(unittest.TestCase):
         self.assertEqual(result['uid'], NODE)
         return self.m.Descriptor.parse(result['value'])
 
+    # BUG/HYPOTHESIS #751: strict codec принимает retained maximum, но
+    # default writer/root copy отказывают после admission на старых 256 KiB.
+    # Actual UID + hashes не подменяются mocked stat или большим pipe budget.
+    def bootstrap_budget_roundtrip(self, tasks, variables=b'', provenance='fixture', refs=()):
+        from mop.common.bootstrap_envelope import bounded_content, encode
+        import base64
+        prepare_a, prepare_value = replace(self.a, attempt_id=str(uuid4())), self.value
+        _, _, self.value = selected('bootstrap_body')
+        self.a = replace(self.a, work=replace(self.a.work, action='bootstrap_body'))
+        self.value['work'] = self.a.work.wire()
+        raw = encode(bounded_content(tasks, variables, provenance, 'a'*64, refs))
+        self.value['bootstrap'] = dict(envelope=base64.b64encode(raw).decode())
+        self.value['bootstrap_digest'] = hashlib.sha256(raw).hexdigest()
+        private_size = len(self.m.pack(self.a, self.s, self.value).raw)
+        for cap in (262144, private_size-1):
+            def lowered():
+                with self.f.NodeWriter(self.ingress, node_uid=NODE,
+                        limits=self.m.Limits(max_file_bytes=cap)) as writer:
+                    return writer.write(self.a, self.s, self.value).wire()
+            denied = as_uid(NODE, lowered)
+            self.assertFalse(denied['ok'], denied)
+            self.assertEqual(denied['error'], 'Refused')
+            self.assertEqual(data_entries(self.ingress), [])
+        def produce():
+            with self.f.NodeWriter(self.ingress, node_uid=NODE) as writer:
+                large = writer.write(self.a, self.s, self.value).wire()
+                # Mixed retained phases: prepare не получает bootstrap budget,
+                # но большой owned bootstrap не ломает следующий small write.
+                small = writer.write(prepare_a, self.s, prepare_value).wire()
+                return large, small
+        produced = as_uid(NODE, produce)
+        self.assertTrue(produced['ok'], produced)
+        descriptor, small = (self.m.Descriptor.parse(value) for value in produced['value'])
+        for cap in (262144, private_size-1):
+            with self.store(limits=self.m.Limits(max_file_bytes=cap)) as lower:
+                with self.assertRaises(Refused):
+                    lower.snapshot(NODE, descriptor, self.a)
+                self.assertEqual(lower.retained, ())
+                self.assertEqual(data_entries(self.snapshots), [])
+        receipt = self.owner.snapshot(NODE, descriptor, self.a)
+        small_receipt = self.owner.snapshot(NODE, small, prepare_a)
+        def consume():
+            from mop.common.bootstrap_envelope import decode_base64
+            with self.f.BodyReader(self.snapshots, body_uid=BODY, body_gid=BODY,
+                    backend_epoch=self.s.epoch, node_id=self.s.node_id, executor_epoch=self.s.executor_epoch) as reader:
+                result = reader.read(descriptor, self.a)
+                decoded = decode_base64(result.value['bootstrap']['envelope'], result.value['bootstrap_digest'])
+                return dict(tasks=hashlib.sha256(decoded.tasks).hexdigest(),
+                    variables=hashlib.sha256(decoded.variables).hexdigest(), refs=len(decoded.secret_refs))
+        result = as_uid(BODY, consume)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uid'], BODY)
+        self.assertEqual(result['value'], dict(tasks=hashlib.sha256(tasks).hexdigest(),
+            variables=hashlib.sha256(variables).hexdigest(), refs=len(refs)))
+        self.owner.cleanup_input(receipt)
+        self.owner.cleanup_snapshot(receipt)
+        self.owner.cleanup_input(small_receipt)
+        self.owner.cleanup_snapshot(small_receipt)
+        self.assertEqual(data_entries(self.ingress), [])
+        self.assertEqual(data_entries(self.snapshots), [])
+
+    def test_150k_bootstrap_crosses_default_actual_node_root_body_transport(self):
+        self.bootstrap_budget_roundtrip(b'x'*150000)
+
+    def test_maximum_retained_envelope_crosses_actual_node_root_body_transport(self):
+        self.bootstrap_budget_roundtrip(b'x'*262144, b'y'*131072, '\U0001f600'*1024,
+            tuple(uuid4() for _ in range(32)))
+
     def read(self, descriptor, admission=None):
         def consume():
             with self.f.BodyReader(self.snapshots, body_uid=BODY, body_gid=BODY,
@@ -441,6 +509,55 @@ class ActualPrivateInputTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertEqual(result['error'], 'Refused')
         self.assertNotIn('execute-root', result['reason'])
+
+    def test_body_checks_selected_bootstrap_digest_after_opaque_root_snapshot(self):
+        # HYPOTHESIS #751: transport hash верен и root копирует bytes, но body
+        # обязан отдельно отказать envelope с чужими tasks при прежнем pin.
+        # SOLUTION: общий strict codec только в body, root не вызывает parser.
+        # RESULT: настоящий UID body принимает original и отказывает mixed
+        # envelope после успешного opaque root snapshot; 25/25 checks GREEN.
+        # STATUS: FIXED — see #751; YAML не разбирается и не исполняется.
+        import base64
+        from mop.common import bootstrap_envelope as codec
+        a, s, value = selected('bootstrap_body')
+        work = replace(a.work, epoch=self.s.epoch, node_id=self.s.node_id, executor_epoch=self.s.executor_epoch)
+        a = replace(a, work=work)
+        s = replace(s, epoch=work.epoch, node_id=work.node_id, executor_epoch=work.executor_epoch)
+        value['work'] = work.wire()
+        descriptor = self.write(a, s, value)
+        with patch('mop.common.initialcreate.parse_delivery', side_effect=AssertionError('root parsed bootstrap')):
+            receipt = self.owner.snapshot(NODE, descriptor, a)
+        original = self.read(descriptor, a)
+        self.assertTrue(original['ok'], original)
+        delivered = original['value']['value']
+        content = codec.decode_base64(delivered['bootstrap']['envelope'], delivered['bootstrap_digest'])
+        self.assertEqual(content.tasks, b'- command: never-root-executed\n')
+        self.assertEqual(content.variables, b'opaque: project-yaml\n')
+        self.assertTrue(self.owner.cleanup_input(receipt))
+        self.assertTrue(self.owner.cleanup_snapshot(receipt))
+        descriptor = self.write(a, s, value)
+        source = self.ingress/descriptor.filename
+        outer = json.loads(source.read_bytes())
+        payload = json.loads(outer['payload'])
+        bootstrap = json.loads(base64.b64decode(payload['bootstrap']['envelope']))
+        bootstrap['tasks'] = base64.b64encode(b'private-unapproved-bootstrap').decode()
+        payload['bootstrap']['envelope'] = base64.b64encode(self.m.canonical_json(bootstrap)).decode()
+        outer['payload'] = self.m.canonical_json(payload).decode()
+        outer['payload_digest'] = hashlib.sha256(outer['payload'].encode()).hexdigest()
+        raw = self.m.canonical_json(outer)
+        source.write_bytes(raw)
+        descriptor = replace(descriptor, sha256=hashlib.sha256(raw).hexdigest())
+        # Другой exact snapshot, не подмена уже удерживаемого receipt.
+        self.owner.close()
+        self.owner = self.store()
+        self.addCleanup(self.owner.close)
+        with patch('mop.common.initialcreate.parse_delivery', side_effect=AssertionError('root parsed bootstrap')):
+            self.owner.snapshot(NODE, descriptor, a)
+        result = self.read(descriptor, a)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error'], 'Refused')
+        self.assertIn('digest mismatch', result['reason'])
+        self.assertNotIn('private-unapproved-bootstrap', result['reason'])
 
     def test_retained_cleanup_after_work_expiry_is_not_body_retirement(self):
         descriptor = self.write()

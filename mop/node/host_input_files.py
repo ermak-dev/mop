@@ -12,7 +12,7 @@ from pathlib import Path
 import stat
 
 from mop.node.host_inputs import (Descriptor, Envelope, Limits, MAX_FILE_BYTES, Refused,
-                                  canonical, digest, pack, parse_body)
+                                  canonical, digest, pack, parse_body, validate_admission)
 
 _FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK = '.phase-input.lock'
@@ -167,7 +167,7 @@ class _Directory:
         except FileNotFoundError:
             return None
 
-    def capacity(self, limits, extra):
+    def capacity(self, limits, extra, owned_limits):
         count = total = 0
         with os.scandir(self.fd) as entries:
             for entry in entries:
@@ -181,7 +181,9 @@ class _Directory:
                 total += value.st_size
                 if (not stat.S_ISREG(value.st_mode) or value.st_nlink != 1
                         or count >= limits.max_files or total+extra > limits.max_bytes
-                        or value.st_size > limits.max_file_bytes):
+                        # Только retained owner знает phase; unknown entries не получают
+                        # bootstrap allowance, root не разбирает business payload.
+                        or value.st_size > owned_limits.get(entry.name, limits.max_file_bytes)):
                     raise Refused('phase input file or byte capacity bound reached')
         if count+1 > limits.max_files or total+extra > limits.max_bytes:
             raise Refused('phase input file or byte capacity bound reached')
@@ -283,6 +285,7 @@ class _Closable:
 @dataclass(eq=False)
 class _Source:
     descriptor: Descriptor
+    limit: int
     physical: tuple | None = field(default=None, repr=False)
     complete: bool = False
 
@@ -304,7 +307,8 @@ class NodeWriter(_Closable):
     def write(self, admission, scope, delivery):
         _running_as(self.node_uid)
         envelope = pack(admission, scope, delivery)
-        if len(envelope.raw) > self.limits.max_file_bytes:
+        limit = self.limits.file_bytes(admission.work.action)
+        if len(envelope.raw) > limit:
             raise Refused('phase input exceeds file byte limit')
         descriptor = envelope.descriptor
         name = descriptor.filename
@@ -314,7 +318,7 @@ class NodeWriter(_Closable):
                 if not previous.complete or previous.descriptor != descriptor:
                     raise Refused('phase input retained descriptor conflict or incomplete outcome')
                 raw, _ = self.directory.read(name, uid=self.node_uid, gid=None, mode=0o600,
-                    limit=self.limits.max_file_bytes, expected=previous.physical)
+                    limit=limit, expected=previous.physical)
                 if digest(raw) != descriptor.sha256:
                     raise Refused('phase input retained digest conflict')
                 return descriptor
@@ -322,8 +326,9 @@ class NodeWriter(_Closable):
                 raise Refused('unknown existing phase input cannot be overwritten or adopted')
             if len(self._owned) >= self.limits.max_files:
                 raise Refused('phase input retained ownership capacity reached')
-            self.directory.capacity(self.limits, len(envelope.raw))
-            source = _Source(descriptor)
+            self.directory.capacity(self.limits, len(envelope.raw),
+                {name: item.limit for name, item in self._owned.items()})
+            source = _Source(descriptor, limit)
             self._owned[name] = source
             source.physical = self.directory.create(name, envelope.raw, gid=None, mode=0o600,
                 record=lambda value: setattr(source, 'physical', value))
@@ -355,6 +360,7 @@ class Receipt:
 class _Record:
     receipt: Receipt
     source: tuple = field(repr=False)
+    limit: int
     snapshot: tuple | None = field(default=None, repr=False)
     complete: bool = False
     input_cleaned: bool = False
@@ -407,10 +413,12 @@ class SnapshotStore(_Closable):
             raise Refused('phase input requires authenticated installed node peer UID')
         if type(descriptor) is not Descriptor:
             raise Refused('typed phase input descriptor required')
+        validate_admission(admission)
+        limit = self.limits.file_bytes(admission.work.action)
         name = descriptor.filename
         with self.ingress.lock(), self.snapshots.lock():
             raw, source = self.ingress.read(name, uid=self.node_uid, gid=None, mode=0o600,
-                                           limit=self.limits.max_file_bytes)
+                                           limit=limit)
             Envelope.parse(raw, descriptor, admission, **self.expected)
             previous = self._owned.get(name)
             if previous is not None:
@@ -418,7 +426,7 @@ class SnapshotStore(_Closable):
                         or previous.input_conflict or previous.receipt.descriptor != descriptor or previous.source != source):
                     raise Refused('phase input retained physical receipt conflict')
                 copied, _ = self.snapshots.read(name, uid=0, gid=self.body_gid, mode=0o440,
-                    limit=self.limits.max_file_bytes, expected=previous.snapshot)
+                    limit=limit, expected=previous.snapshot)
                 if copied != raw:
                     raise Refused('phase input retained snapshot digest conflict')
                 return previous.receipt
@@ -426,14 +434,15 @@ class SnapshotStore(_Closable):
                 raise Refused('unknown existing root snapshot cannot be overwritten or adopted')
             if len(self._owned) >= self.limits.max_files:
                 raise Refused('root snapshot retained ownership capacity reached')
-            self.snapshots.capacity(self.limits, len(raw))
-            record = _Record(Receipt(descriptor), source)
+            self.snapshots.capacity(self.limits, len(raw),
+                {name: item.limit for name, item in self._owned.items()})
+            record = _Record(Receipt(descriptor), source, limit)
             self._owned[name] = record
             record.snapshot = self.snapshots.create(name, raw, gid=self.body_gid, mode=0o440,
                 record=lambda value: setattr(record, 'snapshot', value))
             # Проверка source после copy ловит mutation/substitution до публикации ACK.
             current, physical = self.ingress.read(name, uid=self.node_uid, gid=None, mode=0o600,
-                limit=self.limits.max_file_bytes, expected=source)
+                limit=limit, expected=source)
             if current != raw or physical != source:
                 raise Refused('phase input source changed during root snapshot creation')
             Envelope.parse(raw, descriptor, admission, **self.expected)
@@ -469,7 +478,7 @@ class SnapshotStore(_Closable):
         with self.ingress.lock(), self.snapshots.lock(), self.ingress.pin(name, record.source):
             self._receipt(receipt)
             self.ingress.read(name, uid=self.node_uid, gid=None, mode=0o600,
-                limit=self.limits.max_file_bytes, expected=record.source)
+                limit=record.limit, expected=record.source)
             quarantine = name+'.cleanup'
             if record.cleanup_directory is None:
                 if self.snapshots.stat(quarantine) is not None:

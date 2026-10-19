@@ -138,6 +138,26 @@ class AgentRBACProvisioning(TransactionTestCase):
         self.assertEqual(AgentRBACProfiles().revoke(self.actor, profile.id).id, revoked.id)
         self.assertEqual(ProfileRevocation.objects.filter(profile=profile).count(), 1)
 
+    def test_fresh_profile_scope_and_revocation_fit_one_unlocked_snapshot(self):
+        # HYPOTHESIS (#755 + #747): отдельный revocation SELECT на каждый
+        # checkpoint переполняет прежний 4096 SQL budget bootstrap batch.
+        # Unlocked proof обязан видеть fresh profile/revocation одним SQL;
+        # locked activation/apply по-прежнему проверяют отзыв после row lock.
+        # SOLUTION: Exists annotation только у unlocked live proof, без cache.
+        # RESULT: RED 2 != 1; GREEN fresh read и отзыв — по одному SQL,
+        # все 30 #747 cases и 135 merged bootstrap/RBAC cases прошли на PG17.
+        # STATUS: FIXED — see #755.
+        self.configured()
+        from mop.server.access.rbac import AgentRBACProfiles, require_profile
+        arguments = dict(definition_id=self.definition.id, owner_id=self.user.pk,
+            project_id=self.project.pk)
+        with self.assertNumQueries(1):
+            row = require_profile(self.rbac.id, self.rbac.digest, **arguments)
+        self.assertEqual(row.id, self.rbac.id)
+        AgentRBACProfiles().revoke(self.actor, self.rbac.id)
+        with self.assertNumQueries(1), self.assertRaisesRegex(PermissionError, 'profile is revoked'):
+            require_profile(self.rbac.id, self.rbac.digest, **arguments)
+
     def test_profile_rejects_unbounded_noncanonical_foreign_and_directory_group_inputs(self):
         self.configured()
         from django.contrib.auth.models import Group

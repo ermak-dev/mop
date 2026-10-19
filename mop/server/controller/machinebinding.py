@@ -143,6 +143,11 @@ class OperationWork:
     def launch_definition(self, work, attempt_id):
         return self.operations.launch_machine.launch_definition(MachineStep(**asdict(work)), attempt_id)
 
+    def initial_bootstrap(self, work, attempt_id):
+        current, definition, selected = self.operations.launch_machine.initial_bootstrap(
+            MachineStep(**asdict(work)), attempt_id)
+        return WorkV1(**asdict(current)), definition, selected
+
     def initial_native_attempt(self, work):
         """Historical locator для readiness; не admission нового эффекта."""
         from mop.server.operations import models as om

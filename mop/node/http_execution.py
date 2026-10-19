@@ -151,10 +151,17 @@ class JsonTransport(Protocol):
     async def aclose(self): ...
 
 
+_DEFAULT_RESPONSE = object()
+
+
 class HttpsTransport:
     """Только verified HTTPS, один bounded pool; POST не повторяется даже при EOF."""
     def __init__(self, origin, token, *, timeout=10.0, connections=8,
-                 response_limit=262144, tls=None):
+                 response_limit=_DEFAULT_RESPONSE, tls=None):
+        from mop.common.initial_transfer import DEFAULT_BYTES, phase_limit
+        default = response_limit is _DEFAULT_RESPONSE
+        response_limit = DEFAULT_BYTES if default else response_limit
+        self._bootstrap_limit = phase_limit('bootstrap_body') if default else response_limit
         parts = urlsplit(origin)
         if (parts.scheme != 'https' or not parts.hostname or parts.username or parts.password
                 or parts.query or parts.fragment or parts.path not in ('', '/')
@@ -181,6 +188,10 @@ class HttpsTransport:
                    ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
+        # Только finite bootstrap response получает отдельный default budget;
+        # explicit cap и все прочие routes/purposes остаются прежними.
+        limit = self._bootstrap_limit if (method, path) == ('POST', 'work/initial-launch') and (
+            type(payload) is dict and payload.get('action') == 'bootstrap_body') else self.response_limit
         import aiohttp
         if self._session is None:
             self._session = aiohttp.ClientSession(
@@ -199,7 +210,7 @@ class HttpsTransport:
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
                     body.extend(chunk)
-                    if len(body) > self.response_limit:
+                    if len(body) > limit:
                         if response.status != 200:
                             raise _response_error(response.status, None, self._token)
                         raise Refused('machine response exceeds limit')
