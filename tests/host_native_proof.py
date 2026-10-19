@@ -7,6 +7,17 @@ mount view, PID/start/cgroup до/после waits, не читая native regis
 RESULT: missing/claimed/foreign/same-UID/replaced/raced negatives RED -> GREEN;
 реальные Root/body UID и mount view отдельно проверены scope-probe.
 STATUS: FIXED — see #783
+
+HYPOTHESIS (#798): proof ошибочен, пока connect резолвит имя повторно. Body
+владеет `r/` и может поменять запись местами: имя в момент connect указывает
+на native, а закреплён и возвращён чужой inode; SO_PEERCRED подтверждает
+native, но не тот inode, что Root выдал за доказательство.
+SOLUTION: connect идёт через magic link уже разрешённого O_PATH
+дескриптора того же закреплённого inode; имя больше не authority. Отказ
+закрывает fd закрепления, а не держит их до aclose().
+RESULT: детерминированный swap перед connect и органический renameat2 race
+RED -> GREEN; refused pin освобождает три fd.
+STATUS: FIXED — see #798
 """
 import asyncio
 from contextlib import ExitStack
@@ -34,7 +45,15 @@ from mop.node.host_scope import Reference, Refused, Unknown
 from mop.node import host_scope_systemd as module
 
 
-# Только наш non-native listener; не читает registry/key и не посылает данные.
+# Органическая гонка: отдельный процесс крутит renameat2(RENAME_EXCHANGE).
+SWAP = '''import ctypes,os,sys
+lib=ctypes.CDLL(None,use_errno=True);rename=lib.renameat2
+rename.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint)
+a,b=sys.argv[1].encode(),sys.argv[2].encode()
+while True:
+ if rename(-100,a,-100,b,2)!=0 and ctypes.get_errno()!=2: raise SystemExit(1)
+'''
+
 LISTENER = '''import os,select,socket,sys
 def listen():
  s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
@@ -144,8 +163,9 @@ class NativeProofFixture(unittest.IsolatedAsyncioTestCase):
         for child in self.children:
             child.terminate()
             await asyncio.to_thread(child.wait, 5)
-            child.stdout.close()
-            child.stdin.close()
+            for stream in (child.stdout, child.stdin):
+                if stream is not None:
+                    stream.close()
         self.temp.cleanup()
 
     async def listener(self):
@@ -292,6 +312,95 @@ class RootSocketProof(NativeProofFixture):
         self.adapter.runner_process.side_effect = runner
         with self.assertRaises((Refused, Unknown)):
             await self.attach()
+
+
+class NativeConnectBinding(NativeProofFixture):
+    """#798: connect по имени резолвится заново, поэтому body подменяет запись
+    `r/` между check() и connect() и получает чужой inode в доказательство."""
+
+    async def listen(self, path):
+        child = subprocess.Popen([sys.executable, '-I', '-u', '-c', LISTENER, str(path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={'PATH': os.defpath})
+        self.children.append(child)
+        self.assertEqual(await asyncio.to_thread(child.stdout.readline), b'ready\n')
+        return child
+
+    async def decoy_pair(self):
+        """Fake listener на fixed name и настоящий native на r/native.real."""
+        await self.listen(self.path)
+        real = self.runtime/'native.real'
+        native_child = await self.listen(real)
+        self.native = Process(native_child.pid, 1002, self.reference.boot_id)
+        return real
+
+    async def test_connect_binds_the_pinned_inode_not_the_name(self):
+        # Детерминированное сведение (swap_e2e): body-выбранный fake закреплён,
+        # native подменяется на fixed name непосредственно перед sock_connect.
+        real = await self.decoy_pair()
+        fake_inode = [self.path.lstat().st_dev, self.path.lstat().st_ino]
+        real_inode = [real.lstat().st_dev, real.lstat().st_ino]
+        self.assertNotEqual(fake_inode, real_inode)
+        loop = asyncio.get_running_loop()
+        connect = loop.sock_connect
+        async def swapped(peer, name):
+            if str(name).endswith('/session.sock'):
+                os.rename(self.path, self.runtime/'fake.hold')
+                os.rename(real, self.path)
+            try:
+                return await connect(peer, name)
+            finally:
+                if str(name).endswith('/session.sock'):
+                    os.rename(self.path, real)
+                    os.rename(self.runtime/'fake.hold', self.path)
+        with patch.object(loop, 'sock_connect', swapped):
+            # Явный fake claim: root обязан отказать, а не вернуть fake inode,
+            # к которому native не имеет отношения.
+            with self.assertRaises((Refused, Unknown)):
+                await self.attach(dict(tmux_pid=self.tmux.pid,
+                    tmux_start=self.tmux.start, socket_inode=fake_inode))
+
+    async def test_organic_rename_exchange_never_accepts_a_foreign_inode(self):
+        # Органическая гонка (swap_live): pin снят, пока на fixed name стоял fake;
+        # отдельный процесс крутит renameat2(RENAME_EXCHANGE) с native.
+        real = await self.decoy_pair()
+        pin = module._NativeSocket(self.adapter.installed, self.reference, self.native)
+        self.assertEqual(pin.inode, [self.path.lstat().st_dev, self.path.lstat().st_ino])
+        swapper = subprocess.Popen([sys.executable, '-I', '-c', SWAP, str(self.path), str(real)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={'PATH': os.defpath})
+        self.children.append(swapper)
+        accepted, refused = [], 0
+        try:
+            for _ in range(600):
+                try:
+                    await pin.observe()
+                except (Refused, Unknown):
+                    refused += 1
+                    continue
+                accepted.append(pin.inode)
+                if len(accepted) >= 3:
+                    break
+                await asyncio.sleep(0)
+        finally:
+            swapper.terminate()
+            await asyncio.to_thread(swapper.wait, 5)
+            pin.close()
+        # Pin всегда на fake: ни одно принятое наблюдение недопустимо.
+        self.assertGreater(refused, 0)
+        self.assertEqual(accepted, [])
+
+    async def test_refused_pin_does_not_retain_three_descriptors(self):
+        # pin_leak: отказ не оставляет home/runtime/socket fd до aclose().
+        await self.listen(self.path)
+        self.native = Process(os.getpid(), 1002, self.reference.boot_id)
+        before = len(os.listdir('/proc/self/fd'))
+        with self.assertRaises((Refused, Unknown)):
+            await self.attach(dict(tmux_pid=self.tmux.pid, tmux_start=self.tmux.start,
+                socket_inode=[987654, 123456]))
+        pins = list(self.adapter._native_sockets.values())
+        self.assertEqual([pin.failed for pin in pins], [True], 'failed pin must stay refused')
+        self.assertEqual([pin.home for pin in pins], [None], 'failed pin must release its dirs')
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)
 
 
 if __name__ == '__main__':

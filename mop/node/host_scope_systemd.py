@@ -449,9 +449,11 @@ class _NativeSocket:
         peer.setblocking(False)
         try:
             # Только credential handshake: нет native key, request или bearer.
-            # Dirfd anchor не позволяет path walk уйти через replaced runtime.
+            # Connect идёт по magic link уже разрешённого O_PATH дескриптора:
+            # имя `session.sock` больше не резолвится, поэтому body, владеющий
+            # `r/`, не может подменить inode между check() и connect.
             async with asyncio.timeout(.25):
-                await asyncio.get_running_loop().sock_connect(peer, '/proc/self/fd/'+str(self.runtime)+'/session.sock')
+                await asyncio.get_running_loop().sock_connect(peer, '/proc/self/fd/'+str(self.socket))
             self.check()
             if peer_credentials(peer) != (self.native.pid, self.installed.body_uid, self.installed.body_gid):
                 raise Refused('native socket peer differs from exact retained native PID/UID/GID')
@@ -660,7 +662,10 @@ class SystemdCgroupAdapter:
             return result
         except BaseException as error:
             if pinned is not None:
+                # Отказ окончателен: failed короткозамыкает check(), поэтому fd
+                # закрепления больше не нужны и не должны жить до aclose().
                 pinned.failed = True
+                pinned.close()
             if isinstance(error, OSError):
                 raise Unknown('fixed native socket evidence unavailable: '+type(error).__name__) from error
             raise
