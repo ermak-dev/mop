@@ -17,6 +17,15 @@ if __name__ == '__main__':
                 AssertionError(f'strict mode rejects skipped test {test.id()}: {reason}'), None))
 
         unittest.TestResult.addSkip = strict_skip
+        original_expected_failure = unittest.TestResult.addExpectedFailure
+
+        def strict_expected_failure(result, test, error):
+            # Список expectedFailures нужен прежним Result-наследникам; strict
+            # дополнительно считает исходный exception обычным провалом.
+            original_expected_failure(result, test, error)
+            result.addFailure(test, error)
+
+        unittest.TestResult.addExpectedFailure = strict_expected_failure
     script = sys.argv[1]
     # Тот же import root, что у python selected/tests/check.py: адаптер
     # может быть импортирован другой session из соседней working copy.

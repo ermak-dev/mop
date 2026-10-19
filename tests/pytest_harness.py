@@ -266,14 +266,14 @@ class FreshPolicyProcess(unittest.TestCase):
         self.assertNotIn('setup_test_environment() was already called', result.stdout + result.stderr)
         return result
 
-    def run_cli(self, directory, *, strict):
+    def run_cli(self, directory, *, strict, names=('boundary',)):
         # Настоящий process exit командлета, не объект report/замоканный pytest.
         # Меняем только координату синтетического plan; сам runner неизменён.
         driver = ('import sys, hermetic; from mop.cli.dev import test as command; '
                   'command.root = lambda: sys.argv[1]; '
                   'raise SystemExit(command.main(sys.argv[2:]))')
         return self.run_fresh([sys.executable, '-c', driver, str(directory),
-                              'boundary', *(['--strict'] if strict else [])],
+                              *names, *(['--strict'] if strict else [])],
                              directory, strict=False)
 
     def policy_root(self, directory):
@@ -369,6 +369,103 @@ class FreshNativePolicy(FreshPolicyProcess):
             '    def test_required(self): pass\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('1 passed', result.stdout)
+
+
+class FreshLegacyPolicy(FreshPolicyProcess):
+    # BUG: addSkip перехвачен, но legacy expectedFailure давал exit 0/1 passed.
+    # HYPOTHESIS: strict должен передать исходный expected-failure exception в
+    # обычный unittest failure; правка native wasxfail не влияет на bridge.
+    # SOLUTION: strict callback сохраняет expectedFailures и передаёт исходный
+    # exception в addFailure; nonstrict и штатный unexpected success неизменны.
+    # RESULT: RED — legacy child/outer CLI [0, 0] и скрытая причина до following;
+    # GREEN — [1, 1] с исходным assertion, 31 harness и 5 UID checks на 3.12/PG17.
+    # STATUS: FIXED — see #768
+    expected_failure = ('class Boundary(unittest.TestCase):\n'
+        '    @unittest.expectedFailure\n'
+        '    def test_required(self): self.fail("owned legacy expected-failure reason")\n')
+
+    def invoke(self, body, *, strict, outer, following=False):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='mop-legacy-policy-') as directory:
+            root = self.policy_root(directory)
+            boundary = root / 'tests/boundary.py'
+            boundary.write_text('import unittest\n' + body +
+                '\nif __name__ == "__main__": unittest.main()\n')
+            if outer:
+                names = ['boundary']
+                if following:
+                    (root / 'tests/following.py').write_text(
+                        'raise AssertionError("owned following-file marker")\n')
+                    names.append('following')
+                return self.run_cli(root, strict=strict, names=names)
+            return self.run_fresh([sys.executable, str(ROOT / 'tests/_pytest_legacy.py'),
+                                   str(boundary)], root, strict=strict)
+
+    def assert_policy(self, body, *, strict, code, reasons=(), child_code=None):
+        results = [self.invoke(body, strict=strict, outer=outer) for outer in (False, True)]
+        evidence = '\n'.join(f'{mode} exit={result.returncode}\n{result.stdout}{result.stderr}'
+                             for mode, result in zip(('legacy child', 'outer CLI'), results))
+        self.assertEqual([result.returncode for result in results],
+                         [code if child_code is None else child_code, code], evidence)
+        for result in results:
+            for reason in reasons:
+                self.assertIn(reason, result.stdout + result.stderr)
+        return results
+
+    def test_strict_legacy_expected_failure_preserves_assertion_and_both_real_exits_are_one(self):
+        self.assert_policy(self.expected_failure, strict=True, code=1,
+            reasons=('Boundary.test_required', 'AssertionError: owned legacy expected-failure reason'))
+
+    def test_strict_legacy_expected_failure_is_visible_before_the_following_file(self):
+        result = self.invoke(self.expected_failure, strict=True, outer=True, following=True)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn('Boundary.test_required', output)
+        self.assertIn('owned legacy expected-failure reason', output)
+        self.assertLess(output.index('owned legacy expected-failure reason'),
+                        output.index('owned following-file marker'))
+        self.assertIn('2 failed', output)
+
+    def test_nonstrict_legacy_expected_failure_still_uses_unittest_semantics(self):
+        child, outer = self.assert_policy(self.expected_failure, strict=False, code=0)
+        self.assertIn('OK (expected failures=1)', child.stdout + child.stderr)
+        self.assertIn('1 passed', outer.stdout + outer.stderr)
+
+    def test_legacy_unexpected_success_stays_red_in_both_modes(self):
+        body = ('class Boundary(unittest.TestCase):\n'
+            '    @unittest.expectedFailure\n'
+            '    def test_required(self): pass\n')
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                self.assert_policy(body, strict=strict, code=1,
+                    reasons=('Boundary.test_required', 'UNEXPECTED SUCCESS'))
+
+    def test_legacy_skip_keeps_strict_failure_and_nonstrict_skip(self):
+        body = ('class Boundary(unittest.TestCase):\n'
+            '    @unittest.skip("owned legacy skip reason")\n'
+            '    def test_required(self): pass\n')
+        self.assert_policy(body, strict=True, code=1,
+            reasons=('Boundary.test_required', 'owned legacy skip reason'))
+        child, _ = self.assert_policy(body, strict=False, code=0)
+        self.assertIn('OK (skipped=1)', child.stdout + child.stderr)
+
+    def test_legacy_ordinary_assertion_setup_and_import_failures_stay_red(self):
+        # HYPOTHESIS (wrong): unittest всегда возвращает 1 при setUpClass error.
+        # RESULT: fresh Python 3.12.15 вернул 5 (testsRun == 0), outer CLI — 1.
+        # Сохраняем именно штатные коды; это не повод менять bridge/stdlib.
+        for body, reason, child_code in (
+                ('class Boundary(unittest.TestCase):\n'
+                 '    def test_required(self): self.fail("owned legacy assertion failure")\n',
+                 'owned legacy assertion failure', 1),
+                ('class Boundary(unittest.TestCase):\n'
+                 '    @classmethod\n'
+                 '    def setUpClass(cls): raise RuntimeError("owned legacy setup failure")\n'
+                 '    def test_required(self): pass\n', 'owned legacy setup failure', 5),
+                ('raise ImportError("owned legacy import failure")\n', 'owned legacy import failure', 1)):
+            for strict in (False, True):
+                with self.subTest(reason=reason, strict=strict):
+                    self.assert_policy(body, strict=strict, code=1,
+                                       child_code=child_code, reasons=(reason,))
 
 
 class ProcessOwnership(unittest.TestCase):
