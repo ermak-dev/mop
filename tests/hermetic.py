@@ -269,7 +269,8 @@ def run_cases(cases):
             if stopping.is_set():
                 return None
             try:
-                p = subprocess.Popen([sys.executable, f], env=env, cwd=root,
+                p = subprocess.Popen([sys.executable, os.path.join(TESTS, '_pytest_legacy.py'), f],
+                                     env=env, cwd=root,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, start_new_session=True)
             except OSError:

@@ -122,6 +122,103 @@ def check_tmp_cleanup_338(c):
             not os.path.exists(os.path.join(copy, "web", "node_modules")))
 
 
+# HYPOTHESIS (#692): ранний import hermetic съедал strict/fixture inputs,
+# runpy оставлял import root другого клона, refusal прятал ImportError,
+# а ambient PYTEST_ADDOPTS/PYTEST_PLUGINS мог подменить выбранный plan.
+# SOLUTION: bridge читает strict до изоляции и сохраняет script semantics;
+# commandlet возвращает исходную причину отсутствующей зависимости;
+# общий context изолирует pytest inputs и восстанавливает их после session.
+# RESULT: RED — inputs=None, неверный root, потерянный reason и ambient
+# pytest inputs внутри session; GREEN — те же probes, восстановление env,
+# strict unittest skip и общий tests_lib на Python 3.12.
+# STATUS: FIXED — see #692
+
+def check_pytest_bootstrap_692(c):
+    import json
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        probe = os.path.join(directory, 'check.py')
+        with open(probe, 'w') as stream:
+            stream.write('import json, os, sys\n'
+                         'values = {key: os.environ.get(key) for key in '
+                         '("MOP_TESTS_STRICT", "MOP_TEST_POSTGRES_HOST")}\n'
+                         'values["script_directory"] = sys.path[0]\nprint(json.dumps(values))\n')
+        env = hermetic.child_env({'MOP_TESTS_STRICT': '1',
+                                 'MOP_TEST_POSTGRES_HOST': 'isolated-test-coordinate'})
+        result = subprocess.run([sys.executable, os.path.join(TESTS, '_pytest_legacy.py'), probe],
+                                env=env, capture_output=True, text=True)
+    c.expect('#692 bridge runs the same script entrypoint', result.returncode, 0)
+    observed = json.loads(result.stdout)
+    c.expect('#692 bridge uses the selected check directory, not the helper clone',
+             observed.pop('script_directory'), directory)
+    c.expect('#692 bridge preserves strict and fixture inputs until the check isolates itself',
+             observed, {'MOP_TESTS_STRICT': '1',
+                                        'MOP_TEST_POSTGRES_HOST': 'isolated-test-coordinate'})
+
+
+def check_pytest_strict_skips_692(c):
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        probe = os.path.join(directory, 'skip_probe.py')
+        with open(probe, 'w') as stream:
+            stream.write('import unittest\nclass Probe(unittest.TestCase):\n'
+                         '    @unittest.skip("owned skip reason")\n'
+                         '    def test_boundary(self): pass\n'
+                         'if __name__ == "__main__": unittest.main()\n')
+        for strict in (False, True):
+            result = subprocess.run([sys.executable, os.path.join(TESTS, '_pytest_legacy.py'), probe],
+                                    env=hermetic.child_env({}, strict=strict),
+                                    capture_output=True, text=True)
+            c.expect(f'#692 unittest skip fails exactly in strict={strict}',
+                     result.returncode, int(strict))
+            if strict:
+                c.check('#692 strict failure preserves the skipped test identity and reason',
+                        'Probe.test_boundary' in result.stderr and
+                        'owned skip reason' in result.stderr and
+                        'strict mode rejects skipped test' in result.stderr, result.stderr)
+
+
+def check_pytest_import_reason_692(c):
+    from unittest.mock import patch
+    from mop.cli.dev import test as command
+    import _pytest_runtime
+    reason = 'owned missing pytest dependency reason'
+    with patch.object(command, 'root', return_value=hermetic.ROOT), \
+            patch.object(_pytest_runtime, 'load_pytest', side_effect=ModuleNotFoundError(reason)):
+        try:
+            command.main(['tests_lib'])
+        except RuntimeError as error:
+            observed = str(error)
+        else:
+            observed = ''
+    c.check('#692 missing test extra preserves the actual dependency import reason',
+            reason in observed, observed)
+
+
+def check_pytest_environment_692(c):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from mop.cli.dev import test as command
+    import _pytest_runtime
+    ambient = {'PYTEST_ADDOPTS': '-k only_one_check', 'PYTEST_PLUGINS': 'ambient_fixture_plugin',
+               'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '0'}
+    observed = []
+    pytest = SimpleNamespace(main=lambda args:
+        observed.append({key: os.environ.get(key) for key in ambient}) or 0)
+    with patch.dict(os.environ, ambient), \
+            patch.object(command, 'root', return_value=hermetic.ROOT), \
+            patch.object(_pytest_runtime, 'load_pytest', return_value=pytest):
+        result = command.main(['tests_lib'])
+        restored = {key: os.environ.get(key) for key in ambient}
+    c.expect('#692 ambient pytest options and plugins cannot shrink or replace the selected plan',
+             (result, observed), (0, [{'PYTEST_ADDOPTS': None, 'PYTEST_PLUGINS': None,
+                                     'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}]))
+    c.expect('#692 pytest environment belongs to the invocation and is restored afterwards',
+             restored, ambient)
+
+
 def main():
     c = Checks()
     lib_path = os.path.join(TESTS, "_lib.py")
@@ -143,6 +240,10 @@ def main():
         c.check(f"{f}: imports no other check", not other, other)
         c.check(f"{f}: stands on tests/_lib.py", uses_lib(tree))
     check_tmp_cleanup_338(c)
+    check_pytest_bootstrap_692(c)
+    check_pytest_strict_skips_692(c)
+    check_pytest_import_reason_692(c)
+    check_pytest_environment_692(c)
     return c.report("tests_lib")
 
 

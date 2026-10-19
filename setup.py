@@ -14,9 +14,10 @@ def requirements(group="client", path=os.path.join(HERE, "mop", "common", "deps.
     scope = {}
     with open(path) as f:
         exec(f.read(), scope)
-    return list(scope[{"client": "PIP", "server": "SERVER"}[group]])
+    return list(scope[{"client": "PIP", "server": "SERVER", "test": "TEST"}[group]])
 
 
 if __name__ == "__main__":
     from setuptools import setup
-    setup(install_requires=requirements(), extras_require={"server": requirements("server")})
+    setup(install_requires=requirements(), extras_require={
+        "server": requirements("server"), "test": requirements("test")})

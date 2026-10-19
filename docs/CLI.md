@@ -856,12 +856,11 @@ Every file of tests/ (a helper named _*.py is not a check), or only the
 named ones: `mop dev test cli spec`. The checks of the working copy you run
 it in; outside one, of the mop that runs it.
 
-  --strict   MOP_TESTS_STRICT=1, as CI: a check that would skip for a missing
-             library fails instead
-  -v         a line per file as it finishes, not only on a terminal
+  --strict   as MOP_TESTS_STRICT=1 in CI: every skipped check or test fails
+  -v         verbose pytest progress, not only on a terminal
 
-Prints the output of every file that failed and one line of totals; exit 1
-when anything failed.
+Uses the declared test extra. Prints each failure before the next file and
+pytest's summary; any test or collection failure exits nonzero.
 ```
 
 #### mop dev web

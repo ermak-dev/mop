@@ -21,6 +21,13 @@ mop = "mop.cli:console"
 include = ["mop", "mop.*"]
 namespaces = false
 
+[tool.pytest.ini_options]
+minversion = "8.4"
+testpaths = ["tests"]
+pythonpath = ["tests"]
+python_files = ["*.py"]
+addopts = "-p _pytest_plugin -p no:cacheprovider"
+
 [tool.setuptools.package-data]
 # Каталог ролей пакета (#580): каждый каталог роли -- soul.yaml и промпт
 # (docs/SOUL.md), не один файл скилла мастера (#351).

@@ -67,7 +67,7 @@ def check_bounded_runs(c):
     c.check(f'bounded hermetic launches at most four children, observed {peak}', 1 < peak <= 4)
     c.check(f'communicate drains concurrent children, observed {peak_draining}', peak_draining > 1)
     expected = {(root, os.path.basename(name)) for root in (hermetic.ROOT, '/copy') for name in names}
-    actual = [(kw['cwd'], os.path.basename(argv[1])) for argv, kw in launches]
+    actual = [(kw['cwd'], os.path.basename(argv[-1])) for argv, kw in launches]
     c.check('every file runs exactly once in both homes', len(actual) == len(expected) == 24
             and set(actual) == expected)
     c.check('strict mode reaches every child', all(kw['env'].get('MOP_TESTS_STRICT') == '1'
@@ -86,7 +86,7 @@ def check_failures(c):
         returncode = 7
 
         def __init__(self, argv, **kwargs):
-            if argv[1].endswith('missing.py'):
+            if argv[-1].endswith('missing.py'):
                 raise OSError('start refused: original reason')
 
         def communicate(self):
@@ -234,6 +234,32 @@ def check_real_cancellation(c):
             interrupted and len(owned) == 4 and all(p.returncode == -signal.SIGKILL for p in owned))
 
 
+# HYPOTHESIS (#692): прямой python check.py в HOME matrix обходит strict
+# adapter, и unittest.skipTest остаётся зелёным только в этих подпрогонах.
+# SOLUTION: тот же stdlib bridge, без изменения полного matrix или bound=4.
+# RESULT: RED — exit 0 с одним skip; GREEN — exit 1 и исходный ID/reason,
+# прежние real PIPE/cancellation и deep-TMPDIR probes также проходят.
+# STATUS: FIXED — see #692
+
+def check_strict_unittest_subruns_692(c):
+    with tempfile.TemporaryDirectory() as root:
+        script = Path(root) / 'skip_probe.py'
+        script.write_text('import unittest\nclass Probe(unittest.TestCase):\n'
+                          '    @unittest.skip("owned matrix skip reason")\n'
+                          '    def test_boundary(self): pass\n'
+                          'if __name__ == "__main__": unittest.main()\n')
+        for strict in (False, True):
+            rows = hermetic.run_cases([('clean', str(script), root,
+                                        hermetic.child_env({}, strict=strict))])
+            c.expect(f'#692 HOME matrix rejects unittest skips exactly in strict={strict}',
+                     [code for _, _, code, _ in rows], [int(strict)])
+            if strict:
+                c.check('#692 HOME matrix retains the skipped test identity and reason',
+                        'Probe.test_boundary' in rows[0][3] and
+                        'owned matrix skip reason' in rows[0][3] and
+                        'strict mode rejects skipped test' in rows[0][3], rows[0][3])
+
+
 # HYPOTHESIS: вложенный _lib.RUN_ROOT удлиняет state/service.sock сверх
 # production-предела; standalone installer-проверки скрывают ошибку (#677).
 # SPEC: оба полных файла проходят с глубоким owned TMPDIR и настоящими
@@ -273,6 +299,7 @@ def main():
     check_communication_failure(c)
     check_real_pipes(c)
     check_real_cancellation(c)
+    check_strict_unittest_subruns_692(c)
     check_installer_deep_tmpdir_677(c)
     return c.report('hermetic_runs')
 
