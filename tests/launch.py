@@ -6,6 +6,16 @@
 сервиса кластера, шины и ssh: настоящий ops.add идёт по фальшивому
 транспорту, и проверяется то, что уходит по проводу, и что видит человек.
 Живой подъём роли -- только на пуле (сервер #582, обёртка #583).
+
+#793: с #642/#662 диспетчер не проводит `mop <роль>` до лаунчера -- surface
+`master` в finite inventory объявлен unsupported до private WS terminal
+binding. Свойства лаунчера (#586: каталог, имена, рукопожатие, эхо, ready,
+повторы по request_id, отказы) остаются свойствами продукта, поэтому они
+гоняются на самом каноническом модуле лаунчера (mop.cli.core._launch) с тем
+же подменённым транспортом, а контракт CLI проверяется отдельно: точный
+отказ диспетчера, код 2 и ни одного вызова провода. Ни сценарий, ни
+утверждение не ослаблены; когда private terminal binding появится, эти же
+сценарии уже закрепляют поведение за ним.
 """
 import os
 import subprocess
@@ -20,7 +30,7 @@ sys.path.insert(0, ROOT)
 
 from mop import cli  # noqa: E402
 from mop.cli import lib  # noqa: E402
-from mop.cli.core import _common, attach, master  # noqa: E402
+from mop.cli.core import _common, _launch, attach, master  # noqa: E402
 from mop.cli.pool import login  # noqa: E402
 from mop.client import roles  # noqa: E402
 from mop.common import bus, config, context, ops, puppets  # noqa: E402
@@ -132,12 +142,29 @@ class Pool:
         return self.ssh_rc
 
 
+# #793: точный пользовательский отказ диспетчера на role launch и на
+# private terminal. Это объявленный контракт текущего релиза (GAPS в
+# mop/cli/_control.py), а не повод убрать сценарий.
+ROLE_UNSUPPORTED = ("unsupported: role creation/readiness and private WS "
+                    "terminal is not bound in this release")
+ATTACH_UNSUPPORTED = ("unsupported: private terminal physical resolver/capability "
+                      "discovery is not bound in this release")
+
+
+def dispatch(argv):
+    """`mop …` через настоящий диспетчер -> (out, err, code)."""
+    return run_command(cli.main, argv)
+
+
 def launch(argv, pool, tty=True, catalogue_dirs=None, login_calls=None):
-    """Прогнать `mop <роль> …` целиком через диспетчер -> (out, err, code).
+    """Прогнать `mop <роль> …` через канонический модуль лаунчера -> (out, err, code).
 
     Подмены -- только того, что есть и без лаунчера: шина, терминал (os),
-    ssh (subprocess), часы (time), вход, рабочая копия. Так проверка
-    краснеет поведением прежнего диспетчера, а не отказом импорта."""
+    ssh (subprocess), часы (time), вход, рабочая копия. Диспетчер до
+    лаунчера не доходит (#793, surface master unsupported), поэтому
+    сценарий гонится на самом лаунчере; контракт CLI -- в
+    check_cli_surface_793. Ошибки лаунчера переводятся в строку и код
+    через cli.run -- ровно как у настоящего запуска."""
     clock = [0.0]
 
     def sleep(s):
@@ -162,7 +189,12 @@ def launch(argv, pool, tty=True, catalogue_dirs=None, login_calls=None):
             patched(config, require=lambda *a: None), \
             context.use(context.resolve({"server": "srv.test", "user": "alice"},
                                         {}, {})):
-        return run_command(cli.main, argv, via_cli=True)
+        # `mop master` -- свой командлет-алиас (объявление + общий лаунчер);
+        # прочие роли входят в общий лаунчер напрямую, как их зовёт
+        # диспетчер неизвестным именем.
+        if argv and argv[0] == "master":
+            return run_command(master.main, argv[1:], via_cli=True)
+        return run_command(_launch.main, argv, via_cli=True)
 
 
 # HYPOTHESIS: каталог клиента знал только пакетный каталог -- внешний
@@ -605,6 +637,39 @@ def check_attach_586(c):
             execs and pool.ssh and list(execs[0][1]) == pool.ssh[0], (execs, pool.ssh))
 
 
+# HYPOTHESIS (#793): диспетчер проводит `mop <роль>` до лаунчера и заводит
+# папета, хотя private terminal binding ещё не объявлен; или наоборот --
+# отказ без причины и после сетевого вызова, так что человек не понимает,
+# почему роль не запускается и не создан ли папет.
+# SOLUTION: до объявления surface `master` весь пользовательский контракт --
+# точная строка отказа диспетчера, код 2, пустой stdout и ни одного
+# обращения к шине; имя, не годное именем роли, остаётся unknown командой.
+# Сценарии самого лаунчера -- в остальных проверках файла; когда binding
+# появится, эта проверка сменится на код 0 и провод, а не исчезнет.
+# STATUS: unsupported contract of the current release — see #793.
+def check_cli_surface_793(c):
+    def no_wire(*a, **kw):
+        raise AssertionError("a declared-unsupported surface must not reach the bus")
+
+    with patched(bus, call_cluster=no_wire, request_many=no_wire):
+        for argv in (["builder"], ["no-such-role"], ["master"],
+                     ["builder", "git@h:g/mop.git"], ["builder", "--model", "opus"]):
+            out, err, code = dispatch(argv)
+            c.expect(f"#793 mop {' '.join(argv)} exits unsupported",
+                     (code, out, err), (2, "", ROLE_UNSUPPORTED + "\n"))
+        out, err, code = dispatch(["attach", NAME])
+        c.expect("#793 mop attach exits unsupported", (code, out, err),
+                 (2, "", ATTACH_UNSUPPORTED + "\n"))
+        # Имя не по грамматике роли -- по-прежнему не роль, а опечатка.
+        out, err, code = dispatch(["Builder"])
+        c.expect("#793 a malformed name is an unknown command",
+                 (code, out), (1, ""))
+        c.check("#793 the unknown name names help", "mop help" in err, err)
+        # Встроенная команда остаётся встроенной: роль её не затеняет.
+        out, err, code = dispatch(["help"])
+        c.expect("#793 help stays a built-in command", (code, err), (0, ""))
+
+
 def main():
     c = Checks()
     for check in (check_catalogue_roots_586, check_readiness_shape_586,
@@ -613,7 +678,8 @@ def main():
                   check_role_dispatch_586, check_readiness_586,
                   check_failures_after_creation_586, check_request_id_586,
                   check_handshake_586, check_server_refusal_586, check_options_586, check_no_tty_586,
-                  check_reserved_586, check_master_alias_586, check_attach_586):
+                  check_reserved_586, check_master_alias_586, check_attach_586,
+                  check_cli_surface_793):
         try:
             check(c)
         except Exception as e:  # noqa: BLE001 -- провал проверки, а не файла
