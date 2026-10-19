@@ -229,7 +229,142 @@ class NativeTimeline(unittest.IsolatedAsyncioTestCase):
                 server.close(); await server.wait_closed()
 
 
+class NativeContract(unittest.TestCase):
+    # HYPOTHESIS: #785 сценарий probe по-прежнему требует accepted+idle, хотя
+    # native 2.1.302 на обычный кадр молчит; unknown не классифицируется и
+    # молчание, drain, idle или provider-активность могут прочитаться как успех.
+    # SPEC (вариант A): ровно один native user write без re-send; observed лишь
+    # при unknown либо явном delivered→accepted / отказе→unavailable; cleanup,
+    # prepared fixture и controller receipt source обязательны; idle отдельно.
+    # SOLUTION: чистая classify() над trace/details, используется сценарием.
+    # STATUS: FIXED — see #785.
+    def basis(self, **changes):
+        events = [dict(event='native_write_started', frame_type='user'),
+                  dict(event='native_write_drained', frame_type='user'),
+                  dict(event='native_delivery_result', outcome='unknown'),
+                  dict(event='diagnostic_idle_finished', idle=True)]
+        return dict(dict(native_version='2.1.302', native_outcome='unknown', native_user_writes=1,
+            native_idle=False, diagnostic_idle_observed=True, trace_dropped_events=0,
+            holder_cleared=True, tasks_drained=True, callback_removed=True,
+            cold_home_onboarding=False, prepared_owned_fixture_only=True,
+            diagnostic_idle_is_delivery_evidence=False,
+            controller_receipt='controlled WSS peer only; not committed PostgreSQL evidence',
+            event_timeline=events), **changes)
+
+    def callback(self, status):
+        return dict(event='native_callback', action='peer_message_status', correlation='user', status=status)
+
+    def test_silent_ordinary_delivery_is_observed_without_becoming_acceptance(self):
+        from mop.client import inboxprobe
+        self.assertTrue(callable(getattr(inboxprobe, 'classify', None)),
+            'native contract classification is missing')
+        verdict = inboxprobe.classify(self.basis())
+        self.assertEqual(verdict['outcome'], 'observed', verdict)
+        self.assertEqual(verdict['native_outcome'], 'unknown')
+        self.assertEqual(verdict['acceptance'], False)
+        self.assertEqual(verdict['problems'], [])
+        self.assertIn('2.1.302', verdict['contract'])
+
+    def test_drain_idle_and_provider_activity_never_upgrade_silence(self):
+        from mop.client import inboxprobe
+        # Drain уже в timeline; idle виден диагностически, provider/UI -- поля
+        # вне native receipt. Ничто не превращает unknown в accepted.
+        for changes in (dict(diagnostic_idle_observed=True), dict(native_idle=False),
+                        dict(provider_requests=1, ui_activity=True)):
+            verdict = inboxprobe.classify(self.basis(**changes))
+            self.assertEqual(verdict['native_outcome'], 'unknown', changes)
+            self.assertEqual(verdict['acceptance'], False, changes)
+        # Обычная доставка не может получить owner-idle: subscription шлётся
+        # только после accepted.
+        verdict = inboxprobe.classify(self.basis(native_idle=True))
+        self.assertEqual(verdict['outcome'], 'unknown')
+        self.assertIn('idle', ' '.join(verdict['problems']))
+
+    def test_acceptance_requires_explicit_delivered_and_refusal_explicit_status(self):
+        from mop.client import inboxprobe
+        accepted = self.basis(native_outcome='accepted',
+            event_timeline=self.basis()['event_timeline'] + [self.callback('delivered')])
+        verdict = inboxprobe.classify(accepted)
+        self.assertEqual((verdict['outcome'], verdict['acceptance']), ('observed', True), verdict)
+        invented = inboxprobe.classify(self.basis(native_outcome='accepted'))
+        self.assertEqual(invented['outcome'], 'unknown')
+        self.assertIn('delivered', ' '.join(invented['problems']))
+        refused = self.basis(native_outcome='unavailable',
+            event_timeline=self.basis()['event_timeline'] + [self.callback('dropped')])
+        self.assertEqual(inboxprobe.classify(refused)['outcome'], 'observed')
+        unexplained = inboxprobe.classify(self.basis(native_outcome='unavailable'))
+        self.assertEqual(unexplained['outcome'], 'unknown')
+        self.assertIn('refusal', ' '.join(unexplained['problems']))
+        contradicted = inboxprobe.classify(self.basis(native_outcome='unknown',
+            event_timeline=self.basis()['event_timeline'] + [self.callback('delivered')]))
+        self.assertEqual(contradicted['outcome'], 'unknown')
+
+    def test_one_write_verified_cleanup_and_honest_provenance_are_mandatory(self):
+        from mop.client import inboxprobe
+        self.assertEqual(inboxprobe.classify(self.basis())['outcome'], 'observed')
+        resend = self.basis(native_user_writes=2, event_timeline=self.basis()['event_timeline'] + [
+            dict(event='native_write_started', frame_type='user'),
+            dict(event='native_write_drained', frame_type='user')])
+        verdict = inboxprobe.classify(resend)
+        self.assertEqual(verdict['outcome'], 'unknown')
+        self.assertIn('re-send', ' '.join(verdict['problems']))
+        for name in ('holder_cleared', 'tasks_drained', 'callback_removed'):
+            verdict = inboxprobe.classify(self.basis(**{name: False}))
+            self.assertEqual(verdict['outcome'], 'unknown', name)
+        self.assertIn('cold-boot', ' '.join(inboxprobe.classify(self.basis(cold_home_onboarding=True))['problems']))
+        self.assertIn('prepared', ' '.join(inboxprobe.classify(
+            self.basis(prepared_owned_fixture_only=False))['problems']))
+        self.assertIn('controller receipt', ' '.join(inboxprobe.classify(
+            self.basis(controller_receipt='own fixture'))['problems']))
+        self.assertIn('diagnostic idle', ' '.join(inboxprobe.classify(
+            self.basis(diagnostic_idle_is_delivery_evidence=True))['problems']))
+        self.assertIn('dropped', ' '.join(inboxprobe.classify(
+            self.basis(trace_dropped_events=1))['problems']))
+        self.assertIn('2.1.302', ' '.join(inboxprobe.classify(
+            self.basis(native_version='2.1.303'))['problems']))
+
+    def test_probe_scenario_uses_the_contract_classification(self):
+        from mop.client import chatprobe
+        source = Path(chatprobe.__file__).read_text()
+        self.assertIn("inboxprobe.classify(details)", source,
+            'native-private-inbox scenario must classify through the 2.1.302 contract')
+        self.assertNotIn("native_outcome']=='accepted' and details['native_idle']", source,
+            'accepted+idle cannot remain the ordinary-delivery criterion')
+
+
 class Commandlets(Reports):
+    def test_terminal_delivery_unknown_reads_as_terminal_and_never_reposts(self):
+        from mop.cli import _control
+        import mop.cli.core.delivery as command
+        self.fixture.responses.append(Response(200, self.result(state='unknown')))
+        with _control.use(self.client._context):
+            text, status = _control.tool_call(['delivery'], command.MCP,
+                dict(message_id=self.message, epoch=self.epoch), with_status=True)
+        self.assertEqual(status, 3, text)
+        self.assertIn('terminal', text)
+        self.assertIn('never re-sent', text)
+        self.assertIn('2.1.302', text)
+        self.assertNotIn('resend', text)
+        self.fixture.responses.append(Response(200, self.result(state='accepted', idle=True)))
+        with _control.use(self.client._context):
+            text, status = _control.tool_call(['delivery'], command.MCP,
+                dict(message_id=self.message, epoch=self.epoch), with_status=True)
+        self.assertEqual(status, 0, text)
+        self.assertNotIn('terminal', text)
+
+    def test_committed_report_unknown_reads_as_terminal_without_resend(self):
+        from mop.cli import _control
+        import mop.cli.core.report as command
+        self.fixture.responses.append(Response(200, self.result(state='unknown',
+            operation_request_id=None)))
+        with _control.use(self.client._context):
+            text, status = _control.tool_call(['report'], command.MCP, dict(address='private:'+key(),
+                text='private-marker', epoch=self.epoch, message_id=self.message), with_status=True)
+        self.assertEqual(status, 3, text)
+        self.assertIn('terminal', text)
+        self.assertIn('never re-sent', text)
+        self.assertNotIn('repost', text)
+
     def test_declarative_report_dispatch_pending_and_recovery_without_post_retry(self):
         from mop.cli import _control, _mcp
         self.assertEqual(_control.SURFACES.get('report'), 'bound', 'report must use existing dispatcher')

@@ -1399,8 +1399,11 @@ def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _norm
                 raise RuntimeError('private inbox native proof requires owned normal 2.1.302')
             from mop.client import inboxprobe
             details = inboxprobe.run(terminal, ready_registry, home, runtime, root)
+            # Контракт 2.1.302: accepted+idle не критерий обычной доставки (#785).
+            verdict = inboxprobe.classify(details)
+            details['contract_verdict'] = verdict
             report['scenarios']['native-private-inbox'] = dict(
-                outcome=outcome(details['native_outcome']=='accepted' and details['native_idle']), evidence=details)
+                outcome=verdict['outcome'], evidence=details)
             snapshot('native-private-inbox')
             return report
         if mcp_activation:

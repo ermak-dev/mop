@@ -3,6 +3,13 @@
 Вызывается лишь после kernel proof normal Docker. Launcher передаёт ровно
 свой измеренный процесс и fixture-only key из созданного им private home.
 WSS peer здесь контролируемый; его receipt не выдаётся за SQL COMMIT.
+
+Контракт квитанций native 2.1.302 (#785, вариант A): принятый обычный
+user-кадр не порождает положительной квитанции, поэтому `unknown` — правдивый
+терминальный исход. Подтверждением служит только явный native `delivered`
+(освобождение ранее удержанного сообщения); явный отказ даёт `unavailable`.
+Тишина, слитый write, idle и активность провайдера/UI исход не повышают.
+Контракт привязан к версии 2.1.302 и подлежит перепроверке при её смене.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -19,6 +26,74 @@ from mop.common.endpoint import inbox_encode, inbox_decode
 from .control import ServerContext
 from .local_bridge import LocalBridge, OwnSession, _unique_object, _invalid_constant
 from .private_inbox import InboxOwner
+
+# Контракт квитанций версии, на которой снят этот эксперимент. Смена версии
+# native требует новой перепроверки: молчание и idle могут означать иное.
+CONTRACT = 'native 2.1.302 ordinary inbox receipt contract; re-verify on native version change'
+_POSITIVE = ('delivered',)
+_REFUSALS = ('denied', 'expired', 'refused', 'dropped')
+_OUTCOMES = ('accepted', 'unknown', 'unavailable')
+
+
+def classify(details):
+    """Чистое суждение probe по контракту 2.1.302 (#785, вариант A).
+
+    `observed` здесь значит «эксперимент дал ожидаемое по контракту», а не
+    «native принял сообщение». Принятие требует явного `delivered`; обычная
+    доставка честно остаётся `unknown` и не повторяется. Тишина, слитый write,
+    idle и активность провайдера/UI исход не повышают.
+    """
+    problems = []
+    events = [row for row in details.get('event_timeline') or [] if type(row) is dict]
+    if details.get('native_version') != '2.1.302':
+        problems.append('the receipt contract is tied to native 2.1.302 and must be re-verified '
+                        'on a version change')
+    recorded = details.get('native_outcome')
+    if recorded not in _OUTCOMES:
+        problems.append('native outcome is not a known terminal value')
+    outcome = recorded if recorded in _OUTCOMES else 'unknown'
+    statuses = [row.get('status') for row in events
+        if row.get('event') == 'native_callback' and row.get('action') == 'peer_message_status'
+        and row.get('correlation') == 'user']
+    delivered = any(value in _POSITIVE for value in statuses)
+    refused = any(value in _REFUSALS for value in statuses)
+    if outcome == 'accepted' and not delivered:
+        problems.append('accepted requires an explicit native delivered receipt')
+    if outcome == 'unavailable' and not refused:
+        problems.append('unavailable requires an explicit native refusal status')
+    if outcome == 'unknown' and (delivered or refused):
+        problems.append('native status contradicts the unknown outcome')
+    writes = details.get('native_user_writes')
+    if writes != 1:
+        problems.append('exactly one drained native user write is required; no re-send')
+    started = sum(row.get('event') == 'native_write_started' and row.get('frame_type') == 'user'
+        for row in events)
+    if started and started != writes:
+        problems.append('native user frame was re-sent')
+    for name, phrase in (('holder_cleared', 'holder was not cleared'),
+                         ('tasks_drained', 'owned tasks were not drained'),
+                         ('callback_removed', 'native callback was not removed')):
+        if details.get(name) is not True:
+            problems.append(phrase)
+    if details.get('trace_dropped_events'):
+        problems.append('trace dropped events; evidence is incomplete')
+    if details.get('cold_home_onboarding'):
+        problems.append('cold-boot HOME onboarding was not tested; the fixture HOME is prepared')
+    if details.get('prepared_owned_fixture_only') is not True:
+        problems.append('the evidence must state that the fixture HOME is prepared, not cold-boot proof')
+    receipt = details.get('controller_receipt')
+    if not (type(receipt) is str and 'controlled WSS peer' in receipt
+            and 'not committed PostgreSQL' in receipt):
+        problems.append('controller receipt source must name the controlled WSS peer, '
+                        'not committed PostgreSQL')
+    if details.get('diagnostic_idle_is_delivery_evidence'):
+        problems.append('diagnostic idle is a separate observation, not delivery evidence')
+    if details.get('native_idle') and outcome != 'accepted':
+        problems.append('idle is a separate observation and cannot accompany a non-accepted outcome')
+    observed = not problems
+    return dict(outcome='observed' if observed else 'unknown', native_outcome=outcome,
+        acceptance=observed and outcome == 'accepted' and delivered and not refused,
+        idle=details.get('native_idle') is True, contract=CONTRACT, problems=problems)
 
 
 class NativeTrace:
@@ -259,6 +334,7 @@ def run(terminal, ready, home, runtime, output):
             await runner.cleanup()
         details['trace_dropped_events']=trace.dropped_events
         details['native_user_writes']=sum(row['event']=='native_write_drained' and row.get('frame_type')=='user' for row in trace.events)
-        details['no_fabricated_acceptance']=True
+        # Принятие не заявляется здесь: чистую оценку по контракту 2.1.302
+        # даёт classify(), и она же называет расхождения.
         return details
     return asyncio.run(experiment())

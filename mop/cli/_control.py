@@ -618,6 +618,12 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             if result is None:
                 raise api.UnknownReport(prepare)
             emit({'schema_version': 1, 'delivery': plain(result)}, credential=selected.token)
+            if result.state == 'unknown':
+                # Контракт native 2.1.302 (#785): у обычной доставки нет
+                # положительной квитанции; unknown терминален и не повторяется.
+                print('report outcome unknown is terminal for native 2.1.302; '
+                      'the message is never re-sent; read-only recovery by the original key only',
+                      file=sys.stderr)
             return 0 if result.state == 'accepted' else 3
         elif words == 'delivery':
             result = (client.delivery(args.delivery_id) if args.delivery_id is not None else
@@ -625,6 +631,12 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             emit({'schema_version': 1, 'delivery': plain(result),
                 **({'outcome': 'unknown', 'epoch': args.epoch, 'message_id': args.message_id} if result is None else {})},
                 credential=selected.token)
+            if result is None or result.state == 'unknown':
+                # Контракт native 2.1.302 (#785): у обычной доставки нет
+                # положительной квитанции; unknown терминален и не повторяется.
+                print('delivery outcome unknown is terminal for native 2.1.302; '
+                      'the message is never re-sent; read-only recovery by the original key only',
+                      file=sys.stderr)
             return 0 if result is not None and result.state == 'accepted' else 3
         elif words == 'addresses':
             emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
@@ -669,8 +681,9 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             return _render_operation(operation, credential=selected.token)
         return 0
     except api.UnknownReport as error:
-        print('report unknown; message_id=' + error.message_id + '; epoch=' + error.intent.epoch +
-              '; recover by the original key only; do not repost', file=sys.stderr)
+        print('report outcome unknown; message_id=' + error.message_id + '; epoch=' + error.intent.epoch +
+              '; terminal without a receipt; never re-sent; recover by the original key only',
+              file=sys.stderr)
         if lookup_failure is not None:
             print('lookup failed: ' + _failure(lookup_failure, selected.token), file=sys.stderr)
         return 3

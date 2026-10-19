@@ -2,6 +2,8 @@
 
 Returns committed controller state, not a WebSocket write acknowledgement.
 Queued, attempting and unknown states do not prove native application acceptance.
+Terminal unknown is the truthful outcome for an ordinary native 2.1.302
+delivery and is never re-sent; recovery is read-only by the original key.
 Idle is a separate matched native observation. Access uses the current Actor.
 """
 from mop.cli import _control

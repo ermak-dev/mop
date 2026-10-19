@@ -1376,6 +1376,11 @@ and endpoint DELETE. An acknowledgment before a durable attempt, changed receipt
 foreign recipient or old connection is rejected. `accepted` means explicit
 application acceptance, not successful completion of a task. Idle observation is
 a separate correlated immutable receipt, not acceptance or task correctness.
+On native 2.1.302 an ordinary delivery has no positive receipt: its committed
+state remains `unknown` and is terminal. The receipt model admits an idle
+observation only for an `accepted` delivery with `notify_when_idle`
+(`DeliveryReceipt.save`), so a `notify_when_idle` subscription on an
+ordinary delivery is never satisfied.
 No message content is exposed through events, audit or these metadata reads.
 Expired queued payloads are purged by bounded admission cleanup; they cannot
 permanently occupy shared queue capacity. Expired attempts become unknown, not
@@ -1399,12 +1404,17 @@ It sends bounded native `msgV:1` user frames with the admitted message ID and a
 private ephemeral callback socket. Only a matching native `peer_message_status`
 with `status=delivered` confirms application acceptance; matched
 `denied|expired|refused|dropped` means unavailable. `held` is not acceptance.
-Successful socket writes without that evidence are unknown. `notify_when_idle`
-uses a distinct control message ID and matching `peer_idle_notice`; terminal
-input/keystrokes are never queued or replayed. The launch adapter must replace
-this binding on external conversation changes even when PID/path remain the
-same; a socket alone cannot attest to a conversation ID. Same-UID OS processes
-are not a sandbox.
+Successful socket writes without that evidence are unknown. `unknown` is the
+truthful terminal outcome for an ordinary delivery on native 2.1.302 and is never
+re-sent: drain, idle, provider or UI activity never upgrade it. The receipt
+contract belongs to that native version and is re-verified on a version change
+(see CHANNEL). Native `notify_when_idle` uses a distinct control message ID and
+matching `peer_idle_notice`; it is a separate observation, and for an ordinary
+delivery the outcome stays `unknown`, so the subscribed idle never fires.
+Terminal input/keystrokes are never queued or replayed. The launch adapter must
+replace this binding on external conversation changes even when PID/path remain
+the same; a socket alone cannot attest to a conversation ID. Same-UID OS
+processes are not a sandbox.
 
 `mop.client.private_inbox.InboxOwner` (#773) is an internal, one-shot composition
 port requiring an exact typed `OwnSession`, explicit API context, existing client
@@ -1456,9 +1466,15 @@ PG17/verified HTTPS/WSS integration with a controlled Unix peer is distinct from
 native evidence. `mop dev inbox-probe` runs the actual owned native 2.1.302 in the
 existing offline nonroot Docker fixture, with an explicit hashed source closure,
 fixture-owned physical proof and no real config/credentials. Its controlled WSS
-receipt is not PostgreSQL COMMIT evidence. A provider response, UI display or
-socket write never substitutes for a missing native callback: the observed
-native application outcome remains unknown when that callback is absent.
+receipt is not PostgreSQL COMMIT evidence; its HOME is a prepared owned fixture,
+not cold-boot onboarding proof. It classifies the run against the 2.1.302
+contract: exactly one native user write and no re-send; `observed` only for
+`unknown` or an explicit `delivered`→accepted / refusal→unavailable outcome;
+verified holder, task and callback cleanup. A provider response, UI display,
+socket write, idle or drain never substitutes for a missing native callback:
+the observed native application outcome remains unknown when that callback is
+absent, and no probe result is a claim of acceptance without an explicit
+`delivered`.
 
 ## Sync/async and resource lifecycle
 

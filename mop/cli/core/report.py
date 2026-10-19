@@ -3,7 +3,9 @@
 The opaque private address is not an assignment UUID. Message identity is fixed
 before I/O and is distinct from operation correlation. A queued or accepted HTTP
 submission is not native delivery. Lost submissions recover by GET only; a 404
-remains unknown and never triggers a repost. Text '-' reads bounded UTF-8 stdin.
+remains unknown and never triggers a repost. A committed unknown state is
+terminal for native 2.1.302 ordinary delivery: it is never re-sent, and the
+message id/epoch recover it read-only. Text '-' reads bounded UTF-8 stdin.
 Receiver registration, native sockets and holder headers are not public options.
 """
 from mop.cli import _control

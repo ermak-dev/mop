@@ -141,6 +141,8 @@ mop delivery [delivery-id | --epoch UUID --message-id UUID]: read a private deli
 
 Returns committed controller state, not a WebSocket write acknowledgement.
 Queued, attempting and unknown states do not prove native application acceptance.
+Terminal unknown is the truthful outcome for an ordinary native 2.1.302
+delivery and is never re-sent; recovery is read-only by the original key.
 Idle is a separate matched native observation. Access uses the current Actor.
 ```
 
@@ -305,7 +307,9 @@ mop report <address> <text|-> --epoch UUID [--message-id UUID] [--operation-requ
 The opaque private address is not an assignment UUID. Message identity is fixed
 before I/O and is distinct from operation correlation. A queued or accepted HTTP
 submission is not native delivery. Lost submissions recover by GET only; a 404
-remains unknown and never triggers a repost. Text '-' reads bounded UTF-8 stdin.
+remains unknown and never triggers a repost. A committed unknown state is
+terminal for native 2.1.302 ordinary delivery: it is never re-sent, and the
+message id/epoch recover it read-only. Text '-' reads bounded UTF-8 stdin.
 Receiver registration, native sockets and holder headers are not public options.
 ```
 
@@ -860,10 +864,18 @@ Builds the existing isolated normal nonroot Docker fixture with a finite source
 closure and the declared aiohttp dependency. Runtime has no network except its
 own loopback HTTPS/WSS and dummy Messages provider. No host config, credentials,
 mounts, pool, model settings or native startup composition are used or changed.
-Requires the installed native 2.1.302. The real LocalBridge must observe matched
-native acceptance and idle; absence remains unknown. The controlled WSS receipt
-is not PostgreSQL commit proof. Real PostgreSQL integration is a separate check.
-The report records source hashes, actual version, kernel isolation and cleanup.
+Requires the installed native 2.1.302. The scenario is classified by that
+version's receipt contract (docs/CHANNEL.md): an ordinary user frame gets no
+positive native receipt, so unknown is a truthful terminal outcome and is never
+re-sent. observed requires exactly one native user write, no re-send, verified
+holder/task/callback cleanup, and either unknown or an explicit native
+delivered (accepted) / explicit refusal (unavailable); silence, drained write,
+idle, provider or UI activity never upgrade it, and accepted is never reported
+without explicit delivered. The fixture home is prepared, not cold-boot
+onboarding proof. The controlled WSS receipt is not PostgreSQL commit proof;
+real PostgreSQL integration is a separate check. The report records source
+hashes, actual version, kernel isolation and cleanup. Re-verify the contract
+when the native version changes.
 ```
 
 #### mop dev openapi
