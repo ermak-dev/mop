@@ -193,21 +193,34 @@ The separately privileged builder is not an ordinary worker role.
 
 #644 provisions three ordinary runtime LOGINs (`web`, `worker`, `gateway`),
 each with PostgreSQL `CONNECTION LIMIT 8`: at most 24 connections under these
-identities across their processes, not a group-role limit. A distinct maintenance
-LOGIN has another limit of 8. The target database limit of 32 is an upper bound,
-not a reservation of eight maintenance slots. Verification rejects incoming and
-outgoing membership for all four identities (including transitive INHERIT/SET
-ROLE paths), any additional ordinary LOGIN with CONNECT to the target, and
-unconfigured object/default ACL grantees. This deliberately rejects unsupported
-ACL topologies rather than silently calculating a fictitious aggregate.
+identities across their processes, not a group-role limit. The separate
+`credential` purpose gets its own LOGIN named by `identities.credentials` and
+another limit of 8; it never shares the web login. A distinct maintenance LOGIN
+has its own limit of 8. The explicit managed total is therefore 40 connections
+(24 ordinary + 8 credential + 8 maintenance). The target database limit of 40 is
+an upper bound, not a reservation of eight maintenance slots. Provisioning checks
+40 available nonreserved server slots; the review artifact shows 43 total slots
+with three reserved, not the old four-login budget of 32. The ORM setting
+`instance_db_connections` continues to bound only the three ordinary pools at 24;
+credential capacity is separately fixed and reported, not silently charged to it.
+Verification rejects incoming and outgoing membership for all five identities
+(including transitive INHERIT/SET ROLE paths), any additional ordinary LOGIN with
+CONNECT to the target, and unconfigured object/default ACL grantees. This
+deliberately rejects unsupported ACL topologies rather than silently calculating
+a fictitious aggregate.
 
 This is accounting for the managed target's ordinary logins, not all PostgreSQL
 sessions: external superusers and consumers of other databases are outside that
 scope and can exhaust shared server capacity. Operators must provision adequate
 server capacity and restrict external administrative access; a database limit
-alone cannot guarantee availability. The current installer does not yet provision the separate credential-service DB
-bootstrap or LOGIN; that #669 production binding remains unavailable. Builder gets no runtime DB login. The separately privileged builder is not an
-ordinary worker role.
+alone cannot guarantee availability. Builder gets no runtime DB login and is
+not an ordinary worker role. The credential LOGIN receives the same restricted
+application-table CRUD/sequence grants as other runtime principals, including
+the trust-table exceptions below, never schema ownership or maintenance access.
+`database --passwords-file` takes exactly `web`, `worker`, `gateway`, `credential`
+and `maintenance` in its protected password document; all five credentials must
+be distinct. Neither the installation specification nor generated unit/output
+contains passwords.
 
 Ordinary public application tables allow SELECT/INSERT/UPDATE/DELETE; sequences
 allow USAGE/SELECT, never UPDATE or grant options. Verification checks effective
@@ -222,8 +235,9 @@ schema ACL migration removes ordinary default CRUD from these exceptions before
 schema preparation completes; changing defaults later does not regrant existing
 tables. Native restore must preserve this exception when recreating trust tables.
 `database-check` is read-only and never repairs an external database: unsafe ACLs
-require an explicit operator provisioning/schema-maintenance action. Runtime units
-and full installation apply remain blocked on the missing Root consumers.
+require an explicit operator provisioning/schema-maintenance action. Unit artifacts
+do not install or start services; full installation apply remains blocked on the
+missing Root consumers and native lifecycle acceptance.
 
 ### Isolated credential runtime (#669, Secret core #637)
 
@@ -255,6 +269,92 @@ login/CSRF/session checks remain the frontend's responsibility. OS peer identity
 does not select a user or grant. The service constructs ActorContext through
 Access, never from caller owner/project/actor claims. No new bearer, JWT, shared
 service password, credential file or persisted socket session is introduced.
+
+#### Installer-bound rootless clients (#644)
+
+Fresh `bootstrap --role web|worker` now resolves the explicit
+`identities.credentials` OS account from the installation specification and pins
+its numeric, non-root UID. Both roles receive only these additional nonsecret
+coordinates in their private bootstrap:
+
+```json
+"credential_service": {
+  "path": "/var/lib/fresh-controller/credential-socket/service.sock",
+  "server_uid": 1944
+}
+```
+
+The example path is derived from `paths.state` plus
+`credential-socket/service.sock`, not another configurable registry or an
+environment override. The UID is an example, not a default: the bootstrap command
+requires the declared account to exist. Library renderers must supply its exact
+`credential_uid`; they cannot guess it from the caller UID. The finite bootstrap
+schema allows this field only for web/worker, accepts exactly `path` and
+`server_uid`, and rejects noncanonical/oversized paths, root/invalid UIDs and
+embedded tokens, passwords or root references. Maintenance, credential and
+gateway bootstraps do not receive a client binding. A missing field in an
+isolated/bootstrap fixture remains explicitly unbound; a malformed field fails
+closed. Neither loader nor factory opens the service socket or proves readiness.
+
+The review artifact and explicit OS provisioner use one shared-directory
+definition: `state/credential-socket` is owned by `identities.credentials`, mode
+`0750`, with web/worker as the only additional members of its group. Generated
+web/worker unit artifacts include that supplementary group and hide the private
+credential configuration/state trees along with maintenance/root/backup trees.
+The separate credential private directories stay `0700`; group membership does
+not grant root/bootstrap access.
+
+Fresh OS provisioning generates one encryption root with two private custody
+copies: `paths.root_trust/root.key`, owned only by maintenance for recovery, and
+`paths.configuration/credentials/root.key`, owned only by the credentials account
+for the running provider. It does not give that account traversal of maintenance
+trust/backup trees. Both files are `0600` under separate `0700` directories and
+have the same installation fingerprint. The shared Django signing material is
+copied separately into each purpose-owned private configuration directory,
+including credentials; it is not the encryption root. Web/worker/gateway and
+builder receive no root copy. Repeated provisioning refuses existing trees/accounts
+rather than regenerating or adopting keys.
+
+`bootstrap --role credential --password-file PATH` runs as
+`identities.credentials`, writes only `configuration/credentials/bootstrap.json`,
+and uses the singular `credential` runtime purpose and the separate LOGIN.
+It references only that private directory's `root.key` and `django.key`, not the
+maintenance root path. The password input and result are protected files; successful
+bootstrap emits no contents and never replaces an existing file. The plural
+`credentials` is the OS/path identity, not an accepted bootstrap role.
+
+`render` resolves the declared credential primary UID/GID and exact web/worker
+UIDs from provisioned OS accounts, refusing missing, root or aliased identities
+and a mismatched socket group. Its credential unit invokes the existing
+`mop server credentials --bootstrap ... --socket ... --key-id root-v1
+--socket-group GID --peer-uid WEB_UID --peer-uid WORKER_UID` lifecycle, with the
+same derived endpoint as the clients. Only this explicit binding removes
+`blocked_services.credentials`; a library preview without the OS coordinates
+still reports it blocked. The unit runs under the credentials OS account, permits
+writes only to its private state and shared socket directory, and hides
+maintenance/root/backup and other service-private trees. `SIGTERM` uses the
+existing bounded drain and owned-inode socket cleanup; startup never deletes a
+stale socket. The root identifier is retained as `root-v1`, not rotated on restart.
+
+These are renderable service artifacts, not an install/start receipt. No service
+is started, no stale socket is removed, and full `apply` remains refused. Worker
+startup, explicitly enrolled activation-worker authority, scheduler/native launch
+readiness and transport retirement remain separate composition/acceptance gates.
+Installation-scoped credential integrations also remain closed; daemon startup
+does not grant arbitrary installation-secret authority.
+
+`controller.adminservices.credential_client()` constructs the bounded client
+from the validated bootstrap, with a five-second deadline and the exact pinned
+service UID. Existing create admission, protected project-secret replacement
+and addressed-launch consumers of that factory therefore use the real socket transport when bound,
+without importing a crypto provider or reading a root. Construction means
+configured capability, not a reachable/authorized service: per-call endpoint,
+peer, Access and resource checks still decide the result. No human token is
+retained in the factory or copied to worker/unit/node artifacts.
+`GrantActivator` still requires an explicitly supplied enrolled service token;
+this wiring neither mints one nor derives it from a human owner or a DB login.
+It does not bind scheduler, physical node scope, readiness, retirement, node
+observer or worker lifecycle handlers.
 
 Rootless `mop.common.credential_client.CredentialClient(path, server_uid=UID)` is stdlib
 only. It verifies the service peer UID and protected endpoint and exposes typed
@@ -297,14 +397,17 @@ mismatched assignment is refused before provider work and checked again before
 the retained commit. Bundles must be published through Grants, which seals their
 complete normalized sets; manually populated approval rows are not authority.
 
-Activation and transport retirement remain explicitly unbound: a current read
-projection is not a trusted activation or retirement receipt. Addressed and
-rotation issuance also remain denied by `AwaitAssignment`, even for a permitted
-human. They require an authenticated enrolled node, current assignment, exact
-role/digest/incarnation, active grant/ancestors, current owner rights and pinned
-required-name set, not merely the new current-binding adapter. The public
-SecretStore checks full Secrets delivery action/scope before/after crypto; a
-binding alone is not permission. No node-addressed proof or receipt is fabricated.
+#643 supplies a finite `activate_grant` command and `GrantActivator` adapter for
+claimed create, plus `read_launch` for exact current machine Work. The production
+activation worker still needs its explicitly enrolled service credential; a
+current read projection or configured client is not an activation/readiness or
+retirement receipt. Generic addressed and rotation issuance remain closed without
+a concrete current-resource delivery gate. They require an authenticated enrolled
+node, current assignment, exact role/digest/incarnation, active grant/ancestors,
+current owner rights and pinned required-name set, not merely a current-binding
+adapter. The public SecretStore checks full Secrets delivery action/scope
+before/after crypto; a binding alone is not permission. Transport retirement is
+not supplied by this client wiring, and no node-addressed proof is fabricated.
 
 The implemented rootless aggregate boundary publishes/reads exact encrypted role
 and Preparation bytes, approves them, and reserves grants with the real
@@ -316,32 +419,36 @@ epoch / restore-generation fence at prepare, aggregate commit and read release.
 A changed root during crypto cannot merely fail after committing a stale bundle.
 Receipts contain metadata and immutable references, never the grant token.
 
-This initial #669 stage does not wire the production web/worker HTTP routes,
-node-addressed delivery, #643 admissions, or anonymous LDAP service bind / scoped
-Controller integration consumers. Those non-human consumers need explicit
-purpose plus OS-peer authority and a concrete current-resource query; forwarding
-an arbitrary human owner ID as actor authority is not permitted. They remain
-closed rather than weakening admission or giving ordinary roles a CryptoProvider.
-#644 separately owns service identities, units and DB provisioning.
+The initial #669 socket boundary is now consumed by #643 create admissions and
+addressed launch, and #644 binds their rootless production factory as described
+above, including its separate credential DB/root provisioning and daemon unit.
+This is not full installation acceptance: scheduler authority, physical node
+integration, worker startup and retirement remain their own explicit gates. Anonymous LDAP service bind and other scoped
+Controller integration consumers also need an accepted named purpose, OS-peer
+authority and a concrete current-resource query; forwarding an arbitrary human
+owner ID is not permitted. They stay closed rather than giving ordinary roles a
+CryptoProvider.
 
-This adapter does not provide a role-create admission workflow. Public
-`Assignments.create` currently takes a grant ID while generating the target ID;
-`Grants.reserve` takes the target/incarnation while generating the grant ID.
-Connecting those identities for a new target still needs an accepted owning
-admission use case. The current Operations vertical is node drain/enable, not a
-generic role-create/stage handler. Socket tests with persisted matching
-assignments prove the binding checks, not that missing end-to-end workflow.
-Grants also requires the registered `execution.create_puppet` permission (the
-execution app installs `execution.*` directly since #685, with no logical
-alias). The socket fixture explicitly supplies it. Production admission must own its
-registration rather than treating a superuser or caller-selected owner as a
-substitute for a missing capability.
+#643 owns the role-create workflow connecting reserved target/incarnation/grant
+identities, scheduler registration and machine steps. Socket tests with persisted
+matching assignments prove the credential binding, not a deployed end-to-end
+installation. Grants also requires the registered `execution.create_puppet`
+permission (the execution app installs `execution.*` directly since #685, with no
+logical alias). A superuser or caller-selected owner is not a substitute for a
+missing capability, scheduler binding or service enrollment.
 
 Owned source-only socket checks can exercise actual distinct OS UIDs with
 `mop dev controller --postgres 17 --check credential_service --cross-uid`
-on Python 3.12. Only that explicit fixture runs its test process as root inside its
-new isolated container; the default CI suite remains unprivileged. This creates
-no live pool service or host account and passes no installation inputs.
+on Python 3.12. The narrow gate retains the original two socket cases and adds
+the fresh installer path: a newly provisioned database with verified TLS,
+credential bootstrap written by the real command under a non-root service UID,
+the rendered daemon command, a distinct frontend UID with only socket-group
+access, a real encrypted application mutation, exact peer denial, and `SIGTERM`
+cleanup followed by restart. It does not run systemd or prove worker/native
+lifecycle readiness. Only that explicit fixture runs its test orchestrator as root
+inside its new isolated container; the daemon is non-root and the default CI
+suite remains unprivileged. This creates no live pool service or host account
+and passes no installation inputs.
 
 Cold-start acceptance uses Python 3.12 + PostgreSQL 17 only. Its order is dependency
 setup, provisioned PostgreSQL 17 and trust

@@ -20,9 +20,15 @@ def authority(*, lock=False):
         raise s.Unavailable(str(error)) from None
 
 
-# #628/#642 устанавливают root-owned transport/grant/cipher. Без cipher private
-# send отказывает, а registration/query уже работают через стандартный Auth.
-endpoints = s.Endpoints(authority=authority)
+# SQL grant root общий с command/read composition. Private bytes проходят
+# отдельный finite protected port; web никогда не конструирует cipher/provider.
+def default_endpoints():
+    from .machinebinding import local_grants
+    from .endpointbinding import ProtectedEndpoints
+    return ProtectedEndpoints(authority=authority, grants=local_grants().local_authority())
+
+
+endpoints = default_endpoints()
 
 
 # #690: приватные exact/uid заменены общими строгими полями strict-модуля;
@@ -42,8 +48,10 @@ def presence(value):
 
 
 class EndpointView(APIView):
-    # Grant resolver назначается доверенной root composition, не request JSON.
-    grant_resolver = None
+    # Тот же SQL-only root для authentication и subject service, не request JSON.
+    @property
+    def grant_resolver(self):
+        return endpoints.grants
     # #691: сырой ValueError конечных парсеров (exact/uid) -- клиентский 400;
     # доменные отказы переводит глобальный handler по реестру errors.
     value_error_is_input = True
@@ -117,12 +125,18 @@ class Reports(EndpointView):
             deadline = datetime.fromisoformat(value['not_after'].replace('Z', '+00:00'))
         except ValueError:
             raise ValueError('aware delivery deadline required') from None
-        sender = self.context(request) if 'X-Mop-Endpoint' in request.headers else None
-        delivery = endpoints.send(request.actor, expected_epoch=uid(value['epoch']),
+        from mop.common.credentials import Credential
+        credential = (Credential('token', request.auth.key) if request.auth is not None
+                      else Credential('session', request.session.session_key))
+        has_sender = any(name in request.headers for name in ('X-Mop-Endpoint', 'X-Mop-Connection'))
+        # Только locators; holder_context резолвит credential daemon из SQL.
+        delivery = endpoints.send_private_report(credential, expected_epoch=uid(value['epoch']),
             address=value['address'], message_id=uid(value['message_id']),
             text=value['text'], not_after=deadline, operation_request_id=uid(value['operation_request_id'])
             if value.get('operation_request_id') is not None else None,
-            notify_when_idle=value.get('notify_when_idle', False), priority=value.get('priority', 'next'), sender=sender)
+            notify_when_idle=value.get('notify_when_idle', False), priority=value.get('priority', 'next'),
+            sender_endpoint_id=uid(request.headers.get('X-Mop-Endpoint')) if has_sender else None,
+            sender_connection_nonce=uid(request.headers.get('X-Mop-Connection')) if has_sender else None)
         response = Response({'schema_version': 1, 'delivery': result(delivery)}, status=202)
         response['Location'] = '/api/v1/deliveries/'+str(delivery.id)
         return response

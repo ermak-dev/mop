@@ -12,7 +12,7 @@ from . import models as m
 from .protocol import (WorkV1, AuthorityV1, ReceiptV1, FactPageV1, FACT_FIELDS,
     positive, role_binding, result_codes, WorkPort, GrantAuthority, FactReader,
     InstallationQuery, InspectionV1, EffectInspector, CleanCloneQuery, FactV1, AssignmentBinding,
-    CredentialAssignment)
+    CredentialAssignment, ReplacementPort, StoppedSourceAuthority)
 
 
 class Conflict(ValueError):
@@ -28,6 +28,12 @@ class UnboundWork:
         raise Unavailable('operation work port is not bound')
 
     def current(self, operation_id, step_id):
+        raise Unavailable('operation work port is not bound')
+
+    def abort_unstarted(self, work):
+        raise Unavailable('operation work port is not bound')
+
+    def reconcile_expired(self, *, limit):
         raise Unavailable('operation work port is not bound')
 
     def claimed(self, work, attempt_id):
@@ -108,6 +114,12 @@ class Assignments:
         self.target_fence = target_fence if target_fence is not None else unbound_target_fence
         self.clone_freshness_seconds = bound(clone_freshness_seconds, 60)
 
+    def replacement_execution(self, *, authority: ReplacementPort | None = None,
+                              installation: InstallationQuery | None = None):
+        """SQL lifecycle #625; отсутствие Root proof/restore port -- отказ."""
+        from .replacement import ReplacementExecution
+        return ReplacementExecution(self, authority=authority, installation=installation)
+
     def current(self, *, project_id, target_id):
         """Внутренний запрос для портов Access/Secrets; внешний вызов требует авторизации.
 
@@ -163,6 +175,66 @@ class Assignments:
             raise Denied('current identity and readiness confirmations required for addressed credentials')
         return CredentialAssignment(binding, epoch, *receipts)
 
+    def management_proof(self, actor, request, *, epoch):
+        """SQL-only post-activation runtime proof, без stage/lease authority.
+
+        Sessions владеет accepting assignment, exact current producer, native и
+        ready receipts и committed model event. Access видит только projection.
+        """
+        from mop.common.management_context import ManagementRequest
+        from .protocol import ManagementAssignment, AuthorityV1
+        from .producer import CurrentSessions
+        from .producer_models import SessionProducer
+        from .telemetry_models import SessionObservation, ModelObservation, TelemetryReceipt
+        if (type(request) is not ManagementRequest or type(epoch) is not UUID
+                or request.scope.epoch != epoch or not transaction.get_connection().in_atomic_block):
+            raise Denied('current management runtime scope required')
+        scope = request.scope
+        current_actor(actor)
+        node_executor(actor, scope.node_id, reason='own enrolled node executor required for management context')
+        binding = self.target(scope.target_id, lock=True)
+        if (binding is None or request.generation != binding.generation
+                or any(getattr(scope, name) != getattr(binding, name) for name in
+                    ('target_id', 'incarnation_id', 'node_id', 'executor_epoch'))):
+            raise Denied('management assignment binding changed')
+        Access().authorize(actor, 'access.read_management_context', project_ids=(binding.project_id,),
+            node_ids=(binding.node_id,))
+        receipts = self.readiness(binding, epoch=epoch)
+        if receipts is None:
+            raise Denied('current identity and readiness required for management context')
+        source = CurrentSessions(installation=lambda: AuthorityV1(epoch, True)).current(binding)
+        if source is None or (source.session_id, source.producer_epoch) != (scope.session_id, scope.producer_epoch):
+            raise Denied('current native producer required for management context')
+        producer = SessionProducer.objects.filter(currentproducer__incarnation_id=binding.incarnation_id,
+            producer_epoch=scope.producer_epoch, executor_user_id=actor.user_id).first()
+        ready = m.ResultReceipt.objects.select_related('attempt').get(pk=receipts[1])
+        if producer is None or not m.ResultReceipt.objects.filter(attempt_id=producer.attempt_id,
+                attempt__assignment_id=binding.target_id, attempt__incarnation_id=binding.incarnation_id,
+                attempt__epoch=epoch, attempt__executor_epoch=binding.executor_epoch,
+                attempt__owner_id=binding.owner_id, attempt__generation=binding.generation,
+                attempt__assignment_revision=binding.revision, attempt__role=binding.role,
+                attempt__bundle_digest=binding.bundle_digest, attempt__grant_id=binding.grant_id,
+                attempt__action='native_exec', attempt__state='succeeded', attempt__executor_user_id=actor.user_id,
+                attempt__operation_id=producer.operation_id, attempt__step_id=producer.step_id,
+                outcome='succeeded', evidence='native-started', resulting_revision=F('attempt__revision'),
+                expected_revision=F('attempt__revision')-1).exists():
+            raise Denied('current successful native execution required for management context')
+        if (ready.attempt.operation_id != producer.operation_id
+                or ready.attempt.executor_user_id != producer.executor_user_id):
+            raise Denied('readiness belongs to a different native producer')
+        observation = SessionObservation.objects.filter(assignment_id=binding.target_id,
+            incarnation_id=binding.incarnation_id, node_id=binding.node_id, epoch=epoch,
+            executor_epoch=binding.executor_epoch, producer_epoch=scope.producer_epoch,
+            session_id=scope.session_id, model_proven=True, confirmed_sequence__gte=1).first()
+        model = None if observation is None else ModelObservation.objects.filter(observation=observation,
+            sequence=observation.confirmed_sequence, model=observation.confirmed_model, kind='PostModelSwitch').first()
+        receipt = None if model is None else TelemetryReceipt.objects.filter(observation=observation,
+            sequence=model.sequence).first()
+        if receipt is None:
+            raise Denied('committed current-producer model receipt required for management context')
+        expiry = m.Assignment.objects.get(pk=binding.target_id).expires_at
+        return ManagementAssignment(binding, epoch, *receipts, producer.id, receipt.id, expiry)
+
     def readiness(self, binding, *, epoch):
         """SQL-only: подтверждённые identity и готовность именно текущего
         admission назначения -> (identity receipt, ready receipt) | None.
@@ -177,8 +249,10 @@ class Assignments:
             attempt__state='succeeded', receipt__attempt_id=F('attempt_id'),
             receipt__outcome='succeeded', receipt__resulting_revision=F('attempt__revision'),
             receipt__expected_revision=F('attempt__revision') - 1)
-        identity = m.IdentityApplication.objects.filter(**scope, attempt__action='apply_identity',
-            receipt__evidence='identity-applied').order_by('id').values_list('receipt_id', flat=True).first()
+        identity = m.IdentityApplication.objects.filter(**scope).filter(
+            Q(attempt__action='apply_identity', receipt__evidence='identity-applied') |
+            Q(attempt__action='initial_identity', receipt__evidence='initial-identity-applied')
+        ).order_by('id').values_list('receipt_id', flat=True).first()
         ready = m.ReadinessReceipt.objects.filter(**scope, attempt__action='confirm_ready',
             receipt__evidence='ready').order_by('id').values_list('receipt_id', flat=True).first()
         return None if identity is None or ready is None else (identity, ready)
@@ -349,12 +423,20 @@ class Assignments:
 
 class Landing:
     """Только сериализация человеческого landing; expiry worker не участвует."""
+    def get(self, actor, project_id):
+        """Конечный authorized query; отсутствие строки не материализует токен."""
+        Access().authorize(actor, 'execution.view_landing', project_ids=(project_id,))
+        row = m.LandingToken.objects.filter(project_id=project_id).first()
+        return None if row is None else snapshot(row)
+
     def acquire(self, actor, project_id, *, expected_revision):
         human(actor)
         Access().authorize(actor, 'execution.acquire_landing', project_ids=(project_id,))
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
             row = m.LandingToken.objects.select_for_update().filter(project_id=project_id).first()
+            human(actor)
+            Access().authorize(actor, 'execution.acquire_landing', project_ids=(project_id,))
             if row is None:
                 if type(expected_revision) is not int or expected_revision != 0:
                     raise Conflict('landing token has no matching revision')
@@ -375,7 +457,13 @@ class Landing:
         Access().authorize(actor, 'execution.release_landing', project_ids=(project_id,))
         with transaction.atomic():
             Project.objects.select_for_update().get(pk=project_id)
-            row = m.LandingToken.objects.select_for_update().get(project_id=project_id)
+            row = m.LandingToken.objects.select_for_update().filter(project_id=project_id).first()
+            human(actor)
+            Access().authorize(actor, 'execution.release_landing', project_ids=(project_id,))
+            if row is None:
+                raise Conflict('landing token is unmaterialized')
+            if type(expected_revision) is int and expected_revision == 0:
+                raise Conflict('landing token was already created')
             expected(row, expected_revision)
             if row.owner_id != actor.user_id:
                 raise Denied('landing belongs to another human')
@@ -389,7 +477,10 @@ class Landing:
 class MachineExecution:
     def __init__(self, *, work: WorkPort | None = None, grants: GrantAuthority | None = None,
                  facts: FactReader | None = None, installation: InstallationQuery | None = None,
-                 inspector: EffectInspector | None = None, lease_seconds=30, target_fence=None):
+                 inspector: EffectInspector | None = None, lease_seconds=30, target_fence=None,
+                 stopped_sources: StoppedSourceAuthority | None = None):
+        from .replacement import UnboundReplacement
+        self.stopped_sources = stopped_sources if stopped_sources is not None else UnboundReplacement()
         self.target_fence = target_fence if target_fence is not None else unbound_target_fence
         self.work = work if work is not None else UnboundWork()
         self.grants = grants if grants is not None else UnboundGrants()
@@ -423,8 +514,12 @@ class MachineExecution:
             raise Conflict('target node or incarnation changed')
         incarnation = m.ExecutionIncarnation.objects.select_for_update().get(pk=work.incarnation_id)
         if (incarnation.assignment_id != row.id or incarnation.node_id != row.node_id
-                or incarnation.executor_epoch != work.executor_epoch or not incarnation.accepting):
+                or incarnation.executor_epoch != work.executor_epoch):
             raise Conflict('executor restarted; explicit reconciliation required')
+        if not incarnation.accepting:
+            if work.action != 'wipe_clone':
+                raise Conflict('executor retired; explicit reconciliation required')
+            self.stopped_sources.authorize(work)
         if (row.generation != work.generation or row.revision != work.revision
                 or row.owner_id != work.owner_id or row.role != work.role
                 or row.bundle_digest != work.bundle_digest or row.grant_id != work.grant_id):
@@ -435,9 +530,14 @@ class MachineExecution:
         if (row.owner_id is None or not row.owner.is_active
                 or row.expires_at <= timezone.now() or work.not_after <= timezone.now()):
             raise Conflict('assignment or command is no longer live')
-        self.grants.authorize(owner_id=row.owner_id, project_id=row.project_id,
-            target_id=row.id, grant_id=row.grant_id, role=row.role, bundle_digest=row.bundle_digest,
-            incarnation_id=work.incarnation_id, action=work.action)
+        if not m.ExecutionIncarnation.objects.get(pk=work.incarnation_id).accepting:
+            # Не ослабляем generic grant gate: old binding для exact recycle
+            # wipe проверяется отдельным SQL Root port, не current().
+            self.stopped_sources.authorize(work)
+        else:
+            self.grants.authorize(owner_id=row.owner_id, project_id=row.project_id,
+                target_id=row.id, grant_id=row.grant_id, role=row.role, bundle_digest=row.bundle_digest,
+                incarnation_id=work.incarnation_id, action=work.action)
         if work.action == 'send_message' and not m.IdentityApplication.objects.filter(
                 attempt__assignment_id=row.id, attempt__incarnation_id=work.incarnation_id,
                 attempt__generation=row.generation, attempt__role=row.role,
@@ -497,27 +597,35 @@ class MachineExecution:
                 self._authority(work)
                 row = self._assignment(actor, work, 'claim_work')
                 unclaimed(self.target_fence, row.pk, excluding_operation=work.operation_id)
-                # current обязуется проверить initiating actor/operation и не делать I/O.
-                if self.work.current(work.operation_id, work.step_id) != work:
-                    raise Conflict('admitted operation step changed')
-                self._admit(row, work)
-                previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
-                                                               request_id=request_id).first()
-                if previous:
-                    if (self._work(previous) != work or previous.state != 'claimed'
-                            or previous.lease_until <= timezone.now()):
-                        raise Conflict('claim retry cannot replay or revive an effect')
-                    return snapshot(previous)
-                if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
-                    raise Conflict('unresolved external effect holds resource')
-                values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
-                    'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
-                attempt = m.AssignmentAttempt.objects.create(assignment=row,
-                    incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
-                    request_id=request_id, assignment_revision=work.revision,
-                    lease_until=min(work.not_after, timezone.now()+timedelta(seconds=self.lease_seconds)), **values)
-                self.work.claimed(work, attempt.id)
-                return snapshot(attempt)
+                # Abort без новой attempt должен пережить HTTP-отказ, поэтому
+                # исключение выходит лишь после commit этой короткой транзакции.
+                aborted = self.work.abort_unstarted(work)
+                if not aborted:
+                    # current проверяет initiating actor/operation без I/O.
+                    if self.work.current(work.operation_id, work.step_id) != work:
+                        raise Conflict('admitted operation step changed')
+                    self._admit(row, work)
+                    previous = m.AssignmentAttempt.objects.filter(executor_user_id=actor.user_id,
+                                                                   request_id=request_id).first()
+                    if previous:
+                        if (self._work(previous) != work or previous.state != 'claimed'
+                                or previous.lease_until <= timezone.now()):
+                            raise Conflict('claim retry cannot replay or revive an effect')
+                        return snapshot(previous)
+                    if m.AssignmentAttempt.objects.filter(assignment=row, state__in=('claimed', 'unknown')).exists():
+                        raise Conflict('unresolved external effect holds resource')
+                    values = {name: getattr(work, name) for name in ('epoch', 'operation_id', 'step_id',
+                        'executor_epoch', 'owner_id', 'generation', 'role', 'bundle_digest', 'grant_id', 'action', 'not_after')}
+                    seconds = (self.work.effect_lease(work) if hasattr(self.work, 'effect_lease') else self.lease_seconds)
+                    if type(seconds) is not int or not 1 <= seconds <= 320:
+                        raise Unavailable('bounded phase effect lease required')
+                    attempt = m.AssignmentAttempt.objects.create(assignment=row,
+                        incarnation_id=work.incarnation_id, executor_user_id=actor.user_id,
+                        request_id=request_id, assignment_revision=work.revision,
+                        lease_until=min(work.not_after, timezone.now()+timedelta(seconds=seconds)), **values)
+                    self.work.claimed(work, attempt.id)
+                    return snapshot(attempt)
+            raise Conflict('insufficient intent remaining for phase and cleanup; create aborted')
         except IntegrityError:
             collision = m.AssignmentAttempt.objects.filter(
                 Q(executor_user_id=actor.user_id, request_id=request_id)
@@ -583,8 +691,30 @@ class MachineExecution:
             confirmations = {'restart_session': ('session-replaced', 'confirmed'),
                 'apply_identity': ('identity-applied',), 'confirm_ready': ('ready',), 'send_message': ('delivered',),
                 'wipe_clone': ('clone-wiped',)}
+            from mop.common.initialcreate import CONFIRMATIONS
+            confirmations.update({name: (code,) for name, code in CONFIRMATIONS.items()})
             if evidence not in confirmations[attempt.action]:
                 raise ValueError('named action confirmation required')
+        if outcome == 'succeeded' and attempt.action in ('native_exec', 'confirm_ready'):
+            from .producer_models import CurrentProducer
+            producer = CurrentProducer.objects.select_related('producer').filter(incarnation_id=attempt.incarnation_id).first()
+            if attempt.action == 'native_exec':
+                if (producer is None or producer.producer.attempt_id != attempt.id
+                        or producer.producer.operation_id != attempt.operation_id or producer.producer.step_id != attempt.step_id
+                        or producer.producer.executor_user_id != attempt.executor_user_id):
+                    raise Conflict('exact native exec producer registration ACK required')
+            elif hasattr(self.work, 'initial_native_attempt'):
+                native_attempt = self.work.initial_native_attempt(self._work(attempt))
+                if native_attempt is not None and (producer is None
+                        or producer.producer.attempt_id != native_attempt
+                        or producer.producer.operation_id != attempt.operation_id):
+                    raise Conflict('same initial native producer required for readiness')
+            if attempt.action == 'confirm_ready' and producer is not None:
+                # Post-launch readiness не превращается в initial-create admission.
+                if (producer.producer.assignment_id != attempt.assignment_id
+                        or producer.producer.owner_id != attempt.owner_id or producer.producer.generation != attempt.generation
+                        or producer.producer.executor_epoch != attempt.executor_epoch):
+                    raise Conflict('current readiness producer binding changed')
         # Результат после deadline подтверждает эффект, но не запускает новый.
         self.work.completed_result(self._work(attempt), attempt.id, outcome, evidence)
         attempt.state = outcome
@@ -592,7 +722,7 @@ class MachineExecution:
         attempt.save(update_fields=('state', 'revision'))
         receipt = m.ResultReceipt.objects.create(id=receipt_id, attempt=attempt,
             expected_revision=revision, resulting_revision=attempt.revision, outcome=outcome, evidence=evidence)
-        if outcome == 'succeeded' and attempt.action == 'apply_identity':
+        if outcome == 'succeeded' and attempt.action in ('apply_identity', 'initial_identity'):
             m.IdentityApplication.objects.create(attempt=attempt, receipt=receipt)
         if outcome == 'succeeded' and attempt.action == 'confirm_ready':
             m.ReadinessReceipt.objects.create(attempt=attempt, receipt=receipt)
@@ -649,6 +779,9 @@ class MachineExecution:
 
     def reconcile_expired(self, *, limit=50):
         bound(limit, 100)
+        # Gaps не создают фиктивных attempt IDs: прежний return остаётся
+        # списком изменённых attempts, а abort публикуется Operation event'ом.
+        self.work.reconcile_expired(limit=limit)
         ids = tuple(m.AssignmentAttempt.objects.filter(state='claimed', lease_until__lte=timezone.now())
                     .order_by('assignment_id').values_list('id', 'assignment_id')[:limit])
         changed = []
@@ -668,6 +801,14 @@ class MachineExecution:
 
     def action_work(self, actor, *, operation_id, step_id):
         """Текущий addressed input gate; JSON owner/project не даёт полномочий."""
+        work, _ = self.action_admission(actor, operation_id=operation_id, step_id=step_id)
+        return work
+
+    def action_admission(self, actor, *, operation_id, step_id):
+        """Публичный SQL proof: собственная Work и id её текущего claim.
+
+        Durable operation проверяет свой token по этому id, не читая execution ORM.
+        """
         current_actor(actor)
         with transaction.atomic():
             self._installation_state()
@@ -682,7 +823,7 @@ class MachineExecution:
             if self.work.current(operation_id, step_id) != work:
                 raise Conflict('action input operation changed')
             self._admit(row, work)
-            return work
+            return work, attempt.id
 
     def executor_state(self, actor, node_id):
         """Предыдущий epoch приходит из controller DB, не имени/marker нового агента."""
@@ -706,6 +847,46 @@ class MachineExecution:
             if len(epochs) != 1:
                 raise Unavailable('executor epoch requires explicit installation registration or reconciliation')
             return epochs.pop()
+
+    def host_executor_state(self, actor, node_id):
+        """Registry + отсутствие незавершённых scopes; не physical process proof."""
+        from mop.server.catalog.models import Node
+        machine(actor, node_id, 'claim_work')
+        with transaction.atomic():
+            self._installation_state()
+            node = Node.objects.select_for_update().get(pk=node_id)
+            if node.driver != 'host':
+                raise Conflict('HOST backend binding requires the enrolled HOST node')
+            previous = self.executor_state(actor, node_id)
+            # Историческая non-accepting incarnation сама по себе не доказывает
+            # physical retirement. Не превращаем потерю root ownership в adoption.
+            empty = not (m.ExecutionIncarnation.objects.filter(node_id=node_id).exists()
+                or m.AssignmentAttempt.objects.filter(assignment__node_id=node_id,
+                    state__in=('claimed', 'unknown')).exists())
+            return previous, empty
+
+    def host_executor_bound(self, actor, node_id, *, epoch, previous_epoch, new_epoch):
+        """Empty-only CAS без generic restarted/retire и без replay effects."""
+        if any(type(value) is not UUID or value.int == 0 for value in (epoch, previous_epoch, new_epoch)):
+            raise ValueError('nonzero typed HOST binding epochs required')
+        if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():
+            raise Unavailable('HOST backend binding requires no surrounding transaction')
+        with transaction.atomic():
+            if self._installation_state().epoch != epoch:
+                raise Conflict('HOST installation epoch changed; no automatic backend rebind')
+            current_epoch, empty = self.host_executor_state(actor, node_id)
+            current = m.NodeExecutor.objects.select_for_update().filter(node_id=node_id).first()
+            if current is None or current.executor_epoch != current_epoch:
+                raise Conflict('HOST backend requires explicit node executor registration')
+            if current.executor_epoch == new_epoch:
+                return new_epoch
+            if not empty:
+                raise Conflict('HOST old incarnation/effect ownership unresolved; no automatic retirement')
+            if current.executor_epoch != previous_epoch:
+                raise Conflict('HOST node executor epoch changed')
+            current.executor_epoch, current.registered_at = new_epoch, timezone.now()
+            current.save(update_fields=('executor_epoch', 'registered_at'))
+        return new_epoch
 
     def executor_restarted(self, actor, node_id, *, previous_epoch, new_epoch):
         if transaction.get_connection().in_atomic_block or not transaction.get_connection().get_autocommit():

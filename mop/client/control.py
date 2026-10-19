@@ -67,10 +67,22 @@ class ResetRequired(APIError):
 class UnknownSubmission(ClientError):
     """POST мог достичь admission COMMIT; восстановление только по тому же ключу."""
 
-    def __init__(self, command: "PreparedCommand | NodeCommand | BuildCommand"):
+    def __init__(self, command: "PreparedCommand | NodeCommand | BuildCommand | CreateCommand"):
         self.command = command
         self.request_id = command.request_id
         super().__init__("submission outcome unknown; recover by request_id")
+
+
+class UnknownLanding(ClientError):
+    """SQL CAS мог завершиться; request_id/Operation для этого ресурса нет."""
+
+    def __init__(self, intent: "LandingIntent"):
+        self.intent = intent
+        super().__init__('landing outcome unknown; observe exact revision and owner, never retake automatically')
+
+
+def _unknown_submission(command):
+    return UnknownLanding(command) if type(command) is LandingIntent else UnknownSubmission(command)
 
 
 class WaitTimeout(ClientError):
@@ -112,7 +124,8 @@ def new_request_id(value: str | None = None) -> str:
     return _key(str(uuid4()) if value is None else value)
 
 
-def _deadline(value):
+def admission_deadline(value):
+    """Проверяет абсолютный UTC-срок до context/detail I/O; старый retry допустим."""
     valid = False
     if isinstance(value, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)", value):
         try:
@@ -121,6 +134,22 @@ def _deadline(value):
         except ValueError:
             pass
     # Срок не сравнивается с часами клиента: идентичный retry может быть старым.
+    _require(valid)
+    return value
+
+
+# MessageHandler имеет более узкий предел, чем общий JSON envelope.
+MAX_MESSAGE_BYTES = 16384
+
+
+def message_text(value):
+    """Transient plaintext: без NUL/пустоты, с той же границей, что у message admission."""
+    valid = False
+    if isinstance(value, str) and value.strip() and '\x00' not in value:
+        try:
+            valid = len(value.encode('utf-8')) <= MAX_MESSAGE_BYTES
+        except UnicodeError:
+            pass
     _require(valid)
     return value
 
@@ -201,6 +230,66 @@ class Target:
         _revision(self.revision)
 
 
+def _landing_revision(value):
+    _require(type(value) is str and re.fullmatch(r'0|[1-9][0-9]{0,18}', value) is not None)
+    _require(int(value) <= 9223372036854775807)
+    return value
+
+
+def landing_binding(action, project_id, epoch, expected_revision):
+    """Проверка конечного intent до сети, без выдуманного owner/Operation."""
+    _require(action in ('take', 'release'))
+    _key(project_id)
+    _key(epoch)
+    _landing_revision(expected_revision)
+
+
+@dataclass(frozen=True)
+class LandingIntent:
+    action: str
+    project_id: str
+    epoch: str
+    expected_revision: str
+    owner_id: int
+
+    def __post_init__(self):
+        landing_binding(self.action, self.project_id, self.epoch, self.expected_revision)
+        _require(type(self.owner_id) is int and self.owner_id > 0)
+
+    @property
+    def body(self):
+        return json.dumps({'schema_version': 1, 'epoch': self.epoch,
+            'expected_revision': self.expected_revision}, separators=(',', ':')).encode()
+
+
+@dataclass(frozen=True)
+class LandingSnapshot:
+    epoch: str
+    project_id: str
+    state: str
+    revision: str
+    generation: str | None
+    owner_id: int | None
+
+    def envelope(self):
+        return {'schema_version': 1, 'epoch': self.epoch, 'landing': {
+            name: getattr(self, name) for name in ('project_id', 'state', 'revision', 'generation', 'owner_id')}}
+
+
+@dataclass(frozen=True)
+class LandingRecovery:
+    intent: LandingIntent
+    snapshot: LandingSnapshot
+
+    @property
+    def matched(self):
+        expected_owner = self.intent.owner_id if self.intent.action == 'take' else None
+        return (self.snapshot.project_id == self.intent.project_id and self.snapshot.epoch == self.intent.epoch
+            and int(self.snapshot.revision) == int(self.intent.expected_revision) + 1
+            and self.snapshot.state == ('held' if self.intent.action == 'take' else 'free')
+            and self.snapshot.owner_id == expected_owner)
+
+
 @dataclass(frozen=True)
 class PreparedCommand:
     """Намерение полностью фиксируется до I/O; mutable params не принимаются.
@@ -224,7 +313,7 @@ class PreparedCommand:
         _require(type(self.target) is Target)
         _identity(self.epoch)
         _key(self.request_id)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
         _require(self.action in ("restart", "send", "wipe", "stop", "delete") and type(self.fresh) is bool and
                  type(self.notify_when_idle) is bool and self.priority in ("now", "next", "later") and
                  type(self.wait_seconds) is int and 0 <= self.wait_seconds <= 60)
@@ -234,13 +323,8 @@ class PreparedCommand:
             # wipe и stop-job не несут параметров (#642): ни fresh, ни force.
             _require(self.action == "restart" or not self.fresh)
         else:
-            valid = False
-            if not self.fresh and isinstance(self.message, str):
-                try:
-                    valid = 0 < len(self.message.encode("utf-8")) <= 65536
-                except UnicodeError:
-                    pass
-            _require(valid)
+            _require(not self.fresh)
+            message_text(self.message)
 
     @property
     def body(self) -> bytes:
@@ -274,7 +358,7 @@ class NodeCommand:
         _require(self.action in ("drain", "enable"))
         for value in (self.node_id, self.epoch, self.request_id):
             _key(value)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
         _revision(self.expected_revision)
         _require(1 <= int(self.expected_revision) < 2 ** 63)
 
@@ -284,6 +368,30 @@ class NodeCommand:
             "request_id": self.request_id, "not_after": self.not_after,
             "expected_revision": self.expected_revision, "params": {}},
             sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+@dataclass(frozen=True)
+class CreateCommand:
+    """Новый target ещё не существует: только явные UUID узла и approved definition."""
+
+    project_id: str
+    node_id: str
+    definition_id: str
+    epoch: str
+    request_id: str
+    not_after: str
+
+    def __post_init__(self):
+        for value in (self.project_id, self.node_id, self.definition_id, self.epoch, self.request_id):
+            _key(value)
+        admission_deadline(self.not_after)
+
+    @property
+    def body(self) -> bytes:
+        return json.dumps({'schema_version': 1, 'epoch': self.epoch,
+            'request_id': self.request_id, 'not_after': self.not_after,
+            'params': {'node_id': self.node_id, 'definition_id': self.definition_id}},
+            sort_keys=True, separators=(',', ':')).encode('ascii')
 
 
 @dataclass(frozen=True)
@@ -303,7 +411,7 @@ class BuildCommand:
     def __post_init__(self):
         for value in (self.project_id, self.policy_id, self.epoch, self.request_id):
             _key(value)
-        _deadline(self.not_after)
+        admission_deadline(self.not_after)
         _revision(self.expected_revision)
         _require(int(self.expected_revision) >= 1 and self.mode in ('missing', 'update', 'rebuild'))
         _require(type(self.target_nodes) is tuple and 1 <= len(self.target_nodes) <= 64)
@@ -330,6 +438,52 @@ class Identity:
     node_id: str | None
     grant_id: str | None
     action_permissions: frozenset[str] | None = None
+
+
+def canonical_identity(identity):
+    """Проверка формы Actor, не выдача полномочий по классификации."""
+    if type(identity) is not Identity:
+        return False
+    try:
+        _require(type(identity.user_id) is int and identity.user_id > 0)
+        owner = identity.human_owner_id
+        _require(owner is None or type(owner) is int and owner > 0)
+        for value in (identity.node_id, identity.grant_id):
+            if value is not None:
+                _key(value)
+        if identity.kind == 'human':
+            return owner == identity.user_id and identity.node_id is None and identity.grant_id is None
+        if identity.kind == 'agent':
+            # #720: token агента не является node enrollment; его scope
+            # доказывает текущий grant на сервере, не наличие node metadata.
+            return (owner is not None if identity.grant_id is not None
+                    else owner == identity.user_id and identity.node_id is None)
+        return identity.kind == 'service' and owner is None and identity.grant_id is None
+    except ClientError:
+        return False
+
+
+@dataclass(frozen=True)
+class CapabilityScope:
+    project_id: str | None = None
+    node_id: str | None = None
+    client_id: str | None = None
+
+    def __post_init__(self):
+        for value in (self.project_id, self.node_id, self.client_id):
+            if value is not None:
+                _key(value)
+
+    def query(self):
+        return {name: value for name, value in vars(self).items() if value is not None}
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    epoch: str
+    identity: Identity
+    scope: CapabilityScope
+    catalogue_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -579,7 +733,7 @@ _CODES = frozenset(("validation_error", "not_authenticated", "authentication_fai
                     "database_outcome_unknown", "installation_unavailable", "deadline_horizon",
                     "effects_disabled", "admission_limit", "claim_conflict", "operation_conflict",
                     "transaction_boundary", "controller_unavailable", "delivery_capacity",
-                    "delivery_unavailable", "delivery_conflict", "usage_unavailable"))
+                    "delivery_unavailable", "delivery_conflict", "usage_unavailable", "execution_conflict"))
 
 
 def _api_error(data, status, retry_after):
@@ -711,9 +865,10 @@ class Client:
     Сертификат проверяется всегда, CA выбирается только явным контекстом.
     """
 
-    def __init__(self, context: ServerContext, *, limits: Limits = Limits()):
+    def __init__(self, context: ServerContext, *, limits: Limits = Limits(), before_request=None):
         _require(type(context) is ServerContext and type(limits) is Limits)
-        self._context, self._limits = context, limits
+        _require(before_request is None or callable(before_request))
+        self._context, self._limits, self._before_request = context, limits, before_request
         failed = False
         try:
             self._tls = ssl.create_default_context(cafile=context.ca_file)
@@ -757,6 +912,10 @@ class Client:
         return NodeCommand("enable", node_id, epoch, new_request_id(request_id),
                            not_after, expected_revision)
 
+    def prepare_create(self, project_id: str, *, node_id: str, definition_id: str, epoch: str,
+                       not_after: str, request_id: str | None = None) -> CreateCommand:
+        return CreateCommand(project_id, node_id, definition_id, epoch, new_request_id(request_id), not_after)
+
     def prepare_build(self, project_id: str, *, policy_id: str, epoch: str, expected_revision: str,
                       not_after: str, target_nodes: tuple[str, ...], mode: str = 'missing',
                       request_id: str | None = None) -> BuildCommand:
@@ -766,6 +925,12 @@ class Client:
     def _exchange(self, method, path, body=None, *, command=None, budget=None):
         limits = self._limits
         _require(body is None or len(body) <= limits.max_request_bytes)
+        # Body owner проверяет cancel/binding перед каждым I/O, включая
+        # recovery после unknown POST; один запрос не продлевает общий бюджет.
+        if self._before_request is not None:
+            remaining = self._before_request()
+            _seconds(remaining, limits.request_timeout)
+            budget = min(remaining, budget) if budget is not None else remaining
         deadline = time.monotonic() + min(limits.request_timeout, budget or limits.request_timeout)
         url = urlsplit(self._context.origin)
         connection = response = None
@@ -830,13 +995,13 @@ class Client:
         # Вне except: __context__ тоже не удерживает сырое исключение с секретами.
         if failed:
             if command is not None and possible_post:
-                raise UnknownSubmission(command)
+                raise _unknown_submission(command)
             raise TransportError("control API transport unavailable")
         data = _json(raw)
         if not 200 <= status < 300:
             error = _api_error(data, status, retry_after)
             if command is not None and error.error.code == 'database_outcome_unknown':
-                raise UnknownSubmission(command)
+                raise _unknown_submission(command)
             raise error
         return status, data
 
@@ -846,9 +1011,11 @@ class Client:
             raise ProtocolError("unexpected control API query status")
         return data
 
-    def submit(self, command: PreparedCommand | NodeCommand | BuildCommand) -> Submission:
-        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand))
-        if type(command) is NodeCommand:
+    def submit(self, command: PreparedCommand | NodeCommand | BuildCommand | CreateCommand) -> Submission:
+        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand, CreateCommand))
+        if type(command) is CreateCommand:
+            path = f'/api/v1/projects/{command.project_id}/commands/create-puppet'
+        elif type(command) is NodeCommand:
             path = f"/api/v1/nodes/{command.node_id}/commands/{command.action}"
         elif type(command) is BuildCommand:
             path = f'/api/v1/projects/{command.project_id}/commands/build'
@@ -876,6 +1043,23 @@ class Client:
 
     @staticmethod
     def _command_binding(command, result):
+        if type(command) is CreateCommand:
+            # Только сервер выдаёт target/incarnation. Receipt пока не несёт
+            # node/definition, поэтому не выдумываем клиентский CAS/echo этих полей.
+            target = result.data['target']
+            valid = False
+            try:
+                _key(result.target_id)
+                _key(result.incarnation)
+                _revision(target.get('revision'))
+                _revision(target.get('source_revision'))
+                valid = (result.request_id == command.request_id and result.epoch == command.epoch and
+                         target.get('kind') == 'puppet')
+            except ClientError:
+                pass
+            if not valid:
+                raise ProtocolError('create operation binding mismatch')
+            return
         if type(command) is NodeCommand:
             target_id, incarnation, kind = command.node_id, None, 'node'
         elif type(command) is BuildCommand:
@@ -898,8 +1082,8 @@ class Client:
                     sorted(build['target_nodes']) != sorted(command.target_nodes)):
                 raise ProtocolError('build policy binding mismatch')
 
-    def recover(self, command: PreparedCommand | NodeCommand | BuildCommand) -> Operation:
-        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand))
+    def recover(self, command: PreparedCommand | NodeCommand | BuildCommand | CreateCommand) -> Operation:
+        _require(type(command) in (PreparedCommand, NodeCommand, BuildCommand, CreateCommand))
         result = self.lookup_operation(command.request_id, epoch=command.epoch)
         self._command_binding(command, result)
         return result
@@ -925,6 +1109,68 @@ class Client:
             raise ProtocolError("operation request identity mismatch")
         return result
 
+    @staticmethod
+    def _read_landing(data, project_id, epoch=None):
+        failed = False
+        try:
+            _require(set(data) == {'schema_version', 'epoch', 'landing'})
+            _require(type(data['schema_version']) is int and data['schema_version'] == 1)
+            _key(data['epoch'])
+            _require(epoch is None or data['epoch'] == epoch)
+            row = data['landing']
+            _require(isinstance(row, Mapping) and set(row) == {
+                'project_id', 'state', 'revision', 'generation', 'owner_id'})
+            _key(row['project_id'])
+            _require(row['project_id'] == project_id)
+            _landing_revision(row['revision'])
+            owner = row['owner_id']
+            _require(owner is None or type(owner) is int and owner > 0)
+            if row['state'] == 'unmaterialized':
+                _require(row['revision'] == '0' and row['generation'] is None and owner is None)
+            else:
+                _require(row['state'] in ('free', 'held') and int(row['revision']) > 0)
+                _landing_revision(row['generation'])
+                _require(int(row['generation']) > 0 and (owner is None) == (row['state'] == 'free'))
+            result = LandingSnapshot(data['epoch'], **dict(row))
+        except (KeyError, TypeError, ClientError):
+            failed = True
+        if failed:
+            raise ProtocolError('invalid project landing response')
+        return result
+
+    def read_landing(self, project_id: str, *, epoch: str | None = None) -> LandingSnapshot:
+        path = '/api/v1/projects/' + _key(project_id) + '/landing'
+        if epoch is not None:
+            path += '?' + urlencode({'epoch': _key(epoch)})
+        return self._read_landing(self._get(path), project_id, epoch)
+
+    def change_landing(self, action: str, project_id: str, *, epoch: str,
+                       expected_revision: str) -> LandingSnapshot:
+        landing_binding(action, project_id, epoch, expected_revision)
+        actor = self.identity()
+        if actor.kind != 'human' or actor.grant_id is not None:
+            raise ClientError('landing mutations require the actual current human actor, not delegated ownership')
+        intent = LandingIntent(action, project_id, epoch, expected_revision, actor.user_id)
+        failed = False
+        try:
+            status, data = self._exchange('POST',
+                f'/api/v1/projects/{project_id}/landing/commands/{action}', intent.body, command=intent)
+            if status != 200:
+                raise ProtocolError('unexpected project landing command status')
+            result = self._read_landing(data, project_id, epoch)
+            if not LandingRecovery(intent, result).matched:
+                raise ProtocolError('project landing command binding mismatch')
+        except ProtocolError:
+            failed = True
+        if failed:
+            raise UnknownLanding(intent)
+        return result
+
+    def recover_landing(self, intent: LandingIntent) -> LandingRecovery:
+        """Только query: совпадение текущего CAS не доказывает historical receipt."""
+        _require(type(intent) is LandingIntent)
+        return LandingRecovery(intent, self.read_landing(intent.project_id, epoch=intent.epoch))
+
     def identity(self) -> Identity:
         data = self._get("/api/v1/identity")
         failed = False
@@ -947,6 +1193,30 @@ class Client:
         if failed:
             raise ProtocolError("invalid identity response")
         return result
+
+    def capabilities(self, scope: CapabilityScope) -> Capabilities:
+        """Строгий no-cache advisory query; scope ответа обязан совпадать с запросом."""
+        from .action_catalogue import ACTIONS_V1
+        _require(type(scope) is CapabilityScope)
+        data = self._get('/api/v1/capabilities?' + urlencode({'schema_version': 1, **scope.query()}))
+        try:
+            _require(set(data) == {'schema_version', 'catalogue_version', 'epoch', 'actor', 'scope', 'actions'})
+            _require(type(data['catalogue_version']) is int and data['catalogue_version'] == 1)
+            _key(data['epoch'])
+            _require(set(data['scope']) == {'project_id', 'node_id', 'client_id'})
+            returned = CapabilityScope(**data['scope'])
+            _require(returned == scope)
+            actor = data['actor']
+            _require(set(actor) == {'user_id', 'kind', 'human_owner_id', 'node_id', 'grant_id'})
+            actions = data['actions']
+            _require(type(actions) is tuple and all(type(action) is str and action in ACTIONS_V1 for action in actions))
+            _require(tuple(sorted(set(actions))) == actions)
+            _require(bool(scope.query()) or not actions)
+            identity = Identity(**actor, action_permissions=frozenset(actions))
+            _require(canonical_identity(identity))
+            return Capabilities(data['epoch'], identity, returned)
+        except (KeyError, TypeError, ValueError, ClientError):
+            raise ProtocolError('invalid action catalogue response') from None
 
     def health(self) -> Health:
         data = self._get("/api/v1/health")

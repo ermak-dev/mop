@@ -93,7 +93,11 @@ test("#522 an order after a terminal refusal is a new command and is refused aga
   const first = onState.mock.calls.length;
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   send(view, order, "update", { fresh: true }, onState);
-  await waitFor(() => expect(onState.mock.calls.length).toBeGreaterThan(first));
-  expect(onState.mock.calls.at(-1)?.[0]).toEqual(refusal);
+  // #718: новый callback может быть submitted; терминальный барьер --
+  // обе прежние assertions вместе, не sleep и не увеличение timeout.
+  await waitFor(() => {
+    expect(onState.mock.calls.length).toBeGreaterThan(first);
+    expect(onState.mock.calls.at(-1)?.[0]).toEqual(refusal);
+  });
   expect(net.posts()).toHaveLength(0);
 });

@@ -76,6 +76,11 @@ class Worker:
             raise RuntimeError('controller worker capabilities are not configured')
         if not self.runtime.accepting:
             return []
+        # Gap после machine phase не имеет active attempt и не входит в
+        # scheduler handlers: отдельный bounded SQL recovery на каждом poll.
+        await self.runtime.database(self.operations.reconcile_expired_creates, limit=limit)
+        if not self.runtime.accepting:
+            return []
         ids = await self.runtime.database(self.operations.pending, limit=limit,
             handlers=self.handlers, node_id=self.node_id)
         return await asyncio.gather(*(self.run_one(operation_id) for operation_id in ids))

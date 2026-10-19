@@ -5,7 +5,7 @@ from mop.server.sessions import protocol as p
 from mop.server.sessions.services import Conflict
 # #625 связывает публичные ports здесь, не в sessions import graph.
 # Несвязанный physical/approval port отказывает до admission.
-from .machinebinding import compose, authority
+from .machinebinding import compose, authority, executor_discovery
 # #690: строгий разбор query -- общий strict-модуль; machine-протокол
 # продолжает использовать чистые валидаторы sessions.protocol вне HTTP.
 from .strict import StrictJSONParser, machine_document, query_document as query
@@ -52,12 +52,64 @@ class ActionInput(MachineView):
             'git_name':identity.name, 'git_email':identity.email, **payload})
 
 
+class Launch(MachineView):
+    def post(self, request):
+        from mop.common.credentials import Credential
+        from mop.server.access.services import node_executor
+        from .launchdelivery import read
+        work = p.work_from_wire(request.data)
+        node_executor(request.actor, work.node_id)
+        if request.auth is None:
+            from mop.server.access.services import Denied
+            raise Denied('machine token required for addressed launch')
+        return Response(read(Credential('token', request.auth.key), p.work_to_wire(work)))
+
+
+class InitialLaunch(MachineView):
+    def post(self, request):
+        from mop.common.credentials import Credential
+        from mop.server.access.services import node_executor, Denied
+        from .launchdelivery import read_initial
+        work = p.work_from_wire(request.data)
+        node_executor(request.actor, work.node_id)
+        if request.auth is None:
+            raise Denied('machine token required for initial launch')
+        return Response(read_initial(Credential('token', request.auth.key), p.work_to_wire(work)))
+
+
+class ManagementContext(MachineView):
+    def post(self, request):
+        from mop.common.credentials import Credential
+        from mop.common.management_context import ManagementRequest
+        from mop.server.access.services import node_executor, Denied
+        from .managementcontext import read
+        metadata = ManagementRequest.parse(request.data)
+        node_executor(request.actor, metadata.scope.node_id)
+        if request.auth is None:
+            raise Denied('machine token required for management context')
+        return Response(read(Credential('token', request.auth.key), metadata.wire()))
+
+
 class ExecutorState(MachineView):
     def get(self, request):
         values = query(request.query_params, ('schema_version','node_id'))
         node_id = p.uuid_value(values['node_id'])
-        value = execution.executor_state(request.actor,node_id)
-        return Response({'schema_version':1,'node_id':str(node_id),'executor_epoch':str(value)})
+        return Response(executor_discovery(execution, request.actor, node_id))
+
+
+class HostExecutorState(MachineView):
+    def get(self, request):
+        values = query(request.query_params, ('schema_version', 'node_id'))
+        return Response(executor_discovery(execution, request.actor, p.uuid_value(values['node_id']), host=True))
+
+
+class HostExecutorBind(MachineView):
+    def post(self, request):
+        value = machine_document(request.data, ('schema_version', 'node_id', 'epoch', 'previous_epoch', 'new_epoch'))
+        result = execution.host_executor_bound(request.actor, p.uuid_value(value['node_id']),
+            epoch=p.uuid_value(value['epoch']), previous_epoch=p.uuid_value(value['previous_epoch']),
+            new_epoch=p.uuid_value(value['new_epoch']))
+        return Response(dict(schema_version=1, executor_epoch=str(result), replay_allowed=False))
 
 
 class Claim(MachineView):

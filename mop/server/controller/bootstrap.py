@@ -80,6 +80,28 @@ def private_bytes(path):
     return data
 
 
+def credential_endpoint(bootstrap):
+    """Только nonsecret OS endpoint; не authority, readiness или bearer store."""
+    if 'credential_service' not in bootstrap:
+        return None
+    if bootstrap.get('role') not in {'web', 'worker'}:
+        raise RuntimeError('bootstrap credential service is not allowed for this process role')
+    value = bootstrap['credential_service']
+    if type(value) is not dict or set(value) != {'path', 'server_uid'}:
+        raise RuntimeError('bootstrap credential service keys are invalid')
+    uid = value['server_uid']
+    if type(uid) is not int or not 0 < uid < 2 ** 32 - 1:
+        raise RuntimeError('bootstrap credential service requires an explicit non-root service UID')
+    from mop.common.credentials import CredentialError, socket_path
+    try:
+        path = socket_path(value['path'])
+    except (CredentialError, UnicodeError):
+        raise RuntimeError('bootstrap credential service requires a canonical absolute socket path') from None
+    if str(path) != value['path'] or path == Path('/'):
+        raise RuntimeError('bootstrap credential service requires a canonical absolute socket path')
+    return dict(value)
+
+
 def load(path):
     """Разрешены только координаты БД, identity и ссылки на ключи роли."""
     try:
@@ -88,13 +110,14 @@ def load(path):
         raise RuntimeError('bootstrap is not valid JSON') from exc
     required = {'installation_id', 'role', 'database'}
     if not isinstance(data, dict) or not required <= data.keys() or \
-            data.keys() - (required | {'root_key', 'django_key', 'static_root'}):
+            data.keys() - (required | {'root_key', 'django_key', 'static_root', 'credential_service'}):
         raise RuntimeError('bootstrap keys are invalid')
     identity = data['installation_id']
     if not isinstance(identity, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', identity):
         raise RuntimeError('bootstrap installation identity is invalid')
     if not isinstance(data['role'], str) or data['role'] not in {'maintenance', 'credential', 'web', 'worker', 'gateway'}:
         raise RuntimeError('bootstrap process role is invalid')
+    credential_endpoint(data)
     validate_database(data['database'])
     if data['role'] not in {'maintenance', 'credential'} and 'root_key' in data:
         raise RuntimeError('root key must not be supplied to web, worker or gateway')

@@ -539,7 +539,7 @@ class SessionConfirmationTests(unittest.IsolatedAsyncioTestCase):
         resolver = BindingsResolver(layout, source=None, physical=Physical())
         target = BoundTarget(w.target_id, w.incarnation_id, w.node_id, w.executor_epoch,
             w.generation, w.role, w.bundle_digest, w.grant_id, layout.clone,
-            layout.tmux_socket, '%0', layout.launcher, proof.session_socket)
+            layout.tmux_socket, '%0', layout.launcher, proof.session_socket, proof)
         receipt = ReadyReceipt(r, proof.scope, proof.pid, proof.process_start, str(uuid4()), 'confirmed-model')
         class Receipts:
             async def ready(self, requested, observed): return receipt
@@ -557,59 +557,222 @@ class SessionConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 return receipt
         self.assertFalse(await ReadyConfirmation(resolver, RacingReceipts()).confirmed(w, target))
 
-    async def test_new_producer_is_registered_before_private_hook_bridge_is_exposed(self):
-        m = api()
-        from mop.node import body_launch
-        self.assertTrue(hasattr(body_launch, 'SessionRuntime'), 'registered producer lifetime is missing')
-        from mop.node.body_launch import SessionRuntime, SessionProof
-        from mop.common.telemetry import Ack
-        w = work()
-        r = m.Registration(w, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
-        # Короткий собственный корень (#677): bridge-сокет здесь настоящий
-        # (bind и chmod 0o600 проверяются), во вложенном прогоне наследуемый
-        # TMPDIR удлиняет путь за sockaddr_un.
-        with tempfile.TemporaryDirectory(prefix='m643-', dir='/tmp') as directory:
-            path = Path(directory)/'hook.sock'
-            os.chmod(directory, 0o700)
-            proof = SessionProof(r, '%0', 'actual-session', uuid4(), Path(directory)/'session.sock', 123, 'start-1')
-            events = []
-            class Source:
-                async def register(self, observed):
-                    events.append(('registered', observed.scope))
-                    self.scope = observed.scope
-                    return observed.scope
-                async def ingest(self, observation):
-                    self.observation = observation
-                    return Ack(observation.scope.producer_epoch, observation.sequence)
-            source = Source()
-            runtime = SessionRuntime(source, source)
-            bridge = await runtime.attach(proof, path=path)
-            try:
-                self.assertEqual(events, [('registered', proof.scope)])
-                env = bridge.environment()
-                self.assertEqual(set(env), {'MOP_TELEMETRY_SOCKET', 'MOP_TELEMETRY_TOKEN'})
-                self.assertEqual(len(env['MOP_TELEMETRY_TOKEN']), 64)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                from mop import session
-                from unittest.mock import patch
-                with patch.dict(os.environ, env):
-                    await asyncio.to_thread(session.hook, json.dumps(dict(session_id='actual-session',
-                        hook_event_name='SessionStart')), 0)
-                for _ in range(100):
-                    if bridge.buffered: break
-                    await asyncio.sleep(.001)
-                await bridge.flush()
-                self.assertEqual(source.observation.scope, proof.scope)
-            finally:
-                await runtime.aclose()
-            self.assertFalse(path.exists())
-            class WrongSource:
-                async def register(self, observed):
-                    return replace(observed.scope, producer_epoch=uuid4())
-            runtime = SessionRuntime(WrongSource(), source)
-            with self.assertRaises(Refused): await runtime.attach(proof, path=path)
-            self.assertFalse(path.exists())
+    async def test_producer_cannot_attach_without_preexec_preparation(self):
+        # Полный env/ACK/IPC happy path теперь в session_runtime.py: настоящий
+        # owned child вместо proof со synthetic PID=123 и env подменой parent.
+        from mop.node.body_launch import SessionRuntime
+        runtime = SessionRuntime(None, None)
+        try:
+            with self.assertRaises(Unavailable):
+                runtime.environment()
+            with self.assertRaises(Unavailable):
+                await runtime.attach()
+        finally:
             await runtime.aclose()
+
+
+class SessionIdentityTests(unittest.IsolatedAsyncioTestCase):
+    # BUG: BoundTarget теряет immutable proof, а sender доверяет pathname.
+    # HYPOTHESIS: rebind принимает новый разговор/процесс по тем же путям;
+    # после connect проверяется новое имя сокета, а не уже подключённый peer.
+    # SOLUTION: перенос полного frozen SessionProof в BoundTarget, exact readiness
+    # и SO_PEERCRED/start/cwd/namespace gate открытого writer перед любыми bytes;
+    # native user frame несёт session_id, а drain остаётся unknown.
+    # RESULT: исходный RED -- 7 assertion failures (4 identity substitutions,
+    # readiness, missing session_id, connected peer). Owned kernel peers зелёные;
+    # intentional restart передаёт старый proof в replacement port, не требует
+    # прежней identity после замены. Native Claude/пул не проверялись.
+    # STATUS: FIXED — see #710
+    async def asyncSetUp(self):
+        from mop.node.body_launch import BindingsResolver, SessionProof, process_identity
+        m = api()
+        self.directory = tempfile.TemporaryDirectory(prefix='m710-', dir='/tmp')
+        self.addCleanup(self.directory.cleanup)
+        b = bundle()
+        self.work = replace(work(), bundle_digest=b.digest)
+        r = m.Registration(self.work, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+        self.layout = m.RegisteredLayout(Path(self.directory.name), r)
+        self.layout.clone.mkdir(parents=True)
+        self.layout.runtime.mkdir(parents=True)
+        self.path = self.layout.runtime/'session.sock'
+        self.child = await self.listener(self.path)
+        self.proof = SessionProof(r, '%0', 'owned-conversation', uuid4(), self.path,
+                                  self.child.pid, process_identity(self.child.pid))
+        self.inputs = ActionInput('Owner', 'owner@example.test', 'owned message', 'owned-token')
+        response = m.LaunchResponse(r, b, self.inputs)
+        class Source:
+            async def fetch(inner, requested): return response
+        class Physical:
+            async def observe(inner, layout): return self.proof
+        self.resolver = BindingsResolver(self.layout, source=Source(), physical=Physical())
+
+    async def listener(self, path):
+        # Настоящий kernel peer; только собственные процессы и сокеты, ни registry,
+        # ни key-файлов пользователя. Это не native Claude/SessionApi acceptance.
+        script = ('import asyncio,base64,sys\n'
+                  'async def receive(reader,writer):\n'
+                  ' data=await reader.read()\n'
+                  ' print("closed:"+base64.b64encode(data).decode(),flush=True)\n'
+                  ' writer.close(); await writer.wait_closed()\n'
+                  'async def main():\n'
+                  ' server=await asyncio.start_unix_server(receive,path=sys.argv[1])\n'
+                  ' print("ready",flush=True)\n'
+                  ' async with server: await server.serve_forever()\n'
+                  'asyncio.run(main())\n')
+        child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-u', '-c', script,
+            str(path), cwd=self.layout.clone, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        async def cleanup():
+            if child.returncode is None: child.kill()
+            await child.wait()
+        self.addAsyncCleanup(cleanup)
+        self.assertEqual(await asyncio.wait_for(child.stdout.readline(), 5), b'ready\n')
+        return child
+
+    async def received(self, child):
+        line = await asyncio.wait_for(child.stdout.readline(), 2)
+        self.assertTrue(line.startswith(b'closed:'), line)
+        return base64.b64decode(line[len(b'closed:'):])
+
+    async def test_rebind_rejects_same_path_session_producer_process_and_start_substitution(self):
+        from mop.node.execution_adapters import LocalExecutor
+        from mop.node.http_execution import EffectGuard
+        from mop.node.body_launch import process_identity
+        original = self.proof
+        variants = (('conversation', replace(original, session_id='after-clear')),
+                    ('producer', replace(original, producer_epoch=uuid4())),
+                    ('start', replace(original, process_start='different-boot-or-start')),
+                    ('process', None))
+        for kind, changed in variants:
+            with self.subTest(identity=kind):
+                self.proof = original
+                effects = []
+                class Runner:
+                    async def run(inner, argv, *, before_spawn, final_check):
+                        await before_spawn()
+                        final_check()
+                        effects.append(argv)
+                        return 'Owner <owner@example.test> 1 +0000\n' if 'var' in argv else ''
+                    async def aclose(inner): pass
+                async def authorize():
+                    nonlocal changed
+                    if kind == 'process' and changed is None:
+                        self.child.terminate()
+                        await self.child.wait()
+                        self.path.unlink()
+                        newer = await self.listener(self.path)
+                        changed = replace(original, pid=newer.pid, process_start=process_identity(newer.pid))
+                    self.proof = changed
+                executor = LocalExecutor(Runner(), self.resolver)
+                try:
+                    with self.assertRaisesRegex(Refused, 'binding'):
+                        await executor.execute(self.work, EffectGuard(authorize, lambda: None))
+                    self.assertEqual(effects, [], 'substituted session received a physical effect')
+                finally:
+                    await executor.aclose()
+
+    async def test_restart_confirms_deliberate_old_to_new_identity_not_old_identity_again(self):
+        from mop.node.execution_adapters import LocalExecutor
+        from mop.node.http_execution import EffectGuard
+        from mop.node.body_launch import process_identity
+        self.work = replace(self.work, action='restart_session')
+        r = replace(self.proof.registration, work=self.work)
+        self.proof = replace(self.proof, registration=r)
+        self.layout = replace(self.layout, registration=r)
+        self.resolver.layout = self.layout
+        response = api().LaunchResponse(r, bundle(), self.inputs)
+        class Source:
+            async def fetch(inner, work): return response
+        self.resolver.source = Source()
+        original = self.proof
+        replacement = await self.listener(self.layout.runtime/'replacement.sock')
+        newer = replace(original, session_id='replacement', producer_epoch=uuid4(),
+                        pid=replacement.pid, process_start=process_identity(replacement.pid))
+        calls = []
+        class Runner:
+            async def run(inner, argv, *, before_spawn, final_check):
+                await before_spawn()
+                final_check()
+                self.assertIn('respawn-pane', argv)
+                calls.append('respawn')
+                self.child.terminate()
+                await self.child.wait()
+                self.proof = newer
+                return ''
+            async def aclose(inner): pass
+        class Replacement:
+            async def confirmed(inner, work, target):
+                self.assertEqual(target.session_proof, original)
+                self.assertEqual(self.proof, newer)
+                self.assertIsNotNone(self.child.returncode)
+                calls.append('confirmed')
+                return True
+        async def authorize(): pass
+        executor = LocalExecutor(Runner(), self.resolver, replacement=Replacement())
+        try:
+            self.assertEqual(await executor.execute(self.work, EffectGuard(authorize, lambda: None)),
+                             ('succeeded', 'session-replaced'))
+            self.assertEqual(calls, ['respawn', 'confirmed'])
+        finally:
+            await executor.aclose()
+
+    async def test_ready_receipt_for_new_conversation_cannot_confirm_old_bound_target(self):
+        from mop.node.body_launch import ReadyConfirmation, ReadyReceipt
+        w = self.work
+        target, _ = await self.resolver.resolve(w)
+        self.proof = replace(self.proof, session_id='after-clear')
+        calls = []
+        class Receipts:
+            async def ready(inner, requested, proof):
+                calls.append(proof)
+                return ReadyReceipt(proof.registration, proof.scope, proof.pid,
+                                    proof.process_start, str(uuid4()), 'owned-model')
+        with self.assertRaisesRegex(Refused, 'readiness'):
+            await ReadyConfirmation(self.resolver, Receipts()).confirmed(w, target)
+        self.assertEqual(calls, [], 'new conversation was queried for old readiness')
+
+    async def test_native_user_frame_pins_conversation_but_drain_stays_unknown(self):
+        from mop.node.execution_adapters import UnixSessionSender
+        target, inputs = await self.resolver.resolve(self.work)
+        sender = UnixSessionSender()
+        async def gate(): pass
+        try:
+            self.assertEqual(await sender.send(target, inputs, gate), ('unknown', 'effect-running'))
+            auth, frame = [json.loads(line) for line in (await self.received(self.child)).splitlines()]
+            self.assertEqual(auth, {'type':'auth', 'token':'owned-token'})
+            self.assertEqual(frame.get('session_id'), self.proof.session_id,
+                             'native user frame lost the documented conversation fence')
+        finally:
+            await sender.aclose()
+
+    async def test_connected_peer_is_checked_even_when_path_rebind_matches_original_target(self):
+        from mop.node.execution_adapters import UnixSessionSender
+        import socket
+        import struct
+        target, inputs = await self.resolver.resolve(self.work)
+        parked = self.layout.runtime/'parked.sock'
+        self.path.rename(parked)
+        foreign = await self.listener(self.path)
+        async def gate():
+            # Соединение sender уже с чужим listener; новое чтение pathname видит
+            # старый правильный peer. Проверка пути или повторный connect не gate.
+            parked.replace(self.path)
+            current, _ = await self.resolver.resolve(self.work)
+            self.assertEqual(current, target)
+            _, writer = await asyncio.open_unix_connection(str(self.path))
+            try:
+                peer = writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                self.assertEqual(struct.unpack('3i', peer)[0], self.child.pid)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        sender = UnixSessionSender()
+        try:
+            with self.assertRaisesRegex(Unavailable, 'peer'):
+                await sender.send(target, inputs, gate)
+            self.assertEqual(await self.received(foreign), b'', 'foreign peer received auth/message bytes')
+        finally:
+            await sender.aclose()
 
 
 if __name__ == '__main__': unittest.main()

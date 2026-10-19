@@ -1,63 +1,40 @@
-"""landing token of this project: mop landing [take <puppet>|give|show] [--force]
+"""mop landing <show|take|give|recover-take|recover-give> <project-id> [--epoch id --expected-revision N] [--owner-id N]
 
-  mop landing                   who holds the token, if anyone
-  mop landing take pu-mop-3     grant the token to pu-mop-3 before it lands
-  mop landing give              take it back on the puppet's report
-  mop landing take pu-mop-3 --force
-                                take it from a gone master; says whose it was
-  mop landing give --force      release a gone master's token
+Show one authorized project landing resource over HTTPS. An absent token is
+explicitly unmaterialized at revision 0, not held and not silently created.
+Take and give require an explicit canonical project id, installation epoch
+and exact decimal-string revision. Ownership is the actual current human Actor,
+not a puppet name, delegated owner, git identity or local project context.
+Give releases only that human's own token. There is no force takeover.
 
-Exactly one puppet between merge and push per project: two parallel pushes
-race, and the second bounces non-fast-forward. take refuses while another
-master holds the token, naming who and since when; asking again for the same
-puppet is not an error. The holder is your login on the bus; a holder that
-went away is released with --force.
+A successful SQL CAS response is printed only after the server commit. A lost
+or malformed response triggers only a GET of the same project/epoch. Recovery
+compares the exact successor revision and human owner (or null after give).
+It is a current observation, not a historical command receipt; even a matching
+observation returns exit 3 with command_outcome unknown. Never retake blindly.
+For a later read-only recovery, recover-take/recover-give also require the
+original actual Actor's --owner-id. A later revision, even for that same owner,
+does not match. No Operation/request-id or node anchor is created.
+
+The explicit HTTPS origin/CA and transient Django token follow mop health;
+no .env, legacy server context, bus or local login store is used.
+MCP conservatively requires all three canonical permissions and a human actor;
+the server checks the individual read/acquire/release permission on each call.
 """
-from mop.cli import lib
-from mop.common import bus, landing, puppets
+from mop.cli import _control
 
-
-# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"node_verbs": [], "cluster_verbs": ["landing"], "args": [
-    {"name": "action", "type": "string", "help": "take, give or show; show by default"},
-    {"name": "puppet", "type": "string", "help": "for take: the puppet that lands, pu-<project>-<n>"},
-    {"name": "force", "type": "boolean", "flag": "--force",
-     "help": "take or release a token another master holds"}]}
-
-
-def _held(token):
-    return f"{token['holder']} for {token['puppet']} since {token['since']}"
+MCP = {"annotations": "destructive", "human_only": True,
+       "actions": ["execution.view_landing", "execution.acquire_landing", "execution.release_landing"],
+       "args": [
+    {"name": "action", "type": "string", "required": True,
+     "help": "show, take, give, recover-take or recover-give"},
+    {"name": "project_id", "type": "string", "required": True, "help": "canonical project resource id"},
+    {"name": "epoch", "type": "string", "flag": "--epoch", "help": "installation epoch; required except for show"},
+    {"name": "expected_revision", "type": "string", "flag": "--expected-revision",
+     "help": "exact CAS revision; required except for show; 0 means unmaterialized"},
+    {"name": "owner_id", "type": "integer", "flag": "--owner-id",
+     "help": "original actual human Actor id; required only for read-only recovery"}]}
 
 
 def main(argv):
-    force = "--force" in argv
-    words = [a for a in argv if a != "--force"]
-    action = words[0] if words else "show"
-    if (action == "take" and len(words) != 2) or \
-            (action in ("give", "show") and len(words) > 1) or \
-            action not in ("take", "give", "show") or \
-            any(w.startswith("-") for w in words):
-        lib.usage(__doc__)
-    project = puppets.project_of(lib.origin(None, __doc__))
-    if action == "show":
-        token = bus.call_cluster("landing", project=project, action="show").get("token")
-        print(f"{project}: held by {_held(token)}" if token else f"{project}: free")
-        return 0
-    who = landing.holder()
-    if not who:
-        raise bus.Refused("the landing token is taken by a person's login on the bus, "
-                          "and this process has none: run it from a master shell")
-    fields = {"puppet": words[1]} if action == "take" else {}
-    got = bus.call_cluster("landing", project=project, action=action, holder=who,
-                           force=force, **fields)
-    prev = got.get("previous")
-    # Молча -- обычный исход; забранный у другого токен называется всегда:
-    # тот мастер, вернувшись, будет считать его своим.
-    if force and prev and prev.get("holder") != who:
-        verb = "took" if action == "take" else "released"
-        print(f"{verb} the landing token of {project} from {_held(prev)}")
-    return 0
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+    return _control.invoke('landing', argv)

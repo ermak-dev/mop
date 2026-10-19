@@ -3,9 +3,9 @@
   plan          validate protected topology and show ordered prerequisites (stdlib)
   provisioning  review OS accounts/directories and explicit PostgreSQL topology
     --apply     prepare a new local Debian host/PVE guest (sudo, external DB only)
-  database      create a new DB and four least-privilege roles over verified TLS
+  database      create a new DB and five least-privilege roles over verified TLS
     --provision-bootstrap PATH  separate protected database-only admin document
-    --passwords-file PATH       protected JSON of four new DB role passwords
+    --passwords-file PATH       protected JSON: web, worker, gateway, credential, maintenance
   database-check --provision-bootstrap PATH  verify an external DB as maintenance
   bootstrap --role NAME --password-file PATH  write a new private role bootstrap
   prepare --bootstrap PATH    direct maintenance: migrations then trust initialization
@@ -27,8 +27,12 @@ It refuses existing trees/accounts and provisioned-DB topology: PostgreSQL serve
 TLS/network provisioning needs its own explicit operator input. It starts no service,
 does not connect to the DB, does not invoke PVE and never claims runtime readiness.
 The same local command can run inside a host or an explicitly created PVE guest.
-Rendered units are review artifacts; worker/credential/realtime bindings remain
-separately gated. Full runtime and host/PVE reboot acceptance is a later gate.
+Rendered units are review artifacts. Credential composition resolves the declared
+credentials OS account and exact web/worker peer UIDs; its bootstrap purpose is
+credential. Worker/realtime bindings and native lifecycle acceptance remain gated.
+The separate credential pool adds 8 connections to 24 ordinary plus 8 maintenance;
+PostgreSQL needs 40 ordinary slots plus its reserved capacity. No unit is installed
+or started by rendering. Full runtime and host/PVE reboot acceptance is a later gate.
 """
 import argparse
 import json
@@ -65,7 +69,7 @@ def _main(argv):
     parser.add_argument('--provision-bootstrap')
     parser.add_argument('--passwords-file')
     parser.add_argument('--password-file')
-    parser.add_argument('--role', choices=('maintenance', 'web', 'worker', 'gateway'))
+    parser.add_argument('--role', choices=('maintenance', 'credential', 'web', 'worker', 'gateway'))
     parser.add_argument('--bootstrap')
     parser.add_argument('--settings-file')
     parser.add_argument('--username')
@@ -113,21 +117,28 @@ def _main(argv):
             parser.error('bootstrap requires --role and --password-file')
         import pwd
         import os
-        if pwd.getpwuid(os.geteuid()).pw_name != dict(spec.identities)[args.role]:
+        if pwd.getpwuid(os.geteuid()).pw_name != install.database_identity(spec, args.role):
             raise RuntimeError('bootstrap must run as its declared OS service identity')
         try:
             password = private_bytes(args.password_file).decode('ascii').rstrip('\n')
         except UnicodeError:
             raise RuntimeError('database password file requires ascii text') from None
-        document = install.bootstrap_document(spec, args.role, password=password)
-        destination = dict(spec.paths)['configuration'] + '/' + args.role + '/bootstrap.json'
+        credential_uid = None
+        if args.role in install.CREDENTIAL_CLIENT_ROLES:
+            try:
+                credential_uid = pwd.getpwnam(dict(spec.identities)['credentials']).pw_uid
+            except KeyError:
+                raise RuntimeError('credential service OS identity is not provisioned') from None
+        document = install.bootstrap_document(spec, args.role, password=password, credential_uid=credential_uid)
+        directory = 'credentials' if args.role == 'credential' else args.role
+        destination = dict(spec.paths)['configuration'] + '/' + directory + '/bootstrap.json'
         # Проверяем ключи до записи; signing key копирует защищённый OS provisioner,
         # не runtime и не root из HTTP. Существующие bytes никогда не заменяются.
         from mop.server.controller.bootstrap import private_bytes as read_key
         signing = read_key(document['django_key'])
         if len(signing) < 50 or not signing.isascii():
             raise RuntimeError('Django signing key is not provisioned as at least 50 ascii bytes')
-        if args.role == 'maintenance' and len(read_key(document['root_key'])) < 32:
+        if args.role in ('maintenance', 'credential') and len(read_key(document['root_key'])) < 32:
             raise RuntimeError('separate root trust is not provisioned')
         install.write_private_artifact(destination, json.dumps(document).encode())
     else:

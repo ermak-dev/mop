@@ -15,6 +15,8 @@ from urllib.parse import unquote, urlsplit
 class RegisterPeer:
     def __init__(self):
         self.jobs, self.posts, self.lose_post = {}, [], False
+        self.defer_post = False
+        self.post_arrived, self.release_post, self.post_applied = (threading.Event() for _ in range(3))
         listener = socket.socket()
         listener.bind(('127.0.0.1', 0))
         listener.listen(8)
@@ -45,11 +47,17 @@ class RegisterPeer:
             def do_POST(self):
                 value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 outer.posts.append(copy.deepcopy(value))
+                outer.post_arrived.set()
+                if outer.defer_post:
+                    if not outer.release_post.wait(5):
+                        self.close_connection = True
+                        return
                 job = value['Job']
                 current = outer.jobs.get(job['ID'], {}).get('JobModifyIndex', 0)
                 if value.get('EnforceIndex') is not True or value.get('JobModifyIndex') != current:
                     return self._reply({'error': 'Enforcing job modify index'}, 409)
                 outer.jobs[job['ID']] = {**copy.deepcopy(job), 'JobModifyIndex': current + 1, 'Stop': False}
+                outer.post_applied.set()
                 if outer.lose_post:
                     self.close_connection = True
                     return

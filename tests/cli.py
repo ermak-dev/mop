@@ -8,7 +8,6 @@
 """
 import json
 import os
-import uuid
 import sys
 import tempfile
 
@@ -470,7 +469,6 @@ def check_reference_committed_350(c):
 # STATUS: FIXED — see #432
 import ast
 import os
-import uuid
 
 
 def _owned_help():
@@ -779,6 +777,41 @@ def check_dispatch_sources_396(c):
                 c.check(f"#396 {name} installation source selection",
                         (not opened) if client else bool(opened), opened)
 
+    # HYPOTHESIS (#642): stub resolve выше не ловит возврат конкретного leaf
+    # в legacy environment/context. Проверяем также настоящий каталог/alias.
+    # SOLUTION: ранний route сохраняет argv и transient HTTPS selectors; старый
+    # --server отказывает прежде context/.env даже для unsupported surface.
+    # RESULT: вызывается ровно один canonical handler, legacy вход закрыт.
+    # STATUS: FIXED — see #642
+    from mop.common import context
+    def forbidden(*args, **kwargs):
+        raise AssertionError("remote dispatch reached legacy installation context")
+    def invoke(words, argv, **selected):
+        routed.append((words, argv, selected))
+        return 0
+    cases = [("add", ["add", "project-id", "--node-id", "node-id"]),
+             ("landing", ["landing", "show", "project-id"]),
+             ("mcp", ["mcp", "--check", "--project-id", "project-id"]),
+             ("node drain", ["node", "drain", "node-id"]),
+             ("project list", ["project", "list", "--page-size", "3"]),
+             ("session history", ["session", "history", "puppet-id"])]
+    with patched(cli, environment=forbidden, command=forbidden), \
+            patched(context, here=forbidden), patched(config, _load=forbidden), \
+            patched(_control, invoke=invoke):
+        for words, argv in cases:
+            rest = argv[len(words.split()):]
+            routed.clear()
+            out, err, code = run_command(cli.main,
+                ["--api-origin", "https://controller.example", "--api-ca", "/explicit/ca.pem", *argv])
+            c.expect(f"#642 {words} preserves explicit arguments on early dispatch",
+                     (out, err, code, routed), ("", "", 0, [(words, rest, {
+                         "origin": "https://controller.example", "ca_file": "/explicit/ca.pem"})]))
+            routed.clear()
+            out, err, code = run_command(cli.main, ["--server", "legacy.example", *argv])
+            c.check(f"#642 {words} rejects legacy selection before context or handler",
+                    not out and code == 2 and "legacy server selection" in err and not routed,
+                    (out, err, code, routed))
+
 
 # HYPOTHESIS: старые команды и источник ключа остались в руководстве даже
 # после миграции join. Справочник генерируется из докстрингов командлетов.
@@ -922,9 +955,14 @@ def check_tail_parse_431(c):
 
 CONCISE_431 = {
     "mop.cli.core.landing": (
-        ("syntax", "mop landing [take <puppet>|give|show] [--force]"),
-        ("keeps", "take it from a gone master"),
-        ("keeps", "one puppet between merge and push"),
+        # #642: владение SQL CAS ресурсом человека, не lease имени папета.
+        ("syntax", "mop landing <show|take|give|recover-take|recover-give> <project-id>"),
+        ("keeps", "exact decimal-string revision"),
+        ("keeps", "Give releases only that human's own token"),
+        ("keeps", "There is no force takeover"),
+        ("keeps", "printed only after the server commit"),
+        ("keeps", "not a historical command receipt"),
+        ("keeps", "Never retake blindly"),
         ("gone", "the token is kept by the cluster service"),
     ),
     "mop.cli.core.master": (
@@ -988,9 +1026,14 @@ CONCISE_431 = {
         ("gone", "registry"),
     ),
     "mop.cli.core.add": (
-        # #662: безролевой add снят (breaking change): только --role.
-        ("syntax", "mop add [git-origin] --role <role>"),
-        ("keeps", "the creation carries a request_id"),
+        # #642: immutable definition вместо имени роли; target назначает сервер.
+        ("syntax", "mop add <project-id> --node-id <id> --definition-id <id> --epoch <id>"),
+        ("keeps", "approved immutable role-definition id"),
+        ("keeps", "--request-id fixes the initial command identity before I/O"),
+        ("keeps", "no target revision is required or accepted"),
+        ("keeps", "An accepted receipt is not a running puppet"),
+        ("keeps", "neither a lost reply nor a lookup failure automatically reposts create"),
+        ("keeps", "No git, .env, bus or SSH fallback"),
         ("gone", "Nomad decides placement"),
         ("gone", "instead of a legacy puppet"),
     ),
@@ -1495,6 +1538,7 @@ def main():
     # STATUS: FIXED — see #111
 
     check_mcp_declarations(c)
+    check_canonical_mcp_arguments_642(c)
     check_dev_mcp_515(c)
     check_mcp_positional_refusal_438(c)
     check_refusals(c)
@@ -1552,70 +1596,76 @@ def check_role_declarations_585(c):
             continue
         c.fail(f"#585 declared must refuse: {bad}")
 
-    # HYPOTHESIS (#585, остаток): seventeen commandlets carry an MCP
-    # declaration, but none names its verbs -- so a role sees no commandlet
-    # tool at all, and the fail-closed catalogue is empty for every grant.
-    # SOLUTION: annotate each declaration with the verbs the commandlet
-    # really calls (the audit below follows the actual calls, not guessed
-    # names); a commandlet whose true verbs are admin ones the role grammar
-    # excludes (nodes/drain/up/project_add/project_limit) or that needs a
-    # human login (models, diagnose, server diagnose) stays silent -- it is
-    # human-only, and the grammar keeps it out on purpose.
-    # Глаголы -- по живым вызовам каждого командлета, не по имени команды:
-    # wipe зовёт cluster alloc (узел остановленного) и node wipe; recycle
-    # добавляет spec/delete/update/bootstrap_result; stat -- cluster pool и
-    # node usage; landing -- только landing.
-    ANNOTATED = {
-        # #642: wipe переехал на HTTP-командлет -- старых bus verbs не декларирует.
-        "wipe": None,
-        "restart": None,
-        # #642: delete переехал на HTTP-командлет -- старых bus verbs не декларирует.
-        "delete": None,
-        "recycle": (["wipe"], ["spec", "alloc", "delete", "update",
-                              "bootstrap_result"]),
-        "update": ([], ["spec", "update", "bootstrap_result"]),
-        # add --role (#618): ping -- предзапрос протокола ролей до создания.
-        "add": ([], ["add", "alloc", "bootstrap_result", "ping"]),
-        "landing": ([], ["landing"]),
-        "stat": None,
-        "profile": None,
-        # admin verbs outside the role grammar: silent for grants on purpose
-        # stop (#608) -- job_stop, операторский глагол вне грамматики ролей
-        "stop": None,
-        "node": None, "node_drain": None, "node_up": None,
-        "project_add": None, "project_limit": None,
-        "models": None, "diagnose": None, "server_diagnose": None,
-        # #642: новые HTTP-командлеты не декларируют старые bus verbs.
-        "health": None, "addresses": None, "operation": None, "project_list": None, "build": None,
-        "list": None, "detail": None,
-        # #594: приватная история требует человеческого логина, терминал —
-        # admin-допуска. Исходящим полномочием роли они не становятся.
-        "session_history": None, "session_terminal": None,
+    # HYPOTHESIS (#642): аудит add/landing по bus verbs больше не проверяет
+    # реальную authority; остальные HTTP declarations ошибочно считались silent.
+    # SOLUTION: явный inventory canonical actions + business human-only fences;
+    # ещё живые legacy helpers/declarations остаются отдельным контрактом.
+    # RESULT: проверяются все declarations, отсутствие каждого нужного action
+    # закрывает инструмент; kind не заменяет permission, legacy verbs не смешаны.
+    # STATUS: FIXED — see #642
+    canonical = {
+        "add": ["execution.create_puppet", "execution.assign_work", "operations.view_operation"],
+        "addresses": ["execution.view_delivery", "catalog.view_project"],
+        "build": ["catalog.build_project", "operations.view_operation"],
+        "delete": ["execution.delete_puppet", "operations.view_operation"],
+        "detail": ["catalog.view_pool"], "diagnose": [], "health": [],
+        "landing": ["execution.view_landing", "execution.acquire_landing", "execution.release_landing"],
+        "list": ["catalog.view_pool"],
+        "node_drain": ["catalog.drain_node", "operations.view_operation"],
+        "node_up": ["catalog.enable_node", "operations.view_operation"],
+        "operation": ["operations.view_operation"], "profile": [],
+        "project_list": ["catalog.view_project"],
+        "restart": ["execution.restart_puppet", "operations.view_operation"],
+        "send": ["execution.send_message", "operations.view_operation"],
+        "stat": ["execution.view_usage"],
+        "stop": ["operations.stop_puppet_job", "operations.view_operation"],
+        "wipe": ["execution.wipe_puppet", "operations.view_operation"],
     }
+    legacy = {"recycle": (["wipe"], ["spec", "alloc", "delete", "update", "bootstrap_result"]),
+              "update": ([], ["spec", "update", "bootstrap_result"])}
+    silent = {"node", "project_add", "project_limit", "models", "server_diagnose",
+              "session_history", "session_terminal"}
+    human_only = {"add", "addresses", "landing"}
     from mop.common import soul
+    from mop.client import control as api
+    from mop.cli import _control, _mcp
+    from _control_fixture import KEY
     tools = {n: cli.declared(path) for n, _, path
              in cli.tool_commands(cli.scan(), cli.verbs())}
     declared_names = {n: d for n, d in tools.items() if d is not None}
-    c.expect("#585 every declared commandlet is audited",
-             sorted(declared_names), sorted(ANNOTATED))
-    for name, audited in sorted(ANNOTATED.items()):
-        decl = declared_names.get(name)
-        if audited is None:
-            c.check(f"#585 {name} stays silent: its verbs are outside the role grammar "
-                    f"or need a human login",
-                    not any(k in (decl or {}) for k in
-                            ("node_verbs", "cluster_verbs", "dispatch")))
-            continue
-        node_verbs, cluster_verbs = audited
-        c.expect(f"#585 {name} names the verbs it really calls",
-                 (decl.get("node_verbs"), decl.get("cluster_verbs")),
-                 (node_verbs, cluster_verbs))
+    c.expect("#585/#642 every declared commandlet is audited",
+             set(declared_names), set(canonical) | set(legacy) | silent)
+    c.expect("#642 management discovery exposes exactly the canonical bound declarations",
+             set(_mcp.commandlets()), set(canonical))
+    for name, actions in sorted(canonical.items()):
+        decl = declared_names.get(name, {})
+        c.expect(f"#642 {name} requires its exact canonical actions", decl.get("actions"), actions)
+        c.expect(f"#642 {name} keeps only its business human fence",
+                 decl.get("human_only", False), name in human_only)
+        c.check(f"#642 {name} never mixes canonical authority with legacy verbs",
+                not {"node_verbs", "cluster_verbs", "dispatch"} & decl.keys())
+        for kind, owner, grant in (("human", 7, None), ("agent", 4, KEY), ("service", None, None)):
+            identity = api.Identity(7, kind, owner, None, grant, frozenset(actions))
+            c.expect(f"#642 {name} exact actions for {kind}", _control.allowed(decl, identity),
+                     kind == "human" or name not in human_only)
+        for absent in actions:
+            identity = api.Identity(7, "human", 7, None, None, frozenset(set(actions) - {absent}))
+            c.check(f"#642 {name} refuses without {absent}", not _control.allowed(decl, identity))
+        c.check(f"#642 {name} refuses an unscoped identity without an action catalogue",
+                not _control.allowed(decl, api.Identity(7, "human", 7, None, None)))
+    for name, (node_verbs, cluster_verbs) in legacy.items():
+        decl = declared_names.get(name, {})
+        c.expect(f"#585 {name} names the verbs its surviving helper calls",
+                 (decl.get("node_verbs"), decl.get("cluster_verbs")), (node_verbs, cluster_verbs))
+        c.check(f"#585 {name} has no canonical action claim", "actions" not in decl)
         for verb in node_verbs:
-            c.check(f"#585 {name}: {verb} is in the role grammar",
-                    verb in soul.NODE_VERBS)
+            c.check(f"#585 {name}: {verb} is in the role grammar", verb in soul.NODE_VERBS)
         for verb in cluster_verbs:
-            c.check(f"#585 {name}: {verb} is in the role grammar",
-                    verb in soul.CLUSTER_VERBS)
+            c.check(f"#585 {name}: {verb} is in the role grammar", verb in soul.CLUSTER_VERBS)
+    for name in silent:
+        decl = declared_names.get(name, {})
+        c.check(f"#585 {name} has no outgoing role authority",
+                not {"node_verbs", "cluster_verbs", "dispatch", "actions"} & decl.keys())
     # Аннотация -- не декорация: с ней рабочий пресет видит командлеты в
     # своих правах, а не пустой каталог. Пресет -- рабочий из docs/SOUL.md
     # плюс чтение (usage/roster/alloc/spec), выданное каналом #585: stat
@@ -1631,11 +1681,63 @@ def check_role_declarations_585(c):
         "prompt": "soul.md"}, b"p").manifest.capabilities
     seen = channel.tools_for(channel.GRANT, grant_caps,
                              {n: d for n, d in declared_names.items()})
-    c.check("#642 HTTP declarations never open from legacy verb capabilities",
-            not ({'profile', 'health', 'addresses', 'operation', 'project_list', 'node_drain', 'node_up'} & seen), seen)
+    # send также имя сохранившегося HAND_TOOLS: совпадение имени не доказывает
+    # выдачу canonical declaration. Проверяем её вклад относительно пустого
+    # каталога, а настоящий action filter выше -- по explicit Identity.
+    c.expect("#642 canonical declarations grant no tools through legacy capabilities",
+             seen, channel.tools_for(channel.GRANT, grant_caps, {}))
     c.check("#585 a role with no matching verbs gains nothing",
             not ({"wipe", "add", "stat"} & seen), seen)
     # STATUS: FIXED — see #585
+
+
+def check_canonical_mcp_arguments_642(c):
+    """Позиционные/флаги из действующих declarations, не прежние origin/name.
+
+    HYPOTHESIS: при смене authority codec мог сохранить старые positionals,
+    потерять обязательный explicit binding или округлить строковую CAS revision.
+    SOLUTION: точные argv и required-схемы add, landing и lifecycle/send.
+    RESULT: MCP получает тот же explicit canonical ввод, что CLI.
+    STATUS: FIXED — see #642
+    """
+    from mop.cli import _mcp
+    from mop.client import control as api
+    from _control_fixture import PROJECT, NODE, DEFINITION, EPOCH, PUPPET, INCARNATION
+    revision = "9007199254740993"
+    binding = {"puppet_id": PUPPET, "epoch": EPOCH, "incarnation": INCARNATION,
+               "expected_revision": revision}
+    suffix = ["--epoch", EPOCH, "--incarnation", INCARNATION, "--expected-revision", revision]
+    cases = [
+        ("add", {"project_id": PROJECT, "node_id": NODE, "definition_id": DEFINITION, "epoch": EPOCH},
+         [PROJECT, "--node-id", NODE, "--definition-id", DEFINITION, "--epoch", EPOCH],
+         {"project_id", "node_id", "definition_id", "epoch"}),
+        ("landing", {"action": "recover-take", "project_id": PROJECT, "epoch": EPOCH,
+                     "expected_revision": revision, "owner_id": 7},
+         ["recover-take", PROJECT, "--epoch", EPOCH, "--expected-revision", revision, "--owner-id", "7"],
+         {"action", "project_id"}),
+        ("send", {**binding, "message": "line one\nline two"},
+         [PUPPET, "line one\nline two", *suffix], set(binding) | {"message"}),
+    ]
+    cases.extend((name, dict(binding), [PUPPET, *suffix], set(binding))
+                 for name in ("restart", "wipe", "stop", "delete"))
+    for name, values, argv, required in cases:
+        declaration = cli.declared(os.path.join(cli.PACKAGE, "core", name + ".py"))
+        c.expect(f"#642 {name} requires its canonical MCP arguments",
+                 set(_mcp.schema(declaration)["required"]), required)
+        c.expect(f"#642 {name} renders explicit canonical argv without coercing ids/revisions",
+                 cli.tool_argv(declaration["args"], _mcp.arguments(declaration, values)), argv)
+        for absent in required:
+            try:
+                _mcp.arguments(declaration, {key: value for key, value in values.items() if key != absent})
+            except api.ClientError:
+                continue
+            c.fail(f"#642 {name} accepted missing explicit {absent}")
+        for legacy in ("origin", "role", "name", "force"):
+            try:
+                _mcp.arguments(declaration, {**values, legacy: "private-input"})
+            except api.ClientError:
+                continue
+            c.fail(f"#642 {name} accepted legacy {legacy} as canonical authority")
 
 
 def check_mcp_declarations(c):
@@ -1926,9 +2028,8 @@ def check_dev_mcp_515(c):
     RESULT: в экспозиции нет ни одного dev-инструмента, командлеты живы.
     STATUS: FIXED — see #515"""
     import io
-    import inspect
     from mop.cli.dev.bug import new, edit
-    from mop.cli.service import mcp
+    from mop.cli import _control, _mcp
     from mop.common import gitlab
 
     # Экспозиция собирается обходом дерева: приватная группа не входит в
@@ -1944,13 +2045,31 @@ def check_dev_mcp_515(c):
     declared_leaf = os.path.join(cli.PACKAGE, "dev", "bug", "list.py")
     c.check("#515 no developer leaf carries an MCP declaration",
             cli.declared(declared_leaf) is None)
-    calls = []
-    with patched(mcp, MASTER=False, command_tool=lambda *args: calls.append(args)):
-        mcp.command_tools()
-    c.expect("#515 node profile has no developer tools", calls, [])
-    # Профиль мастера собирает каталог тем же обходом: пока что не
-    # смотря на PROFILE, проверяем состав выше -- повторять его здесь
-    # значило бы вторую копию списка.
+    # HYPOTHESIS (#642): прежний MASTER/command_tools больше не является
+    # точкой discovery; перенос не должен открыть dev или импортировать runtime.
+    # SOLUTION: настоящий commandlets обходит синтетические AST-модули; даже
+    # bound action-declaration в dev остаётся закрытым, health виден.
+    # RESULT: положительный и отрицательный контроль без исполнения модулей.
+    # STATUS: FIXED — see #642
+    with tempfile.TemporaryDirectory(prefix="mop-test-discovery-642-") as root:
+        declaration = {"annotations": "readonly", "actions": []}
+        for relative in ("core/health.py", "dev/__init__.py", "dev/bug/__init__.py",
+                         "dev/bug/list.py"):
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as stream:
+                stream.write('"""synthetic command"""\nimport nothing_such\n'
+                             'raise AssertionError("runtime import during discovery")\n'
+                             f'MCP = {declaration!r}\n')
+        with patched(cli, PACKAGE=root,
+                     scan=lambda: [("core", "health", False), ("dev", "", True)],
+                     verbs=lambda: {"dev": {"bug": {"list": {}}}}), \
+                patched(_control, SURFACES={"health": "bound", "dev": "bound",
+                    "dev bug": "bound", "dev bug list": "bound"}):
+            discovered = _mcp.commandlets()
+        c.expect("#642 canonical discovery includes only the public AST declaration",
+                 discovered, {"health": (["health"], os.path.join(root, "core/health.py"),
+                                          declaration)})
     # Командлеты остаются рабочим CLI: characterization ниже -- те же
     # вызовы, что были зелёными до #515 (#443), ничего не ослаблено.
 
@@ -2226,7 +2345,7 @@ CAPS_OK = {
     # статусы, которые читают глазами и модель
     "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
     # протоколы, сигналы, литералы чужих программ
-    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "ASGI", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
+    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "ASGI", "UUID", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
     "PLAY", "RECAP", "EXIT",
     # идентификаторы в тексте
     "SECTIONS", "TESTS",
@@ -3138,34 +3257,104 @@ def check_deploy_check(c):
 
 
 def check_agent_on_node_172(c):
-    """#172: юнит агента переезжает с `python3 -m mop.agent` на `mop agent`,
-    а на узле .env нет -- только node.env. Считалось, что диспетчер откажет
-    там на REQUIRED; не отказывает: require зовёт только lib.cluster, а
-    командлет агента его не берёт. Проверка зелёная с первого прогона и
-    закрепляет нынешнее поведение, а не чинит: отказ здесь уронил бы агента
-    на каждом узле, как только юнит переедет. Живьём то же на hyper:
-    `cd / && ~/mop/bin/mop agent --check` -- exit 0, subscribed.
+    """Ранний node entry #172 сохраняется на explicit bootstrap #640/#642.
 
-    Узел здесь -- временный дом с одним node.env, .env нет, каталог `/`.
-    Дальше отказа на настройках команда дойти обязана: до агента -- его
-    отказ на кредах шины, либо, без nats-py, отказ командлета про библиотеку.
-    STATUS: FIXED — see #172"""
+    HYPOTHESIS: старый check принимает только bus diagnostic и падает на новом
+    обязательном --bootstrap. SOLUTION: тот же entry без .env/context/NATS,
+    но с явным private transport; настоящие TLS discovery/refusal и safe errors.
+    RESULT: обязательный input не подменяется node.env; успешный check читает
+    только executor discovery, unbound serve не двигает fence.
+    STATUS: FIXED — see #642"""
+    import http.server
+    from pathlib import Path
     import subprocess
-    import tempfile
-    home = tempfile.mkdtemp(prefix="mop-node-172-")
-    os.makedirs(os.path.join(home, ".config", "mop"))
-    with open(os.path.join(home, ".config", "mop", "node.env"), "w") as f:
-        f.write("MOP_DRIVER=host\nMOP_USER=mopuser\n")
-    env = hermetic.child_env({"HOME": home,
-                              "MOP_ENV_FILE": os.path.join(home, "no-such.env"),
-                              "MOP_NODE": "hyper"})
-    r = subprocess.run(["bash", os.path.join(ROOT, "bin", "mop"), "agent", "--check"],
-                       cwd="/", env=env, capture_output=True, text=True, timeout=60)
-    out = r.stdout + r.stderr
-    reached = "no bus credentials" in out or "bus library needed" in out
-    c.check("mop agent --check on a node with node.env and no .env must reach the agent",
-            not ("required settings not filled" in out or not reached),
-            f"rc {r.returncode}, {out.strip()!r}")
+    from uuid import uuid4
+    from _control_fixture import own_tls
+
+    script = '''
+import importlib.abc, os, sys
+class RejectOld(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname == 'nats' or fullname.startswith('nats.') or fullname in (
+            'mop.common.context', 'mop.common.config', 'mop.common.bus',
+            'mop.node.agent', 'mop.client.control', 'mop.cli._control'):
+            raise AssertionError('legacy import: '+fullname)
+def reject_store(event, args):
+    if event == 'open' and isinstance(args[0], (str, bytes)):
+        if os.path.basename(os.fsdecode(args[0])) in (
+            '.env', 'node.env', 'bus.json', 'ready.json', 'connection.json',
+            'operator.json', 'client.json', 'no-such.env'):
+            raise AssertionError('legacy store read')
+sys.meta_path.insert(0, RejectOld())
+sys.addaudithook(reject_store)
+from mop.cli import main
+sys.exit(main(sys.argv[1:]))
+'''
+
+    class Discovery(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.server.calls.append((self.command, self.path, self.headers.get('Authorization')))
+            raw = json.dumps(self.server.value).encode()
+            self.send_response(self.server.status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            self.server.calls.append((self.command, self.path, None))
+            self.send_error(500, 'unexpected mutation')
+
+    with tempfile.TemporaryDirectory(prefix='mop-node-172-') as home, own_tls(Discovery) as tls:
+        server, origin, ca, directory = tls
+        config = Path(home)/'.config'/'mop'
+        config.mkdir(parents=True)
+        (config/'node.env').write_text('MOP_DRIVER=host\nMOP_USER=mopuser\n')
+        env = hermetic.child_env({'HOME': home, 'MOP_ENV_FILE': str(Path(home)/'no-such.env'),
+                                  'MOP_NODE': 'legacy-node-must-not-authorize'})
+        env['PYTHONPATH'] = ROOT
+        node, epoch, executor = (str(uuid4()) for _ in range(3))
+        token = 'a' * 40
+        ca.chmod(0o600)
+        file = Path(directory)/'bootstrap.json'
+        file.write_text(json.dumps(dict(schema_version=1, installation_id='fixture',
+            origin=origin, ca_file=str(ca), node_id=node, token=token)))
+        file.chmod(0o600)
+        server.value = dict(schema_version=1, installation_id='fixture', epoch=epoch,
+                            node_id=node, executor_epoch=executor)
+        server.status, server.calls = 200, []
+
+        def invoke(args, code, diagnostic=''):
+            result = subprocess.run([sys.executable, '-P', '-c', script, 'agent', *args],
+                cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            c.expect(f'#642 explicit bootstrap agent {args} exit', result.returncode, code)
+            c.expect('#642 agent never writes stdout', result.stdout, '')
+            if diagnostic:
+                c.check('#642 agent explains its safe refusal', diagnostic in result.stderr,
+                        result.stderr)
+            else:
+                c.expect('#642 successful node discovery is silent', result.stderr, '')
+            for forbidden in ('Traceback', 'legacy import', 'legacy store read',
+                              'required settings not filled', 'no bus credentials',
+                              'bus library needed', token):
+                c.check(f'#642 node entry never exposes {forbidden!r}',
+                        forbidden not in result.stdout+result.stderr)
+
+        invoke(['--check'], 2, '--bootstrap')
+        invoke(['--bootstrap', str(Path(directory)/'missing'), '--check'], 1,
+               'node bootstrap private input is unavailable')
+        c.expect('#642 missing input never contacts discovery', server.calls, [])
+        invoke(['--bootstrap', str(file), '--check'], 0)
+        expected = [('GET', '/api/v1/machine/executor?schema_version=1&node_id='+node, 'Token '+token)]
+        c.expect('#642 check is authenticated read-only discovery', server.calls, expected)
+        invoke(['--bootstrap', str(file)], 1, 'native physical startup root is not bound')
+        c.expect('#642 unbound physical root has no HTTP effect', server.calls, expected)
+        server.status = 401
+        invoke(['--bootstrap', str(file), '--check'], 1, 'machine request refused (HTTP 401)')
+        c.expect('#642 auth refusal never falls back or retries', server.calls, expected * 2)
 
 
 def check_bus_import_169(c):
@@ -3374,6 +3563,10 @@ def check_fallback_model_183(c):
     # MCP, то есть тоже сообщение наружу. `epic #12` в примере -- формат
     # номера, а не ссылка.
     # STATUS: FIXED — see #255
+    # HYPOTHESIS (#728): новый MCP docstring снова публикует номер задачи.
+    # SOLUTION: убрать только номер и регенерировать справочник, не менять запрет.
+    # RESULT: RED 1/1581 на service/mcp.py; GREEN 1581/1581 после правки текста.
+    # STATUS: FIXED — see #728
     told = []
     for d, _, files in os.walk(cli.PACKAGE):
         for f in files:
@@ -3444,15 +3637,29 @@ def check_master_argv_400(c):
 # STATUS: FIXED — see #399
 def check_add_argv_399(c):
     from mop.cli.core import add
-    from mop.common import config
-    with patched(config, require=lambda *names: None):
-        try:
-            out, err, code = run_command(add.main, ["first", "second"])
-        except NameError as e:
-            c.fail("#399 mop add must parse argv before network", str(e))
-            return
-    c.check("#399 mop add refuses extra arguments with usage",
-            code != 0 and "mop add" in str(code), (out, err, code))
+    from mop.cli import _control
+    from _control_fixture import PROJECT, NODE, DEFINITION, EPOCH, KEY, DEADLINE
+    valid = [PROJECT, "--node-id", NODE, "--definition-id", DEFINITION,
+             "--epoch", EPOCH, "--request-id", KEY, "--not-after", DEADLINE]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("add reached context/I/O before argument validation")
+
+    # #642: usage теперь argparse stderr, а не SystemExit с docstring.
+    # Все обязательные canonical selectors и лишний positional проверяются
+    # до transient context; отказ не возвращается в legacy dispatcher.
+    with patched(_control, context=forbidden), \
+            patched(cli, environment=forbidden, command=forbidden):
+        for entry, prefix in ((add.main, []), (cli.main, ["add"])):
+            cases = [[], ["first", "second"], [*valid, "extra"]]
+            for option in ("--node-id", "--definition-id", "--epoch"):
+                index = valid.index(option)
+                cases.append(valid[:index] + valid[index + 2:])
+            for argv in cases:
+                out, err, code = run_command(entry, prefix + argv)
+                c.expect(f"#399/#642 add validates before context: {argv}",
+                         (out, err, code), ("", "invalid command arguments\n", 1))
+    # STATUS: FIXED — see #642
 
 
 # ── #377: путь отказа `mop add` -- текст, а не трасса ────────────────────
@@ -3464,49 +3671,53 @@ def check_add_argv_399(c):
 # STATUS: FIXED — see #377
 def check_add_failure_377(c):
     from mop.cli.core import add
-    from mop.common import bus, context, puppets
-    task = {"state": "dead", "failed": True, "restarts": 3, "exit": 1, "next_s": None}
-    cases = [
-        ("the allocation failed", {"ID": "a-9", "NodeName": "n1", "ClientStatus": "failed"},
-         "pu-mop-9 on n1: failed to start"),
-        ("the task summary says failing", {"ID": "a-9", "NodeName": "n1",
-                                           "ClientStatus": "pending", "task": task,
-                                           "reason": "clone failed: no route"},
-         "pu-mop-9 on n1: FAILED: clone failed: no route")]
+    from mop.cli import _control
+    from mop.client import control as api
+    from mop.common import context, config
+    from _control_fixture import (Fixture, Response, PROJECT, NODE, DEFINITION,
+                                  EPOCH, KEY, DEADLINE, TOKEN, PUPPET, create_operation)
+    argv = [PROJECT, "--node-id", NODE, "--definition-id", DEFINITION,
+            "--epoch", EPOCH, "--request-id", KEY, "--not-after", DEADLINE]
 
-    class P:
-        def step(self, text):
-            pass
+    def forbidden(*args, **kwargs):
+        raise AssertionError("canonical add reached legacy context or transport")
 
-        def clear(self):
-            pass
-    for what, alloc, want in cases:
-        said = []
-
-        def call_cluster(verb, alloc=alloc, **kw):
-            if verb == "ping":
-                return {"soul_protocol": {"version": 1, "request_id": True}}
-            if verb == "add":
-                return {"name": "pu-mop-9", "ok": True, "soul": "puppet",
-                        "soul_digest": "a" * 64,
-                        "soul_inc": "%s" % uuid.uuid5(uuid.NAMESPACE_DNS, "377")}
-            return {"alloc": alloc}
-        with patched(bus, call_cluster=call_cluster), \
-                patched(_common, workspace_text=lambda o: ("", None),
-                        sent_line=lambda s: ""), \
-                patched(add.roles, protocol=lambda reply: True), \
-                patched(lib, fail=said.append), \
-                patched(_common.ops.time, sleep=lambda s: None), \
-                patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
-            try:
-                code = add._add("git@h:g/mop.git", "mop", False, P(), "puppet")
-            except Exception as e:
-                c.fail(f"#377 mop add, {what}: a refusal, not a trace",
-                       f"{type(e).__name__}: {e}")
-                continue
-        c.expect(f"#377 mop add, {what}: exit 1", code, 1)
-        c.check(f"#377 mop add, {what}: says why: {said}",
-                len(said) == 1 and said[0].startswith(want), said)
+    # HYPOTHESIS (#642): add._add/roles удалены, но отказ создания всё ещё
+    # должен сохранять причину и не падать трассировкой из-за формы ответа.
+    # SOLUTION: реальные HTTP error/Operation codecs, без аллокаций Nomad;
+    # admission и terminal failure различаются, accepted не считается running.
+    # RESULT: отказ в stderr, Operation -- versioned stdout с target и reason.
+    # STATUS: FIXED — see #642
+    for entry, prefix in ((add.main, []), (cli.main, ["add"])):
+        for state, expected_code in (("failed", 1), ("refused", 1),
+                                     ("accepted", 3), ("succeeded", 0)):
+            envelope = create_operation(state)
+            envelope["operation"].update(code="execution_conflict" if expected_code == 1 else "admitted",
+                reason="clone failed: no route" if expected_code == 1 else "command admitted")
+            fixture = Fixture(Response(202, envelope))
+            with _control.use(api.ServerContext("https://controller.example", TOKEN)), \
+                    patched(api, _DeadlineHTTPSConnection=fixture.factory), \
+                    patched(cli, environment=forbidden, command=forbidden), \
+                    patched(context, here=forbidden), patched(config, _load=forbidden):
+                out, err, code = run_command(entry, prefix + argv)
+            c.expect(f"#377/#642 add {state} preserves the canonical result",
+                     (json.loads(out), err, code), (envelope, "", expected_code))
+            c.expect("#642 create target is assigned by the server, not inferred from an allocation",
+                     json.loads(out)["operation"]["target"]["id"], PUPPET)
+            c.expect("#642 create uses exactly one bound POST",
+                     [(method, path, json.loads(body)) for method, path, body, _ in fixture.calls],
+                     [("POST", "/api/v1/projects/" + PROJECT + "/commands/create-puppet",
+                       {"schema_version": 1, "epoch": EPOCH, "request_id": KEY,
+                        "not_after": DEADLINE, "params": {"node_id": NODE, "definition_id": DEFINITION}})])
+        reason = "approved role definition is unavailable"
+        fixture = Fixture(Response(403, {"schema_version": 1, "error": {
+            "code": "access_denied", "message": reason, "retryable": False}}))
+        with _control.use(api.ServerContext("https://controller.example", TOKEN)), \
+                patched(api, _DeadlineHTTPSConnection=fixture.factory):
+            out, err, code = run_command(entry, prefix + argv)
+        c.expect("#377/#642 create admission refusal is a reason, not a trace",
+                 (out, err, code), ("", "access_denied: " + reason + "\n", 1))
+        c.expect("#642 admission refusal never retries", len(fixture.calls), 1)
 
 
 def check_server_namespace_259(c):
@@ -3522,7 +3733,7 @@ def check_server_namespace_259(c):
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
             "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
             "diagnose",   # #536: офлайн-сводка локальной установки
-            "proxykey", "grant", "controller", "credentials", "install"}
+            "proxykey", "grant", "controller", "credentials", "install", "preview"}
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))
@@ -3536,9 +3747,11 @@ def check_server_namespace_259(c):
     c.check("#536 mop diagnose stays top-level, for the operator's machine",
             "diagnose" in top)
     # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
-    c.expect("#646 driver keeps existing operations and non-model diagnostics",
+    # #719: private OS fixture -- node diagnostic, не pool/model operation.
+    c.expect("#646/#719/#643/#746 driver keeps operations and bounded non-model diagnostics",
              set(tree.get("driver") or {}),
-             {"run", "list", "sweep", "build", "clone-work", "purge-clone", "exec"})
+             {"run", "list", "sweep", "build", "clone-work", "purge-clone", "exec",
+              "scope-probe", "hold-probe", "phase-input-probe"})
     for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
         c.expect(f"#259 LEGACY must map {old} into server", cli.LEGACY.get(old), ("server", old))
     for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],
@@ -3761,7 +3974,9 @@ def check_tail_stderr_333(c):
     именно он (lib.stderr_text). Инструмент MCP `tail` -- тот же текст.
     STATUS: FIXED — see #333"""
     from mop.cli.core import tail
-    from mop.cli.service import mcp
+    from mop.cli import _control
+    from mop.client import control as api
+    from _control_fixture import Fixture, Response, EPOCH, PUPPET, TOKEN, puppet_row
     from mop.common import puppets
     text = getattr(lib, "stderr_text", None)
     if text is None or not hasattr(puppets, "alloc_stderr"):
@@ -3804,10 +4019,29 @@ def check_tail_stderr_333(c):
         out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
     c.expect("#333 mop tail with a pane: as before, stderr not asked",
              (out, asked), ("b\nc\n", []))
-    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr), \
-            patched(mcp, MASTER=True):
-        got = mcp.tail("pu-mop-1", lines=2)
-    c.expect("#333 MCP tail: the same text", got, want.rstrip("\n"))
+    # HYPOTHESIS (#642): ручного MCP tail больше нет; общее свойство --
+    # модель получает тот же диагноз, что CLI, без второй реализации чтения.
+    # SOLUTION: bound detail через настоящий tool_call и dispatcher; прежние
+    # живые tail/lib helpers выше сохраняют проверку allocation stderr.
+    # RESULT: canonical failure projection побайтно одинакова в CLI и MCP.
+    # STATUS: FIXED — see #642
+    row = puppet_row()
+    row["state"] = {"kind": "failing", "detail": "bootstrap failed: no file", "branch": None}
+    envelope = {"schema_version": 1, "epoch": EPOCH, "puppet": row}
+    fixture = Fixture(Response(data=envelope), Response(data=envelope))
+    declaration = cli.declared(os.path.join(cli.PACKAGE, "core", "detail.py"))
+    with patched(api, _DeadlineHTTPSConnection=fixture.factory), \
+            _control.use(api.ServerContext("https://controller.example", TOKEN)):
+        out, err, code = run_command(cli.main, ["detail", PUPPET])
+        got, status = _control.tool_call(["detail"], declaration, {"puppet_id": PUPPET},
+                                         with_status=True)
+    c.expect("#642 CLI detail preserves the failure projection",
+             (json.loads(out), err, code), (envelope, "", 0))
+    c.expect("#642 MCP detail returns the same diagnosis as CLI", (got, status),
+             (out.rstrip(), code))
+    c.expect("#642 shared detail handler performs only the same authorized read",
+             [(method, path) for method, path, _, _ in fixture.calls],
+             [("GET", "/api/v1/puppets/" + PUPPET)] * 2)
 
 
 # ── #433: справка и отказы mop/cli/dev короче, контракт на месте ───────

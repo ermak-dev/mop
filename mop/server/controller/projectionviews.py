@@ -21,7 +21,8 @@ def read_authority():
 
 
 def queries():
-    return PoolQueries(epoch=lambda: UUID(read_authority()['epoch']))
+    from .machinebinding import local_grants
+    return PoolQueries(epoch=lambda: UUID(read_authority()['epoch']), grants=local_grants().local_authority())
 
 
 def response(function):
@@ -58,12 +59,18 @@ def parameters(request):
     return result
 
 
-class PoolSnapshot(APIView):
+class PoolReadView(APIView):
+    @property
+    def grant_resolver(self):
+        return queries().grants
+
+
+class PoolSnapshot(PoolReadView):
     def get(self, request):
         return response(lambda: queries().snapshot(request.actor, **parameters(request)))
 
 
-class ProjectionEvents(APIView):
+class ProjectionEvents(PoolReadView):
     def get(self, request):
         def read():
             params = parameters(request)
@@ -74,7 +81,7 @@ class ProjectionEvents(APIView):
         return response(read)
 
 
-class PuppetDetail(APIView):
+class PuppetDetail(PoolReadView):
     def get(self, request, target_id):
         def read():
             if request.query_params:

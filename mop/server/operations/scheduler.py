@@ -91,6 +91,7 @@ class RegisterTicket:
     operation_id: UUID
     token: UUID
     not_after: datetime
+    predecessor: JobPin | None = None
 
     def __post_init__(self):
         if (any(type(value) is not UUID for value in (self.epoch, self.scheduler_id, self.restore_generation,
@@ -106,6 +107,16 @@ class RegisterTicket:
                 or any(key.startswith('mop.stop_') for key in self.job['Meta'])
                 or any(key in self.job for key in ('Stop', 'JobModifyIndex', 'Namespace'))):
             raise ValueError('typed addressed registration required')
+        predecessor = self.predecessor
+        if self.expected_index == 0:
+            if predecessor is not None:
+                raise ValueError('create registration cannot name a predecessor')
+        elif (type(predecessor) is not JobPin or
+                (predecessor.epoch, predecessor.restore_generation, predecessor.scheduler_id,
+                 predecessor.namespace, predecessor.job_id, predecessor.modify_index, predecessor.target.target_id) !=
+                (self.epoch, self.restore_generation, self.scheduler_id, self.namespace,
+                 self.job_id, self.expected_index, self.target.target_id)):
+            raise ValueError('exact enrolled registration predecessor required')
 
 
 @dataclass(frozen=True)
@@ -455,6 +466,11 @@ class NomadStopScheduler:
             current = 0 if status == 404 else value['JobModifyIndex']
             if current != ticket.expected_index:
                 return RegisterProof('failed','conditional-refusal')
+            if ticket.predecessor is not None and (
+                    value.get('Stop') is not False
+                    or any(value['Meta'].get(key) != item for key, item in job_metadata(ticket.predecessor).items())
+                    or any(key.startswith('mop.stop_') for key in value['Meta'])):
+                return RegisterProof('failed','conditional-refusal')
             # Preflight занял wall time: intent перепроверяется перед эффектом (#679).
             if ticket.not_after <= datetime.now(timezone.utc):
                 return RegisterProof('failed','conditional-refusal')
@@ -471,10 +487,11 @@ class NomadStopScheduler:
             return RegisterProof('unknown','scheduler-uncertain')
 
     def inspect_register(self, ticket, *, deadline=None):
-        """Сверка только чтением: наша точная Meta -- succeeded; чужая -- отказ.
+        """Сверка только чтением: наша точная Meta -- succeeded, иначе unknown.
 
-        Отсутствие job после возможной записи не доказывает ни успеха, ни
-        отказа: запрос мог ещё не дойти -- unknown."""
+        Даже старый/чужой job не доказывает отказ после возможного dispatch:
+        исходный conditional POST ещё может прийти поздно. Только preflight
+        или атомарный 409 доказывают отсутствие эффекта, не такое чтение."""
         try:
             budget = deadline if deadline is not None else time.monotonic() + self.timeout
             status, value = self._registered(ticket, deadline=budget)
@@ -483,6 +500,6 @@ class NomadStopScheduler:
             if (value['Meta'] == ticket.job['Meta'] and value.get('Stop') is not True
                     and value['JobModifyIndex'] > ticket.expected_index):
                 return RegisterProof('succeeded','job-registered',value['JobModifyIndex'])
-            return RegisterProof('failed','conditional-refusal')
+            return RegisterProof('unknown','scheduler-uncertain')
         except Exception:
             return RegisterProof('unknown','scheduler-uncertain')

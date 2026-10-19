@@ -147,6 +147,54 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Django signing'):
             load(self.path)
 
+    # HYPOTHESIS: rootless endpoint не входит в finite bootstrap schema.
+    # SPEC: только web/worker, canonical socket path + точный non-root UID;
+    # никаких bearer/root/DB credentials в endpoint и никаких файловых чтений.
+    # SOLUTION: общий finite validator у loader/renderer/factory; без socket I/O.
+    # RESULT: RED отвергал valid binding; GREEN проверяет роли, UID, path и safe errors.
+    # STATUS: FIXED — see #644.
+    def test_web_and_worker_accept_only_nonsecret_protected_service_coordinates(self):
+        self.data.pop('root_key')
+        endpoint = {'path': str(self.directory / 'service.sock'), 'server_uid': 1944}
+        for role in ('web', 'worker'):
+            with self.subTest(role=role):
+                self.data.update(role=role, credential_service=endpoint)
+                self.write()
+                self.assertEqual(load(self.path)['credential_service'], endpoint)
+
+    def test_credential_endpoint_rejects_extra_fields_types_paths_and_privileged_uid(self):
+        self.data.pop('root_key')
+        self.data['role'] = 'worker'
+        valid = {'path': '/var/lib/fresh/credential-socket/service.sock', 'server_uid': 1944}
+        invalid = [None, [], {}, {**valid, 'token': 'private-value'},
+                   {**valid, 'database': {}}, {**valid, 'root_key': 'private-value'}]
+        invalid += [{**valid, 'server_uid': uid} for uid in (None, True, 0, -1, '1944', 2 ** 32 - 1)]
+        invalid += [{**valid, 'path': path} for path in
+                    (None, [], 'relative.sock', '/run/../service.sock', '/run//service.sock',
+                     '/run/./service.sock', '/run/service.sock/', '/', '/run/' + 's' * 100,
+                     '/run/\x00sock', '/run/' + chr(0xd800))]
+        for endpoint in invalid:
+            with self.subTest(endpoint=endpoint):
+                self.data['credential_service'] = endpoint
+                self.write()
+                with self.assertRaisesRegex(RuntimeError, 'credential service') as caught:
+                    load(self.path)
+                self.assertNotIn('private-value', str(caught.exception))
+
+    def test_other_roles_cannot_acquire_a_credential_client_by_bootstrap(self):
+        self.data['django_key'] = str(self.root)
+        self.data['credential_service'] = {'path': '/run/credential/service.sock', 'server_uid': 1944}
+        for role in ('gateway', 'maintenance', 'credential'):
+            with self.subTest(role=role):
+                self.data['role'] = role
+                if role == 'gateway':
+                    self.data.pop('root_key', None)
+                else:
+                    self.data['root_key'] = str(self.root)
+                self.write()
+                with self.assertRaisesRegex(RuntimeError, 'credential service.*role'):
+                    load(self.path)
+
     def test_no_fallback_for_missing_file(self):
         with self.assertRaisesRegex(RuntimeError, 'bootstrap'):
             load(self.directory / 'absent')

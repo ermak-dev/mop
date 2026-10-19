@@ -14,5 +14,15 @@ def node_actions():
 
 
 def credential_client():
-    """Rootless client отдельной #669 службы; web не строит CryptoProvider."""
-    return None
+    """Rootless client отдельной службы; construction не доказывает readiness.
+
+    Точные UID/path берёт installer bootstrap. Никакого root/provider import,
+    повторного OS lookup, кэшированного bearer или fallback к legacy inputs.
+    """
+    from django.conf import settings
+    from mop.common.credential_client import CredentialClient
+    from .bootstrap import credential_endpoint
+    endpoint = credential_endpoint(settings.BOOTSTRAP)
+    if endpoint is None:
+        return None
+    return CredentialClient(endpoint['path'], server_uid=endpoint['server_uid'], timeout=5)

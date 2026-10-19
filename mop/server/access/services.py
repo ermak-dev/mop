@@ -259,14 +259,14 @@ def is_node_executor(actor):
     return True
 
 
-def visible_project_ids(actor):
+def visible_project_ids(actor, *, limit=None):
     # Вид Actor не выбирает систему проверок (#685): проектная область для
     # человека, агента и сервиса — одна и та же membership-таблица.
     user = _resolve(actor)
     if _global(user):
-        return Catalog.current_project_ids()
+        return Catalog.current_project_ids(limit=limit)
     memberships = m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True)
-    return Catalog.current_project_ids(memberships)
+    return Catalog.current_project_ids(memberships, limit=limit)
 
 
 class Access:
@@ -338,8 +338,8 @@ class Access:
 
 class AuthorizedCatalog(Catalog):
     """Access-composition: client и ownership принадлежат одной transaction."""
-    def __init__(self):
-        super().__init__(authorizer=Access())
+    def __init__(self, *, grants=None):
+        super().__init__(authorizer=Access(grants=grants))
 
     def register_client(self, actor, *, label):
         with transaction.atomic():

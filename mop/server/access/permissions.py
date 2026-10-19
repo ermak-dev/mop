@@ -28,12 +28,13 @@ _EXECUTION = ('assign_work',
     'register_endpoint', 'deliver_report', 'view_history', 'view_tail', 'read_terminal',
     'control_terminal', 'send_session_command', 'change_session_model', 'view_usage',
     'view_landing', 'acquire_landing', 'release_landing', 'reconcile_work', 'read_history',
-    'poll_work', 'claim_work', 'report_result', 'read_facts', 'ingest_telemetry', 'ingest_observations')
+    'poll_work', 'claim_work', 'report_result', 'read_facts', 'read_launch', 'register_producer', 'ingest_telemetry', 'ingest_observations')
 _OPERATIONS = ('stop_puppet_job', 'override_assignment', 'recover_operation', 'cancel_operation',
     'view_operation', 'view_audit', 'diagnose_pool', 'treat_pool', 'collect_pool_garbage',
     'sweep_pool', 'view_node_disk')
 _SECRETS = ('view_secret_metadata', 'manage_project_secret', 'deliver_secret', 'rotate_proxy_key')
-_ACCESS = ('view_role', 'approve_role', 'issue_grant', 'revoke_grant', 'activate_grant')
+_ACCESS = ('view_role', 'approve_role', 'issue_grant', 'revoke_grant', 'activate_grant',
+           'read_management_context', 'provision_agent_rbac')
 
 
 def _identity(prefix, codes):
@@ -67,8 +68,8 @@ ACTIONS = frozenset(ACTION_PERMISSIONS)
 # enrollment этой одной permission не даёт secret management/human authority.
 MACHINE_ACTIONS = frozenset(('catalog.record_node_application', 'catalog.observe_node',
     'catalog.record_settings_application', 'execution.poll_work', 'execution.claim_work',
-    'execution.report_result', 'execution.read_facts', 'execution.ingest_telemetry',
-    'execution.ingest_observations', 'secrets.deliver_secret', 'access.activate_grant'))
+    'execution.report_result', 'execution.read_facts', 'execution.read_launch', 'execution.register_producer', 'execution.ingest_telemetry',
+    'execution.ingest_observations', 'secrets.deliver_secret', 'access.activate_grant', 'access.read_management_context'))
 
 # Инвариант оставшейся scope-таблицы: у installation-wide действий нет строки
 # проекта, поэтому проектная membership не может выразить их границу; право
@@ -80,7 +81,7 @@ GLOBAL_ACTIONS = frozenset(
       'drain_node', 'enable_node', 'forget_node', 'build_project', 'recover_build',
       'view_installationsetting', 'change_installationsetting', 'view_nodesetting', 'change_nodesetting')] +
     ['execution.' + x for x in ('view_history', 'view_tail', 'read_terminal', 'control_terminal')] +
-    ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation', 'view_audit',
+    ['operations.' + x for x in ('stop_puppet_job', 'override_assignment', 'recover_operation',
       'diagnose_pool', 'treat_pool', 'collect_pool_garbage', 'sweep_pool', 'view_node_disk')] +
     ['secrets.rotate_proxy_key', 'controller.manage_proxy', 'builds.force_build', 'execution.view_usage'])
 

@@ -114,6 +114,40 @@ class FreshPlan(FreshPlanFixture, unittest.TestCase):
         self.assertIn('#669', result.stderr)
 
 class PreparationTests(FreshPlanFixture, unittest.TestCase):
+    # HYPOTHESIS: plural OS identity ошибочно исключает singular credential purpose.
+    # SPEC: отдельный DML login и private root/signing refs, не maintenance/rootless client.
+    # SOLUTION: явное соответствие credential -> credentials, без второго bootstrap schema.
+    # RESULT: RED — unsupported credential / missing budget; узкий pure прогон GREEN.
+    # STATUS: FIXED — see #644.
+    def test_credential_bootstrap_has_its_own_login_and_private_root_custody(self):
+        module = self.library()
+        data = module.bootstrap_document(module.specification(self.spec), 'credential',
+                                         password='private-credential-password')
+        config = self.spec['paths']['configuration'] + '/credentials'
+        self.assertEqual(set(data), {'installation_id', 'role', 'database', 'root_key', 'django_key'})
+        self.assertEqual(data['role'], 'credential')
+        self.assertEqual(data['database']['USER'], self.spec['identities']['credentials'])
+        self.assertNotEqual(data['database']['USER'], self.spec['identities']['web'])
+        self.assertEqual(data['root_key'], config + '/root.key')
+        self.assertEqual(data['django_key'], config + '/django.key')
+        self.assertNotIn(self.spec['paths']['root_trust'], data['root_key'])
+        self.assertNotIn('private-credential-password', repr(data))
+
+    def test_credential_pool_is_explicit_and_does_not_consume_ordinary_or_maintenance_budget(self):
+        module = self.library()
+        spec = module.specification(self.spec)
+        budget = module.connection_budget({role: (1, 8) for role in module.RUNTIME_ROLES},
+                                          runtime=24, maintenance=8)
+        self.assertEqual(budget['credential'], 8)
+        self.assertEqual(budget['total'], 40)
+        planned = module.plan(spec)['connections']
+        self.assertEqual(planned['roles']['credential'], 8)
+        self.assertEqual(planned['credential'], 8)
+        self.assertEqual(planned['total'], 40)
+        postgres = module.provisioning_artifact(spec)['postgresql']
+        self.assertEqual(postgres['credential_connections'], 8)
+        self.assertEqual(postgres['max_connections'], 43)
+
     def library(self):
         from mop.server import installation
         return installation
@@ -140,7 +174,47 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
         managed = module.provisioning_artifact(module.specification(self.spec))
         self.assertEqual(managed['postgresql']['package'], 'postgresql-16')
         self.assertTrue(managed['postgresql']['manage_service'])
-        self.assertEqual(managed['postgresql']['max_connections'], 35)
+        self.assertEqual(managed['postgresql']['max_connections'], 43)
+
+    # HYPOTHESIS: installer не передаёт endpoint/UID, factory всегда unbound.
+    # SPEC: один derived path для renderer/provisioner, web/worker получают
+    # только координаты; UID явен после OS provisioning и не приходит из env.
+    # SOLUTION: явный credential_uid в renderer, OS lookup только в installer CLI.
+    # RESULT: RED -- отсутствовали endpoint и shared directory; GREEN без service start.
+    # STATUS: FIXED — see #644.
+    def test_rootless_credential_bootstrap_uses_installation_path_and_exact_os_uid(self):
+        import inspect
+        module = self.library()
+        self.assertIn('credential_uid', inspect.signature(module.bootstrap_document).parameters,
+                      'installer cannot pin the protected credential service UID')
+        spec = module.specification(self.spec)
+        for role in ('web', 'worker'):
+            with self.subTest(role=role):
+                data = module.bootstrap_document(spec, role, password='own-db-password', credential_uid=1944)
+                self.assertEqual(data['credential_service'], {'path': '/var/lib/mop-fresh/credential-socket/service.sock',
+                                                              'server_uid': 1944})
+                self.assertNotIn('root_key', data)
+                self.assertEqual(set(data['credential_service']), {'path', 'server_uid'})
+                for uid in (None, True, 0, -1, '1944', 2 ** 32 - 1):
+                    with self.subTest(uid=uid), self.assertRaisesRegex(ValueError, 'credential service'):
+                        module.bootstrap_document(spec, role, password='own-db-password', credential_uid=uid)
+        for role in ('maintenance', 'gateway'):
+            self.assertNotIn('credential_service', module.bootstrap_document(spec, role, password='own-db-password'))
+
+    def test_credential_socket_group_only_allows_web_worker_traversal_not_private_custody(self):
+        module = self.library()
+        artifact = module.provisioning_artifact(module.specification(self.spec))
+        socket_dirs = [item for item in artifact['shared_directories'] if item['owner'] == 'mop_credentials']
+        self.assertEqual(socket_dirs, [{'path': '/var/lib/mop-fresh/credential-socket',
+                                      'owner': 'mop_credentials', 'group': 'mop_credentials', 'mode': '0750'}])
+        tasks = artifact['playbook'][0]['tasks']
+        memberships = [task for task in tasks if task.get('ansible.builtin.user', {}).get('groups') == 'mop_credentials']
+        self.assertEqual(len(memberships), 1)
+        self.assertEqual(memberships[0]['loop'], ['mop_web', 'mop_worker'])
+        self.assertTrue(memberships[0]['ansible.builtin.user']['append'])
+        for item in artifact['directories']:
+            if item['owner'] == 'mop_credentials':
+                self.assertEqual(item['mode'], '0700')
 
     def test_runtime_bootstrap_render_never_exports_maintenance_root(self):
         module = self.library()
@@ -148,7 +222,7 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
                         'purpose-scoped bootstrap renderer is missing')
         spec = module.specification(self.spec)
         for role in ('web', 'worker', 'gateway', 'maintenance'):
-            document = module.bootstrap_document(spec, role, password='secret-password-marker')
+            document = module.bootstrap_document(spec, role, password='secret-password-marker', credential_uid=1944)
             self.assertEqual(document['role'], role)
             self.assertEqual(document['database']['OPTIONS']['sslmode'], 'verify-full')
             self.assertEqual(document['database']['HOST'], 'db.example.invalid')
@@ -165,12 +239,14 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
         spec = module.specification(self.spec)
         expected = self.spec['paths']['state'] + '/static'
         for role in ('maintenance', 'web'):
-            self.assertEqual(module.bootstrap_document(spec, role, password='p')['static_root'], expected)
+            self.assertEqual(module.bootstrap_document(spec, role, password='p', credential_uid=1944)['static_root'], expected)
         for role in ('worker', 'gateway'):
-            self.assertNotIn('static_root', module.bootstrap_document(spec, role, password='p'))
+            self.assertNotIn('static_root', module.bootstrap_document(spec, role, password='p', credential_uid=1944))
         artifact = module.provisioning_artifact(spec)
         self.assertEqual(artifact['shared_directories'], [{'path': expected,
             'owner': self.spec['identities']['maintenance'], 'group': self.spec['identities']['web'],
+            'mode': '0750'}, {'path': self.spec['paths']['state'] + '/credential-socket',
+            'owner': self.spec['identities']['credentials'], 'group': self.spec['identities']['credentials'],
             'mode': '0750'}])
         tasks = artifact['playbook'][0]['tasks']
         self.assertTrue(any(task.get('ansible.builtin.file', {}).get('mode') == '0750' for task in tasks))
@@ -204,6 +280,8 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
     def test_bootstrap_command_creates_only_own_private_runtime_document(self):
         import pwd
         self.spec['identities']['web'] = pwd.getpwuid(os.geteuid()).pw_name
+        self.spec['identities']['credentials'] = 'nobody'
+        expected_uid = pwd.getpwnam('nobody').pw_uid
         self.assertNotEqual(self.spec['identities']['web'], 'root',
                             'installation permission proof requires an ordinary test user')
         paths = {name: str(Path(self.tmp.name) / name) for name in self.spec['paths']}
@@ -225,6 +303,8 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         data = json.loads(path.read_bytes())
         self.assertNotIn('root_key', data)
+        self.assertEqual(data['credential_service'], {
+            'path': paths['state'] + '/credential-socket/service.sock', 'server_uid': expected_uid})
         self.assertNotIn('private-db-password-marker-644', result.stdout + result.stderr)
         repeated = self.call('bootstrap', '--role', 'web', '--password-file', str(password))
         self.assertNotEqual(repeated.returncode, 0)
@@ -236,18 +316,95 @@ class PreparationTests(FreshPlanFixture, unittest.TestCase):
         self.assertIn('signing key', refused.stderr)
         self.assertFalse(path.exists())
 
+    def test_bootstrap_cli_maps_credential_purpose_to_plural_os_account_and_private_files(self):
+        import pwd
+        self.spec['identities']['credentials'] = pwd.getpwuid(os.geteuid()).pw_name
+        self.spec['paths'] = {name: str(Path(self.tmp.name) / name) for name in self.spec['paths']}
+        directory = Path(self.spec['paths']['configuration']) / 'credentials'
+        directory.mkdir(parents=True, mode=0o700)
+        directory.parent.chmod(0o700)
+        for name, value in [('django.key', b'd' * 64), ('root.key', b'r' * 32)]:
+            path = directory / name
+            path.write_bytes(value)
+            path.chmod(0o600)
+        ca = Path(self.tmp.name) / 'fixture-ca.pem'
+        ca.write_bytes(b'explicit-fixture-trust-reference')
+        ca.chmod(0o644)
+        self.spec['database']['tls_ca'] = str(ca)
+        password = directory / 'database.password'
+        password.write_bytes(b'private-credential-db-password-644')
+        password.chmod(0o600)
+        self.write()
+        result = self.call('bootstrap', '--role', 'credential', '--password-file', str(password))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '')
+        bootstrap = directory / 'bootstrap.json'
+        self.assertEqual(bootstrap.stat().st_mode & 0o777, 0o600)
+        from mop.server.controller.bootstrap import load
+        data = load(bootstrap)
+        self.assertEqual(data['role'], 'credential')
+        self.assertEqual(data['database']['USER'], self.spec['identities']['credentials'])
+        self.assertNotIn('private-credential-db-password-644', result.stdout + result.stderr)
+        repeated = self.call('bootstrap', '--role', 'credential', '--password-file', str(password))
+        self.assertNotEqual(repeated.returncode, 0)
+        self.assertIn('new file', repeated.stderr)
+        bootstrap.unlink()
+        (directory / 'root.key').write_bytes(b'short')
+        refused = self.call('bootstrap', '--role', 'credential', '--password-file', str(password))
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('root trust', refused.stderr)
+        self.assertFalse(bootstrap.exists())
+
     def test_instance_budget_counts_all_processes_and_rejects_hidden_pool(self):
         module = self.library()
         self.assertTrue(callable(getattr(module, 'connection_budget', None)),
                         'instance-wide process budget is missing')
         self.assertEqual(module.connection_budget({'web': (1, 8), 'worker': (1, 8),
-                         'gateway': (1, 8)}, runtime=24, maintenance=8)['total'], 32)
+                         'gateway': (1, 8)}, runtime=24, maintenance=8)['total'], 40)
         for pools in ({'web': (2, 8), 'worker': (1, 8), 'gateway': (1, 8)},
                       {'web': (1, 8), 'worker': (1, 8), 'gateway': (1, 8), 'hidden': (1, 1)}):
             with self.assertRaisesRegex(ValueError, 'budget|process'):
                 module.connection_budget(pools, runtime=24, maintenance=8)
 
 class ProtectedArtifacts(unittest.TestCase):
+    # #677: shared fixture владеет коротким runtime до конца каждого test case,
+    # включая исключение. Обычные tempfiles и HOME остаются под hermetic/_lib.
+    def test_fixture_runtime_is_private_canonical_and_cleaned_after_success_or_error(self):
+        import socket
+        from mop.server.controller.bootstrap import credential_endpoint
+        ambient = (os.environ['HOME'], os.environ['TMPDIR'], tempfile.tempdir)
+        for fail in (False, True):
+            made = []
+
+            class OwnedFixture(FreshPlanFixture, unittest.TestCase):
+                def runTest(child):
+                    root = Path(child.tmp.name)
+                    made.append(root)
+                    self.assertEqual(root, root.resolve())
+                    self.assertEqual(root.stat().st_uid, os.geteuid())
+                    self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+                    endpoint = root / 'state' / 'credential-socket' / 'service.sock'
+                    endpoint.parent.mkdir(parents=True, mode=0o700)
+                    data = {'path': str(endpoint), 'server_uid': os.geteuid()}
+                    self.assertEqual(credential_endpoint({'role': 'web', 'credential_service': data}), data)
+                    with socket.socket(socket.AF_UNIX) as listener:
+                        listener.bind(str(endpoint))
+                    self.assertEqual((os.environ['HOME'], os.environ['TMPDIR'], tempfile.tempdir), ambient)
+                    with tempfile.TemporaryDirectory() as ordinary:
+                        self.assertEqual(Path(ordinary).parent, Path(tempfile.tempdir))
+                    if fail:
+                        raise RuntimeError('owned fixture test failure')
+
+            result = unittest.TestResult()
+            OwnedFixture().run(result)
+            self.assertEqual(result.failures, [])
+            self.assertEqual(len(result.errors), int(fail), result.errors)
+            if fail and result.errors:
+                self.assertIn('owned fixture test failure', result.errors[0][1])
+            self.assertEqual(len(made), 1)
+            self.assertFalse(made[0].exists())
+            self.assertEqual((os.environ['HOME'], os.environ['TMPDIR'], tempfile.tempdir), ambient)
+
     def test_new_private_artifact_refuses_replacement_and_unsafe_ancestors(self):
         from mop.server import installation
         self.assertTrue(callable(getattr(installation, 'write_private_artifact', None)),

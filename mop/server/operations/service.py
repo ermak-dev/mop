@@ -106,6 +106,14 @@ def _snapshot(row):
             result['target']['revision'] = str(applied_revision or row.expected_revision)
             if result['evidence'] is not None:
                 result['evidence']['projection_updated'] = applied_revision is not None
+    if row.action == 'update':
+        binding = row.replacementbinding
+        result['source'] = dict(id=str(row.target_id), incarnation=str(binding.source_incarnation_id),
+            revision=str(binding.source_revision), generation=str(binding.source_generation), grant_id=str(binding.source_grant_id))
+        result['destination'] = dict(id=str(row.target_id), incarnation=str(row.incarnation_id),
+            revision=str(row.expected_revision), generation=str(row.restartbinding.generation),
+            grant_id=str(row.restartbinding.grant_id))
+        result['target']['source_revision'] = str(binding.source_revision)
     if row.action in ('send', 'dispatch'):
         result['message_id'] = str(row.messagebinding.message_id)
     return result
@@ -133,6 +141,11 @@ def _move(row, state, code, *, expected_revision, safe_reason=None):
     if not m.Operation.objects.filter(pk=row.pk, revision=before).update(state=row.state,
             revision=row.revision, code=row.code, reason=row.reason, completed_at=row.completed_at):
         raise Refused('revision_conflict')
+    if row.action == 'create':
+        if state is State.SUCCEEDED:
+            m.CreateCleanup.objects.filter(operation=row).update(adopted_at=timezone.now())
+        elif state not in (State.ACCEPTED, State.RUNNING, State.RECONCILING):
+            m.CreateCleanup.objects.filter(operation=row, required_at=None).update(required_at=timezone.now())
     _event(row)
 
 
@@ -574,11 +587,13 @@ class Operations:
         # регистрации, пока его первый шаг не взят.
         work = (Q(state=State.ACCEPTED, target_kind='node') | Q(state=State.ACCEPTED, action__in=('stop_job', 'delete'))
                 | Q(action='build', state__in=('running','unknown','reconciling'), step__lease_until__lt=timezone.now())
-                | Q(state=State.ACCEPTED, action='create', step__name='scheduler_register', step__token=None)
-                # Активация -- только после успешных шагов узла (#643).
+                | (Q(state=State.RUNNING, action='create', step__name='scheduler_register', step__token=None)
+                   & ~Exists(m.Step.objects.filter(operation=OuterRef('pk'), name__in=(
+                       'prepare_body', 'bootstrap_body', 'initial_identity')).exclude(outcome='succeeded')))
                 | (Q(state=State.RUNNING, action='create', step__name='activate_grant', step__token=None)
                    & ~Exists(m.Step.objects.filter(operation=OuterRef('pk'), name__in=(
-                       'scheduler_register', 'apply_identity', 'confirm_ready')).exclude(outcome='succeeded'))))
+                       'prepare_body', 'bootstrap_body', 'initial_identity', 'scheduler_register',
+                       'native_exec', 'confirm_ready')).exclude(outcome='succeeded'))))
         work &= Q(step__name__in=handlers)
         if node_id is not None:
             # Service enrollment касается только node-eligibility lane. Build
@@ -597,6 +612,18 @@ class Operations:
     def current_machine(self, operation_id, step_id):
         from .puppet import RestartHandler
         return RestartHandler(self).current(operation_id, step_id)
+
+    def abort_unstarted_create(self, work):
+        from .launch import CreateExpiry
+        return CreateExpiry(self).abort_unstarted(work)
+
+    def reconcile_expired_creates(self, *, limit=50):
+        from .launch import CreateExpiry
+        return CreateExpiry(self).reconcile(limit=limit)
+
+    def effect_lease(self, work):
+        row = m.Operation.objects.get(pk=work.operation_id)
+        return self.machine_handler(row.action).effect_lease(work)
 
     def claimed_machine(self, work, attempt_id):
         from .puppet import RestartHandler

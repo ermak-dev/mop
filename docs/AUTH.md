@@ -92,8 +92,9 @@ projection and installation epoch, not a stored permission grant. A changed scop
 or invalid cursor returns 410 with `reset_required`, never an unfiltered next page.
 
 DRF TokenAuthentication remains standard: one token per User, no automatic expiry
-and no per-device logout. Only explicit issuance/rotation responses contain its
-key. The framework Token table is the API/STORAGE credential-storage exception;
+and no per-device logout. Only explicit issuance/rotation responses and the
+maintenance-only private Node OS transport export (#722) contain its key. The
+framework Token table is the API/STORAGE credential-storage exception;
 it is not AEAD/hashed token storage. Token/session records and their private binding
 references require protected DB/backup access and are not registered in Admin.
 CredentialBinding stores a token HMAC generation check or a reference to the actual
@@ -138,6 +139,46 @@ longer resolve. Node-free contexts authenticate but stay denied in
 Enrollment alone supplies no readiness, grant
 activation, transport retirement or installation-secret authority; addressed secret
 issuance independently validates the current execution and approved role proofs.
+
+#### Supported freshNode maintenance export (#722)
+
+`mop server controller enroll-node` is the finite early-bootstrap caller of
+`enroll_service` for a fresh node; it does not expose `renew`, a username selector,
+an arbitrary permission list or human impersonation. Protected controller bootstrap
+selects the installation and maintenance DB principal explicitly, before any legacy
+`.env`/node-file/context selection. Installation/root verification and the restore
+ready guard are mandatory. The node UUID must be current in that installation.
+It creates a standard service Actor/enrollment/token/binding and initializes the
+technical NodeExecutor epoch in SQL for discovery by an empty node. Existing epoch
+is preserved; effects, physical capabilities and reconciliation are not enabled.
+
+The fixed profile consists only of canonical `execution.poll_work`, `claim_work`,
+`report_result`, `read_facts`, `read_launch`, `register_producer`, `ingest_telemetry`
+and `ingest_observations` (all prefixed `execution.`). There are no global proxy,
+admin, catalog receipt, secret-management or grant-activation permissions. The
+membership set is exactly current non-retired NodeProjects with an enabled local
+source; there is no all-project membership, Group, LoginIdentity or owner context.
+Every Node API still reloads current Actor/Token/enrollment/RBAC/project scope;
+transport file contents never authorize an operation independently.
+
+Reexport requires an explicit exact live enrollment UUID, a new private owned
+output folder and the same node/purpose/Actor flags/direct permission/membership
+shape and current standard token binding. Unknown/deleted/revoked enrollment,
+username collisions, human/service purpose changes, removed or expanded rights,
+project changes or missing executor epoch refuse without repair, silent rotation,
+permission expansion, new Actor creation or overwriting an earlier file.
+`renew=True` is not used. The private delivery receipt records the nonsecret
+reexport handle; CLI success is silent and token bytes never enter argv, normal
+repr or audit payloads.
+
+The frozen v1 Node OS contract and delivery references are specified in
+[BOOTSTRAP.md](BOOTSTRAP.md#freshnode-private-transport-export-722). Bootstrap is
+only HTTPS origin, Node-local CA reference, node UUID, standard private token and
+nonsecret installation namespace/version. No DB/root/Django/Nomad/proxy-management/
+human credentials, permission/policy snapshot, epoch or readiness field is exported.
+This is the minimal transport exception of #624, not a new authority store.
+The command writes private controller artifacts only: no live delivery, node
+parser/daemon, OS account changes, privilege escalation, deploy or pool operation.
 
 After scheduler, worker or private-pipeline I/O, admission repeats once before
 effect or issuance through the common `readmission` helper (#687), defined beside

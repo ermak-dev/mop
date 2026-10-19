@@ -9,7 +9,7 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 """
 from mop.cli import _control
 
-MCP = {"annotations": "destructive", "human_only": True, "actions": ["catalog.enable_node", "operations.view_operation"], "args": [
+MCP = {"annotations": "destructive", "actions": ["catalog.enable_node", "operations.view_operation"], "args": [
     {"name": "node_id", "type": "string", "required": True, "help": "node resource id"},
     {"name": "epoch", "type": "string", "flag": "--epoch", "required": True, "help": "installation epoch"},
     {"name": "expected_revision", "type": "string", "flag": "--expected-revision", "required": True, "help": "node CAS revision"},

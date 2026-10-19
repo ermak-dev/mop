@@ -46,6 +46,7 @@ LAYERS = {
     "mop.cli.driver": COMMON,
     # cli: клиент
     "mop.cli._control": CLIENT,  # HTTPS frontend, не общий transport узла
+    "mop.cli._mcp": CLIENT,  # stdio frontend того же HTTPS-клиента (#642)
     "mop.cli.core": CLIENT, "mop.cli.project": CLIENT, "mop.cli.secret": CLIENT,
     "mop.cli.node": CLIENT, "mop.cli.dev": CLIENT, "mop.cli.service.mcp": CLIENT,
     "mop.cli.session": CLIENT,
@@ -60,9 +61,12 @@ LAYERS = {
     # установки (playvars) -- как и до #259, когда оба варианта жили в нём.
     "mop.cli.pool.setup": SERVER, "mop.cli.pool._self": SERVER,
     # cli: узел
-    "mop.cli.service.agent": NODE, "mop.cli.driver.run": NODE,
+    "mop.cli.service.agent": NODE, "mop.cli.service.host-root": NODE,
+    "mop.cli.driver.run": NODE,
     "mop.cli.driver.list": NODE, "mop.cli.driver.sweep": NODE,
-    "mop.cli.driver.clone-work": NODE,
+    "mop.cli.driver.clone-work": NODE, "mop.cli.driver.hold-probe": NODE,
+    "mop.cli.driver.scope-probe": NODE,  # Частная OS fixture, не controller/pool API.
+    "mop.cli.driver.phase-input-probe": NODE,  # #746: частная fixture конечного транспорта.
 }
 # Что вправе лежать в корне пакета, кроме каталогов слоёв.
 ROOT_PARTS = ("session", "usage", "driver", "cli")

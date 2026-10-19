@@ -22,9 +22,29 @@ class Unavailable(RuntimeError):
     pass
 
 
-ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
+def _response_error(status, value, token):
+    """Canonical DRF phrase сохраняется; raw body/HTML/traceback не отражаются."""
+    refused = status in (400, 401, 403, 404, 409)
+    prefix = 'machine request refused' if refused else 'machine authority unavailable'
+    reason = prefix + ' (HTTP ' + str(status) + ')'
+    error = value.get('error') if type(value) is dict and type(value.get('schema_version')) is int \
+        and value['schema_version'] == 1 else None
+    if type(error) is dict:
+        code, message = error.get('code'), error.get('message')
+        if (type(code) is str and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', code)
+                and type(message) is str and 0 < len(message) <= 1024 and message.isprintable()
+                and type(error.get('retryable')) is bool):
+            # Это уже безопасная фраза сервера, не вторая allowlist-санитизация.
+            # Даже ошибочный отражённый bearer не попадает в диагностику.
+            reason += ': ' + (code + ': ' + message).replace(token, '[redacted]')
+    return Refused(reason) if refused else Unavailable(reason)
+
+
+# Общий конечный wire vocabulary не связывает physical executor (#721).
+from mop.common.initialcreate import MACHINE as INITIAL_ACTIONS, CONFIRMATIONS as INITIAL_CONFIRMATIONS
+ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone')) | INITIAL_ACTIONS
 EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
-    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
+    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running', *INITIAL_CONFIRMATIONS.values()))
 FACT_TYPES = {
     'states': dict(running=bool, dirty=bool, session_count=int),
     'clone': dict(clean=bool, branch=str, untracked=int, modified=int),
@@ -156,7 +176,9 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('GET','executor'), ('POST','executor/restarted'), ('GET','facts'), ('POST','telemetry')}
+                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('POST','management-context'),
+                   ('GET','executor'), ('POST','executor/restarted'), ('GET','executor/host'), ('POST','executor/host/bind'),
+                   ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
         if (method, path) not in allowed:
             raise Refused('unnamed machine endpoint')
         import aiohttp
@@ -170,21 +192,27 @@ class HttpsTransport:
             # redirects не должны уносить credential или повторять эффект на другом origin.
             async with self._session.request(method, self.origin+path, json=payload,
                     params=params, allow_redirects=False) as response:
-                if response.status != 200:
-                    if response.status in (400, 401, 403, 404, 409):
-                        raise Refused('machine request refused (HTTP ' + str(response.status) + ')')
-                    raise Unavailable('machine authority unavailable (HTTP ' + str(response.status) + ')')
                 if response.content_type != 'application/json':
+                    if response.status != 200:
+                        raise _response_error(response.status, None, self._token)
                     raise Refused('JSON response required')
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
                     body.extend(chunk)
                     if len(body) > self.response_limit:
+                        if response.status != 200:
+                            raise _response_error(response.status, None, self._token)
                         raise Refused('machine response exceeds limit')
+                if response.status != 200:
+                    try:
+                        value = json.loads(body, object_pairs_hook=_unique_object)
+                    except (ValueError, UnicodeError, RecursionError):
+                        value = None
+                    raise _response_error(response.status, value, self._token) from None
                 try:
                     return json.loads(body, object_pairs_hook=_unique_object)
-                except (ValueError, UnicodeError) as error:
-                    raise Refused('invalid machine JSON') from error
+                except (ValueError, UnicodeError, RecursionError):
+                    raise Refused('invalid machine JSON') from None
         except (aiohttp.ClientError, TimeoutError, OSError) as error:
             raise Unavailable('machine HTTPS connection lost; outcome unknown') from error
 
@@ -215,6 +243,34 @@ class Admission:
 class MachineClient:
     def __init__(self, transport: JsonTransport):
         self.transport = transport
+
+    async def read_launch(self, metadata):
+        """LaunchQuery: конечный адресный POST; ответ проверяет LaunchResponse."""
+        work = Work.parse(metadata)
+        return await self.transport.request('POST', 'work/launch', payload=work.wire())
+
+    async def read_initial_launch(self, metadata):
+        """Отдельная finite phase schema; readiness не получает native bytes."""
+        from mop.common.initialcreate import parse_delivery
+        work = Work.parse(metadata)
+        value = await self.transport.request('POST', 'work/initial-launch', payload=work.wire())
+        try:
+            return parse_delivery(value, work.wire())
+        except ValueError as error:
+            raise Refused(str(error)) from error
+
+    async def read_management_context(self, metadata):
+        """Read-only после activation; нет Work lease, origin и произвольного Token lookup."""
+        from mop.common.management_context import ManagementRequest, ManagementContext
+        try:
+            request = ManagementRequest.parse(metadata)
+        except ValueError:
+            raise Refused('invalid current runtime management request') from None
+        value = await self.transport.request('POST', 'management-context', payload=request.wire())
+        try:
+            return ManagementContext.parse(value, request)
+        except ValueError:
+            raise Refused('invalid addressed management context response') from None
 
     async def action_input(self, work):
         value = await self.transport.request('GET','work/input',params=dict(schema_version='1',
@@ -256,10 +312,37 @@ class MachineClient:
 
     async def executor_state(self, node_id):
         value = await self.transport.request('GET','executor',params=dict(schema_version='1',node_id=uuid(node_id)))
-        exact(value, ('schema_version','node_id','executor_epoch'))
+        return self._executor_state(value, node_id)
+
+    @staticmethod
+    def _executor_state(value, node_id):
+        exact(value, ('schema_version','installation_id','epoch','node_id','executor_epoch'))
+        if (type(value['installation_id']) is not str
+                or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', value['installation_id'])):
+            raise Refused('canonical installation identity required')
+        for name in ('epoch', 'node_id', 'executor_epoch'):
+            if UUID(uuid(value[name])).int == 0:
+                raise Refused('nonzero installation/node/executor UUID required')
         if value['node_id'] != node_id:
             raise Refused('executor discovery changed node')
-        return uuid(value['executor_epoch'])
+        return value
+
+    async def host_executor_state(self, node_id):
+        value = await self.transport.request('GET', 'executor/host',
+            params=dict(schema_version='1', node_id=uuid(node_id)))
+        exact(value, ('schema_version', 'installation_id', 'epoch', 'node_id', 'executor_epoch', 'empty'))
+        if type(value['empty']) is not bool:
+            raise Refused('finite HOST SQL empty observation required')
+        self._executor_state({key: item for key, item in value.items() if key != 'empty'}, node_id)
+        return value
+
+    async def host_bound(self, node_id, epoch, previous_epoch, new_epoch):
+        value = await self.transport.request('POST', 'executor/host/bind', dict(
+            schema_version=1, node_id=uuid(node_id), epoch=uuid(epoch),
+            previous_epoch=uuid(previous_epoch), new_epoch=uuid(new_epoch)))
+        exact(value, ('schema_version', 'executor_epoch', 'replay_allowed'))
+        if value['executor_epoch'] != new_epoch or value['replay_allowed'] is not False:
+            raise Refused('HOST backend binding not fenced')
 
     async def restarted(self, node_id, previous_epoch, new_epoch):
         value = await self.transport.request('POST', 'executor/restarted', dict(
@@ -400,7 +483,10 @@ class Runtime:
             raise Refused('runtime already started or closed')
         async with asyncio.timeout(self.shutdown_timeout):
             if previous_epoch is None:
-                previous_epoch = await self.client.executor_state(self.node_id)
+                discovery = await self.client.executor_state(self.node_id)
+                if discovery['epoch'] != self.epoch:
+                    raise Refused('executor discovery changed installation epoch')
+                previous_epoch = discovery['executor_epoch']
             await self.client.restarted(self.node_id, previous_epoch, self.executor_epoch)
             quiet = await self.executor.reconcile(self.node_id, previous_epoch, self.executor_epoch)
         if quiet is not True:

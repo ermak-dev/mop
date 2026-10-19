@@ -109,11 +109,29 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(Refused):
             asyncio.run(client.action_input(work))
         self.assertTrue(callable(getattr(client,'executor_state',None)), 'server epoch discovery client port missing')
-        transport.value = dict(schema_version=1,node_id=work.node_id,executor_epoch=work.executor_epoch)
-        self.assertEqual(asyncio.run(client.executor_state(work.node_id)),work.executor_epoch)
+        transport.value = dict(schema_version=1, installation_id='fixture', epoch=work.epoch,
+            node_id=work.node_id, executor_epoch=work.executor_epoch)
+        self.assertEqual(asyncio.run(client.executor_state(work.node_id)), transport.value)
         transport.value = {**transport.value,'node_id':str(uuid4())}
         with self.assertRaises(Refused):
             asyncio.run(client.executor_state(work.node_id))
+
+    def test_initial_create_vocabulary_is_finite_without_binding_physical_ports(self):
+        # HYPOTHESIS #721: server native_exec не проходит общий wire consumer.
+        # SOLUTION: общий конечный словарь, без включения physical ports.
+        # RESULT: native_exec/initial endpoint были refused; wire checks green.
+        # STATUS: FIXED — see #721; unknown fallback по-прежнему запрещён.
+        from mop.common.initialcreate import MACHINE, CONFIRMATIONS
+        from mop.node.http_execution import EVIDENCE
+        from mop.node.execution_adapters import LocalExecutor
+        for action in MACHINE:
+            work = Work.parse(wire(action=action))
+            self.assertEqual(Work.parse(work.wire()), work)
+            with self.assertRaises(Unavailable):
+                asyncio.run(LocalExecutor(None, None).execute(work, None))
+        self.assertTrue(set(CONFIRMATIONS.values()) <= EVIDENCE)
+        with self.assertRaises(Refused):
+            Work.parse(wire(action='arbitrary_new_action'))
 
     def test_strict_finite_work(self):
         self.assertEqual(Work.parse(wire()).action, 'send_message')
@@ -132,7 +150,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def request(inner,method,path,payload=None,params=None):
                 if path == 'executor':
                     inner.calls.append((method,path,payload,params))
-                    return dict(schema_version=1,node_id=work['node_id'],executor_epoch=previous)
+                    return dict(schema_version=1, installation_id='fixture', epoch=work['epoch'],
+                        node_id=work['node_id'], executor_epoch=previous)
                 return await super().request(method,path,payload,params)
         transport = Discovery(work)
         runtime = Runtime(MachineClient(transport),Executor(),node_id=work['node_id'],epoch=work['epoch'],
@@ -420,6 +439,173 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             await transport.aclose()
             self.assertTrue(transport._session.closed)
 
+    async def test_addressed_launch_uses_finite_post_without_disclosing_work_in_url(self):
+        # HYPOTHESIS (#643): LaunchQuery ещё не связан с finite HTTPS transport.
+        # SPEC: POST metadata body, тот же verified transport, не UUID oracle.
+        # RED: missing LaunchQuery adapter; SOLUTION: явный POST в allowlist и
+        # MachineClient.read_launch. RESULT: 30/30 green. STATUS: FIXED -- see #643.
+        metadata, seen = wire(), []
+        class Response:
+            status = 200
+            content_type = 'application/json'
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            @property
+            def content(self): return self
+            async def iter_chunked(self, size): yield b'{"schema_version":1}'
+        class Session:
+            def __init__(self, **kwargs): self.connector = kwargs['connector']
+            def request(self, method, url, **kwargs):
+                seen.append((method, url, kwargs))
+                return Response()
+            async def close(self): await self.connector.close()
+        with patch('aiohttp.ClientSession', Session):
+            transport = HttpsTransport('https://host.test', 'credential')
+            client = MachineClient(transport)
+            self.assertTrue(callable(getattr(client, 'read_launch', None)), 'LaunchQuery adapter is missing')
+            try:
+                value = await client.read_launch(metadata)
+                self.assertEqual(value, {'schema_version': 1})
+                self.assertEqual(seen[0][:2], ('POST', 'https://host.test/api/v1/machine/work/launch'))
+                self.assertEqual(seen[0][2]['json'], metadata)
+                self.assertIsNone(seen[0][2]['params'])
+                with self.assertRaises(Refused): await transport.request('GET', 'work/launch')
+                # #721: отдельный именованный POST, не generic delivery endpoint.
+                await transport.request('POST', 'work/initial-launch', metadata)
+                self.assertEqual(seen[1][:2], ('POST', 'https://host.test/api/v1/machine/work/initial-launch'))
+                self.assertEqual(seen[1][2]['json'], metadata)
+                self.assertIsNone(seen[1][2]['params'])
+                for method, path in (('GET', 'work/initial-launch'), ('POST', 'work/initial-launch/secret')):
+                    with self.assertRaises(Refused): await transport.request(method, path)
+            finally:
+                await client.aclose()
+
+    async def test_management_context_is_finite_bound_secret_safe_read_not_launch_work(self):
+        # HYPOTHESIS #742: нет strict typed post-activation клиента; scope не Work.
+        # SPEC: exact POST body, no token/owner/path/origin authority, DTO repr safe.
+        # SOLUTION: finite HTTPS method + strict common request/secret-safe DTO.
+        # RESULT: missing client RED; 33/33 GREEN, mismatched scope/plaintext refused.
+        # STATUS: FIXED — see #742.
+        from datetime import timedelta
+        from mop.common.management_context import ManagementRequest, ManagementContext
+        from mop.common.telemetry import SessionScope
+        request = ManagementRequest(SessionScope(uuid4(), uuid4(), uuid4(), uuid4(),
+            uuid4(), 'native-session', uuid4()), 3)
+        context = ManagementContext(request, 'installation-fixture', uuid4(), uuid4(), uuid4(), 12,
+            uuid4(), 7, datetime.now(timezone.utc)+timedelta(minutes=2), 'e'*40)
+        result, calls = context.wire(), []
+        class Response:
+            status = 200
+            content_type = 'application/json'
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            @property
+            def content(self): return self
+            async def iter_chunked(self, size): yield json.dumps(result).encode()
+        class Session:
+            def __init__(self, **kwargs): self.connector = kwargs['connector']
+            def request(self, method, url, **kwargs):
+                calls.append((method, url, kwargs))
+                return Response()
+            async def close(self): await self.connector.close()
+        with patch('aiohttp.ClientSession', Session):
+            transport = HttpsTransport('https://host.test', 'node-credential')
+            client = MachineClient(transport)
+            self.assertTrue(callable(getattr(client, 'read_management_context', None)),
+                'finite management context client is missing')
+            try:
+                received = await client.read_management_context(request.wire())
+                self.assertEqual(received, context)
+                self.assertNotIn(context.token, repr(received))
+                self.assertEqual(calls[0][:2], ('POST', 'https://host.test/api/v1/machine/management-context'))
+                self.assertEqual(calls[0][2]['json'], request.wire())
+                self.assertIsNone(calls[0][2]['params'])
+                for method, path in (('GET', 'management-context'), ('POST', 'management-context/token')):
+                    with self.assertRaises(Refused): await transport.request(method, path)
+                for key in ('token', 'actor_id', 'token_id', 'owner', 'origin', 'path', 'secret_name', 'work'):
+                    with self.subTest(key=key), self.assertRaises((ValueError, Refused)):
+                        await client.read_management_context({**request.wire(), key: 'untrusted'})
+                for key, value in (('subject_id', True), ('token', 'invalid'), ('credential_id', 'bad'),
+                        ('schema_version', True), ('assignment_revision', '0'), ('origin', 'https://foreign.invalid')):
+                    with self.subTest(key=key), self.assertRaises(ValueError):
+                        ManagementContext.parse({**result, key: value}, request)
+                for name in ('target_id', 'incarnation_id', 'node_id', 'executor_epoch', 'producer_epoch', 'epoch'):
+                    result['request'] = {**request.wire(), 'scope': {**request.scope.wire(), name: str(uuid4())}}
+                    with self.subTest(name=name), self.assertRaises(Refused):
+                        await client.read_management_context(request.wire())
+                result['request'] = request.wire()
+                result['token'] = 'response-plaintext-must-not-appear'
+                with self.assertRaises(Refused) as failure:
+                    await client.read_management_context(request.wire())
+                self.assertNotIn(result['token'], str(failure.exception))
+            finally:
+                await client.aclose()
+
+    # HYPOTHESIS (#717): transport выбрасывает non-200 до чтения canonical
+    # error envelope, и причина безопасного отказа теряется на HTTP503.
+    # SOLUTION: bounded canonical error body читается под прежним deadline;
+    # safe phrase сохраняется, bearer redacted, raw/invalid body не отражается.
+    # RESULT: RED -- safe reason отсутствует; GREEN -- owned TLS и node checks.
+    # STATUS: FIXED — see #717
+    async def test_owned_https_preserves_safe_drf_reason_without_echoing_token(self):
+        import http.server
+        from _control_fixture import own_tls
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.server.calls += 1
+                raw = self.server.body
+                self.send_response(self.server.status)
+                self.send_header('Content-Type', self.server.content_type)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        token = 'owned-node-secret-not-in-errors'
+        with own_tls(Handler) as (server, origin, cert, _):
+            server.calls, server.content_type = 0, 'application/json'
+            transport = HttpsTransport(origin, token, tls=ssl.create_default_context(cafile=str(cert)), response_limit=1024)
+            try:
+                for status, kind in ((403, Refused), (503, Unavailable)):
+                    server.status = status
+                    server.body = json.dumps({'schema_version': 1, 'error': {
+                        'code': 'authority_unavailable', 'message': 'pinned bootstrap approval was revoked',
+                        'retryable': False}}).encode()
+                    with self.assertRaises(kind) as raised:
+                        await transport.request('GET', 'work')
+                    self.assertIn('pinned bootstrap approval was revoked', str(raised.exception))
+                    self.assertIn('HTTP '+str(status), str(raised.exception))
+                server.body = json.dumps({'schema_version': 1, 'error': {'code': 'authority_unavailable',
+                    'message': 'credential '+token+' is unavailable', 'retryable': False}}).encode()
+                with self.assertRaises(Unavailable) as raised:
+                    await transport.request('GET', 'work')
+                self.assertNotIn(token, str(raised.exception))
+                self.assertIn('[redacted]', str(raised.exception))
+                private = 'private-raw-error-not-in-diagnostics'
+                bad = (
+                    ('text/html', ('<html>'+private+'</html>').encode()),
+                    ('application/json', json.dumps({'schema_version': 2, 'error': {
+                        'code': 'authority_unavailable', 'message': private, 'retryable': True}}).encode()),
+                    ('application/json', ('{"schema_version":1,"error":{"code":"x","message":"'+private+
+                        '","message":"duplicate","retryable":true}}').encode()),
+                    ('application/json', ('{"error":"'+private*100+'"}').encode()),
+                    ('application/json', json.dumps({'schema_version': 1, 'error': {
+                        'code': 'authority_unavailable', 'message': private+'\nraw traceback', 'retryable': True}}).encode()),
+                )
+                for content_type, raw in bad:
+                    server.content_type, server.body = content_type, raw
+                    with self.assertRaises(Unavailable) as raised:
+                        await transport.request('GET', 'work')
+                    self.assertNotIn(private, str(raised.exception))
+                    self.assertNotIn(token, str(raised.exception))
+                    self.assertIn('HTTP 503', str(raised.exception))
+                self.assertEqual(server.calls, 3+len(bad), 'diagnostics must never retry requests')
+            finally:
+                await transport.aclose()
+
     async def test_bounded_json_duplicate_fields_redirect_and_no_raw_error_leak(self):
         class Response:
             status = 200
@@ -462,9 +648,15 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 writer.close()
                 await writer.wait_closed()
             server = await asyncio.start_unix_server(receive, path=socket)
+            from mop.driver.launch import Registration
+            from mop.node.body_launch import SessionProof, process_identity
+            registration = Registration(work, str(uuid4()), 'b'*64, 'c'*64, 'pu-owned-1')
+            proof = SessionProof(registration, '%0', 'owned-session', uuid4(), socket,
+                                 os.getpid(), process_identity(os.getpid()))
             target = BoundTarget(work.target_id, work.incarnation_id, work.node_id,
                 work.executor_epoch, work.generation, work.role, work.bundle_digest,
-                work.grant_id, root, root/'tmux', '%0', root/'launcher', session_socket=socket)
+                work.grant_id, Path.cwd(), root/'tmux', '%0', root/'launcher',
+                session_socket=socket, session_proof=proof)
             inputs = ActionInput('Owner','owner@example.test','text ; $(not-a-shell)', peer_token='private-token')
             sender = UnixSessionSender()
             calls = []

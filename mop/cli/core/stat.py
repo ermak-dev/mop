@@ -12,7 +12,7 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 """
 from mop.cli import _control
 
-MCP = {"annotations": "readonly", "human_only": True,
+MCP = {"annotations": "readonly",
        "actions": ["execution.view_usage"], "args": [
     {"name": "days", "type": "integer", "flag": "--days", "help": "bounded UTC window, default 14 days"},
     {"name": "start", "type": "string", "flag": "--start", "help": "inclusive ISO date"},

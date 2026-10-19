@@ -53,6 +53,8 @@ class Operation(serializers.Serializer):
     code = serializers.CharField(allow_null=True, required=False)
     reason = serializers.CharField(allow_null=True, required=False)
     target = free({'type': 'object', 'additionalProperties': True})
+    source = free({'type': 'object', 'additionalProperties': True}, required=False)
+    destination = free({'type': 'object', 'additionalProperties': True}, required=False)
     steps = free({'type': 'array', 'items': {'type': 'object', 'additionalProperties': True}},
                  required=False)
     resources_held = serializers.BooleanField()
@@ -63,6 +65,27 @@ class OperationReply(serializers.Serializer):
     schema_version = serializers.IntegerField(default=1)
     epoch = serializers.CharField()
     operation = Operation()
+
+
+class LandingCommand(serializers.Serializer):
+    schema_version = free({'type': 'integer', 'enum': [1]})
+    epoch = serializers.UUIDField()
+    expected_revision = free({'type': 'string', 'pattern': '^(0|[1-9][0-9]{0,18})$',
+        'description': 'Exact CAS revision, at most 9223372036854775807; 0 means unmaterialized.'})
+
+
+class LandingState(serializers.Serializer):
+    project_id = serializers.UUIDField()
+    state = choices('unmaterialized', 'free', 'held')
+    revision = serializers.CharField()
+    generation = serializers.CharField(allow_null=True)
+    owner_id = serializers.IntegerField(min_value=1, allow_null=True)
+
+
+class LandingReply(serializers.Serializer):
+    schema_version = free({'type': 'integer', 'enum': [1]})
+    epoch = serializers.UUIDField()
+    landing = LandingState()
 
 
 class NodeCommand(serializers.Serializer):
@@ -83,6 +106,14 @@ class RestartCommand(serializers.Serializer):
     not_after = serializers.CharField()
     params = free({'type': 'object', 'properties': {'fresh': {'type': 'boolean'}},
                    'additionalProperties': False})
+
+
+class UpdateCommand(RestartCommand):
+    params = free({'type': 'object', 'properties': {
+        'fresh': {'type': 'boolean', 'default': False},
+        'origin': {'type': 'string', 'maxLength': 2048,
+                   'description': 'Optional source origin of the same Catalog project.'}},
+        'additionalProperties': False})
 
 
 class CreateCommand(serializers.Serializer):
@@ -142,6 +173,30 @@ class IdentityReply(serializers.Serializer):
     human_owner_id = serializers.IntegerField(allow_null=True)
     node_id = serializers.CharField(allow_null=True)
     grant_id = serializers.CharField(allow_null=True)
+
+
+class CapabilityScope(serializers.Serializer):
+    project_id = serializers.UUIDField(allow_null=True)
+    node_id = serializers.UUIDField(allow_null=True)
+    client_id = serializers.UUIDField(allow_null=True)
+
+
+class CapabilityActor(serializers.Serializer):
+    user_id = serializers.IntegerField(min_value=1)
+    kind = choices('human', 'agent', 'service')
+    human_owner_id = serializers.IntegerField(allow_null=True, min_value=1)
+    node_id = serializers.UUIDField(allow_null=True)
+    grant_id = serializers.UUIDField(allow_null=True)
+
+
+class CapabilitiesReply(serializers.Serializer):
+    from mop.server.access.permissions import ACTION_PERMISSIONS
+    schema_version = free({'type': 'integer', 'enum': [1]}, required=True)
+    catalogue_version = free({'type': 'integer', 'enum': [1]}, required=True)
+    epoch = serializers.UUIDField()
+    actor = CapabilityActor()
+    scope = CapabilityScope()
+    actions = serializers.ListField(child=serializers.ChoiceField(choices=sorted(ACTION_PERMISSIONS)))
 
 
 class ProjectFields(serializers.Serializer):
@@ -248,6 +303,37 @@ class Events(serializers.Serializer):
     coverage = free({'type': 'array', 'items': {'type': 'string'}})
 
 
+class AuditTarget(serializers.Serializer):
+    kind = choices('node', 'puppet', 'project')
+    id = serializers.UUIDField()
+    incarnation = serializers.UUIDField(allow_null=True)
+
+
+class AuditItem(serializers.Serializer):
+    id = serializers.RegexField(r'^[1-9][0-9]*$', max_length=19)
+    operation_id = serializers.UUIDField()
+    revision = serializers.RegexField(r'^[1-9][0-9]*$', max_length=19)
+    created_at = serializers.DateTimeField()
+    action = choices('drain', 'enable', 'restart', 'build', 'stop_job', 'send', 'dispatch',
+                     'wipe', 'delete', 'create', 'update')
+    state = choices('accepted', 'running', 'reconciling', 'succeeded', 'refused', 'failed',
+                    'partial', 'unknown', 'expired', 'cancelled')
+    code = serializers.CharField(max_length=64, allow_blank=True)
+    reason = serializers.CharField(max_length=512, allow_blank=True)
+    target = AuditTarget()
+    node_id = serializers.UUIDField()
+    project_ids = serializers.ListField(child=serializers.UUIDField(), min_length=1)
+
+
+class AuditPage(serializers.Serializer):
+    schema_version = free({'type':'integer', 'enum':[1]}, required=True)
+    epoch = serializers.UUIDField()
+    results = AuditItem(many=True)
+    next_cursor = serializers.CharField(allow_null=True, max_length=4096)
+    coverage = free({'type':'array', 'items':{'type':'string', 'enum':['operation_audit']},
+                     'minItems':1, 'maxItems':1}, required=True)
+
+
 class UsageSource(serializers.Serializer):
     id = serializers.CharField()
     profile = serializers.CharField()
@@ -298,8 +384,24 @@ def _param(name, required=False, description='', pattern=None):
 
 def parameters():
     """{класс view: query-параметры реального адаптера} (#696)."""
-    from . import operationviews, projectionviews, usageviews
+    from . import auditviews, catalogueviews, operationviews, projectionviews, usageviews, landingviews
     return {
+        auditviews.Audit: (
+            OpenApiParameter('project_id', OpenApiTypes.UUID, OpenApiParameter.QUERY,
+                             description='Optional explicit project intersection; never adds authority.'),
+            OpenApiParameter('cursor', {'type': 'string', 'minLength': 1, 'maxLength': 4096},
+                             OpenApiParameter.QUERY,
+                             description='Opaque descending keyset cursor; expires after 300 seconds.'),
+            OpenApiParameter('limit', {'type': 'integer', 'minimum': 1, 'maximum': 100},
+                             OpenApiParameter.QUERY, default=100,
+                             description='Maximum audit items; the same limit is required on continuation.')),
+        landingviews.LandingDetail: (
+            _param('epoch', description='Optional exact installation epoch; mismatch refuses without a mutation.'),),
+        catalogueviews.Capabilities: (
+            _param('schema_version', description='wire version, always 1'),
+            _param('project_id', description='explicit project UUID; absent scope grants no actions'),
+            _param('node_id', description='explicit node UUID; enrollment and project membership still apply'),
+            _param('client_id', description='explicit owned client UUID')),
         usageviews.Usage: (
             _param('schema_version', description='wire version, always 1'),
             _param('start', description='inclusive ISO date of the period'),
@@ -329,8 +431,26 @@ def annotations():
     urlpatterns и держится рядом с реальными адаптерами. Вызывается
     лениво: модуль urls импортируется только при генерации.
     """
-    from . import authviews, buildviews, operationviews, projectionviews, usageviews, views
+    from . import auditviews, authviews, buildviews, catalogueviews, operationviews, projectionviews, usageviews, views, landingviews
     return {
+        auditviews.Audit: {'get': (None, AuditPage, 200,
+            'Read-only immutable operation audit, authorized before keyset pagination. '
+            'Requires operations.view_audit and current complete project/node/grant scope. '
+            'Coverage is operation_audit, not legacy bus messages. Responses are no-store; '
+            'invalid or stale cursors require a reset (410).')},
+        landingviews.LandingDetail: {'get': (None, LandingReply, 200,
+            'One authorized project landing state, no writes and no cursor. An absent row is explicitly '
+            'unmaterialized at revision 0, with no owner or generation. Requires execution.view_landing.')},
+        landingviews.TakeLanding: {'post': (LandingCommand, LandingReply, 200,
+            'Human-only project CAS acquire, committed before reply; requires execution.acquire_landing. '
+            'No force, puppet identity or external Operation. Lost responses require read-only '
+            'comparison of exact successor revision and human owner, never a blind retake.')},
+        landingviews.ReleaseLanding: {'post': (LandingCommand, LandingReply, 200,
+            'Human-only release of the current actor own token by exact epoch/revision; requires '
+            'execution.release_landing. A late old release cannot touch a newer acquisition.')},
+        catalogueviews.Capabilities: {'get': (None, CapabilitiesReply, 200,
+            'Current canonical action permissions for one explicit scope. Advisory only; '
+            'commands reauthorize the actual resource. Absent or unknown scope grants no actions.')},
         views.Health: {'get': (None, Health, 200,
             'Liveness and installation identity of the controller.')},
         usageviews.Usage: {'get': (None, Usage, 200,
@@ -365,6 +485,10 @@ def annotations():
             'Submits a node drain command; eligible is fixed by the route.')},
         operationviews.EnableNode: {'post': (NodeCommand, OperationReply, 202,
             'Submits a node enable command; eligible is fixed by the route.')},
+        operationviews.UpdatePuppet: {'post': (UpdateCommand, OperationReply, 202,
+            'Admits an update plan and synchronously prepares its exact replacement grant. '
+            'Source assignment and agent credentials are unchanged; prepared is not physical completion. '
+            'Missing replacement or continuation support refuses before effects. Unknown preparation is replay-only.')},
         operationviews.RestartPuppet: {'post': (RestartCommand, OperationReply, 202,
             'Submits a puppet restart command; fresh requires its own credential binding.')},
         operationviews.StopPuppetJob: {'post': (RestartCommand, OperationReply, 202,

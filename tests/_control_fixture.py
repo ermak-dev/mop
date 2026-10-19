@@ -98,6 +98,16 @@ PROJECT = '5ee23d6c-04a4-43ae-9b91-409485c535fc'
 POLICY = 'b5600b0d-15cc-4fa3-ab0e-7c59d7e98939'
 PUPPET = '9db85243-4ae1-4511-8acc-bf6c8140cf2c'
 INCARNATION = 'f6db1446-0358-4dfd-8605-85ec12367ebc'
+DEFINITION = '24807b60-72aa-44d1-985d-7073f4053dbb'
+
+
+def create_operation(state='accepted'):
+    value = restart_operation(state)
+    value['operation']['target']['revision'] = '1'
+    value['operation']['target']['source_revision'] = '1'
+    value['operation']['steps'] = [{'name': name, 'outcome': '', 'evidence': ''}
+        for name in ('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')]
+    return value
 
 
 def puppet_row():
@@ -142,6 +152,13 @@ def restart_operation(state='accepted'):
                                   'revision': '7', 'source_revision': '7'}
     value['operation']['steps'] = [{'name': name, 'outcome': '', 'evidence': ''}
         for name in ('apply_identity', 'restart_session', 'confirm_ready')]
+    return value
+
+
+def send_operation(state='accepted'):
+    value = restart_operation(state)
+    value['operation']['steps'] = [{'name': name, 'outcome': '', 'evidence': ''}
+        for name in ('apply_identity', 'send_message')]
     return value
 
 

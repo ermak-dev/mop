@@ -29,6 +29,124 @@ class ClientBoundary(unittest.TestCase):
     # SOLUTION: stdlib transport на common-границе; unreleased старый импорт удалён.
     # RESULT: common transport отсутствовал; после переноса шесть checks green.
     # STATUS: FIXED — see #669.
+    @staticmethod
+    def initial_delivery():
+        from dataclasses import replace
+        from uuid import uuid4
+        from _body_fixture import work
+        wire = replace(work(), action='prepare_body').wire()
+        value = dict(schema_version=1, work=wire, phase='prepare_body', bootstrap_revision=str(uuid4()),
+            bootstrap_digest='a'*64, image_digest='b'*64, display_name='pu-project-1',
+            image_revision=str(uuid4()), image_policy=dict(policy_id=str(uuid4()), cpu=100, memory_mb=256, disk_mb=1024),
+            git_name='Owner', git_email='owner@example.invalid',
+            selection=dict(policy_id=str(uuid4()), digest='c'*64,
+                source=dict(origin='https://example.invalid/repo.git', commit='d'*40, ref='refs/heads/source'),
+                desired_model='desired-only', model_config_digest='e'*64,
+                consumers=[dict(purpose='model_config', version_id=str(uuid4()))]),
+            role=None, bootstrap=None, consumers=[])
+        import hashlib
+        value['image_digest'] = hashlib.sha256(('image-revision:'+value['image_revision']).encode()).hexdigest()
+        return wire, value
+
+    def test_initial_metadata_is_exact_bounded_and_not_physical_evidence(self):
+        # HYPOTHESIS #738: без имени и immutable policy узел вынужден угадывать
+        # layout/resources; bool проходит как int, неизвестные поля расширяют DTO.
+        # SPEC: точные UUID и logical pin, cpu MHz, memory/disk MiB, int32 > 0;
+        # ни installed receipt, ни capability, ни произвольный path/argv.
+        # SOLUTION: exact обязательные metadata + UUID-derived logical pin;
+        # политика имеет ровно UUID/CPU/memory/disk, без legacy defaults.
+        # RESULT: RED -- parser отвергал новый canonical response; GREEN -- 17/17.
+        # STATUS: FIXED — see #738.
+        from copy import deepcopy
+        from mop.common import initialcreate as i, credentials as p
+        wire, value = self.initial_delivery()
+        self.assertEqual(i.parse_delivery(value, wire), value)
+        for field in ('display_name', 'image_revision', 'image_policy'):
+            changed = deepcopy(value)
+            del changed[field]
+            with self.subTest(missing=field), self.assertRaises(p.CredentialError):
+                i.parse_delivery(changed, wire)
+        variants = []
+        for field, invalid in (
+                ('display_name', (None, True, 1, [], '', 'pu-a-1\n', '../pu-a-1', 'pu-a/other-1', 'pu-'+'a'*60+'-1')),
+                ('image_revision', (None, True, 1, [], '', 'not-uuid')),
+                ('image_policy', (None, True, 1, [], {}))):
+            variants.extend({**deepcopy(value), field: bad} for bad in invalid)
+        for field in ('policy_id', 'cpu', 'memory_mb', 'disk_mb'):
+            changed = deepcopy(value)
+            del changed['image_policy'][field]
+            variants.append(changed)
+            invalid = (None, True, 1, [], '', 'not-uuid') if field == 'policy_id' else (None, True, False, '1', 1.0, [], 0, -1, 2**31)
+            for bad in invalid:
+                changed = deepcopy(value)
+                changed['image_policy'][field] = bad
+                variants.append(changed)
+        for field in ('path', 'argv', 'source', 'receipt', 'installed', 'capabilities'):
+            variants.append({**deepcopy(value), field: 'untrusted'})
+            changed = deepcopy(value)
+            changed['image_policy'][field] = 'untrusted'
+            variants.append(changed)
+        variants.append({**deepcopy(value), 'image_digest': 'b'*64})
+        for changed in variants:
+            with self.subTest(changed=changed), self.assertRaises(p.CredentialError):
+                i.parse_delivery(changed, wire)
+        for bound in (1, 2**31-1):
+            changed = deepcopy(value)
+            changed['image_policy'].update(cpu=bound, memory_mb=bound, disk_mb=bound)
+            self.assertEqual(i.parse_delivery(changed, wire), changed)
+        changed = deepcopy(value)
+        changed['display_name'] = 'pu-'+'a'*59+'-1'
+        self.assertEqual(len(changed['display_name']), 64)
+        self.assertEqual(i.parse_delivery(changed, wire), changed)
+
+    def test_initial_delivery_rejects_malformed_types_and_boolean_work_schema(self):
+        # HYPOTHESIS #721: equality допускает bool == int, set lookup роняет
+        # malformed consumer payload вместо конечного CredentialError.
+        # SOLUTION: exact type/value Work, конечные purpose и отдельная shape.
+        # RESULT: bool/list/ref обходы воспроизведены red; strict parser green.
+        # STATUS: FIXED — see #721.
+        from copy import deepcopy
+        from mop.common import initialcreate as i, credentials as p
+        wire, value = self.initial_delivery()
+        self.assertEqual(i.parse_delivery(value, wire), value)
+        mutations = (lambda x: x.update(phase=[]),
+            lambda x: x['work'].update(schema_version=True),
+            lambda x: x['selection']['consumers'][0].update(purpose=[]),
+            lambda x: x.update(consumers=[dict(purpose=[], version_id=[], name='x', kind='file', value='')]),
+            lambda x: x['selection']['source'].update(ref='refs/heads/.hidden'),
+            lambda x: x['selection']['source'].update(ref='refs/heads/source.lock'))
+        for mutate in mutations:
+            changed = deepcopy(value)
+            mutate(changed)
+            with self.subTest(value=changed), self.assertRaises(p.CredentialError):
+                i.parse_delivery(changed, wire)
+
+    # HYPOTHESIS #742: existing Actor Token не имеет finite post-activation handoff.
+    # SOLUTION: только runtime locators; DTO скрывает token в repr; original auth retained.
+    # RESULT: unsupported command RED на PG17; exact shape GREEN, без Token lookup API.
+    # STATUS: FIXED — see #742.
+    def test_management_context_has_only_current_runtime_locators(self):
+        import copy
+        from mop.common import credentials as p
+        from uuid import uuid4
+        request = dict(schema_version=1, scope=dict(epoch=str(uuid4()), target_id=str(uuid4()),
+            incarnation_id=str(uuid4()), node_id=str(uuid4()), executor_epoch=str(uuid4()),
+            session_id='native-session', producer_epoch=str(uuid4())), generation='1')
+        envelope = dict(version=1, auth=dict(kind='token', value='a'*40),
+            command='read_management_context', args={'request': request})
+        try:
+            _, command, parsed = p.parse_request(envelope)
+        except p.CredentialError as error:
+            self.fail('finite post-activation management read is missing: '+str(error))
+        self.assertEqual(command.value, 'read_management_context')
+        self.assertEqual(parsed['request'], request)
+        for key in ('actor_id', 'token_id', 'owner', 'origin', 'path', 'secret_name', 'work'):
+            with self.subTest(key=key):
+                bad = copy.deepcopy(envelope)
+                bad['args']['request'][key] = 'untrusted'
+                with self.assertRaises(p.CredentialError):
+                    p.parse_request(bad)
+
     def test_transport_is_available_to_all_layers_without_client_import(self):
         path = Path(__file__).resolve().parents[1] / 'mop/common/credential_client.py'
         self.assertTrue(path.is_file(), 'server-compatible common credential transport is missing')
@@ -120,6 +238,24 @@ class ClientBoundary(unittest.TestCase):
                 for name in ('owner_id', 'actor_id', 'ciphertext', 'context'):
                     with self.assertRaises(p.CredentialError):
                         p.parse_request({**request, 'args': {**args, name: identity}})
+
+    # HYPOTHESIS #730: generic reserve заново выбирает latest, а raw proof
+    # превратил бы wire в authority. Начальный reserve принимает только locator.
+    # SOLUTION: отдельный finite command принимает только reservation UUID.
+    # RESULT: unsupported command red; exact shape и запрет caller proof green.
+    # STATUS: FIXED — see #730.
+    def test_initial_grant_reservation_accepts_only_durable_reservation_locator(self):
+        from mop.common import credentials as p
+        from uuid import uuid4
+        reservation = uuid4()
+        request = dict(version=1, auth=dict(kind='token', value='a'*40),
+            command='reserve_initial_grant', args=dict(reservation_id=str(reservation)))
+        _, command, args = p.parse_request(request)
+        self.assertEqual(command.value, 'reserve_initial_grant')
+        self.assertEqual(args, dict(reservation_id=reservation))
+        for name in ('owner_id', 'actor_id', 'approval_id', 'version_id', 'digest', 'policy', 'project_id'):
+            with self.subTest(name=name), self.assertRaises(p.CredentialError):
+                p.parse_request({**request, 'args': {**request['args'], name: str(uuid4())}})
 
     # HYPOTHESIS: адресная выдача без target не выбирает конкретную инкарнацию.
     # SOLUTION: target UUID обязателен; только сервер выбирает остальные refs.

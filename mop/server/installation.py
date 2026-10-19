@@ -8,13 +8,18 @@ from .controller.bootstrap import private_bytes
 
 IDENTITIES = ('maintenance', 'web', 'worker', 'gateway', 'credentials', 'builder')
 RUNTIME_ROLES = ('web', 'worker', 'gateway')
+DATABASE_RUNTIME_ROLES = (*RUNTIME_ROLES, 'credential')
+DATABASE_ROLES = (*DATABASE_RUNTIME_ROLES, 'maintenance')
+CREDENTIAL_CONNECTIONS = 8
+DATABASE_CONNECTIONS = 40
+CREDENTIAL_CLIENT_ROLES = ('web', 'worker')
 ORDER = ('setup', 'postgresql', 'migrations', 'initialize', 'admin', 'configuration',
          'services', 'enrollment', 'image', 'body')
 BLOCKERS = (
     (628, 'realtime subscriptions, ACL and socket shutdown composition'),
     (643, 'body launch and reboot-persistent host/PVE routing'),
     (648, 'privileged image executor socket and lifecycle'),
-    (669, 'credential executor socket, custody and lifecycle'),
+    (669, 'installation credential consumers and transport retirement composition'),
 )
 
 
@@ -92,8 +97,9 @@ def plan(spec):
     return {'installation_id': spec.identity, 'order': list(ORDER),
             'database': dict(spec.database), 'production_ready': False,
             'connections': {'runtime': 24, 'maintenance': 8, 'scope': 'instance-role-limits',
+                            'credential': CREDENTIAL_CONNECTIONS, 'total': DATABASE_CONNECTIONS,
                             'accounted_principals': 'managed-target-logins',
-                            'roles': {role: 8 for role in (*RUNTIME_ROLES, 'maintenance')}},
+                            'roles': {role: 8 for role in DATABASE_ROLES}},
             'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS],
             'setup': 'mop server controller setup --venv ' + dict(spec.paths)['venv'],
             'provisioned_database': 'OS PostgreSQL package/service provisioning requires operator execution',
@@ -119,7 +125,8 @@ def connection_budget(processes, *, runtime, maintenance):
         total += count * size
     if total > runtime:
         raise ValueError('process pools exceed the instance database budget')
-    return {'runtime': total, 'maintenance': maintenance, 'total': total + maintenance,
+    return {'runtime': total, 'credential': CREDENTIAL_CONNECTIONS, 'maintenance': maintenance,
+            'total': total + CREDENTIAL_CONNECTIONS + maintenance,
             'processes': {role: {'count': count, 'pool_max': size} for role, (count, size) in processes.items()}}
 
 
@@ -132,8 +139,7 @@ def provisioning_artifact(spec):
             directories.append({'path': paths[base] + '/' + role, 'owner': user, 'mode': '0700'})
     for base in ('backup', 'root_trust'):
         directories.append({'path': paths[base], 'owner': users['maintenance'], 'mode': '0700'})
-    # Единственный не приватный каталог: maintenance пишет, группа web читает.
-    shared = [{'path': static_root(spec), 'owner': users['maintenance'], 'group': users['web'], 'mode': '0750'}]
+    shared = shared_directories(spec)
     managed = db['topology'] == 'provisioned'
     playbook = [{'name': 'Prepare a separate fresh controller without starting services',
         'hosts': 'localhost', 'connection': 'local', 'gather_facts': False, 'become': True,
@@ -144,13 +150,16 @@ def provisioning_artifact(spec):
                 {'name': '{{ item }}', 'group': '{{ item }}', 'system': True,
                  'shell': '/usr/sbin/nologin', 'create_home': False, 'password_lock': True},
              'loop': list(users.values())},
+            {'name': 'Allow only rootless frontends to reach the credential socket', 'ansible.builtin.user':
+                {'name': '{{ item }}', 'groups': users['credentials'], 'append': True},
+             'loop': [users[role] for role in CREDENTIAL_CLIENT_ROLES]},
             {'name': 'Prepare separate root-owned parent trees', 'ansible.builtin.file':
                 {'path': '{{ item }}', 'state': 'directory', 'owner': 'root', 'group': 'root', 'mode': '0755'},
              'loop': [paths['configuration'], paths['state']]},
             {'name': 'Prepare purpose-owned private directories', 'ansible.builtin.file':
                 {'path': '{{ item.path }}', 'state': 'directory', 'owner': '{{ item.owner }}',
                  'group': '{{ item.owner }}', 'mode': '0700'}, 'loop': directories},
-            {'name': 'Prepare the shared collected-static directory', 'ansible.builtin.file':
+            {'name': 'Prepare narrowly shared static and credential socket directories', 'ansible.builtin.file':
                 {'path': '{{ item.path }}', 'state': 'directory', 'owner': '{{ item.owner }}',
                  'group': '{{ item.group }}', 'mode': '0750'}, 'loop': shared},
             {'name': 'Install matching native PostgreSQL client tools', 'ansible.builtin.apt':
@@ -163,8 +172,9 @@ def provisioning_artifact(spec):
             'shared_directories': shared,
             'postgresql': {'host': db['host'], 'port': db['port'], 'major': db['major'],
                 'package': ('postgresql-' if managed else 'postgresql-client-') + str(db['major']),
-                'manage_service': managed, 'max_connections': 35,
-                'runtime_connections': 24, 'maintenance_connections': 8,
+                'manage_service': managed, 'max_connections': DATABASE_CONNECTIONS + 3,
+                'runtime_connections': 24, 'credential_connections': CREDENTIAL_CONNECTIONS,
+                'maintenance_connections': 8,
                 'reserved_connections': 3, 'tls': 'verify-full', 'tls_ca': db['tls_ca'],
                 'network_access': 'operator must restrict to controller identities and backup hosts'},
             'unresolved': ['OS package repository and TLS server key provisioning are operator-owned',
@@ -180,23 +190,58 @@ def static_root(spec):
     return dict(spec.paths)['state'] + '/static'
 
 
-def bootstrap_document(spec, role, *, password):
-    """Credential bytes только в purpose-owned bootstrap, не в плане/артефакте узла."""
-    from .controller.bootstrap import Bootstrap
-    if role not in (*RUNTIME_ROLES, 'maintenance'):
-        raise ValueError('this consumer must not receive a database bootstrap')
+def credential_socket_directory(spec):
+    """Один installer-owned путь; не private state/config самой credential роли."""
+    return dict(spec.paths)['state'] + '/credential-socket'
+
+
+def shared_directories(spec):
+    """Одна definition для review playbook и конечного OS executor."""
+    users = dict(spec.identities)
+    return [{'path': static_root(spec), 'owner': users['maintenance'], 'group': users['web'], 'mode': '0750'},
+            {'path': credential_socket_directory(spec), 'owner': users['credentials'],
+             'group': users['credentials'], 'mode': '0750'}]
+
+
+def database_password(password):
+    """Проверка DB-only ввода не требует OS endpoint или root bootstrap."""
     if type(password) is not str or not password or any(c in password for c in '\x00\r\n'):
         raise ValueError('database password must be nonempty single-line text')
-    db, paths, users = dict(spec.database), dict(spec.paths), dict(spec.identities)
+    return password
+
+
+def database_identity(spec, role):
+    """Purpose credential единственен; plural credentials -- только OS account/path."""
+    if role not in DATABASE_ROLES:
+        raise ValueError('this consumer must not receive a database bootstrap')
+    return dict(spec.identities)['credentials' if role == 'credential' else role]
+
+
+def bootstrap_document(spec, role, *, password, credential_uid=None):
+    """Credential bytes только в purpose-owned bootstrap, не в плане/артефакте узла."""
+    from .controller.bootstrap import Bootstrap, credential_endpoint
+    user = database_identity(spec, role)
+    database_password(password)
+    db, paths = dict(spec.database), dict(spec.paths)
+    directory = paths['configuration'] + '/' + ('credentials' if role == 'credential' else role)
     result = Bootstrap(installation_id=spec.identity, role=role,
-        django_key=paths['configuration'] + '/' + role + '/django.key',
+        django_key=directory + '/django.key',
         database={'ENGINE': 'django.db.backends.postgresql', 'HOST': db['host'],
-                  'PORT': str(db['port']), 'NAME': db['name'], 'USER': users[role],
+                  'PORT': str(db['port']), 'NAME': db['name'], 'USER': user,
                   'PASSWORD': password, 'OPTIONS': {'sslmode': 'verify-full', 'sslrootcert': db['tls_ca']}})
     if role == 'maintenance':
         result['root_key'] = paths['root_trust'] + '/root.key'
+    elif role == 'credential':
+        result['root_key'] = directory + '/root.key'
     if role in ('maintenance', 'web'):
         result['static_root'] = static_root(spec)
+    if role in CREDENTIAL_CLIENT_ROLES:
+        result['credential_service'] = {'path': credential_socket_directory(spec) + '/service.sock',
+                                        'server_uid': credential_uid}
+        try:
+            credential_endpoint(result)
+        except RuntimeError as error:
+            raise ValueError(str(error)) from None
     return result
 
 
@@ -265,7 +310,66 @@ def initialize_configuration(actor, values):
         return catalog.set_installation_settings(actor, values, expected_revision=1)
 
 
-def service_artifact(spec, values):
+def _credential_os_identity(credential_uid, credential_gid, frontend_uids):
+    """Точная OS ACL; UID не заменяет Access и не доказывает готовность службы."""
+    valid = lambda value: type(value) is int and 0 < value < 2 ** 32 - 1
+    if not valid(credential_uid) or not valid(credential_gid) or type(frontend_uids) is not dict or \
+            set(frontend_uids) != set(CREDENTIAL_CLIENT_ROLES) or \
+            any(not valid(uid) for uid in frontend_uids.values()) or \
+            len({credential_uid, *frontend_uids.values()}) != 3:
+        raise ValueError('credential service requires distinct non-root OS identities and exact frontend UIDs')
+
+
+def credential_os_coordinates(spec):
+    """Только явный installer render; отсутствующий account не угадывается по caller."""
+    import pwd
+    import grp
+    users = dict(spec.identities)
+    try:
+        credential = pwd.getpwnam(users['credentials'])
+        group = grp.getgrnam(users['credentials'])
+        peers = {role: pwd.getpwnam(users[role]).pw_uid for role in CREDENTIAL_CLIENT_ROLES}
+    except KeyError:
+        raise RuntimeError('credential service OS identities are not provisioned') from None
+    if credential.pw_gid != group.gr_gid:
+        raise RuntimeError('credential service primary group differs from the provisioned socket group')
+    result = dict(credential_uid=credential.pw_uid, credential_gid=group.gr_gid, frontend_uids=peers)
+    _credential_os_identity(**result)
+    return result
+
+
+def _credential_unit(spec, *, credential_uid, credential_gid, frontend_uids):
+    """Существующий daemon lifecycle; stale endpoint исправляет только оператор."""
+    _credential_os_identity(credential_uid, credential_gid, frontend_uids)
+    from .controller.bootstrap import credential_endpoint
+    paths, users = dict(spec.paths), dict(spec.identities)
+    socket_dir = credential_socket_directory(spec)
+    try:
+        credential_endpoint({'role': 'web', 'credential_service': {
+            'path': socket_dir + '/service.sock', 'server_uid': credential_uid}})
+    except RuntimeError as error:
+        raise ValueError(str(error)) from None
+    config, state = paths['configuration'] + '/credentials', paths['state'] + '/credentials'
+    command = (paths['venv'] + '/bin/mop server credentials --bootstrap ' + config + '/bootstrap.json' +
+               ' --socket ' + socket_dir + '/service.sock --key-id root-v1 --socket-group ' + str(credential_gid))
+    for role in CREDENTIAL_CLIENT_ROLES:
+        command += ' --peer-uid ' + str(frontend_uids[role])
+    hidden = [paths['root_trust'], paths['backup']]
+    for role in ('maintenance', *RUNTIME_ROLES, 'builder'):
+        hidden.extend(paths[base] + '/' + role for base in ('configuration', 'state'))
+    return '\n'.join([
+        '[Unit]', 'Description=Fresh mop credential service', 'After=network-online.target',
+        '[Service]', 'Type=simple', 'User=' + users['credentials'], 'Group=' + users['credentials'],
+        'WorkingDirectory=' + state, 'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
+        'TimeoutStartSec=30', 'TimeoutStopSec=30', 'KillSignal=SIGTERM',
+        'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only',
+        'PrivateTmp=true', 'UMask=0077', 'TasksMax=64', 'LimitNOFILE=1024',
+        'CapabilityBoundingSet=', 'AmbientCapabilities=',
+        'ReadWritePaths=' + state + ' ' + socket_dir, 'InaccessiblePaths=' + ' '.join(hidden),
+        '[Install]', 'WantedBy=multi-user.target', ''])
+
+
+def service_artifact(spec, values, *, credential_uid=None, credential_gid=None, frontend_uids=None):
     """Производные units; не install/start и не proof готовности executors."""
     from urllib.parse import urlsplit
     from .catalog.definitions import DEFINITIONS
@@ -291,6 +395,7 @@ def service_artifact(spec, values):
         units[role] = '\n'.join([
             '[Unit]', 'Description=Fresh mop ' + role, 'After=network-online.target',
             '[Service]', 'Type=simple', 'User=' + users[role], 'Group=' + users[role],
+            'SupplementaryGroups=' + users['credentials'],
             'WorkingDirectory=' + state,
             'Environment=MOP_CONTROLLER_BOOTSTRAP=' + config + '/bootstrap.json',
             'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
@@ -301,14 +406,19 @@ def service_artifact(spec, values):
             'AmbientCapabilities=' + ('CAP_NET_BIND_SERVICE' if role == 'web' and settings['http_port'] < 1024 else ''),
             'ReadWritePaths=' + state,
             'InaccessiblePaths=' + paths['root_trust'] + ' ' + paths['backup'] + ' ' +
-                paths['configuration'] + '/maintenance',
+                paths['configuration'] + '/maintenance ' + paths['configuration'] + '/credentials ' +
+                paths['state'] + '/credentials',
             '[Install]', 'WantedBy=multi-user.target', ''])
+    required = {'web': ['bootstrap.json', 'django.key', 'tls.crt', 'tls.key'],
+                'worker': ['bootstrap.json', 'django.key']}
+    blocked = {'worker': [625], 'credentials': [669], 'builder': [648], 'gateway': [628]}
+    if any(value is not None for value in (credential_uid, credential_gid, frontend_uids)):
+        units['credentials'] = _credential_unit(spec, credential_uid=credential_uid,
+            credential_gid=credential_gid, frontend_uids=frontend_uids)
+        required['credentials'] = ['bootstrap.json', 'django.key', 'root.key']
+        del blocked['credentials']
     return {'units': units, 'connections': budget, 'applied': False, 'runtime_bound': False,
-            'required_artifacts': {'web': ['bootstrap.json', 'django.key', 'tls.crt', 'tls.key'],
-                                   'worker': ['bootstrap.json', 'django.key']},
-            'blocked_services': {'worker': [625], 'credentials': [669], 'builder': [648],
-                                 'gateway': [628]},
-            'services_started': False}
+            'required_artifacts': required, 'blocked_services': blocked, 'services_started': False}
 
 
 def render_catalog(actor, *, spec=None):
@@ -319,6 +429,7 @@ def render_catalog(actor, *, spec=None):
     _maintenance_role()
     verify_installation()
     catalog = AuthorizedCatalog()
+    coordinates = credential_os_coordinates(spec) if spec is not None else None
     with short_transaction():
         effective = catalog.get_effective_settings(actor)
         values = dict(effective.values)
@@ -337,7 +448,7 @@ def render_catalog(actor, *, spec=None):
                   'receipt': None, 'runtime_bound': False,
                   'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS]}
         if spec is not None:
-            result['services'] = service_artifact(spec, values)
+            result['services'] = service_artifact(spec, values, **coordinates)
         return result
 
 

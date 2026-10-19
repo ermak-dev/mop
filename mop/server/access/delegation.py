@@ -1,5 +1,6 @@
 """Значения и конечная policy делегирования; без ORM, транспорта и role subclasses."""
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from uuid import UUID
 
 from mop.common import soul
@@ -8,6 +9,15 @@ from mop.common import soul
 def uuid_value(value):
     if type(value) is not UUID:
         raise ValueError('complete UUID binding required')
+
+
+@dataclass(frozen=True)
+class AgentManagementCredential:
+    """Существующий credential точного active delegation; не issuance/transport config."""
+    subject_id: int
+    credential_id: UUID
+    expires_at: datetime
+    token: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,35 @@ class ApprovedPolicy:
         if (not isinstance(self.digest, str) or not soul.HEX64.fullmatch(self.digest)
                 or type(self.owner_id) is not int or self.owner_id < 1):
             raise ValueError('exact approved policy reference required')
+
+
+@dataclass(frozen=True)
+class ReplacementIntent:
+    """Admission locator развёрнут доверенным портом, не аргументы из wire.
+
+    Source должен оставаться current; destination -- новый grant того же
+    target/Actor и точной policy, без неявного продления срока.
+    """
+    request_id: UUID
+    source: RoleBinding
+    destination: RoleBinding
+    definition_id: UUID
+    policy: ApprovedPolicy
+    expires_at: datetime
+
+    def __post_init__(self):
+        for value in (self.request_id, self.definition_id):
+            uuid_value(value)
+        if type(self.source) is not RoleBinding or type(self.destination) is not RoleBinding or type(self.policy) is not ApprovedPolicy:
+            raise ValueError('typed replacement bindings and exact approved policy required')
+        old, new = self.source, self.destination
+        if ((old.project_id, old.target_id, old.role, old.digest, old.human_owner_id) !=
+                (new.project_id, new.target_id, new.role, new.digest, new.human_owner_id)
+                or old.incarnation == new.incarnation or old.grant_id == new.grant_id
+                or (self.policy.project_id, self.policy.owner_id) != (old.project_id, old.human_owner_id)
+                or type(self.expires_at) is not datetime or self.expires_at.tzinfo is None
+                or self.expires_at.utcoffset() != timezone.utc.utcoffset(self.expires_at)):
+            raise ValueError('same-scope replacement with new incarnation and grant required')
 
 
 @dataclass(frozen=True)

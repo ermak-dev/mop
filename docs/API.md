@@ -306,6 +306,31 @@ recall bytes already sent; record in-flight outcome and deny later stages. A
 read-after-wait reauthorizes before returning data. No secret or private transcript
 is broadcast while waiting for a best-effort revocation notification.
 
+### Scoped action catalogue (#633)
+
+`GET /api/v1/capabilities` requires the current token or browser session and returns
+`Cache-Control: no-store`. Its finite query accepts only `schema_version=1` and
+optional canonical UUIDs `project_id`, `node_id`, `client_id`, once each. No scope
+means no actions; unknown, retired or foreign scopes never imply installation-wide
+access. Combined scopes are conjunctive, including current client ownership and
+service enrollment. Malformed, repeated and unknown query fields are refused.
+
+The v1 reply contains `schema_version`, `catalogue_version=1`, the installation
+`epoch`, current `actor` facts (`user_id`, `kind`, `human_owner_id`, `node_id`,
+`grant_id`), the exact requested `scope` (nullable UUID fields), and sorted unique
+`actions`. Actions come only from Access's canonical `ACTION_PERMISSIONS`, through
+the same Access/Grants evaluator as commands, including directory freshness,
+current group/direct permissions, delegation issuer/ancestry and assignment.
+Actor kind and approved program content do not grant actions. Actor and permission
+checks are repeated while materializing the response; an epoch change refuses it.
+
+This is advisory discovery, not an authority token or physical-effect promise.
+Consumers reject unknown catalogue versions/action IDs, refresh before each call,
+and retain the explicit context. Commands still authorize their actual resources
+and business prerequisites. `/api/v1/identity` remains identity facts only, not an
+unscoped permission catalogue. Private inbox registration/delivery is a separate
+contract (#649), not implied by management discovery.
+
 ## Identity and wire versioning
 
 * `schema_version` is the wire schema major, initially 1, not a row revision.
@@ -417,6 +442,77 @@ bounded admission limit with Retry-After; 503 unavailable authority/database.
 Preserve safe library refusal reasons. Raw untrusted exceptions are translated
 once at their adapter, not repeatedly sanitized into an empty generic error.
 A failed HTTP response is not proof the external effect failed.
+
+## Finite operation audit query (#626)
+
+`GET /api/v1/audit` is a read-only projection of the existing immutable
+`Operations.AuditEvent` evidence. It does not admit operations, repair state,
+create a second journal or run effects. The mounted legacy `/api/journal` is not
+an alias: `coverage` is exactly `["operation_audit"]`, not all historical bus
+messages, terminal traffic or private command contents. The frozen contract is
+also typed in [API.schema.yaml](API.schema.yaml); frontend migration uses this
+contract rather than guessing a legacy-compatible payload.
+
+Only these optional query fields are accepted, once each:
+
+| Field | Contract |
+| --- | --- |
+| `project_id` | Canonical UUID of an explicit project intersection; never grants visibility |
+| `limit` | Canonical decimal integer 1..100, default 100 |
+| `cursor` | Opaque authenticated keyset cursor, 1..4096 characters; use the same filter and limit |
+
+Every read requires the canonical `operations.view_audit` Django permission and
+current credential, identity, RBAC and project scope. Actor kind or `is_staff`
+is not installation-wide authority. Explicit all-project membership or Django
+superuser status can provide current project scope, not a bypass of credential
+checks. With no project filter, at most 100 currently authorized projects may
+be materialized; a larger scope returns 503 `unavailable` asking for an explicit
+project, never a truncated successful history. No current authorized scope is
+403 `permission_denied`; an absent or unauthorized explicit project is 404
+`not_found`. A valid scope with no matching evidence returns an empty page.
+
+Visibility is decided in SQL **before** keyset pagination and `LIMIT`: every
+pinned project of an operation must be currently authorized. A multi-project
+event is disclosed whole, with all sorted `project_ids`, or not at all; a
+project filter does not remove unauthorized project IDs from a visible row.
+Puppet events on a shared node use the puppet operation's projects, not its
+neighbors. Node-wide commands additionally require all current node projects.
+Service enrollment restricts reads to its bound node even when another node
+belongs to the same project. Delegated credentials additionally require the
+current grant/owner/subject chain and exact target/incarnation. A build
+operation's stored `node_id` is only an anchor, not proof of its complete build
+node scope: node-bound service readers do not receive build audit events.
+Project-authorized non-node readers see build targets as the actual project.
+
+A successful response has exactly these fields:
+
+```json
+{"schema_version":1,"epoch":"<uuid>","results":[{"id":"<positive-decimal>","operation_id":"<uuid>","revision":"<positive-decimal>","created_at":"2026-10-18T10:05:00Z","action":"restart","state":"refused","code":"dispatch_declined","reason":"target does not receive dispatch","target":{"kind":"puppet","id":"<uuid>","incarnation":"<uuid>"},"node_id":"<uuid>","project_ids":["<uuid>"]}],"next_cursor":null,"coverage":["operation_audit"]}
+```
+
+`id` identifies immutable audit evidence, not the operation. `revision` is the
+evidence's operation revision, encoded as a decimal string; `created_at` is UTC
+RFC 3339. `target.kind` is `node`, `puppet` or `project`; `incarnation` is a UUID
+for a bound puppet or null. Action/state/code/reason come from safe operation
+evidence, including refusal reasons. No actor binding, request parameters,
+private message plaintext/ciphertext, root/secret references, connection details,
+environment, arbitrary payload or raw provider error is included. DTOs are
+materialized immutable application values, not live ORM objects.
+
+Ordering is descending `(created_at, id)` with an exclusive keyset boundary.
+`next_cursor` is null only when the query has no further authorized matching row.
+This is finite browsing, not a retained snapshot or gap-free realtime replay:
+newer concurrent inserts appear on refreshing the first page, not in later
+older pages; newly committed older evidence can appear below the boundary.
+Cursors expire after 300 seconds and bind the installation epoch, live
+credential/authorization proof, complete allowed scope, selected project and
+limit. Tampering, expiry or a changed binding requires 410 `reset_required`
+with `reset: {"required": true}`; the client restarts without a cursor. A current
+authentication/permission revocation can instead refuse with 401/403. Scope and
+installation/restore authority are checked again after materialization; no stale
+successful page is returned when that check observes a change. Unavailable
+restore/database authority returns 503. All successes and refusals are
+`Cache-Control: no-store`. Mutating methods return 405.
 
 ## Durable operations implementation checkpoint (#625)
 
@@ -583,6 +679,89 @@ handler is bound only with a launch support (the target's job is registered for 
 incarnation); without it the machine route keeps refusing as unavailable. The last node
 step is not terminal: `activate_grant` follows on the server.
 
+#### Addressed launch delivery
+
+`POST /api/v1/machine/work/launch` takes exactly the version-1 `Work` object,
+not a definition UUID, project/owner selector or a reusable read capability. The
+caller must present its own current token, a `node-executor` service enrollment
+for that node, project/node access and canonical `execution.read_launch` permission
+in addition to the permissions for its claimed work. A human, another service
+purpose, another node/project or another executor's claim cannot read launch bytes.
+Only the current claimed `apply_identity` or `confirm_ready` of `create` is eligible:
+assignment revision/generation, incarnation, executor epoch, installation/restore
+generation, operation/step/claim identity, deadlines and retained create resource
+fences must still match. The server selects the definition from `CreateBinding`;
+wire metadata never grants definition-read authority.
+
+The rootless HTTP adapter forwards the original machine credential and Work through
+the finite protected-socket `read_launch` command. Only `CredentialApplication`
+opens the encrypted retained definition. Its Access-owned scoped reader uses
+`authorize_launch`, the current reserved provisioned grant/ancestry, exact definition
+and approved policy scope, seal/approval and retained references; it does not
+construct an owner credential or broaden generic `read_definition`. The launch
+pins must still name that owner's approved unrevoked project bootstrap and the
+pinned project image revision. Provider I/O runs outside database transactions;
+all authority, scope and pins are re-read after it and before disclosure.
+Revocation, completion, expiry or rebinding during that wait refuses the response.
+
+The no-store reply has exactly `schema_version`, `work`, `bootstrap_revision`,
+`bootstrap_digest`, `image_digest`, `manifest` (the approved definition's JSON
+object), `prompt` (canonical base64 of its actual approved bytes), `git_name`,
+`git_email`, `message` and `peer_token`. Create uses the owner's current Git
+identity, empty `message` and null `peer_token`: this endpoint does not issue an
+agent credential. `LaunchResponse.parse` verifies exact Work/pins and the complete
+bundle digest on the node. `MachineClient.read_launch` implements `LaunchQuery`
+through the existing verified HTTPS transport's explicit POST allowlist; the
+Work never appears in a URL. `AddressedLaunchSource` consumes this adapter.
+
+#### Initial-launch layout metadata (#738)
+
+`POST /api/v1/machine/work/initial-launch` uses the separate protected-socket
+`read_initial_launch` command and `initialcreate.parse_delivery`, not an extension
+of the role-only `LaunchResponse`. Its exact version-1 response fields are
+`schema_version`, `work`, `phase`, `bootstrap_revision`, `bootstrap_digest`,
+`image_digest`, `display_name`, `image_revision`, `image_policy`, `selection`,
+`git_name`, `git_email`, `role`, `bootstrap` and `consumers`. Missing or unknown
+fields are refused; there is no optional legacy shape. Work must match the
+addressed request exactly, including field types and phase.
+
+`display_name` is the canonical name assigned to this target, not a project name,
+a path or a local naming hint. It must be a valid `pu-<project>-<number>` name of
+at most 64 characters. The server snapshots the assignment name with the launch
+proof and refuses a change during provider I/O; a consumer with an existing
+registration must require the same name, not derive a different clone location.
+
+`image_revision` is the canonical UUID of the admitted `ImageRevision`, read
+through the pinned `IncarnationLaunch`, never the latest catalog revision.
+`image_policy` has exactly `policy_id` (the canonical UUID of that image's
+immutable `ProjectPolicySnapshot`), `cpu`, `memory_mb` and `disk_mb`. CPU is in
+MHz, not cores; memory and disk are in MiB (1,048,576 bytes). Each resource is a
+strict integer from 1 through 2,147,483,647; booleans, floats and numeric strings
+are invalid. This policy UUID is distinct from `selection.policy_id`, which
+identifies the admitted source/model/consumer selection. Image/policy/resource
+metadata are part of the same before/after-provider proof as the reserved
+selection and exact Work. A newer selection cannot replace the reservation;
+a mismatching pinned or unavailable node image refuses delivery.
+
+`image_digest` remains the logical SHA256 of UTF-8
+`image-revision:<image_revision UUID>`. It is checked against that UUID, but is
+not a hash of physical artifact bytes. These fields neither certify an installed
+image nor carry a physical receipt or installed capability flags. The installed
+root port must verify physical artifacts separately and enforce resources on
+the actual body cgroup: a passive scheduler hold does not constrain that cgroup.
+No raw image source, arbitrary path, argv or generic consumer destination is
+introduced. Existing phase-purpose byte restrictions remain unchanged: source
+credentials only for `prepare_body`, approved bootstrap and its selected inputs
+only for `bootstrap_body`, role bytes only for `initial_identity`/`native_exec`,
+model configuration/credentials only for `native_exec`, and no such bytes for
+`confirm_ready`. SQL/HTTP budgets, phase leases and cleanup reserves are unchanged.
+
+Startup still has to bind the protected credential client in the web root and
+supply the authenticated machine client to the node source (#644). Without the
+credential binding the endpoint returns unavailable; neither web nor worker gets
+a provider/root key. The scheduler remains metadata-only. This delivery does not
+implement or bind the physical `SessionApi`.
+
 `activate_grant` is discovered only once the registration and both node steps
 succeeded. The worker asks the credential service to activate the grant -- activation
 re-reads and re-checks the encrypted definition, so it can only run where the provider
@@ -669,14 +848,34 @@ trusted BindingResolver, not from these HTTP inputs. Production has no fabricate
 positive capability or fallback path mapping: an unbound support port refuses
 before an Operation is created.
 
-`GET /api/v1/machine/executor?schema_version=1&node_id=...` supplies the previous
-process epoch from server-owned current/replaced incarnations. An absent or
-ambiguous registration refuses; the agent cannot derive it from a puppet name or
-local marker. Restart acknowledgment uses the existing explicit previous/new epoch
+`GET /api/v1/machine/executor?schema_version=1&node_id=...` returns exactly
+`schema_version: 1`, `installation_id`, `epoch`, `node_id`, and `executor_epoch`.
+`installation_id` is the canonical `Installation.identity` string, never its
+numeric primary key; `epoch` and both executor/node coordinates are canonical UUID
+strings. The installation and previous process epoch are read under one short
+restore/installation admission, preserving enrolled-node, claim-work and every
+assignment's project permission checks. This read is `Cache-Control: no-store` and
+has no effects: even with installation effects disabled it neither registers nor
+restarts an executor, reconciles physical scopes, polls nor claims work. An absent
+or ambiguous registration refuses; the agent cannot derive it from a puppet name,
+local marker or bootstrap epoch snapshot. Incomplete executor-only responses are
+not supported. Restart acknowledgment uses the existing explicit previous/new epoch
 CAS. Claim, result and restart acknowledgments cannot escape an outer uncommitted
 caller transaction, including explicit autocommit-off transactions. External
 fact, clone and inspection reads also refuse such a caller transaction. Restore
 guard precedes Assignment and Operation/Step locks, including the expiry worker.
+
+The private node bootstrap consumer validates this complete live response through
+`MachineClient`, then compares its installation identity and node to the private
+transport export. `mop agent --bootstrap /absolute/private/bootstrap.json --check`
+is a bounded read-only check and is silent on success. Neither the export nor a
+local epoch file supplies authority. Its CA is loaded from validated private
+no-follow file bytes, not reopened by path or augmented with system trust;
+redirects and environment proxies are disabled. Startup refusal owns bounded
+executor/client cleanup even under repeated cancellation. Effectful native serve
+still requires a complete explicit physical root: the expanded machine action
+vocabulary does not enable missing physical implementations or bypass the
+`NativeBindings` capability refusal.
 
 Run the disposable native fixture with the worktree launcher:
 `mop dev controller --postgres 17 --label _restart_live_cases`. It uses Python 3.12 and
@@ -969,6 +1168,58 @@ not a pending-work queue. Operation and Step links are UUID values, never import
 of private operations models. A unique operation/step and a conditional unique
 unresolved assignment enforce admission across processes. `LandingToken` guards
 human landing ownership only; TerminalControl remains a separate realtime domain.
+
+#### Project landing v1 (#638)
+
+`GET /api/v1/projects/{project_id}/landing` requires current
+`execution.view_landing` in that current project. It is a finite SQL query, not
+an operation, node RPC, repair or token acquisition. It accepts only an optional
+canonical UUID `epoch` query parameter; duplicate/unknown parameters refuse.
+No cursor is needed for one resource. The response is exactly:
+
+```json
+{"schema_version":1,"epoch":"00000000-0000-0000-0000-000000000001","landing":{"project_id":"00000000-0000-0000-0000-000000000002","state":"unmaterialized","revision":"0","generation":null,"owner_id":null}}
+```
+
+An absent `LandingToken` is explicitly `unmaterialized`, revision `"0"`, without
+an owner or generation; reading never creates a row. A materialized token has
+state `free` (null owner) or `held` (the actual human Actor ID as an integer),
+with positive decimal-string revision and generation. No puppet name is resolved
+or guessed into an Actor, and no phantom holder is created.
+
+`POST` to its `/commands/take` and `/commands/release` accepts exactly
+`schema_version` (integer 1), canonical installation `epoch`, and
+`expected_revision` (canonical decimal string, 0..9223372036854775807).
+Both return the same v1 envelope with HTTP 200 only after an independent COMMIT.
+The commands require current `execution.acquire_landing` or
+`execution.release_landing` respectively, current project membership and a
+current **human** actor. Agent/service/delegated credentials cannot acquire or
+release by inheriting an owner's identity. Release is only by the exact current
+human owner. No force takeover, puppet parameter, request key or arbitrary
+operation/node anchor is supported. Revision 0 acquires only an unmaterialized
+row; an already-held token conflicts even when held by the same human. Release
+of an unmaterialized resource conflicts without creating one. Every successful
+transition increments revision/generation; late releases cannot touch a new
+acquisition.
+
+The public boundary rejects surrounding transactions (including disabled
+autocommit), uses the bounded short SQL transaction, locks the restore guard and
+installation before project/token locks, checks the installation epoch and
+revalidates live actor/permissions under the subject locks. A closed restore
+guard refuses; `effects_enabled` is not required for this SQL-only human state.
+There is no pool/provider I/O. Errors use the shared safe v1 error envelope;
+successes and refusals are `Cache-Control: no-store`. A DB commit with an unknown
+outcome is not retryable.
+
+A lost HTTP/COMMIT response is **not** a grant or permission to retake. Recovery
+is read-only: use the same project/epoch and compare the exact successor revision
+(`expected_revision + 1`) and actual human owner (take) or null owner (release).
+An unchanged revision, a later revision even with the same owner, another owner,
+a changed epoch or an unavailable read is uncertain: explain that uncertainty
+and do not POST again automatically. Even a matching observation describes that
+current resource state, not a historical command receipt or authority over
+execution/terminal work. A new intent needs a fresh explicit CAS binding.
+
 `IdentityApplication` and `ReadinessReceipt` require matching confirmed attempts.
 Send admission requires identity confirmation for that exact assignment generation,
 incarnation, role, digest and grant. None of these rows grants terminal control.

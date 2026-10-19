@@ -7,6 +7,8 @@ import type { ApplyToken, Entity, Identity, Json, ReadQuery } from './poolStore'
 import type { Session } from './useSession';
 import type { Counts, Kind, Puppet, Snapshot, VerdictKind } from './types';
 import { operations } from './useOperationFeed';
+import { AUDIT_POLL_S, auditQuery, parseAuditPage } from './audit';
+import type { AuditQuery, AuditView } from './audit';
 
 export const POLL_MS = 5_000;
 const TERMINAL = new Set(['succeeded', 'failed', 'refused', 'expired', 'cancelled', 'partial', 'unknown']);
@@ -43,11 +45,11 @@ function entity(raw: unknown, kind?: string): Entity {
   object(row.desired); object(row.observed); object(row.state);
   return { ...head, data: row as Record<string, Json> };
 }
-export const sessionKey = (session: Session) => JSON.stringify([session.login, session.role, session.generation ?? '']);
+export const sessionKey = (session: Session) => JSON.stringify([session.login, session.role, session.kind, session.authenticated, session.generation ?? '']);
 const context = (key: string) => ({ server: window.location.origin, user: key, scope: 'authorized-projects',
   authorization: key, credentialGeneration: key, target: '' });
 
-class PoolNetwork {
+class SharedPoolNetwork {
   state = createPoolState(context(''), '');
   key = '';
   private listeners = new Set<() => void>();
@@ -73,6 +75,125 @@ class PoolNetwork {
   private error: string | null = null;
   private detailErrors = new Map<string, string>();
   private now = Date.now();
+  // Audit -- один конечный query в том же владельце/context, не второй hook cache.
+  private auditQuery = auditQuery();
+  private auditOwners = 0;
+  private auditGeneration = 0;
+  private auditSequence = 0;
+  private auditAccepted = 0;
+  private auditController = new AbortController();
+  private auditReads = new Map<number, ApplyToken>();
+  private auditTimer: ReturnType<typeof setInterval> | null = null;
+  private auditPages = 0;
+  private auditCursors = new Set<string>();
+  private auditMorePending = false;
+  private auditReady = false;
+  private audit: AuditView = { journal: Object.freeze([]), error: null, loading: false, nextCursor: null, sourceKey: '' };
+  private auditSource() { return JSON.stringify([this.key, this.state.generation, this.auditGeneration, this.auditQuery.key]); }
+  private clearAudit(error: string | null = null) {
+    this.auditController.abort(); this.auditController = new AbortController();
+    for (const token of this.auditReads.values()) this.state = reducePool(this.state, { type: 'settled', token });
+    this.auditReads.clear(); this.auditGeneration++; this.auditAccepted = this.auditSequence;
+    this.auditPages = 0; this.auditCursors.clear(); this.auditMorePending = false; this.auditReady = false;
+    this.audit = { journal: Object.freeze([]), error, loading: false, nextCursor: null, sourceKey: this.auditSource() };
+  }
+  auditView(session: Session, active: boolean, query: AuditQuery = {}): AuditView {
+    let selected: ReturnType<typeof auditQuery>;
+    try { selected = auditQuery(query); }
+    catch (error) { return { journal: [], error: reasonOf(error), loading: false, nextCursor: null, sourceKey: '' }; }
+    if (!active || !session.login || !this.matches(session) || selected.key !== this.auditQuery.key || !this.auditOwners)
+      return { journal: [], error: active && !session.login ? 'Operation audit unavailable: sign in required' : null,
+        loading: false, nextCursor: null, sourceKey: JSON.stringify([sessionKey(session), selected.key, active]) };
+    return this.audit;
+  }
+  watchAudit(query: AuditQuery = {}) {
+    const selected = auditQuery(query);
+    if (!this.auditOwners || selected.key !== this.auditQuery.key) {
+      this.clearAudit(); this.auditQuery = selected; this.auditOwners = 0;
+      this.audit = { ...this.audit, sourceKey: this.auditSource() };
+      if (this.auditTimer) clearInterval(this.auditTimer);
+      this.auditTimer = setInterval(() => {
+        // Старые страницы -- конечный просмотр, не replay; refresh возвращает первую.
+        // Максимум два параллельных poll: медленный ответ всё ещё имеет шанс примениться.
+        if (this.auditPages <= 1 && !this.auditMorePending && this.auditReads.size < 2) void this.readAudit();
+      }, AUDIT_POLL_S * 1000);
+    }
+    this.auditOwners++;
+    if (!this.auditReady && !this.auditReads.size) void this.readAudit();
+    const key = selected.key;
+    return () => {
+      if (key !== this.auditQuery.key || !this.auditOwners || --this.auditOwners) return;
+      if (this.auditTimer) clearInterval(this.auditTimer);
+      this.auditTimer = null; this.clearAudit(); this.publish();
+    };
+  }
+  async moreAudit(session: Session, query: AuditQuery = {}) {
+    if (!this.matches(session) || auditQuery(query).key !== this.auditQuery.key || this.auditMorePending || !this.audit.nextCursor) return;
+    await this.readAudit(this.audit.nextCursor);
+  }
+  async refreshAudit(session: Session, query: AuditQuery = {}) {
+    if (!this.matches(session) || auditQuery(query).key !== this.auditQuery.key || !this.auditOwners) return;
+    this.clearAudit(); await this.readAudit();
+  }
+  private async readAudit(cursor?: string, restarted = false) {
+    if (!this.auditOwners || !this.key || this.controller.signal.aborted) return;
+    const token = this.begin({ type: 'detail' }), version = this.auditGeneration, at = ++this.auditSequence;
+    this.auditReads.set(at, token);
+    if (cursor) this.auditMorePending = true;
+    this.audit = { ...this.audit, loading: true }; this.publish();
+    const current = () => version === this.auditGeneration && token.generation === this.state.generation &&
+      this.auditReads.get(at) === token && this.auditOwners > 0;
+    try {
+      const query = new URLSearchParams({ limit: String(this.auditQuery.limit) });
+      if (this.auditQuery.projectId) query.set('project_id', this.auditQuery.projectId);
+      if (cursor) query.set('cursor', cursor);
+      const raw = await hybridRequest<unknown>(`/api/v1/audit?${query}`, undefined, this.auditController.signal);
+      if (!current() || at <= this.auditAccepted) return;
+      const page = parseAuditPage(raw, this.auditQuery.limit);
+      if (!this.state.epoch) {
+        // Первая подтверждённая REST authority: тот же epoch для всех DTO/read tokens.
+        this.dispatch({ type: 'bootstrap', generation: token.generation, epoch: page.epoch });
+      } else if (page.epoch !== this.state.epoch) {
+        this.dispatch({ type: 'context', context: this.state.context, epoch: page.epoch });
+        this.sequence++; this.closeSockets(); this.loading = false;
+        if (!restarted) await this.readAudit(undefined, true);
+        else { this.clearAudit('Operation audit unavailable: installation epoch changed again'); this.publish(); }
+        return;
+      }
+      if (cursor && (cursor !== this.audit.nextCursor || this.auditPages >= 100)) throw new Error('Operation audit pagination limit reached; refresh the first page');
+      if (page.next_cursor && (page.next_cursor === cursor || (cursor && this.auditCursors.has(page.next_cursor))))
+        throw new Error('Operation audit pagination repeated a cursor; refresh the first page');
+      const pages = cursor ? this.auditPages + 1 : 1;
+      if (pages >= 100 && page.next_cursor) throw new Error('Operation audit pagination limit reached; choose a project or refresh');
+      const rows = cursor ? [...this.audit.journal, ...page.results] : [...page.results];
+      if (new Set(rows.map(row => row.id)).size !== rows.length) throw new Error('Invalid operation audit pagination: repeated evidence');
+      this.auditAccepted = at; this.auditPages = pages; this.auditReady = true;
+      if (!cursor) this.auditCursors.clear();
+      if (page.next_cursor) this.auditCursors.add(page.next_cursor);
+      this.audit = { journal: Object.freeze(rows), error: null, loading: false, nextCursor: page.next_cursor, sourceKey: this.auditSource() };
+    } catch (error) {
+      if (!current()) return;
+      // Даже опоздавший 403 -- подтверждённый запрет текущего контекста, не
+      // транспортный шум. Он стирает общий store и все конкурирующие audit reads.
+      const denied = error instanceof HybridHttpError && [401, 403].includes(error.status);
+      if (!denied && at <= this.auditAccepted) return;
+      if (error instanceof HybridHttpError && error.status === 410 && error.code === 'reset_required' && cursor && !restarted) {
+        this.clearAudit(); this.publish(); await this.readAudit(undefined, true); return;
+      }
+      if (denied) {
+        this.dispatch({ type: 'reset', generation: this.state.generation, reason: 'context_changed' });
+        this.sequence++; this.closeSockets(); this.loading = false; this.reading.clear();
+      }
+      this.clearAudit(`Operation audit unavailable: ${reasonOf(error)}`); this.publish();
+    } finally {
+      // Старый finally не снимает loading нового запроса после reset/logout.
+      if (current()) {
+        this.auditReads.delete(at); this.dispatch({ type: 'settled', token });
+        if (cursor) this.auditMorePending = false;
+        this.audit = { ...this.audit, loading: this.auditReads.size > 0 }; this.publish();
+      }
+    }
+  }
 
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   get = () => this.state;
@@ -84,7 +205,7 @@ class PoolNetwork {
   private dispatch(action: Parameters<typeof reducePool>[1]) {
     const before = this.state.generation;
     this.state = reducePool(this.state, action);
-    if (before !== this.state.generation) { this.snapshotReady = false; this.detailErrors.clear(); }
+    if (before !== this.state.generation) { this.snapshotReady = false; this.detailErrors.clear(); this.clearAudit(); }
     this.publish();
   }
   private begin(query: ReadQuery): ApplyToken {
@@ -120,6 +241,8 @@ class PoolNetwork {
   }
   private stop() {
     this.sequence++; this.controller.abort(); this.closeSockets();
+    if (this.auditTimer) clearInterval(this.auditTimer);
+    this.auditTimer = null; this.auditOwners = 0; this.clearAudit();
     if (this.timer) clearInterval(this.timer);
     if (this.retry) clearTimeout(this.retry);
     this.timer = null; this.retry = null; this.owners = 0; this.loading = false; this.reading.clear();
@@ -137,6 +260,7 @@ class PoolNetwork {
     if (error instanceof HybridHttpError && (error.status === 401 || (error.status === 403 && ['not_authenticated', 'authentication_failed', 'permission_denied'].includes(error.code ?? '')))) {
       // Запрет чтения стирает приватные факты, а не оставляет их на экране до reload.
       this.dispatch({ type: 'reset', generation, reason: 'context_changed' });
+      this.clearAudit(`Operation audit unavailable: ${this.error}`);
       this.sequence++; this.closeSockets(); this.loading = false;
     }
     this.dispatch({ type: 'connection', generation: this.state.generation, status: 'disconnected', error: this.error });
@@ -259,10 +383,8 @@ class PoolNetwork {
         if (at !== this.sequence || token.generation !== this.state.generation) return;
         const epoch = text(body.epoch);
         if (!this.state.epoch) {
-          // До первого snapshot нет подписки и принятых entity; установка epoch
-          // не пропускает прежние callbacks через поколение нового контекста.
-          this.dispatch({ type: 'context', context: this.state.context, epoch });
-          token = this.begin({ type: 'snapshot', kind: 'puppet' });
+          // Первое связывание epoch не отменяет authority read того же context.
+          this.dispatch({ type: 'bootstrap', generation: token.generation, epoch });
         }
         if (!Array.isArray(body.results)) throw new Error('Invalid snapshot rows');
         const next = body.next_cursor == null ? null : text(body.next_cursor);
@@ -276,6 +398,7 @@ class PoolNetwork {
         cursor = next; token = this.begin({ type: 'snapshot', kind: 'puppet', snapshotId, cursor });
       } while (true);
       this.snapshotReady = true; this.error = null; this.publish();
+      if (this.auditOwners && !this.auditReady && !this.auditReads.size) void this.readAudit();
       await Promise.all([...this.details].map(id => this.readDetail(id)));
     } catch (error) { this.dispatch({ type: 'settled', token }); this.failure(error, token.generation); }
     finally { if (at === this.sequence) this.loading = false; }
@@ -342,6 +465,33 @@ class PoolNetwork {
     if (this.controller.signal.aborted) return;
     await this.load(); await this.refreshInvalidated(); await this.recover();
     if (!this.sockets.size && !this.retry) void this.connect();
+  }
+  async create(projectId: string, nodeId: string, definitionId: string, requestId: string) {
+    // Новая цель ещё не имеет incarnation/revision: только конечный create
+    // intent проекта (#627). Исход и recovery принадлежат общему store.
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    if (![projectId, nodeId, definitionId, requestId].every(value => uuid.test(value)))
+      throw new Error('Canonical project, node, definition and request ids are required');
+    if (!this.state.epoch || !this.snapshotReady) throw new Error('Refresh the pool before creating a puppet');
+    if (this.state.pending[requestId]) throw new Error('This create request is already tracked; recover it instead');
+    const body = { schema_version: 1, epoch: this.state.epoch, request_id: requestId,
+      not_after: new Date(Date.now() + 2 * 60_000).toISOString(),
+      params: { node_id: nodeId, definition_id: definitionId } };
+    this.dispatch({ type: 'track', requestId });
+    const token = this.begin({ type: 'detail' });
+    try {
+      const result = this.applyOperation(await this.request(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/commands/create-puppet`, body), token);
+      if (result?.operation) operations.accepted(result.operation.target.id, result.id);
+      await this.recover();
+      return result?.id ?? null;
+    } catch (error) {
+      this.dispatch({ type: 'settled', token });
+      // Потерянный ответ не повод создавать ещё одного папета.
+      await this.recover();
+      if (this.operation(requestId)) return this.operation(requestId)!.id;
+      throw error;
+    }
   }
   async command(id: string, action: string, params: Record<string, unknown>, requestId: string) {
     const row = this.puppet(id);
@@ -432,5 +582,5 @@ export function presentPuppet(row: Entity, now = Date.now(), invalidated = false
     soul: typeof desired.role === 'string' ? desired.role : null,
     soul_digest: typeof desired.bundle_digest === 'string' ? desired.bundle_digest : null, soul_inc: row.incarnation };
 }
-export const poolNetwork = new PoolNetwork();
+export const poolNetwork = new SharedPoolNetwork();
 export function usePoolState() { return useSyncExternalStore(poolNetwork.subscribe, poolNetwork.get); }

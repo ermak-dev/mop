@@ -1,4 +1,4 @@
-// Журнал админа читает закрытый /api/journal (#424), не публичный снимок.
+// Operation audit читает frozen /api/v1/audit через общего владельца DTO.
 // Панель сессии и движки операций не принадлежат фильтру ростера.
 import { Alert, Group, Stack, Tabs, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
@@ -6,9 +6,12 @@ import { usePool } from "./usePool";
 import { useOperationBalloons } from "./useOperationBalloons";
 import { fetchSession, GUEST, hasControls, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
 import { useJournal } from "./useJournal";
+import { sessionKey } from './poolNetwork';
+import type { AuditQuery } from './audit';
 import { useHashPage } from "./useHashPage";
 import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
+import { CreateBox } from "./components/CreateBox";
 import { DashboardSplit } from "./components/DashboardSplit";
 import { PuppetCard } from "./components/PuppetCard";
 import { NodesPanel } from "./components/NodesPanel";
@@ -34,10 +37,12 @@ export default function App() {
   // До подтверждённой Django identity приватный ростер не читается.
   const [failed, setFailed] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
-  // Журнал (#422): закрытый источник, тянет только admin и только пока
-  // страница журнала открыта (опрос каждые POLL_S, ревью #422); на 401/403
-  // и смену роли записи стирает сам хук -- на экране не остаётся прежних.
-  const journal = useJournal(session, page === "journal");
+  // UI не угадывает operations.view_audit по frontend role: текущую
+  // identity/credential/scope проверяет сервер. Чтение только на открытой странице.
+  const identity = sessionKey(session);
+  const [auditSelection, setAuditSelection] = useState<{ identity: string; query: AuditQuery } | null>(null);
+  const auditQuery = auditSelection?.identity === identity ? auditSelection.query : {};
+  const journal = useJournal(session, page === "journal", auditQuery);
   // Стартовый опрос и обновление на возврат к вкладке (#416, ревью): cookie
   // сессии живёт TTL, и открытая вкладка без reload показывала бы админ-ссылку
   // и логин вечно. Порядок без гонки со входом: опрос кладёт ответ только
@@ -89,7 +94,6 @@ export default function App() {
   // Карточка папета (#463): цель держит App, не таблица -- закрытие и смена
   // роли/логина гасят её отсюда одним setState, а опоздавший ответ прежней
   // цели отбрасывает сам хук (поколение). Гостю и не-admin опенера нет.
-  const identity = JSON.stringify([session.login, session.role, session.generation]);
   const [selection, setSelection] = useState<{ name: string; identity: string } | null>(null);
   const puppet = selection?.identity === identity ? selection.name : null;
   const setPuppet = (name: string | null) => setSelection(name ? { name, identity } : null);
@@ -122,7 +126,7 @@ export default function App() {
             <Tabs.Tab value="main">Пул</Tabs.Tab>
             <Tabs.Tab value="nodes">Узлы</Tabs.Tab>
             <Tabs.Tab value="tokens">Токены</Tabs.Tab>
-            {hasControls(session) && <Tabs.Tab value="journal">Журнал</Tabs.Tab>}
+            {session.login && <Tabs.Tab value="journal">Operation audit</Tabs.Tab>}
           </Tabs.List>
         </Tabs>
         <Group gap="md">
@@ -142,12 +146,12 @@ export default function App() {
       <DashboardSplit open={!!target} main={
         <main className="dashboard-main">
           {page === 'journal' ? (
-            <JournalPage journal={journal.journal} error={journal.error} open={() => {}}
-              sourceKey={identity} />
+            <JournalPage key={identity} {...journal} query={auditQuery}
+              onQuery={query => setAuditSelection({ identity, query })} />
           ) : <Stack gap="md">
             {snapshot && snapshot.errors.length > 0 && <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join('\n')}</Alert>}
             {page === 'main' && <>
-              {hasControls(session) && <Text size="sm" c="dimmed">Creation is not yet exposed by the new controller.</Text>}
+              <CreateBox session={session} />
               {snapshot && <PoolTable projects={snapshot.projects} sessions={snapshot.sessions}
                 masters={snapshot.masters} session={session} selected={target}
                 onOpen={hasControls(session) ? setPuppet : undefined} />}

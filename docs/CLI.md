@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop add`, `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop landing`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop send`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
+Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -29,23 +29,20 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [git-origin] --role <role>
+mop add <project-id> --node-id <id> --definition-id <id> --epoch <id>
 
-Without origin, the origin of the current working copy is used. The name is
-picked automatically: <project>-<number>; placement over the pool and the
-8 GB reservation are not chosen here. Silent when the puppet is running; on
-a terminal it shows the current step. The new puppet is in mop list.
-Use mop models to see model IDs offered by the selected proxy.
+Submit a durable puppet create command using an explicit project, node and
+approved immutable role-definition id. The server assigns the target, name and
+incarnation; no target revision is required or accepted. Origin, role-name,
+shell and force inputs are not supported. No git, .env, bus or SSH fallback.
 
---role names the new puppet's role (soul name): the creation carries a
-request_id, the answer is checked against the server's echo of the role
-triple. A role principal (a grant master) names the role and sends no
-bootstrap policy of its own: the child inherits the parent's approved
-snapshot. A roleless add is gone: every puppet carries a soul.
-
---request-id retries an earlier unknown outcome under its id: the server
-reconciles to the job it reserved instead of creating a second one; a
-changed payload under the same id is refused before any effect.
+--request-id fixes the initial command identity before I/O; --not-after fixes
+its absolute UTC execution deadline (default two minutes). --wait is a bounded
+GET wait. An accepted receipt is not a running puppet: pending/unknown outcomes
+return exit 3. Recover with mop operation using the original request key and
+epoch; neither a lost reply nor a lookup failure automatically reposts create.
+Actual body launch/readiness depends on the server's configured bindings.
+The explicit HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop addresses
@@ -179,20 +176,28 @@ The response describes observed controller readiness, not puppet health.
 #### mop landing
 
 ```text
-landing token of this project: mop landing [take <puppet>|give|show] [--force]
+mop landing <show|take|give|recover-take|recover-give> <project-id> [--epoch id --expected-revision N] [--owner-id N]
 
-  mop landing                   who holds the token, if anyone
-  mop landing take pu-mop-3     grant the token to pu-mop-3 before it lands
-  mop landing give              take it back on the puppet's report
-  mop landing take pu-mop-3 --force
-                                take it from a gone master; says whose it was
-  mop landing give --force      release a gone master's token
+Show one authorized project landing resource over HTTPS. An absent token is
+explicitly unmaterialized at revision 0, not held and not silently created.
+Take and give require an explicit canonical project id, installation epoch
+and exact decimal-string revision. Ownership is the actual current human Actor,
+not a puppet name, delegated owner, git identity or local project context.
+Give releases only that human's own token. There is no force takeover.
 
-Exactly one puppet between merge and push per project: two parallel pushes
-race, and the second bounces non-fast-forward. take refuses while another
-master holds the token, naming who and since when; asking again for the same
-puppet is not an error. The holder is your login on the bus; a holder that
-went away is released with --force.
+A successful SQL CAS response is printed only after the server commit. A lost
+or malformed response triggers only a GET of the same project/epoch. Recovery
+compares the exact successor revision and human owner (or null after give).
+It is a current observation, not a historical command receipt; even a matching
+observation returns exit 3 with command_outcome unknown. Never retake blindly.
+For a later read-only recovery, recover-take/recover-give also require the
+original actual Actor's --owner-id. A later revision, even for that same owner,
+does not match. No Operation/request-id or node anchor is created.
+
+The explicit HTTPS origin/CA and transient Django token follow mop health;
+no .env, legacy server context, bus or local login store is used.
+MCP conservatively requires all three canonical permissions and a human actor;
+the server checks the individual read/acquire/release permission on each call.
 ```
 
 #### mop list
@@ -304,23 +309,26 @@ The explicit HTTPS origin/CA and transient Django token follow mop health.
 #### mop send
 
 ```text
-send a message to a pool puppet or a session on this machine
+mop send <id> <text|-> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
 
-  mop send <target> <text>            send
-  mop send <target> -                 text from stdin
-  mop send <target> <text> --wait[=N] send and wait until the recipient goes free
-  mop send --list                     live sessions on this machine
+Submit one finite remote send through /api/v1/messages. The target is a puppet
+assignment resource id, never a name, pid, directory or socket. Without a full
+explicit binding, authorized detail supplies the epoch, incarnation and desired
+revision, not the projection clock. The request key and UTC --not-after (default
+two minutes) are fixed before context/detail I/O. MCP requires the full binding.
 
-<target> — puppet name (pu-<project>-1), session name, pid, directory, or socket
-path. A puppet is recognized by the pu- prefix and reached over the bus; anything
-else is a local session, reached directly through its uds inbox.
+Text '-' reads bounded stdin; UTF-8 text is limited to 16384 bytes, nonempty and
+without NUL. Newlines are preserved. Text stays in the transient request body, not
+a URL, diagnostic or local store. --priority now|next|later defaults to next.
+--wait-seconds N (0..60) is the server command field; --wait seconds is a bounded
+GET-only operation wait. Neither option proves idle state or message delivery.
 
-  --priority now|next|later   where in the recipient's queue (default next)
-  --mode bypass|prompting     which permission mode to present as (bypass)
-  --quiet                     silent, exit code only
-  --force                     take over a puppet another master leads
-
-Channel protocol — CHANNEL.md, bus subjects — BUS.md.
+accepted/unknown/outstanding operations exit 3, not delivered. Recover with mop
+operation using the original request-id and epoch; a lost reply never reposts.
+Local send/--list, --mode, --force, --local, --reply-to and --notify-when-idle are
+explicitly unsupported before I/O: this client has no trusted holder endpoint.
+An unavailable physical message binding is a server refusal, never bus/UDS/SSH
+fallback. The HTTPS origin/CA and transient Django token follow mop health.
 ```
 
 #### mop stat
@@ -584,7 +592,7 @@ Sets status::wip and, unless --no-branch, creates the issue's branch.
 #### mop dev chat-probe
 
 ```text
-mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py]: probe the installed interactive Claude
+mop dev chat-probe [--output DIR] [--timeout seconds] [--history-module /path/session.py] [--model-hooks] [--isolated-normal] [--mcp-activation]: probe the installed interactive Claude
 
 Uses a fresh home/workdir, a private randomly named tmux server and a loopback
 Messages fixture with a dummy key. No existing session is resumed. All responses
@@ -611,6 +619,45 @@ Captures live ready/after-model/after-clear registry, socket peer and key fields
 without peerToken values. Optional --history-module explicitly selects a trusted
 local regular session.py source (not a downloaded file); invokes its history
 before and after /clear and records only safe headers/counts, not private records.
+
+Optional --model-hooks replaces the default scenarios with same-model, real
+change and return-to-target observations. A fixed quoted command uses isolated
+Python and reads at most 4096 bytes; malformed and at-limit inputs are dropped.
+Only event/session/to-model/from-model/receiver-time reach model-hooks.jsonl.
+The new private fixture sink is activated after live PID/start/registry/socket
+proof; startup hooks before activation are lost. This is fixture-only activation,
+not production HookBridge/registration acceptance. Requested --model, statusline
+and next fixture requests are not model confirmation. This probe implements no
+readiness receipt or scope retirement. If the installed --help explicitly says
+--bare skips settings hooks, hook scenarios report unsupported in this mode;
+silence alone remains unknown and does not prove normal-mode hook behavior.
+The host probe never removes --bare. Default scenarios/settings are unchanged.
+
+--model-hooks --isolated-normal instead always builds a new owned nonroot Docker
+fixture. It accepts only a local Unix Docker endpoint, refuses host managed
+policy before copying/building/launching, snapshots only the installed native ELF
+and two tracked fixture modules, and mounts no host paths or sockets. Public
+image dependencies may be downloaded at build time. Runtime uses --network none,
+private PID/cgroup/mount/net/IPC namespaces, a distinct fixture UID, dropped
+capabilities and no-new-privileges. Both Docker inspect and kernel evidence must
+prove isolation before the native CLI starts; failure has no host fallback.
+Fresh home/config/runtime and the dummy loopback provider remain mandatory.
+This mode cannot be combined with --history-module. Reports and raw fixture
+artifacts are copied out privately before owned container/image cleanup; only
+safe hook/identity projections reach report.json. Native version is measured
+inside the container, not inferred from the host installation.
+
+Optional --mcp-activation requires --model-hooks --isolated-normal and no history
+module. Replaces hook/model-switch/inbox scenarios with one native empty-to-active
+MCP discovery experiment. A fixed stdlib toy server is generated only inside the
+owned Python 3.12 container. It initializes with zero tools, then publishes one
+safe no-argument fixture tool after an explicit fixture-only marker and standard
+notifications/tools/list_changed. No policy bypass, real token, Actor/grant or
+management operation is implemented or tested. Native PID/start/session must
+remain unchanged. Missing requery/provider-tool evidence remains unknown, never
+acceptance. Only bounded MCP methods/counts/names and provider tool-name
+projections are retained, not raw protocol, prompts or tokens. Default strict
+empty MCP is unchanged. Native and toy PID/start cleanup is measured separately.
 
 Prints the report path and one verdict per scenario. Exit 1 for runner errors,
 not for unsupported or unknown scenarios. Does not contact the pool or load
@@ -759,7 +806,7 @@ Docker socket enter test containers. Cleanup failures are reported explicitly.
 --realtime supplies the declared NATS binary from an owned Docker image; the
 checks start their own native TLS broker with fixture-only principals and ACLs.
 --cross-uid runs only the narrow root UID gate (_credential_uid_gate.py,
-the two real cross-peer cases) as root inside the owned container,
+the two real cross-peer cases and the fresh-installer daemon case) as root inside the owned container,
 after the setup builds the uid pair; the default suite still runs as
 unprivileged ci.
 --web adds the frontend gates — the dashboard build check, full TypeScript
@@ -940,6 +987,20 @@ the driver's remote shell; a nonzero child exit remains nonzero. Does not copy o
 credentials and does not create, restart or stop the body.
 ```
 
+#### mop driver hold-probe
+
+```text
+mop driver hold-probe: check the passive installed anchor in an owned container
+
+Runs the production standalone artifact with root and nonroot UIDs in a fresh
+Python 3.12 Docker container, with no network, pool, host credentials or writable
+host mounts. Checks exact hold argv, signals, hostile environment, bytes/hash,
+root ownership, modes and symlink refusals. Root runs only the passive hold,
+never a native runtime. Removes the owned container even after a failed check.
+Requires an existing Docker installation and a mop source checkout with tests.
+This is not an installer, runtime binding, allocation or native readiness check.
+```
+
 #### mop driver list
 
 ```text
@@ -947,6 +1008,22 @@ mop driver list: bodies standing on this node — no Nomad needed
 
 The roster of this machine, asked from its driver: on a hypervisor the
 containers, on a host node the live tmux servers. Runs on the node itself.
+```
+
+#### mop driver phase-input-probe
+
+```text
+mop driver phase-input-probe: check private phase handoff in an owned container
+
+Runs the production input writer, root snapshot store and body reader in a new
+Python 3.12 Docker container with distinct actual root/node/body UIDs. Checks
+exact selected bytes, private permissions, substitution/race refusals, bounded
+capacity and retained physical cleanup after Work expiry. Copies only the fixed
+source closure; no host mounts, credentials, network, sudo or host services.
+Removes only its labelled container/image, including after a failed check.
+Requires an existing Docker installation and the mop source checkout with tests.
+This checks private transport, not machine authorization, the root backend,
+a phase runner/broker, native execution, readiness, installation or rollout.
 ```
 
 #### mop driver purge-clone
@@ -969,6 +1046,20 @@ mop driver run <name>: raise the body and run the puppet inside it
 What the job spec calls (the outer wrapper). Runs on the node that owns the
 puppet: ensure the body, bootstrap the sandbox through the server,
 push the inner wrapper in and hold its session until it ends.
+```
+
+#### mop driver scope-probe
+
+```text
+mop driver scope-probe: check physical host containment in a new private Docker fixture
+
+Builds an isolated systemd fixture with private PID/cgroup namespaces, no host
+bind mounts, no Docker socket and no network. Runs only the fixture's installed
+double-fork runner, never an existing body, host service or user session.
+
+Exit 0 is actual OS containment acceptance; exit 77 means the kernel could not
+provide the private fixture. Neither outcome binds production capabilities or
+installs a supervisor. Requires an already available Docker installation.
 ```
 
 #### mop driver sweep
@@ -1421,6 +1512,9 @@ Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
   worker                        run the bounded worker lifecycle
   backup --file PATH            protected PostgreSQL custom-format dump
   restore --file PATH           restore into an empty DB, reset epoch, disable effects
+  enroll-node --node UUID --origin HTTPS_ORIGIN --ca-file NODE_CA_PATH
+    --file NEW_PRIVATE_FOLDER/bootstrap.json --node-file NODE_OS_PATH
+    [--enrollment UUID]         export a node service transport; exact live reexport only
 
 Every action except setup and offline schema requires an absolute MOP_CONTROLLER_BOOTSTRAP
 file. Maintenance uses its own DB principal with schema/backup rights. Web and
@@ -1551,9 +1645,9 @@ mop server install <action> --spec PATH: independent fresh-install preparation
   plan          validate protected topology and show ordered prerequisites (stdlib)
   provisioning  review OS accounts/directories and explicit PostgreSQL topology
     --apply     prepare a new local Debian host/PVE guest (sudo, external DB only)
-  database      create a new DB and four least-privilege roles over verified TLS
+  database      create a new DB and five least-privilege roles over verified TLS
     --provision-bootstrap PATH  separate protected database-only admin document
-    --passwords-file PATH       protected JSON of four new DB role passwords
+    --passwords-file PATH       protected JSON: web, worker, gateway, credential, maintenance
   database-check --provision-bootstrap PATH  verify an external DB as maintenance
   bootstrap --role NAME --password-file PATH  write a new private role bootstrap
   prepare --bootstrap PATH    direct maintenance: migrations then trust initialization
@@ -1575,8 +1669,28 @@ It refuses existing trees/accounts and provisioned-DB topology: PostgreSQL serve
 TLS/network provisioning needs its own explicit operator input. It starts no service,
 does not connect to the DB, does not invoke PVE and never claims runtime readiness.
 The same local command can run inside a host or an explicitly created PVE guest.
-Rendered units are review artifacts; worker/credential/realtime bindings remain
-separately gated. Full runtime and host/PVE reboot acceptance is a later gate.
+Rendered units are review artifacts. Credential composition resolves the declared
+credentials OS account and exact web/worker peer UIDs; its bootstrap purpose is
+credential. Worker/realtime bindings and native lifecycle acceptance remain gated.
+The separate credential pool adds 8 connections to 24 ordinary plus 8 maintenance;
+PostgreSQL needs 40 ordinary slots plus its reserved capacity. No unit is installed
+or started by rendering. Full runtime and host/PVE reboot acceptance is a later gate.
+```
+
+#### mop server preview
+
+```text
+mop server preview --directory PATH [--port 18080]: local isolated Django Admin
+
+Starts a new disposable PostgreSQL 17 container and production Admin over
+loopback HTTPS using the declared server extra of the current interpreter.
+Requires local Docker and openssl. It reads no installation .env or pool data.
+The directory must not exist; generated keys and the initial admin password
+are written there privately, never printed. The localhost certificate is
+self-signed. Username: admin. Stop with Ctrl+C (or stop this owned task).
+The container and its preview database are removed on shutdown; private
+bootstrap/password/log files remain. This is not a ready production pool:
+unbound runtime operations still refuse and effects start disabled.
 ```
 
 #### mop server proxykey
@@ -1788,20 +1902,61 @@ Started by systemd and the job spec, not by hand.
 #### mop agent
 
 ```text
-node agent: answers the bus about the puppets on this node (unit mop-agent)
+node agent: explicit private HTTPS bootstrap, one per node under systemd
 
-  mop agent            subscribe and serve, until stopped
-  mop agent --check    ask this node's agent over the bus whether it answers
+  mop agent --bootstrap /absolute/private/bootstrap.json --check
+  mop agent --bootstrap /absolute/private/bootstrap.json
 
-One per node, under systemd, outside the job spec (docs/BUS.md): it must
-answer precisely while a puppet is restarting.
+--check performs bounded authenticated executor discovery and verifies the
+installation identity, epoch and enrolled node. It never changes the executor
+fence, reconciles physical scopes, polls work or claims effects. An executor-only
+response without installation coordinates is refused, not upgraded locally.
+
+Normal serve is unavailable until a complete native physical startup root is
+bound. A transport export is not physical reconciliation or readiness evidence.
+No .env, bus.json, ready.json or previous login fallback is supported.
+```
+
+#### mop host-root
+
+```text
+mop host-root --physical /absolute/root-owned/physical.json
+
+Installed privileged host supervisor, not an HTTP agent or arbitrary RPC.
+The installed launcher uses an isolated interpreter and immutable root-owned
+release before importing this command. A user checkout is refused. The bounded
+no-follow config contains only installed node/installation IDs, OS UIDs/GID and
+physical paths: no credentials, .env, policy snapshots or saved executor epoch.
+
+This root retains physical ownership across HTTP frontend disconnects. It does
+not enable the incomplete native action graph or install a host service.
 ```
 
 #### mop mcp
 
 ```text
-mop mcp [--check]: expose pool commands as tools
+mop mcp [--check] [--project-id UUID] [--node-id UUID] [--client-id UUID]: authenticated management tools
 
-Started by a claude session. --check shows the local profile and connection
-settings; the available tools depend on the session's access.
+Uses only transient HTTPS context and the server's current scoped action
+catalogue. --check queries that catalogue and reports the private inbox as
+unavailable; it does not register an endpoint or confirm native delivery.
+No scope exposes only authenticated identity/health diagnostics, not all actions.
+Management tools invoke the bound commandlets themselves. The private inbox,
+agent discovery, reports and idle notifications remain unavailable.
+
+Installed bodies may instead select --body-standby --body-bootstrap PATH
+--body-context PATH --body-deadline UTC. These options require two distinct
+absolute sibling paths in an owned private directory and an explicit UTC
+startup deadline no more than 300 seconds ahead. Files may initially be absent:
+initialize succeeds with no identity or tools; no commandlet runs before binding.
+The verified installed root publishes the common BodyBootstrap descriptor after
+producer ACK and the separate ManagementContext only after grant activation.
+Only bounded private no-follow single-link files and certificate bytes are read,
+never a CA pathname or permissions from the descriptor. A successful verified
+HTTPS Agent catalogue enables discovery and tools/list_changed; each later call
+refreshes current permissions and refuses expired or changed identity/scope.
+Body mode ignores ambient HTTPS context, cannot combine with --check, ordinary
+scope selectors or explicit global HTTPS selectors, and exits unsuccessfully if
+the handoff deadline expires. This client does not supply the root issuer or
+prove physical body binding; the private inbox remains unavailable.
 ```

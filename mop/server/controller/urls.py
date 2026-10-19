@@ -16,11 +16,15 @@ from . import authviews as auth
 from . import operationviews as operations
 from . import machineviews as machine
 from . import telemetryviews as telemetry
+from .producerviews import RegisterProducer
 from . import terminalviews as terminal
 from . import endpointviews as endpoint
 from .buildviews import BuildProject
 from . import projectionviews as projection
 from .usageviews import Usage
+from .auditviews import Audit
+from . import landingviews as landing
+from .catalogueviews import Capabilities
 
 from mop.server.gateway.views import gateway_view
 
@@ -30,6 +34,7 @@ urlpatterns = [
     path('v8/management/<path:resource>', gateway_view),
     path('admin/', admin.site.urls), path('api/v1/health', Health.as_view()),
     path('api/v1/usage', Usage.as_view()),
+    path('api/v1/audit', Audit.as_view()),
     path('api/v1/auth/csrf', auth.csrf),
     path('api/v1/auth/login', never_cache(auth.Login.as_view())),
     path('api/v1/auth/logout', never_cache(auth.Logout.as_view())),
@@ -38,11 +43,17 @@ urlpatterns = [
     path('api/v1/auth/token/revoke', auth.RevokeToken.as_view()),
     path('api/v1/machine/work', machine.Work.as_view()),
     path('api/v1/machine/work/input', machine.ActionInput.as_view()),
+    path('api/v1/machine/work/launch', machine.Launch.as_view()),
+    path('api/v1/machine/work/initial-launch', machine.InitialLaunch.as_view()),
+    path('api/v1/machine/management-context', machine.ManagementContext.as_view()),
     path('api/v1/machine/executor', machine.ExecutorState.as_view()),
+    path('api/v1/machine/executor/host', machine.HostExecutorState.as_view()),
+    path('api/v1/machine/executor/host/bind', machine.HostExecutorBind.as_view()),
     path('api/v1/machine/work/claim', machine.Claim.as_view()),
     path('api/v1/machine/work/result', machine.Result.as_view()),
     path('api/v1/machine/executor/restarted', machine.Restarted.as_view()),
     path('api/v1/machine/facts', machine.Facts.as_view()),
+    path('api/v1/machine/session-producers', RegisterProducer.as_view()),
     path('api/v1/machine/telemetry', telemetry.Ingest.as_view()),
     path('api/v1/sessions/telemetry', telemetry.Latest.as_view()),
     path('api/v1/sessions/history', telemetry.History.as_view()),
@@ -66,13 +77,18 @@ urlpatterns = [
     path('api/v1/machine/observation-producers/<uuid:target_id>/<str:kind>', projection.ProducerStatus.as_view()),
     path('api/v1/machine/observation-context', projection.ObservationContext.as_view()),
     path('api/v1/identity', auth.Identity.as_view()),
+    path('api/v1/capabilities', Capabilities.as_view()),
     path('api/v1/projects', auth.Projects.as_view()),
     path('api/v1/projects/<uuid:project_id>', auth.Project.as_view()),
+    path('api/v1/projects/<uuid:project_id>/landing', landing.LandingDetail.as_view()),
+    path('api/v1/projects/<uuid:project_id>/landing/commands/take', landing.TakeLanding.as_view()),
+    path('api/v1/projects/<uuid:project_id>/landing/commands/release', landing.ReleaseLanding.as_view()),
     path('api/v1/projects/<uuid:project_id>/commands/build', BuildProject.as_view()),
     path('api/v1/projects/<uuid:project_id>/commands/create-puppet', operations.CreatePuppet.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/drain', operations.DrainNode.as_view()),
     path('api/v1/nodes/<uuid:node_id>/commands/enable', operations.EnableNode.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/restart', operations.RestartPuppet.as_view()),
+    path('api/v1/puppets/<uuid:target_id>/commands/update', operations.UpdatePuppet.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/stop-job', operations.StopPuppetJob.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/wipe', operations.WipePuppet.as_view()),
     path('api/v1/puppets/<uuid:target_id>/commands/delete', operations.DeletePuppet.as_view()),

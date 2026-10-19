@@ -276,6 +276,10 @@ def _maintenance_role():
         raise RuntimeError('this action requires the separate maintenance DB principal')
 
 
+class RestoreGuardBusy(RuntimeError):
+    """Блокировка допуска занята, но это не доказательство повреждения guard."""
+
+
 def _guard_row(using, *, lock=False):
     from django.db import DatabaseError
     from .models import RestoreGuard
@@ -289,7 +293,11 @@ def _guard_row(using, *, lock=False):
     except RestoreGuard.DoesNotExist as exc:
         raise RuntimeError('controller restore guard is missing; maintenance required') from exc
     except DatabaseError as exc:
-        raise RuntimeError(f'controller restore guard is unavailable: {type(exc).__name__}; maintenance required') from exc
+        # SELECT FOR UPDATE может законно проиграть короткий lock budget
+        # другому admission. SQLSTATE, не raw driver text, сохраняет причину.
+        if lock and getattr(exc.__cause__, 'sqlstate', None) == '55P03':
+            raise RestoreGuardBusy('controller restore guard lock timeout') from exc
+        raise RuntimeError(f'controller restore guard is unavailable: {type(exc).__name__}') from exc
 
 
 def require_restore_ready(using='default', *, lock=False):
@@ -462,6 +470,13 @@ def create_admin(username, password, using='default'):
     return {'username': user.username}
 
 
+def enroll_node(*, node_id, origin, ca_file, file, node_file, enrollment_id=None):
+    """Maintenance-only freshNode issuer; только private OS transport export."""
+    from .nodebootstrap import issue
+    return issue(node_id=node_id, origin=origin, ca_file=ca_file, file=file,
+                 node_file=node_file, enrollment_id=enrollment_id)
+
+
 def close_pools():
     """Вызывается после quiescence на shutdown, не после каждого request."""
     connections.close_all()
@@ -562,9 +577,8 @@ def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None
     Restart потребляется только machine HTTP, не этим controller poll.
     """
     from ..access.context import ActorContext, ActorKind
-    from ..access.grants import Grants
     from ..operations.worker import Worker
-    from .machinebinding import AssignmentBindings
+    from .machinebinding import local_grants
 
     node_bound = node_executor is not None
     if node_bound != (executor is not None):
@@ -583,7 +597,7 @@ def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None
 
     # Только SQL authority: credential/owner/approval перечитываются каждым
     # use case. Provider secret I/O не вызывается под application transaction.
-    authority = Grants(provider=None, bindings=AssignmentBindings()).local_authority()
+    authority = local_grants().local_authority()
     operations = operations_service(grants=authority, executor=executor)
     builds = None
     if build_bound:

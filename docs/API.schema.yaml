@@ -8,6 +8,101 @@ info:
     is enforced by tests and docs/API.md. Every operation can refuse with the shared
     error envelope: schema_version plus error{code, message, retryable}.'
 paths:
+  /api/v1/audit:
+    get:
+      operationId: api_v1_audit_retrieve
+      description: Read-only immutable operation audit, authorized before keyset pagination.
+        Requires operations.view_audit and current complete project/node/grant scope.
+        Coverage is operation_audit, not legacy bus messages. Responses are no-store;
+        invalid or stale cursors require a reset (410).
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        description: Opaque descending keyset cursor; expires after 300 seconds.
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 100
+        description: Maximum audit items; the same limit is required on continuation.
+      - in: query
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        description: Optional explicit project intersection; never adds authority.
+      tags:
+      - api-v1-audit
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
   /api/v1/auth/login:
     post:
       operationId: api_v1_auth_login_create
@@ -321,6 +416,99 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TokenReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/capabilities:
+    get:
+      operationId: api_v1_capabilities_retrieve
+      description: Current canonical action permissions for one explicit scope. Advisory
+        only; commands reauthorize the actual resource. Absent or unknown scope grants
+        no actions.
+      parameters:
+      - in: query
+        name: client_id
+        schema:
+          type: string
+        description: explicit owned client UUID
+      - in: query
+        name: node_id
+        schema:
+          type: string
+        description: explicit node UUID; enrollment and project membership still apply
+      - in: query
+        name: project_id
+        schema:
+          type: string
+        description: explicit project UUID; absent scope grants no actions
+      - in: query
+        name: schema_version
+        schema:
+          type: string
+        description: wire version, always 1
+      tags:
+      - api-v1-capabilities
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilitiesReply'
           description: ''
         '400':
           content:
@@ -1560,6 +1748,262 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: ''
+  /api/v1/projects/{project_id}/landing:
+    get:
+      operationId: api_v1_projects_project_id_landing_retrieve
+      description: One authorized project landing state, no writes and no cursor.
+        An absent row is explicitly unmaterialized at revision 0, with no owner or
+        generation. Requires execution.view_landing.
+      parameters:
+      - in: query
+        name: epoch
+        schema:
+          type: string
+        description: Optional exact installation epoch; mismatch refuses without a
+          mutation.
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects/{project_id}/landing/commands/release:
+    post:
+      operationId: api_v1_projects_project_id_landing_commands_release_submit
+      description: Human-only release of the current actor own token by exact epoch/revision;
+        requires execution.release_landing. A late old release cannot touch a newer
+        acquisition.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LandingCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+  /api/v1/projects/{project_id}/landing/commands/take:
+    post:
+      operationId: api_v1_projects_project_id_landing_commands_take_submit
+      description: Human-only project CAS acquire, committed before reply; requires
+        execution.acquire_landing. No force, puppet identity or external Operation.
+        Lost responses require read-only comparison of exact successor revision and
+        human owner, never a blind retake.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-projects
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LandingCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandingReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
   /api/v1/puppets:
     get:
       operationId: api_v1_puppets_retrieve
@@ -1975,6 +2419,92 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: ''
+  /api/v1/puppets/{target_id}/commands/update:
+    post:
+      operationId: api_v1_puppets_target_id_commands_update_submit
+      description: Admits an update plan and synchronously prepares its exact replacement
+        grant. Source assignment and agent credentials are unchanged; prepared is
+        not physical completion. Missing replacement or continuation support refuses
+        before effects. Unknown preparation is replay-only.
+      parameters:
+      - in: path
+        name: target_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - api-v1-puppets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCommand'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReply'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '405':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: ''
   /api/v1/puppets/{target_id}/commands/wipe:
     post:
       operationId: api_v1_puppets_target_id_commands_wipe_submit
@@ -2242,6 +2772,396 @@ paths:
           description: ''
 components:
   schemas:
+    ActionEnum:
+      enum:
+      - drain
+      - enable
+      - restart
+      - build
+      - stop_job
+      - send
+      - dispatch
+      - wipe
+      - delete
+      - create
+      - update
+      type: string
+      description: |-
+        * `drain` - drain
+        * `enable` - enable
+        * `restart` - restart
+        * `build` - build
+        * `stop_job` - stop_job
+        * `send` - send
+        * `dispatch` - dispatch
+        * `wipe` - wipe
+        * `delete` - delete
+        * `create` - create
+        * `update` - update
+    ActionsEnum:
+      enum:
+      - access.activate_grant
+      - access.approve_role
+      - access.issue_grant
+      - access.provision_agent_rbac
+      - access.read_management_context
+      - access.revoke_grant
+      - access.view_role
+      - auth.add_group
+      - auth.add_user
+      - auth.change_group
+      - auth.change_user
+      - auth.delete_group
+      - auth.delete_user
+      - auth.view_group
+      - auth.view_user
+      - builds.force_build
+      - catalog.add_clientregistration
+      - catalog.add_imagerevision
+      - catalog.add_installationsetting
+      - catalog.add_node
+      - catalog.add_nodeimage
+      - catalog.add_nodesetting
+      - catalog.add_project
+      - catalog.add_projectpolicysnapshot
+      - catalog.add_workspacebinding
+      - catalog.build_project
+      - catalog.change_clientregistration
+      - catalog.change_imagerevision
+      - catalog.change_installationsetting
+      - catalog.change_node
+      - catalog.change_nodeimage
+      - catalog.change_nodesetting
+      - catalog.change_project
+      - catalog.change_projectpolicysnapshot
+      - catalog.change_workspacebinding
+      - catalog.configure_node
+      - catalog.configure_project
+      - catalog.delete_clientregistration
+      - catalog.delete_imagerevision
+      - catalog.delete_installationsetting
+      - catalog.delete_node
+      - catalog.delete_nodeimage
+      - catalog.delete_nodesetting
+      - catalog.delete_project
+      - catalog.delete_projectpolicysnapshot
+      - catalog.delete_workspacebinding
+      - catalog.drain_node
+      - catalog.enable_node
+      - catalog.forget_node
+      - catalog.observe_node
+      - catalog.pin_project_policy
+      - catalog.record_node_application
+      - catalog.record_settings_application
+      - catalog.recover_build
+      - catalog.set_project_limit
+      - catalog.view_clientregistration
+      - catalog.view_imagerevision
+      - catalog.view_installationsetting
+      - catalog.view_node
+      - catalog.view_nodeimage
+      - catalog.view_nodesetting
+      - catalog.view_pool
+      - catalog.view_project
+      - catalog.view_projectpolicysnapshot
+      - catalog.view_workspacebinding
+      - controller.manage_proxy
+      - controller.view_models
+      - execution.acquire_landing
+      - execution.assign_work
+      - execution.change_session_model
+      - execution.claim_work
+      - execution.control_terminal
+      - execution.create_puppet
+      - execution.delete_puppet
+      - execution.deliver_report
+      - execution.dispatch_task
+      - execution.ingest_observations
+      - execution.ingest_telemetry
+      - execution.poll_work
+      - execution.read_facts
+      - execution.read_history
+      - execution.read_launch
+      - execution.read_terminal
+      - execution.reconcile_work
+      - execution.recycle_puppet
+      - execution.register_endpoint
+      - execution.register_producer
+      - execution.release_landing
+      - execution.report_result
+      - execution.restart_puppet
+      - execution.send_message
+      - execution.send_session_command
+      - execution.stop_allocation
+      - execution.update_puppet
+      - execution.view_delivery
+      - execution.view_history
+      - execution.view_landing
+      - execution.view_tail
+      - execution.view_usage
+      - execution.wipe_puppet
+      - operations.cancel_operation
+      - operations.collect_pool_garbage
+      - operations.diagnose_pool
+      - operations.override_assignment
+      - operations.recover_operation
+      - operations.stop_puppet_job
+      - operations.sweep_pool
+      - operations.treat_pool
+      - operations.view_audit
+      - operations.view_node_disk
+      - operations.view_operation
+      - preparation.approve_bootstrap
+      - secrets.deliver_secret
+      - secrets.manage_project_secret
+      - secrets.rotate_proxy_key
+      - secrets.view_secret_metadata
+      type: string
+      description: |-
+        * `access.activate_grant` - access.activate_grant
+        * `access.approve_role` - access.approve_role
+        * `access.issue_grant` - access.issue_grant
+        * `access.provision_agent_rbac` - access.provision_agent_rbac
+        * `access.read_management_context` - access.read_management_context
+        * `access.revoke_grant` - access.revoke_grant
+        * `access.view_role` - access.view_role
+        * `auth.add_group` - auth.add_group
+        * `auth.add_user` - auth.add_user
+        * `auth.change_group` - auth.change_group
+        * `auth.change_user` - auth.change_user
+        * `auth.delete_group` - auth.delete_group
+        * `auth.delete_user` - auth.delete_user
+        * `auth.view_group` - auth.view_group
+        * `auth.view_user` - auth.view_user
+        * `builds.force_build` - builds.force_build
+        * `catalog.add_clientregistration` - catalog.add_clientregistration
+        * `catalog.add_imagerevision` - catalog.add_imagerevision
+        * `catalog.add_installationsetting` - catalog.add_installationsetting
+        * `catalog.add_node` - catalog.add_node
+        * `catalog.add_nodeimage` - catalog.add_nodeimage
+        * `catalog.add_nodesetting` - catalog.add_nodesetting
+        * `catalog.add_project` - catalog.add_project
+        * `catalog.add_projectpolicysnapshot` - catalog.add_projectpolicysnapshot
+        * `catalog.add_workspacebinding` - catalog.add_workspacebinding
+        * `catalog.build_project` - catalog.build_project
+        * `catalog.change_clientregistration` - catalog.change_clientregistration
+        * `catalog.change_imagerevision` - catalog.change_imagerevision
+        * `catalog.change_installationsetting` - catalog.change_installationsetting
+        * `catalog.change_node` - catalog.change_node
+        * `catalog.change_nodeimage` - catalog.change_nodeimage
+        * `catalog.change_nodesetting` - catalog.change_nodesetting
+        * `catalog.change_project` - catalog.change_project
+        * `catalog.change_projectpolicysnapshot` - catalog.change_projectpolicysnapshot
+        * `catalog.change_workspacebinding` - catalog.change_workspacebinding
+        * `catalog.configure_node` - catalog.configure_node
+        * `catalog.configure_project` - catalog.configure_project
+        * `catalog.delete_clientregistration` - catalog.delete_clientregistration
+        * `catalog.delete_imagerevision` - catalog.delete_imagerevision
+        * `catalog.delete_installationsetting` - catalog.delete_installationsetting
+        * `catalog.delete_node` - catalog.delete_node
+        * `catalog.delete_nodeimage` - catalog.delete_nodeimage
+        * `catalog.delete_nodesetting` - catalog.delete_nodesetting
+        * `catalog.delete_project` - catalog.delete_project
+        * `catalog.delete_projectpolicysnapshot` - catalog.delete_projectpolicysnapshot
+        * `catalog.delete_workspacebinding` - catalog.delete_workspacebinding
+        * `catalog.drain_node` - catalog.drain_node
+        * `catalog.enable_node` - catalog.enable_node
+        * `catalog.forget_node` - catalog.forget_node
+        * `catalog.observe_node` - catalog.observe_node
+        * `catalog.pin_project_policy` - catalog.pin_project_policy
+        * `catalog.record_node_application` - catalog.record_node_application
+        * `catalog.record_settings_application` - catalog.record_settings_application
+        * `catalog.recover_build` - catalog.recover_build
+        * `catalog.set_project_limit` - catalog.set_project_limit
+        * `catalog.view_clientregistration` - catalog.view_clientregistration
+        * `catalog.view_imagerevision` - catalog.view_imagerevision
+        * `catalog.view_installationsetting` - catalog.view_installationsetting
+        * `catalog.view_node` - catalog.view_node
+        * `catalog.view_nodeimage` - catalog.view_nodeimage
+        * `catalog.view_nodesetting` - catalog.view_nodesetting
+        * `catalog.view_pool` - catalog.view_pool
+        * `catalog.view_project` - catalog.view_project
+        * `catalog.view_projectpolicysnapshot` - catalog.view_projectpolicysnapshot
+        * `catalog.view_workspacebinding` - catalog.view_workspacebinding
+        * `controller.manage_proxy` - controller.manage_proxy
+        * `controller.view_models` - controller.view_models
+        * `execution.acquire_landing` - execution.acquire_landing
+        * `execution.assign_work` - execution.assign_work
+        * `execution.change_session_model` - execution.change_session_model
+        * `execution.claim_work` - execution.claim_work
+        * `execution.control_terminal` - execution.control_terminal
+        * `execution.create_puppet` - execution.create_puppet
+        * `execution.delete_puppet` - execution.delete_puppet
+        * `execution.deliver_report` - execution.deliver_report
+        * `execution.dispatch_task` - execution.dispatch_task
+        * `execution.ingest_observations` - execution.ingest_observations
+        * `execution.ingest_telemetry` - execution.ingest_telemetry
+        * `execution.poll_work` - execution.poll_work
+        * `execution.read_facts` - execution.read_facts
+        * `execution.read_history` - execution.read_history
+        * `execution.read_launch` - execution.read_launch
+        * `execution.read_terminal` - execution.read_terminal
+        * `execution.reconcile_work` - execution.reconcile_work
+        * `execution.recycle_puppet` - execution.recycle_puppet
+        * `execution.register_endpoint` - execution.register_endpoint
+        * `execution.register_producer` - execution.register_producer
+        * `execution.release_landing` - execution.release_landing
+        * `execution.report_result` - execution.report_result
+        * `execution.restart_puppet` - execution.restart_puppet
+        * `execution.send_message` - execution.send_message
+        * `execution.send_session_command` - execution.send_session_command
+        * `execution.stop_allocation` - execution.stop_allocation
+        * `execution.update_puppet` - execution.update_puppet
+        * `execution.view_delivery` - execution.view_delivery
+        * `execution.view_history` - execution.view_history
+        * `execution.view_landing` - execution.view_landing
+        * `execution.view_tail` - execution.view_tail
+        * `execution.view_usage` - execution.view_usage
+        * `execution.wipe_puppet` - execution.wipe_puppet
+        * `operations.cancel_operation` - operations.cancel_operation
+        * `operations.collect_pool_garbage` - operations.collect_pool_garbage
+        * `operations.diagnose_pool` - operations.diagnose_pool
+        * `operations.override_assignment` - operations.override_assignment
+        * `operations.recover_operation` - operations.recover_operation
+        * `operations.stop_puppet_job` - operations.stop_puppet_job
+        * `operations.sweep_pool` - operations.sweep_pool
+        * `operations.treat_pool` - operations.treat_pool
+        * `operations.view_audit` - operations.view_audit
+        * `operations.view_node_disk` - operations.view_node_disk
+        * `operations.view_operation` - operations.view_operation
+        * `preparation.approve_bootstrap` - preparation.approve_bootstrap
+        * `secrets.deliver_secret` - secrets.deliver_secret
+        * `secrets.manage_project_secret` - secrets.manage_project_secret
+        * `secrets.rotate_proxy_key` - secrets.rotate_proxy_key
+        * `secrets.view_secret_metadata` - secrets.view_secret_metadata
+    AuditItem:
+      type: object
+      properties:
+        id:
+          type: string
+          maxLength: 19
+          pattern: ^[1-9][0-9]*$
+        operation_id:
+          type: string
+          format: uuid
+        revision:
+          type: string
+          maxLength: 19
+          pattern: ^[1-9][0-9]*$
+        created_at:
+          type: string
+          format: date-time
+        action:
+          $ref: '#/components/schemas/ActionEnum'
+        state:
+          $ref: '#/components/schemas/AuditItemStateEnum'
+        code:
+          type: string
+          maxLength: 64
+        reason:
+          type: string
+          maxLength: 512
+        target:
+          $ref: '#/components/schemas/AuditTarget'
+        node_id:
+          type: string
+          format: uuid
+        project_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+      required:
+      - action
+      - code
+      - created_at
+      - id
+      - node_id
+      - operation_id
+      - project_ids
+      - reason
+      - revision
+      - state
+      - target
+    AuditItemStateEnum:
+      enum:
+      - accepted
+      - running
+      - reconciling
+      - succeeded
+      - refused
+      - failed
+      - partial
+      - unknown
+      - expired
+      - cancelled
+      type: string
+      description: |-
+        * `accepted` - accepted
+        * `running` - running
+        * `reconciling` - reconciling
+        * `succeeded` - succeeded
+        * `refused` - refused
+        * `failed` - failed
+        * `partial` - partial
+        * `unknown` - unknown
+        * `expired` - expired
+        * `cancelled` - cancelled
+    AuditPage:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditItem'
+        next_cursor:
+          type: string
+          nullable: true
+          maxLength: 4096
+        coverage:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoverageEnum'
+          minItems: 1
+          maxItems: 1
+      required:
+      - coverage
+      - epoch
+      - next_cursor
+      - results
+      - schema_version
+    AuditTarget:
+      type: object
+      properties:
+        kind:
+          $ref: '#/components/schemas/AuditTargetKindEnum'
+        id:
+          type: string
+          format: uuid
+        incarnation:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+      - id
+      - incarnation
+      - kind
+    AuditTargetKindEnum:
+      enum:
+      - node
+      - puppet
+      - project
+      type: string
+      description: |-
+        * `node` - node
+        * `puppet` - puppet
+        * `project` - project
     BuildCommand:
       type: object
       properties:
@@ -2277,6 +3197,94 @@ components:
       - policy_id
       - request_id
       - target_nodes
+    CapabilitiesReply:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        catalogue_version:
+          $ref: '#/components/schemas/CatalogueVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        actor:
+          $ref: '#/components/schemas/CapabilityActor'
+        scope:
+          $ref: '#/components/schemas/CapabilityScope'
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActionsEnum'
+      required:
+      - actions
+      - actor
+      - catalogue_version
+      - epoch
+      - schema_version
+      - scope
+    CapabilityActor:
+      type: object
+      properties:
+        user_id:
+          type: integer
+          minimum: 1
+        kind:
+          $ref: '#/components/schemas/CapabilityActorKindEnum'
+        human_owner_id:
+          type: integer
+          minimum: 1
+          nullable: true
+        node_id:
+          type: string
+          format: uuid
+          nullable: true
+        grant_id:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+      - grant_id
+      - human_owner_id
+      - kind
+      - node_id
+      - user_id
+    CapabilityActorKindEnum:
+      enum:
+      - human
+      - agent
+      - service
+      type: string
+      description: |-
+        * `human` - human
+        * `agent` - agent
+        * `service` - service
+    CapabilityScope:
+      type: object
+      properties:
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        node_id:
+          type: string
+          format: uuid
+          nullable: true
+        client_id:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+      - client_id
+      - node_id
+      - project_id
+    CatalogueVersionEnum:
+      type: integer
+      enum:
+      - 1
+    CoverageEnum:
+      type: string
+      enum:
+      - operation_audit
     CreateCommand:
       type: object
       properties:
@@ -2409,7 +3417,7 @@ components:
         user_id:
           type: integer
         kind:
-          $ref: '#/components/schemas/KindEnum'
+          $ref: '#/components/schemas/IdentityReplyKindEnum'
         human_owner_id:
           type: integer
           nullable: true
@@ -2425,7 +3433,7 @@ components:
       - kind
       - node_id
       - user_id
-    KindEnum:
+    IdentityReplyKindEnum:
       enum:
       - human
       - service
@@ -2435,6 +3443,69 @@ components:
         * `human` - human
         * `service` - service
         * `agent` - agent
+    LandingCommand:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        expected_revision:
+          type: string
+          pattern: ^(0|[1-9][0-9]{0,18})$
+          description: Exact CAS revision, at most 9223372036854775807; 0 means unmaterialized.
+      required:
+      - epoch
+      - expected_revision
+      - schema_version
+    LandingReply:
+      type: object
+      properties:
+        schema_version:
+          $ref: '#/components/schemas/SchemaVersionEnum'
+        epoch:
+          type: string
+          format: uuid
+        landing:
+          $ref: '#/components/schemas/LandingState'
+      required:
+      - epoch
+      - landing
+      - schema_version
+    LandingState:
+      type: object
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/LandingStateStateEnum'
+        revision:
+          type: string
+        generation:
+          type: string
+          nullable: true
+        owner_id:
+          type: integer
+          minimum: 1
+          nullable: true
+      required:
+      - generation
+      - owner_id
+      - project_id
+      - revision
+      - state
+    LandingStateStateEnum:
+      enum:
+      - unmaterialized
+      - free
+      - held
+      type: string
+      description: |-
+        * `unmaterialized` - unmaterialized
+        * `free` - free
+        * `held` - held
     ModeEnum:
       enum:
       - missing
@@ -2479,7 +3550,7 @@ components:
         epoch:
           type: string
         state:
-          $ref: '#/components/schemas/StateEnum'
+          $ref: '#/components/schemas/OperationStateEnum'
         revision:
           type: string
         code:
@@ -2489,6 +3560,12 @@ components:
           type: string
           nullable: true
         target:
+          type: object
+          additionalProperties: true
+        source:
+          type: object
+          additionalProperties: true
+        destination:
           type: object
           additionalProperties: true
         steps:
@@ -2524,6 +3601,26 @@ components:
       required:
       - epoch
       - operation
+    OperationStateEnum:
+      enum:
+      - accepted
+      - running
+      - reconciling
+      - succeeded
+      - refused
+      - failed
+      - partial
+      - unknown
+      type: string
+      description: |-
+        * `accepted` - accepted
+        * `running` - running
+        * `reconciling` - reconciling
+        * `succeeded` - succeeded
+        * `refused` - refused
+        * `failed` - failed
+        * `partial` - partial
+        * `unknown` - unknown
     ProjectBody:
       type: object
       properties:
@@ -2796,26 +3893,6 @@ components:
       - next_cursor
       - results
       - snapshot_id
-    StateEnum:
-      enum:
-      - accepted
-      - running
-      - reconciling
-      - succeeded
-      - refused
-      - failed
-      - partial
-      - unknown
-      type: string
-      description: |-
-        * `accepted` - accepted
-        * `running` - running
-        * `reconciling` - reconciling
-        * `succeeded` - succeeded
-        * `refused` - refused
-        * `failed` - failed
-        * `partial` - partial
-        * `unknown` - unknown
     TokenReply:
       type: object
       properties:
@@ -2834,6 +3911,40 @@ components:
       description: |-
         * `puppet.changed` - puppet.changed
         * `puppet.deleted` - puppet.deleted
+    UpdateCommand:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          default: 1
+        epoch:
+          type: string
+        request_id:
+          type: string
+        incarnation:
+          type: string
+        expected_revision:
+          type: string
+        not_after:
+          type: string
+        params:
+          type: object
+          properties:
+            fresh:
+              type: boolean
+              default: false
+            origin:
+              type: string
+              maxLength: 2048
+              description: Optional source origin of the same Catalog project.
+          additionalProperties: false
+      required:
+      - epoch
+      - expected_revision
+      - incarnation
+      - not_after
+      - params
+      - request_id
     Usage:
       type: object
       properties:

@@ -9,6 +9,7 @@ from mop.server.catalog.models import Record, ImmutableRecord
 from .telemetry_models import (SessionObservation, TurnOutcome, ModelObservation,
     TelemetryReceipt, PrivateHistoryCursor)  # noqa: F401
 from .terminal_models import TerminalControl, TerminalAttachment  # noqa: F401
+from .producer_models import SessionProducer, CurrentProducer  # noqa: F401
 
 
 class Assignment(Record):
@@ -115,6 +116,7 @@ class AssignmentAttempt(Record):
             ('claim_work', 'Can claim enrolled machine work'),
             ('report_result', 'Can report enrolled machine result'),
             ('read_facts', 'Can read enrolled machine facts'),
+            ('read_launch', 'Can read own admitted launch inputs'),
             ('reconcile_work', 'Can reconcile unknown machine work')]
         constraints = Record.Meta.constraints + [
             models.UniqueConstraint(fields=('executor_user_id', 'request_id'), name='attempt_request_identity'),
@@ -126,7 +128,7 @@ class AssignmentAttempt(Record):
             models.CheckConstraint(condition=Q(state__in=('claimed', 'unknown', 'succeeded', 'failed')),
                                    name='attempt_known_state'),
             models.CheckConstraint(condition=Q(action__in=('restart_session', 'apply_identity', 'send_message', 'confirm_ready',
-                'wipe_clone')), name='attempt_named_action'),
+                'wipe_clone', 'prepare_body', 'bootstrap_body', 'initial_identity', 'native_exec')), name='attempt_named_action'),
             models.CheckConstraint(condition=Q(lease_until__lte=models.F('not_after')),
                                    name='attempt_lease_within_deadline'),
         ]
@@ -145,6 +147,29 @@ class ResultReceipt(ImmutableRecord):
             models.CheckConstraint(condition=Q(expected_revision__gte=1,
                 resulting_revision=models.F('expected_revision') + 1), name='receipt_revision_successor'),
             models.CheckConstraint(condition=Q(outcome__in=('succeeded', 'failed', 'unknown')), name='execution_receipt_known_outcome'),
+        ]
+
+
+class ReplacementReceipt(ImmutableRecord):
+    """SQL projection подтверждённого перехода, без FK на чужой журнал."""
+    operation_id = models.UUIDField()
+    phase = models.CharField(max_length=16)
+    step_id = models.UUIDField()
+    token = models.UUIDField()
+    receipt_id = models.UUIDField(unique=True)
+    binding_digest = models.CharField(max_length=64)
+    assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT)
+    source_incarnation = models.ForeignKey(ExecutionIncarnation, on_delete=models.PROTECT)
+    resulting_revision = models.PositiveBigIntegerField()
+    resulting_generation = models.PositiveBigIntegerField()
+    modify_index = models.PositiveBigIntegerField()
+
+    class Meta(Record.Meta):
+        default_permissions = ()
+        constraints = Record.Meta.constraints + [
+            models.UniqueConstraint(fields=('operation_id', 'phase'), name='replacement_operation_phase'),
+            models.CheckConstraint(condition=Q(phase__in=('stop', 'cutover'), resulting_revision__gte=1,
+                resulting_generation__gte=1, modify_index__gte=1), name='replacement_confirmed_transition'),
         ]
 
 

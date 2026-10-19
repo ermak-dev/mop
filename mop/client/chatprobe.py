@@ -9,10 +9,12 @@ import errno
 import fcntl
 import http.server
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -31,6 +33,281 @@ import uuid
 
 MODEL = "claude-opus-5-5"
 SECOND_MODEL = "claude-sonnet-5-5"
+MCP_TOOL = "fixture_ping"
+MCP_SERVER = "activation_fixture"
+MCP_PROVIDER_TOOL = "mcp__" + MCP_SERVER + "__" + MCP_TOOL
+MCP_METHODS = ("initialize", "notifications/initialized", "tools/list", "tools/call", "ping",
+               "notifications/tools/list_changed")
+
+
+def _tool_names(tools):
+    """Ограниченный список имён, без schemas/descriptions или произвольного текста."""
+    if not isinstance(tools, list) or len(tools) > 128:
+        return None
+    names = []
+    for tool in tools:
+        name = tool.get("name") if isinstance(tool, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name):
+            return None
+        names.append(name)
+    return names
+
+
+def provider_tool_projection(body, at_ns):
+    """Только реальные provider tool definitions; messages никогда не копируются."""
+    if not isinstance(body, dict) or type(at_ns) is not int or at_ns < 0:
+        return None
+    names = _tool_names(body.get("tools", []))
+    return dict(at_ns=at_ns, tool_count=len(names), tool_names=names) if names is not None else None
+
+
+def _mcp_frame(raw):
+    """Один bounded JSON-RPC frame без дубликатов/NaN и без сырых журналов."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 8192:
+        return None
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate MCP field")
+            result[key] = value
+        return result
+    def constant(_):
+        raise ValueError("nonfinite MCP value")
+    try:
+        frame = json.loads(raw, object_pairs_hook=unique, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(frame, dict) or frame.get("jsonrpc") != "2.0":
+        return None
+    if "id" in frame and not (type(frame["id"]) is int and 0 <= frame["id"] <= 2**53
+            or isinstance(frame["id"], str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", frame["id"])):
+        return None
+    return frame
+
+
+def mcp_frame_projection(raw, direction, at_ns, response_method=None):
+    """Контекст ответа — метод собственного синхронного reply, не поле чужого frame."""
+    frame = _mcp_frame(raw)
+    if frame is None or direction not in ("client", "server") or type(at_ns) is not int or at_ns < 0:
+        return None
+    method = frame.get("method", response_method)
+    if method not in MCP_METHODS or response_method not in (None, method):
+        return None
+    if "method" in frame:
+        if "result" in frame or "error" in frame:
+            return None
+        if direction == "server":
+            if method != "notifications/tools/list_changed" or "id" in frame:
+                return None
+        elif method == "notifications/tools/list_changed":
+            return None
+        kind = "request" if "id" in frame else "notification"
+    else:
+        if (direction != "server" or "id" not in frame or ("result" in frame) == ("error" in frame)
+                or response_method is None):
+            return None
+        kind = "result" if "result" in frame else "error"
+    row = dict(direction=direction, kind=kind, method=method, at_ns=at_ns)
+    if kind == "result":
+        result = frame["result"]
+        if not isinstance(result, dict):
+            return None
+        if method == "tools/list":
+            names = _tool_names(result.get("tools"))
+            if names is None:
+                return None
+            row.update(tool_count=len(names), tool_names=names)
+        elif method == "initialize":
+            caps = result.get("capabilities", {})
+            tools = caps.get("tools", {}) if isinstance(caps, dict) else {}
+            row["tools_list_changed"] = isinstance(tools, dict) and tools.get("listChanged") is True
+    return row
+
+
+def mcp_toy_reply(frame, active):
+    """Фиксированный stdlib toy: ни pool authority, ни scripts/argv/files."""
+    if not isinstance(frame, dict) or "id" not in frame:
+        return None
+    reply = dict(jsonrpc="2.0", id=frame["id"])
+    method, params = frame.get("method"), frame.get("params", {})
+    if not isinstance(params, dict):
+        return dict(reply, error={"code": -32602, "message": "Invalid fixture parameters"})
+    if method == "initialize":
+        version = params.get("protocolVersion")
+        if version not in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):
+            version = "2025-11-25"
+        return dict(reply, result=dict(protocolVersion=version, capabilities={"tools": {"listChanged": True}},
+            serverInfo={"name": "offline-activation-fixture", "version": "1"}))
+    if method == "ping":
+        return dict(reply, result={})
+    if method == "tools/list":
+        tools = [dict(name=MCP_TOOL, description="Harmless offline fixture ping; no arguments or side effects.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False})] if active else []
+        return dict(reply, result={"tools": tools})
+    if method == "tools/call" and active and params == {"name": MCP_TOOL, "arguments": {}}:
+        return dict(reply, result={"content": [{"type": "text", "text": "fixture-only pong"}]})
+    return dict(reply, error={"code": -32601, "message": "Unavailable fixture method or tool"})
+
+
+def mcp_activation_evidence(events, providers, before, after, activation_ns):
+    """Только причинное окно и прежняя native identity дают acceptance discovery."""
+    identity = lambda row: (row["pid"], row["sessionId"], row["process"]["start_ticks"],
+                            row.get("config_home"), row.get("messagingSocketPath"))
+    same = (live_contract_observed(before) and live_contract_observed(after)
+        and identity(before[0]) == identity(after[0]))
+    active = type(activation_ns) is int and activation_ns > 0
+    def matches(method, direction, kind, post):
+        return [row for row in events if row.get("method") == method and row.get("direction") == direction
+            and row.get("kind") == kind and type(row.get("at_ns")) is int and active
+            and (row["at_ns"] >= activation_ns if post else row["at_ns"] < activation_ns)]
+    initialized = bool(matches("initialize", "client", "request", False)
+        and matches("initialize", "server", "result", False))
+    empty = any(row.get("tool_count") == 0 and row.get("tool_names") == []
+        for row in matches("tools/list", "server", "result", False))
+    notify = bool(matches("notifications/tools/list_changed", "server", "notification", True))
+    requery = bool(matches("tools/list", "client", "request", True))
+    catalogue = requery and any(row.get("tool_count") == 1 and row.get("tool_names") == [MCP_TOOL]
+        for row in matches("tools/list", "server", "result", True))
+    pre = [row for row in providers if active and row["at_ns"] < activation_ns and row["tool_count"] > 0]
+    pre_empty = bool(pre) and all(MCP_PROVIDER_TOOL not in row["tool_names"] for row in pre)
+    provider = any(active and row["at_ns"] >= activation_ns and MCP_PROVIDER_TOOL in row["tool_names"] for row in providers)
+    observed = bool(same and initialized and empty and pre_empty and notify and (catalogue or provider))
+    return dict(outcome=outcome(observed), same_native_identity=bool(same), initialize_observed=initialized,
+        empty_before_activation=empty, provider_empty_before_activation=pre_empty,
+        notification_observed=notify, client_requery_observed=requery,
+        active_catalogue_observed=bool(catalogue), provider_tool_observed=provider)
+
+
+def toy_process_owned(pid, argv, descendants, script):
+    """PID из toy log не даёт права kill без цепочки от pane и точного cmdline."""
+    return pid in descendants and argv == [str(Path(sys.executable).resolve()), "-I", str(script)]
+
+
+def mcp_cleanup_evidence(events, cleanup):
+    """Только ранее записанный PID/start, захваченный среди собственных потомков."""
+    identities = [dict(pid=row["pid"], start_ticks=row["start_ticks"]) for row in events if row.get("kind") == "process"]
+    owned = {(row["pid"], row["start_ticks"]) for row in cleanup.get("owned_processes", [])}
+    gone = {(row["pid"], row["start_ticks"]) for row in cleanup.get("leftovers", [])}
+    verified = bool(identities and cleanup.get("verified") and all(
+        (row["pid"], row["start_ticks"]) in owned and (row["pid"], row["start_ticks"]) not in gone for row in identities))
+    return dict(verified=verified, observed_processes=identities)
+
+
+# Только эта константа становится toy.py внутри доказанного owned container.
+# Ни аргументы CLI, ни содержимое чужого файла не становятся исполняемым кодом.
+MCP_TOY_SOURCE = r'''import importlib.util
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import threading
+import time
+
+if len(sys.argv) != 1:
+    sys.exit("fixed fixture server takes no arguments")
+spec = importlib.util.spec_from_file_location("probe", "/opt/probe/chatprobe.py")
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
+root = Path(__file__).parent
+lock = threading.Lock()
+active = threading.Event()
+stop = threading.Event()
+
+def append(row):
+    fd = os.open(root / "events.jsonl", os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        data = (json.dumps(row, ensure_ascii=True, allow_nan=False) + "\n").encode()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size + len(data) > 65536):
+            raise RuntimeError("private fixture log bound or identity failed")
+        if os.write(fd, data) != len(data):
+            raise RuntimeError("private fixture log write failed")
+    finally:
+        os.close(fd)
+
+def send(frame, method=None):
+    raw = json.dumps(frame, allow_nan=False).encode()
+    row = p.mcp_frame_projection(raw, "server", time.monotonic_ns(), method)
+    if row is not None:
+        append(row)
+    sys.stdout.buffer.write(raw + b"\n")
+    sys.stdout.buffer.flush()
+
+def activated():
+    try:
+        fd = os.open(root / "activate", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        info = os.fstat(fd)
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+            and stat.S_IMODE(info.st_mode) == 0o600 and os.read(fd, 32) == b"fixture-only\n")
+    finally:
+        os.close(fd)
+
+def watch():
+    while not stop.wait(.05):
+        if activated():
+            with lock:
+                active.set()
+                send(dict(jsonrpc="2.0", method="notifications/tools/list_changed"))
+            return
+
+identity = p.process_identity(os.getpid())
+append(dict(kind="process", pid=identity["pid"], start_ticks=identity["start_ticks"], at_ns=time.monotonic_ns()))
+thread = threading.Thread(target=watch, daemon=True)
+thread.start()
+try:
+    while True:
+        raw = sys.stdin.buffer.readline(8193)
+        if not raw or len(raw) > 8192:
+            break
+        frame = p._mcp_frame(raw)
+        if frame is None:
+            break
+        with lock:
+            row = p.mcp_frame_projection(raw, "client", time.monotonic_ns())
+            if row is not None:
+                append(row)
+            reply = p.mcp_toy_reply(frame, active.is_set())
+            if reply is not None:
+                send(reply, frame.get("method"))
+finally:
+    stop.set()
+    thread.join(timeout=1)
+'''
+
+
+def _prepare_mcp_toy(runtime):
+    """Новый fixed script/log, marker отсутствует; на host входа нет."""
+    _normal_guard()
+    directory = runtime / "mcp"
+    directory.mkdir(mode=0o700)
+    script = directory / "toy.py"
+    with script.open("x") as output:
+        output.write(MCP_TOY_SOURCE)
+    script.chmod(0o600)
+    (directory / "events.jsonl").touch(mode=0o600, exist_ok=False)
+    return script
+
+
+def _mcp_events(script):
+    """Только собственный bounded log; сырые wire frames сюда не записывались."""
+    with (script.parent / "events.jsonl").open("rb") as source:
+        raw = source.read(65537)
+    if len(raw) > 65536:
+        raise RuntimeError("bounded MCP evidence exceeded fixture capacity")
+    events = []
+    for line in raw.splitlines():
+        row = json.loads(line)
+        # Строки дописываются одним write; неизвестные поля не публикуются.
+        fields = ("kind", "pid", "start_ticks", "at_ns") if row.get("kind") == "process" else (
+            "direction", "kind", "method", "at_ns", "tools_list_changed", "tool_count", "tool_names")
+        events.append({key: row[key] for key in fields if key in row})
+    return events
 
 
 def isolated_env(source, home, endpoint):
@@ -127,6 +404,13 @@ def managed_preflight(present):
     return not present
 
 
+def managed_paths():
+    """Только metadata: organizational policy не читается и не обходится image-ом."""
+    return [str(path) for path in (Path("/etc/claude-code/managed-settings.json"),
+        Path("/etc/claude-code/managed-settings.d"), Path("/etc/claude-code/managed-mcp.json"))
+        if path.exists() or path.is_symlink()]
+
+
 def process_identity(pid):
     """start ticks плюс state защищают от чужого переиспользованного PID."""
     try:
@@ -186,6 +470,147 @@ def live_snapshot(config, work, expected_pid):
             row["socket_peer_error"] = peer_error
             rows.append(row)
     return rows
+
+
+def model_hook_projection(raw, now_ns):
+    """Никаких сырых prompts/paths/tokens: только узкие поля и время приёмника."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) < 4096:
+        return None
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate hook field")
+            result[key] = value
+        return result
+    def constant(_):
+        raise ValueError("nonfinite hook value")
+    try:
+        body = json.loads(raw, object_pairs_hook=unique, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(body, dict) or type(now_ns) is not int or now_ns < 0:
+        return None
+    event, sid = body.get("hook_event_name"), body.get("session_id")
+    if (event not in ("PostModelSwitch", "SessionStart", "UserPromptSubmit")
+            or not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid)):
+        return None
+    to_model = from_model = None
+    if event == "PostModelSwitch":
+        to_model, from_model = body.get("to_model"), body.get("from_model")
+        if not isinstance(to_model, str):
+            return None
+        for value in (to_model, from_model):
+            if value is not None and (not isinstance(value, str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}", value)):
+                return None
+    return dict(event=event, session_id=sid, to_model=to_model, from_model=from_model, at_ns=now_ns)
+
+
+def peer_receipt_projection(raw, user_id, subscription):
+    """Только собственная корреляция; отсутствие msgV наблюдаем, не разрешаем."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 8192:
+        return None
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate receipt field")
+            result[key] = value
+        return result
+    try:
+        frame = json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if type(frame) is not dict or frame.get("type") != "control":
+        return None
+    version = frame.get("msgV")
+    if version is not None and (type(version) is not int or version != 1):
+        return None
+    action, key = frame.get("action"), frame.get("orig_msg_id")
+    if (action == "peer_message_status" and key == user_id and version == 1
+            and frame.get("status") in ("held", "denied", "expired", "delivered", "refused", "dropped")):
+        return dict(action=action, orig_msg_id=key, status=frame["status"], msgV=version)
+    if (action == "peer_idle_notice" and key == subscription
+            and frame.get("state") in ("idle", "exited", "unavailable")):
+        return dict(action=action, orig_msg_id=key, state=frame["state"], msgV=version)
+    return None
+
+
+def bare_skips_hooks(help_text):
+    """Только явный контракт установленного CLI, не догадка по пустому sink."""
+    option = re.search(r"^\s+--bare\b(.*?)(?=^\s+--[a-z]|\Z)", help_text, re.MULTILINE | re.DOTALL)
+    return bool(option and "skip hooks" in " ".join(option[1].lower().split()))
+
+
+def probe_settings(hook_output=None):
+    """Opt-in fixed command: argv не берётся ни из stdin, ни из окружения."""
+    settings = {"permissions": {"defaultMode": "default"}}
+    if hook_output is not None:
+        command = shlex.join([str(Path(sys.executable).resolve()), "-I", str(Path(__file__).resolve()),
+                              "--capture-model-hook", str(hook_output)])
+        settings["hooks"] = {event: [{"hooks": [{"type": "command", "command": command, "timeout": 2}]}]
+            for event in ("SessionStart", "UserPromptSubmit", "PostModelSwitch")}
+    return settings
+
+
+def capture_model_hook(output, raw, now_ns):
+    """Существующий private fixture sink, не authority file и не create API.
+
+    Отсутствующий файл — ещё не активированный producer; ранний hook теряется.
+    Ровно 4096 байт тоже отбрасываются: без чтения 4097-го размер не доказан.
+    """
+    row = model_hook_projection(raw, now_ns)
+    if row is None:
+        return False
+    try:
+        fd = os.open(output, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            return False
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        data = (json.dumps(row, ensure_ascii=True, allow_nan=False) + "\n").encode()
+        if os.fstat(fd).st_size + len(data) > 65536:
+            return False
+        return os.write(fd, data) == len(data)
+    finally:
+        os.close(fd)
+
+
+def _model_hook_stdin():
+    """EOF и размер ограничены; зависший producer не держит CLI открытым."""
+    chunks = bytearray()
+    deadline = time.monotonic() + .2
+    while len(chunks) < 4096:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([0], [], [], remaining)[0]:
+            return b""
+        chunk = os.read(0, 4096 - len(chunks))
+        if not chunk:
+            return bytes(chunks)
+        chunks.extend(chunk)
+    return b""
+
+
+def model_switch_observed(events, before, after, started_ns, ended_ns, active_ns, target, previous):
+    """Нужен switch в своём окне, не запрос/сокет/statusline или старый hook."""
+    if (not live_contract_observed(before) or not live_contract_observed(after)
+            or not 0 <= active_ns <= started_ns < ended_ns):
+        return False
+    first, last = before[0], after[0]
+    identity = lambda row: (row["pid"], row["sessionId"], row["process"]["start_ticks"],
+                            row.get("config_home"), row.get("messagingSocketPath"))
+    if identity(first) != identity(last):
+        return False
+    matches = [event for event in events if event.get("event") == "PostModelSwitch"
+        and event.get("session_id") == first["sessionId"]
+        and event.get("to_model") == target and event.get("from_model") == previous
+        and type(event.get("at_ns")) is int and started_ns <= event["at_ns"] <= ended_ns]
+    return len(matches) == 1
 
 
 def probe_command(claude, settings, session_id, messaging_socket):
@@ -317,6 +742,7 @@ class Fixture(http.server.ThreadingHTTPServer):
         self.unsupported = set()
         self.errors = []
         self.auth_checks = []
+        self.mcp_activation = False
 
     def handle_error(self, request, client_address):
         error = sys.exception()
@@ -360,7 +786,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         kind = prompt_kind(body) if primary_request(body) else "auxiliary"
         response_text = "fixture-backed " + kind + " complete " + uuid.uuid4().hex[:12]
-        self.server.requests.append({"kind": kind, "body": body, "response_text": response_text})
+        record = {"kind": kind, "response_text": response_text}
+        if self.server.mcp_activation:
+            record["provider"] = provider_tool_projection(body, time.monotonic_ns())
+        else:
+            record["body"] = body
+        self.server.requests.append(record)
         block = {"type": "text", "text": response_text}
         if kind in ("bash", "ask"):
             name = "Bash" if kind == "bash" else "AskUserQuestion"
@@ -415,6 +846,7 @@ class Terminal:
         self.owned = {}
         self.cleanup = {"verified": False, "leftovers": [], "errors": []}
         self.server_identity = None
+        self.toy_script = None
         self.seq = 0
         self.input_seq = 0
         self.raw = bytearray()
@@ -523,8 +955,15 @@ class Terminal:
         for pid in descendants:
             if pid in processes:
                 _, start, command = processes[pid]
-                # Только Claude, собственная оболочка и sleep этого сценария.
-                if pid == pane or command in ("claude", "bash", "sh", "sleep"):
+                # Toy — лишь точный interpreter/script в доказанной цепочке pane.
+                toy_owned = False
+                if self.toy_script:
+                    try:
+                        argv = Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+                        toy_owned = toy_process_owned(pid, argv, descendants, self.toy_script)
+                    except (FileNotFoundError, ProcessLookupError):
+                        pass
+                if pid == pane or command in ("claude", "bash", "sh", "sleep") or toy_owned:
                     self.owned[pid] = {"pid": pid, "start_ticks": start, "command": command}
 
     def remaining(self):
@@ -586,8 +1025,236 @@ class Terminal:
         return verified
 
 
-def run(root, timeout=30, history_module=None):
-    """Возвращает независимые наблюдения и пути доказательств; ничего не печатает."""
+def _run_mcp_activation(terminal, fixture, report, script, ready, capture_live, snapshot, turn, timeout):
+    """Настоящий native MCP клиент, не SDK simulation и не production inbox."""
+    _normal_guard()
+    details = report["mcp_activation"]
+    if not live_contract_observed(ready):
+        details["reason"] = "owned native session not proved; no fixture activation"
+        return
+    def events():
+        terminal.track_owned()
+        return _mcp_events(script)
+    def initial_empty():
+        return any(row.get("method") == "tools/list" and row.get("kind") == "result"
+            and row.get("tool_names") == [] for row in events())
+    initialized_empty = terminal.wait(initial_empty, timeout)
+    initial_answer = turn("after-model", "probe:after-model before fixture MCP activation")
+    before = capture_live("mcp-before")
+    details["before_answer_rendered"] = initial_answer
+    if not initialized_empty or not live_contract_observed(before):
+        details["reason"] = "native empty MCP discovery or live session not proved; no policy bypass"
+        return
+    active_ns = time.monotonic_ns()
+    # Контролируемый marker не токен и не разрешение production; только fixed toy.
+    with (script.parent / "activate").open("xb") as marker:
+        marker.write(b"fixture-only\n")
+    (script.parent / "activate").chmod(0o600)
+    details.update(activated_at_ns=active_ns, activation="explicit fixture-only marker; not Actor/token/grant activation")
+    def requery():
+        return any(row.get("method") == "tools/list" and row.get("kind") == "result"
+            and row.get("tool_names") == [MCP_TOOL] and row["at_ns"] >= active_ns for row in events())
+    terminal.wait(requery, timeout)
+    details["after_answer_rendered"] = turn("after-model", "probe:after-model after fixture MCP activation")
+    terminal.pump(.5)
+    after = capture_live("mcp-after")
+    providers = [row["provider"] for row in fixture.requests if row.get("kind") == "after-model" and row.get("provider")]
+    evidence = mcp_activation_evidence(events(), providers, ready, after, active_ns)
+    details.update(evidence)
+    details["reason"] = ("genuine native discovery observed in the same PID/start/session"
+        if evidence["outcome"] == "observed" else
+        "native requery/provider tool or stable identity not proved; missing evidence remains unknown")
+    snapshot("mcp-after")
+
+
+def _run_model_hooks(terminal, fixture, report, output, ready, capture_live, snapshot, turn):
+    """Только наблюдения native CLI; sink-активация не подменяет production ACK."""
+    details = report["model_hooks"]
+    if not live_contract_observed(ready):
+        raise RuntimeError("model hook capture requires proven owned live registry/key/socket identity")
+    active_ns = time.monotonic_ns()
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    details.update(activated_at_ns=active_ns,
+        activation="fixture-only sink after live proof; not production HookBridge or registration ACK")
+    def events():
+        with output.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise RuntimeError("bounded model hook evidence exceeded fixture capacity")
+        return [json.loads(line) for line in raw.splitlines()]
+    initial_start = time.monotonic_ns()
+    initial_answer = turn("after-model", "probe:after-model initial hook control")
+    initial_requests = [r for r in fixture.requests if r["kind"] == "after-model"]
+    capture_live("hook-initial")
+    details["initial_fixture_request"] = dict(fresh_answer_rendered=initial_answer,
+        model=initial_requests[-1]["body"].get("model") if initial_requests else None,
+        confirmation=False, reason="next fixture request is supporting evidence, not model readiness")
+    cases = []
+    for name, target, previous in (("same-model", MODEL, MODEL),
+            ("change", SECOND_MODEL, MODEL), ("return", MODEL, SECOND_MODEL)):
+        before = capture_live("hook-" + name + "-before")
+        start_ns = time.monotonic_ns()
+        terminal.text("/model " + target)
+        terminal.pump(2)
+        screen = snapshot("hook-" + name + "-command")
+        confirmation = "Switch model?" in screen
+        if confirmation:
+            terminal.send(b"\r")
+            terminal.pump(1)
+        request_count = len(fixture.requests)
+        answer = turn("after-model", "probe:after-model hook " + name)
+        terminal.pump(.5)
+        after = capture_live("hook-" + name + "-after")
+        end_ns = time.monotonic_ns()
+        seen = events()
+        window = [event for event in seen if start_ns <= event["at_ns"] <= end_ns]
+        requests = [r for r in fixture.requests[request_count:] if r["kind"] == "after-model"]
+        request_model = requests[-1]["body"].get("model") if requests else None
+        observed = model_switch_observed(seen, before, after, start_ns, end_ns, active_ns, target, previous)
+        cases.append(dict(name=name, target=target, previous=previous, started_at_ns=start_ns,
+            ended_at_ns=end_ns, events=window, hook_observed=observed, fresh_answer_rendered=answer,
+            next_request_model=request_model, switch_confirmation_seen=confirmation,
+            before_snapshot="hook-" + name + "-before", after_snapshot="hook-" + name + "-after"))
+    seen = events()
+    controls = [event for event in seen if event["event"] == "UserPromptSubmit"
+        and event["session_id"] == ready[0]["sessionId"] and event["at_ns"] >= initial_start]
+    details["events"] = seen
+    details["cases"] = cases
+    details["initial_readiness"] = "unknown; no readiness receipt or scope retirement is implemented by this probe"
+    details["strategy"] = ("Require a genuine launch-scoped causal model query/handshake, or an explicitly authorized "
+        "real transition away and back with correlated PostModelSwitch. Do not infer readiness from --model, "
+        "statusline, registry/socket liveness, or a next fixture request. Same-model reassertion needs its own hook.")
+    unsupported = details["native_bare_skips_hooks"] and report["isolation_mode"].startswith("bare;")
+    reason = ("installed --help explicitly says --bare skips settings/plugin hooks; isolation retained"
+        if unsupported else "normal mode inside verified offline container; missing hook evidence remains unknown"
+        if report["isolation_mode"].startswith("isolated-normal") else
+        "no explicit hook-suppression contract; missing hook evidence remains unknown")
+    details["native_capability_reason"] = reason
+    report["scenarios"]["model-hooks-control"] = dict(outcome=outcome(bool(controls), unsupported),
+        evidence=dict(projected_prompt_events=len(controls), initial_snapshot="hook-initial", reason=reason))
+    for case in cases:
+        # Пустой sink не доказывает отсутствие native события. Отказ лишь из
+        # явного --bare contract; same-model в обычном режиме не проверен.
+        report["scenarios"]["model-hooks-" + case["name"]] = dict(
+            outcome=outcome(case["hook_observed"], unsupported), evidence={**case, "reason": reason})
+    report["scenarios"]["live-registry-contract"] = dict(outcome=outcome(all(
+        live_contract_observed(rows) for rows in report["live_snapshots"].values())),
+        evidence=dict(snapshots=list(report["live_snapshots"])))
+
+
+def _run_peer_receipts(terminal, report, ready, home, runtime, timeout, snapshot):
+    """Реальный inbox только своего normal Docker CLI, без invented ACK/registry."""
+    _normal_guard()
+    if not live_contract_observed(ready):
+        raise RuntimeError("native receipt probe requires proven own live session")
+    row = ready[0]
+    key = json.loads((home / ".claude" / "sessions" / row["key_file"]).read_text())
+    user_id, subscription, duplicate_id = (str(uuid.uuid4()) for _ in range(3))
+    callback = runtime / (str(os.getpid()) + "-" + uuid.uuid4().hex + ".sock")
+    records, rejected = [], []
+    # Та же форма и parent, что у LocalBridge: не маскируем native ограничения
+    # регистрацией фиктивного requester или ослаблением feature flags.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(callback))
+        callback.chmod(0o600)
+        listener.listen(16)
+        listener.setblocking(False)
+        def collect():
+            for _ in range(16):
+                try:
+                    connection, _ = listener.accept()
+                except BlockingIOError:
+                    break
+                with connection:
+                    pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+                    if pid != row["pid"] or uid != os.getuid():
+                        rejected.append("peer identity mismatch")
+                        continue
+                    connection.settimeout(.2)
+                    data = bytearray()
+                    try:
+                        while len(data) <= 8192 and b"\n" not in data:
+                            chunk = connection.recv(min(8193 - len(data), 4096))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                    except TimeoutError:
+                        rejected.append("callback read deadline")
+                        continue
+                    value = (peer_receipt_projection(bytes(data), user_id, subscription)
+                        or peer_receipt_projection(bytes(data), duplicate_id, subscription))
+                    if value is not None and len(records) < 64:
+                        records.append(value)
+            return False
+        def send(frame):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(2)
+                connection.connect(row["messagingSocketPath"])
+                pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+                if pid != row["pid"] or uid != os.getuid():
+                    raise RuntimeError("native receipt target peer changed")
+                auth = dict(type="auth", token=key["peerToken"])
+                connection.sendall((json.dumps(auth) + "\n" + json.dumps(frame) + "\n").encode())
+        try:
+            base = dict(msgV=1, session_id=row["sessionId"], **{"from": "uds:" + str(callback)})
+            send(dict(base, msg_id=subscription, type="control", action="notify_when_idle"))
+            terminal.wait(collect, min(timeout, 3))
+            message = dict(role="user", content="probe:after-model native receipt fixture " + user_id)
+            send(dict(base, msg_id=user_id, type="user", priority="next", message=message))
+            terminal.wait(collect, min(timeout, 3))
+            # Отдельный диагностический дубль fixture-only текста, не retry
+            # неизвестного production write и не попытка добиться accepted.
+            send(dict(base, msg_id=duplicate_id, type="user", priority="next", message=message))
+            terminal.wait(collect, min(timeout, 3))
+            snapshot("native-peer-receipts")
+        finally:
+            callback.unlink(missing_ok=True)
+    statuses = [value for value in records if value["action"] == "peer_message_status"]
+    notices = [value for value in records if value["action"] == "peer_idle_notice"]
+    evidence = dict(receipts=records, rejected=rejected, callback_removed=not callback.exists(),
+        diagnostic_duplicate_id=duplicate_id, ordinary_user_id=user_id,
+        normal_enqueue_ack="not fabricated; transport/drain/model request is not acceptance",
+        requester="unregistered fixture callback; same parent/name shape as LocalBridge",
+        limitations="Missing receipts remain unknown; no policy bypass, fake registry, approval, or production enablement.")
+    for name, observed in (("native-peer-status", bool(statuses)),
+            ("native-peer-idle", any(value["state"] == "idle" for value in notices)),
+            ("native-peer-delivered", any(value["status"] == "delivered" for value in statuses))):
+        report["scenarios"][name] = dict(outcome=outcome(observed), evidence=evidence)
+
+
+def run(root, timeout=30, history_module=None, model_hooks=False, isolated_normal=False, mcp_activation=False):
+    """Normal opt-in всегда создаёт Docker fixture, никогда не host argv."""
+    if mcp_activation and (not model_hooks or not isolated_normal or history_module):
+        raise ValueError("MCP activation requires --model-hooks --isolated-normal and no history module")
+    if isolated_normal:
+        if not model_hooks or history_module:
+            raise ValueError("isolated normal mode requires --model-hooks and no history module")
+        from mop.client import chatprobe_isolation
+        options = {"mcp_activation": True} if mcp_activation else {}
+        return chatprobe_isolation.run(root, timeout, managed_paths(), **options)
+    return _run_fixture(root, timeout, history_module, model_hooks)
+
+
+def _normal_guard():
+    """Импорт только соседнего trusted fixture source, без package/config host-а."""
+    path = Path(__file__).with_name("chatprobe_isolation.py")
+    spec = importlib.util.spec_from_file_location("probe_isolation", path)
+    isolation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(isolation)
+    isolation.verify_normal_runtime()
+
+
+def _run_fixture(root, timeout=30, history_module=None, model_hooks=False, _normal=False, mcp_activation=False):
+    """Внутренний normal путь требует kernel proof, не доверяет caller flag."""
+    if mcp_activation and (not _normal or not model_hooks or history_module):
+        raise ValueError("MCP activation is only available inside the fixed normal fixture")
+    if _normal:
+        _normal_guard()
+        if not model_hooks or history_module:
+            raise ValueError("normal fixture only supports fixed model hook scenarios")
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
     os.chmod(root, 0o700)
@@ -598,6 +1265,7 @@ def run(root, timeout=30, history_module=None):
     (home / "tmp").mkdir(parents=True)
     (home / ".claude").mkdir()
     fixture = Fixture(work)
+    fixture.mcp_activation = mcp_activation
     endpoint = f"http://127.0.0.1:{fixture.server_port}"
     env = isolated_env(os.environ, home, endpoint)
     claude, tmux = shutil.which("claude"), shutil.which("tmux")
@@ -607,7 +1275,9 @@ def run(root, timeout=30, history_module=None):
     (home / ".claude" / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True,
         "theme": "dark", "customApiKeyResponses": {"approved": ["chat-probe-dummy-key"], "rejected": []}}))
     settings = home / ".claude" / "settings.json"
-    settings.write_text(json.dumps({"permissions": {"defaultMode": "default"}}))
+    hook_output = root / "model-hooks.jsonl" if model_hooks else None
+    hook_prepared_ns = time.monotonic_ns()
+    settings.write_text(json.dumps(probe_settings(hook_output)))
     server_thread = threading.Thread(target=fixture.serve_forever, daemon=True)
     server_thread.start()
     label = tmux_socket(runtime)
@@ -618,6 +1288,17 @@ def run(root, timeout=30, history_module=None):
               "live_snapshots": {}, "history_module": history_module, "history": {},
               "report_path": str(root / "report.json"), "scenarios": {},
               "terminal_path": str(root / "terminal.jsonl"), "errors": []}
+    if model_hooks:
+        report["model_hooks"] = dict(output_path=str(hook_output), prepared_at_ns=hook_prepared_ns,
+            source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            projection_fields=["event", "session_id", "to_model", "from_model", "at_ns"],
+            input_limit_bytes=4096, at_limit_input_dropped=True,
+            preactivation="sink absent; startup hooks are dropped, never treated as readiness")
+    toy_script = None
+    if mcp_activation:
+        report["mcp_activation"] = dict(activation="not reached; fixture-only marker is not Actor/grant activation",
+            events=[], provider_requests=[], fixture_python_version=sys.version.split()[0],
+            limitations="No production MCP/auth/token/permissions/inbox or paid provider acceptance; no policy bypass.")
     terminal = None
     def record(name, observed, evidence, unsupported=False):
         report["scenarios"][name] = {"outcome": outcome(observed, unsupported), "evidence": evidence}
@@ -642,9 +1323,7 @@ def run(root, timeout=30, history_module=None):
         terminal.text(text or "probe:" + kind)
         return terminal.wait(lambda: completion_seen(fixture.requests, kind, since, terminal.screen()), timeout)
     try:
-        managed = [str(path) for path in (Path("/etc/claude-code/managed-settings.json"),
-            Path("/etc/claude-code/managed-settings.d"), Path("/etc/claude-code/managed-mcp.json"))
-            if path.exists() or path.is_symlink()]
+        managed = managed_paths()
         report["managed_settings_absent"] = managed_preflight(managed)
         if not report["managed_settings_absent"]:
             raise RuntimeError("managed settings could override probe isolation; Claude not started")
@@ -671,6 +1350,8 @@ def run(root, timeout=30, history_module=None):
         help_text = subprocess.run([claude, "--help"], env=env, cwd=work,
             capture_output=True, text=True, timeout=10, check=True).stdout
         (root / "claude-help.txt").write_text(help_text)
+        if model_hooks:
+            report["model_hooks"]["native_bare_skips_hooks"] = bare_skips_hooks(help_text)
         report["claude_executable"] = claude
         if "--bare" not in help_text:
             raise RuntimeError("installed claude lacks --bare isolation; probe not started")
@@ -682,8 +1363,23 @@ def run(root, timeout=30, history_module=None):
             "Temporary runtime is retained privately for inspection; projected key evidence excludes peerToken.",
             "Linux /proc identity and English UI observations; unknown means insufficient evidence."]
         command = probe_command(claude, settings, session_id, str(runtime / "c.sock"))
+        if _normal:
+            # Единственное удаление --bare — после повторного kernel proof в image.
+            _normal_guard()
+            command.remove("--bare")
+            report["isolation_mode"] = "isolated-normal; verified offline nonroot Docker fixture"
+            report["limitations"] = ["Fixture-backed responses only; no paid provider evidence.",
+                "New container, private PID/mount/net/cgroup/IPC; network none, loopback fixture only.",
+                "Normal settings hooks enabled only inside the owned fixture; no host config or credentials copied.",
+                "Initial readiness remains unknown; no production receipt or registration acceptance."]
+        if mcp_activation:
+            toy_script = _prepare_mcp_toy(runtime)
+            config = {"mcpServers": {MCP_SERVER: {"type": "stdio",
+                "command": str(Path(sys.executable).resolve()), "args": ["-I", str(toy_script)]}}}
+            command[command.index("--mcp-config") + 1] = json.dumps(config)
         report["command"] = command
         terminal = Terminal(tmux, label, env, work, command, root)
+        terminal.toy_script = toy_script
         terminal.pump(3)
         startup = snapshot("startup")
         if "trust this folder" in startup.lower() or "trust this directory" in startup.lower():
@@ -694,6 +1390,14 @@ def run(root, timeout=30, history_module=None):
         report["initial_identity"] = before
         terminal.track_owned()
         ready_registry = capture_live("ready")
+        if mcp_activation:
+            _run_mcp_activation(terminal, fixture, report, toy_script, ready_registry, capture_live, snapshot, turn, timeout)
+            return report
+        if model_hooks:
+            _run_model_hooks(terminal, fixture, report, hook_output, ready_registry, capture_live, snapshot, turn)
+            if _normal:
+                _run_peer_receipts(terminal, report, capture_live("peer-receipts-before"), home, runtime, timeout, snapshot)
+            return report
         framing_text = "probe:framing\nsecond line with Unicode: Проба"
         framing = turn("framing", framing_text)
         sent = request("framing")
@@ -840,10 +1544,40 @@ def run(root, timeout=30, history_module=None):
                              "own_tmux_server_stopped": tmux_stopped,
                              "fixture_listener_closed": fixture.socket.fileno() == -1,
                              "fixture_thread_stopped": not server_thread.is_alive()}
-        for name in ("terminal-framing", "foreground-slash", "model-identity", "clear-identity",
-                     "live-registry-contract", "history-adapter", "stream-interrupt",
-                     "permissions-default", "bash-interrupt", "ask-user-question"):
+        if mcp_activation:
+            details = report["mcp_activation"]
+            try:
+                details["events"] = _mcp_events(toy_script) if toy_script else []
+                details["provider_requests"] = [row["provider"] for row in fixture.requests
+                    if row.get("kind") == "after-model" and row.get("provider")]
+                toy_cleanup = mcp_cleanup_evidence(details["events"], terminal.cleanup if terminal else {})
+                report["cleanup"]["toy_process"] = toy_cleanup
+                if toy_cleanup["observed_processes"] and not toy_cleanup["verified"]:
+                    report["errors"].append("observed toy process cleanup not proved")
+            except (OSError, ValueError, RuntimeError) as error:
+                report["errors"].append("MCP evidence collection failed: " + type(error).__name__)
+            report["scenarios"]["mcp-activation"] = dict(outcome=details.get("outcome", "unknown"), evidence=details)
+            record("live-registry-contract", bool(report["live_snapshots"]) and all(
+                live_contract_observed(rows) for rows in report["live_snapshots"].values()),
+                {"snapshots": list(report["live_snapshots"])})
+        names = (("mcp-activation", "live-registry-contract") if mcp_activation else
+                 ("model-hooks-control", "model-hooks-same-model", "model-hooks-change", "model-hooks-return",
+                  "live-registry-contract") if model_hooks else
+                 ("terminal-framing", "foreground-slash", "model-identity", "clear-identity",
+                  "live-registry-contract", "history-adapter", "stream-interrupt",
+                  "permissions-default", "bash-interrupt", "ask-user-question"))
+        for name in names:
             if name not in report["scenarios"]:
                 record(name, False, {"reason": "scenario not reached"})
         (root / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     return report
+
+
+if __name__ == "__main__":
+    # Единственный внутренний entrypoint fixed command, не запускатель команд.
+    if len(sys.argv) != 3 or sys.argv[1] != "--capture-model-hook":
+        sys.exit("fixed model hook capture arguments required")
+    try:
+        capture_model_hook(sys.argv[2], _model_hook_stdin(), time.monotonic_ns())
+    except OSError as error:
+        sys.exit("private model hook capture failed: " + type(error).__name__)

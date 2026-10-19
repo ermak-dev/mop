@@ -140,12 +140,17 @@ class Catalog:
         return m.Node.objects.filter(pk=node_id, retired_at__isnull=True).exists()
 
     @staticmethod
-    def current_project_ids(project_ids=None):
+    def current_project_ids(project_ids=None, *, limit=None):
         """SQL scope query для Access; None — все current, пустой набор — никто."""
         rows = m.Project.objects.filter(retired_at__isnull=True)
         if project_ids is not None:
             rows = rows.filter(pk__in=project_ids)
-        return tuple(rows.order_by('pk').values_list('pk', flat=True))
+        rows = rows.order_by('pk').values_list('pk', flat=True)
+        if limit is not None:
+            if type(limit) is not int or limit < 1:
+                raise ValueError('positive project scope limit required')
+            rows = rows[:limit]
+        return tuple(rows)
 
     @staticmethod
     def current_node_ids(node_ids):

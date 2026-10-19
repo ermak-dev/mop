@@ -212,7 +212,12 @@ test:py3.12:
     REQUIRED_ROOT_ONLY_IDS = frozenset({
         ('CredentialSocketUids', 'test_distinct_frontend_uid_uses_only_group_protected_socket'),
         ('AddressedCredentialUids', 'test_addressed_delivery_uses_actual_frontend_uid_without_rights_inference'),
+        ('InstalledCredentialUids', 'test_fresh_installer_starts_rootless_daemon_with_separate_pg_login_and_frontend_uid'),
     })
+
+    # #742: новая actual UID граница — union, не замена исходного #674 набора.
+    MANAGEMENT_ROOT_ONLY_IDS = frozenset({('ManagementContextUids',
+        'test_management_context_actual_frontend_uid_has_no_human_or_generic_token_authority')})
 
     def _test_inventory(self, name):
         import ast
@@ -235,7 +240,8 @@ test:py3.12:
     def test_uid_gate_holds_exactly_the_moved_root_only_ids(self):
         import ast
         gate_ids, gate_source, tree = self._test_inventory(self.ROOT_GATE_MODULE)
-        self.assertEqual(gate_ids, self.REQUIRED_ROOT_ONLY_IDS)
+        required = self.REQUIRED_ROOT_ONLY_IDS | self.MANAGEMENT_ROOT_ONLY_IDS
+        self.assertEqual(gate_ids, required)
         self.assertNotIn('skipTest', gate_source)
         self.assertIn('os.geteuid() != 0', gate_source)
         # Точечный вход: _credential_uid_fixture.py объявляет метки ровно
@@ -249,21 +255,56 @@ test:py3.12:
                             for target in node.targets)):
                 labels = ast.literal_eval(node.value)
         self.assertTrue(labels, 'the gate entry must declare its exact labels')
-        self.assertEqual(sorted(labels), sorted(
-            f'{module}.{cls}.{method}' for (cls, method), module in (
-                (pair, self.ROOT_GATE_MODULE.removesuffix('.py')) for pair in self.REQUIRED_ROOT_ONLY_IDS)))
+        expected = [f'{self.ROOT_GATE_MODULE.removesuffix(".py")}.{cls}.{method}'
+                    for cls, method in required]
+        # #669 добавляет application send/take UID, не заменяет ни один из
+        # исходных credential IDs и не разрешает wildcard/class discovery.
+        private_ids, private_source, _ = self._test_inventory('_endpoint_credential_uid_gate.py')
+        self.assertEqual(private_ids, {('EndpointCredentialUids',
+            'test_private_reports_cross_real_uid_without_root_or_caller_authority')})
+        self.assertNotIn('skipTest', private_source)
+        expected += [f'_endpoint_credential_uid_gate.{cls}.{method}' for cls, method in private_ids]
+        self.assertEqual(sorted(labels), sorted(expected))
         suite_ids = set()
-        for name in ('_credential_cases.py', '_credential_binding_cases.py'):
+        root_ids = gate_ids | private_ids
+        for name in ('_credential_cases.py', '_credential_binding_cases.py', '_endpoint_credential_cases.py'):
             ids, source = self._test_inventory(name)[:2]
             self.assertNotIn('skipTest', source, f'{name} must not skip unprivileged')
-            self.assertEqual(ids & self.REQUIRED_ROOT_ONLY_IDS, set(),
+            self.assertEqual(ids & root_ids, set(),
                              f'{name} still carries root-only cases')
             suite_ids |= ids
         # #711: перенос, не потеря -- сохраняются точные исходные ID #669,
         # а не общий счётчик, который запрещал добавлять socket checks.
         from _credential_inventory import missing_original
-        self.assertEqual(missing_original(suite_ids | gate_ids), set())
-        self.assertEqual(suite_ids & gate_ids, set())
+        self.assertEqual(missing_original(suite_ids | root_ids), set())
+        self.assertEqual(suite_ids & root_ids, set())
+
+    # #669: entry уже существует; проверка закрепляет обязательный запуск
+    # настоящих application cases, отдельно от root-only и pure protocol.
+    def test_private_endpoint_credentials_have_a_mandatory_nonroot_entrypoint(self):
+        import runpy
+        from mop.cli.dev.test import plan
+        top = Path(__file__).resolve().parent
+        entries = ('endpoint_credentials.py', 'endpoint_credential_protocol.py')
+        selected = plan([], [path.name for path in top.iterdir()])
+        for name in entries:
+            self.assertIn(name, selected)
+        self.assertNotIn('_endpoint_credential_cases.py', selected)
+        self.assertNotIn('_endpoint_credential_uid_gate.py', selected)
+        with patch('_controller_fixture.main', return_value=23) as main:
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_path(str(top / entries[0]), run_name='__main__')
+        main.assert_called_once_with(['_endpoint_credential_cases'])
+        self.assertEqual(caught.exception.code, 23)
+
+    # #668: selectable helper не должен остаться вне обязательного CI gate.
+    # RED: entry отсутствовал; отдельный check исполняется и в hermetic HOME.
+    def test_owned_management_regression_is_selected_by_the_normal_gate(self):
+        from mop.cli.dev.test import plan
+        entry = Path(__file__).with_name('controller_lifecycle.py')
+        self.assertTrue(entry.is_file(), 'owned lifecycle regression needs a mandatory check-file entry')
+        self.assertEqual(plan([], [entry.name, '_controller_lifecycle_cases.py']), [entry.name])
+        self.assertIn("'_controller_lifecycle_cases.OwnedLifecycle'", entry.read_text())
 
     # HYPOTHESIS (#711): exact count66 падал после добавления новых случаев;
     # замена на >=66 скрыла бы удаление исходной проверки новой с другим ID.
@@ -424,6 +465,151 @@ test:py3.12:
                         _drop_backend_state(dict(NAME=name, HOST='fixture-only', PORT='5432',
                                                  USER='fixture-only', PASSWORD='synthetic'), pid)
         connect.assert_not_called()
+
+    # HYPOTHESIS (#668): UUID-name недостаточен для DROP: collision/replacement
+    # не становятся нашими ресурсами. Native maintenance purpose ограничен
+    # точным именем, созданным этим объектом OID/owner/nonce, не произвольным SQL.
+    # SOLUTION: два instance hooks creation, native postgres-only cursor с 30 s
+    # общим бюджетом; default backend/pool и 5/10 s приложения не меняются.
+    # RESULT: behavioral RED/GREEN PG17 в _controller_lifecycle_cases; 29 pure
+    # safety checks green, исходные strict skip/cross-UID inventories сохранены.
+    # STATUS: FIXED — see #668 (не утверждение об исходном orphan-owner).
+    def owned_database(self):
+        from types import SimpleNamespace
+        from _controller_fixture import OwnedTestDatabase
+        name = 'test_mop_' + 'a' * 32
+        config = dict(NAME='mop_ci', HOST='fixture-only', PORT='5432',
+                      USER='fixture-user', PASSWORD='synthetic-do-not-log',
+                      OPTIONS={'pool': {'max_size': 8}, 'sslmode': 'disable',
+                               'options': '-c statement_timeout=5000'}, TEST={'NAME': name})
+        creation = SimpleNamespace(connection=SimpleNamespace(settings_dict=config,
+            close_pool=unittest.mock.Mock()), _get_test_db_name=lambda: name,
+            sql_table_creation_suffix=lambda: '')
+        return OwnedTestDatabase(creation, name), creation
+
+    def test_owned_management_is_postgres_only_finite_and_does_not_inherit_runtime_policy(self):
+        import psycopg
+        from unittest.mock import MagicMock
+        from _controller_fixture import maintenance_cursor
+        owner, creation = self.owned_database()
+        native = MagicMock()
+        native.__enter__.return_value = native
+        with patch.object(psycopg.Connection, 'connect', return_value=native) as connect:
+            with maintenance_cursor(creation.connection.settings_dict):
+                pass
+        options = connect.call_args.kwargs
+        self.assertEqual(options['dbname'], 'postgres')
+        self.assertEqual(options['connect_timeout'], 5)
+        self.assertIn('statement_timeout=30000', options['options'])
+        self.assertIn('lock_timeout=2000', options['options'])
+        self.assertEqual(options['sslmode'], 'disable')
+        self.assertNotIn('pool', options)
+        native.close.assert_called_once()
+
+    def test_runner_wires_owned_management_without_replacing_the_runtime_backend(self):
+        import hermetic
+        from django.test.runner import DiscoverRunner
+        from _controller_fixture import main, OwnedTestDatabase
+        observed = []
+        def run_tests(runner, labels):
+            from django.conf import settings
+            from django.db import connection
+            creation = connection.creation
+            owner = creation._create_test_db.__self__
+            self.assertIsInstance(owner, OwnedTestDatabase)
+            self.assertIs(creation._destroy_test_db.__self__, owner)
+            self.assertEqual(settings.DATABASES['default']['ENGINE'], 'mop.server.controller.postgresql')
+            self.assertEqual(settings.CONTROLLER_DB_TIMEOUT, 5)
+            self.assertEqual(settings.CONTROLLER_TRANSACTION_TIMEOUT, 10)
+            observed.append(owner.name)
+            return 0
+        with patch.dict(hermetic.FIXTURE_ENV, {'MOP_TEST_POSTGRES_HOST': 'fixture-only'}), \
+                patch.object(DiscoverRunner, 'run_tests', new=run_tests):
+            self.assertEqual(main(['_controller_cases']), 0)
+        self.assertEqual(len(observed), 1)
+
+    def test_owned_management_transport_timeout_fences_and_is_not_unbounded(self):
+        import psycopg
+        from unittest.mock import MagicMock
+        from _controller_fixture import maintenance_cursor
+        owner, creation = self.owned_database()
+        raw, captured = MagicMock(), []
+        def connect(cls, **kwargs):
+            captured.append(cls)
+            return raw
+        with patch.object(psycopg.Connection, 'connect', new=classmethod(connect)), \
+                patch('_controller_fixture.time.monotonic', side_effect=[0, 1, 31]), \
+                patch.object(psycopg.Connection, 'wait', side_effect=psycopg.errors._WaitTimeout) as wait:
+            with maintenance_cursor(creation.connection.settings_dict):
+                fake = captured[0](MagicMock())
+                with self.assertRaisesRegex(TimeoutError, 'maintenance deadline'):
+                    captured[0].wait(fake, iter(()))
+                self.assertEqual(wait.call_args.kwargs['timeout'], 29)
+                fake.pgconn.finish.assert_called_once()
+                fake.pgconn.finish.reset_mock()
+                with self.assertRaisesRegex(TimeoutError, 'maintenance deadline'):
+                    captured[0].wait(fake, iter(()))
+                self.assertEqual(wait.call_count, 1, 'expired budget must not enter another driver wait')
+                fake.pgconn.finish.assert_called_once()
+        raw.close.assert_called_once()
+
+    def test_owned_management_rejects_collision_without_destroy_or_retry(self):
+        from unittest.mock import MagicMock
+        owner, creation = self.owned_database()
+        cursor = MagicMock()
+        cursor.execute.side_effect = RuntimeError('database already exists')
+        with patch('_controller_fixture.maintenance_cursor') as managed:
+            managed.return_value.__enter__.return_value = cursor
+            with self.assertRaisesRegex(RuntimeError, 'already exists'):
+                owner.create(0, True, False)
+        self.assertEqual(cursor.execute.call_count, 1)
+        self.assertTrue(cursor.execute.call_args.args[0].startswith('CREATE DATABASE '))
+        self.assertIsNone(owner.identity)
+
+    def test_owned_management_refuses_unowned_or_replaced_database_before_drop(self):
+        from unittest.mock import MagicMock
+        owner, creation = self.owned_database()
+        cursor = MagicMock()
+        with patch('_controller_fixture.maintenance_cursor') as managed:
+            managed.return_value.__enter__.return_value = cursor
+            with self.assertRaisesRegex(ValueError, 'owned|created'):
+                owner.destroy(owner.name, 0)
+            managed.assert_not_called()
+            owner.identity = (111, 222, owner.marker)
+            for metadata in ((112, 222, owner.marker), (111, 223, owner.marker),
+                             (111, 222, 'foreign-marker'), None):
+                cursor.reset_mock()
+                cursor.fetchone.return_value = metadata
+                with self.subTest(metadata=metadata), self.assertRaisesRegex(RuntimeError, 'ownership'):
+                    owner.destroy(owner.name, 0)
+                self.assertFalse(any('DROP DATABASE' in str(call) for call in cursor.execute.call_args_list))
+        with self.assertRaisesRegex(ValueError, 'owned|exact'):
+            owner.destroy('mop_ci', 0)
+        owner.creation.connection.settings_dict['TEST']['NAME'] = 'test_mop_' + 'b' * 32
+        with self.assertRaisesRegex(ValueError, 'owned|exact'):
+            owner.destroy(owner.name, 0)
+
+    def test_owned_cleanup_requires_quiescence_and_propagates_drop_errors(self):
+        from unittest.mock import MagicMock
+        owner, creation = self.owned_database()
+        owner.identity = (111, 222, owner.marker)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = owner.identity
+        cursor.fetchall.return_value = [(123, 'idle', 'Client', 'ClientRead')]
+        with patch('_controller_fixture.maintenance_cursor') as managed:
+            managed.return_value.__enter__.return_value = cursor
+            with self.assertRaisesRegex(RuntimeError, 'quiescent'):
+                owner.destroy(owner.name, 0)
+            self.assertFalse(any('DROP DATABASE' in str(call) for call in cursor.execute.call_args_list))
+            cursor.fetchall.return_value = []
+            def fail_drop(query, *args, **kwargs):
+                if query.startswith('DROP DATABASE'):
+                    raise RuntimeError('owned DROP failed')
+            cursor.execute.side_effect = fail_drop
+            with self.assertRaisesRegex(RuntimeError, 'owned DROP failed'):
+                owner.destroy(owner.name, 0)
+        self.assertIsNotNone(owner.identity, 'failed cleanup must not erase ownership evidence')
+        creation.connection.close_pool.assert_called()
 
     def test_client_fixture_runs_clean_wheel_tls_and_real_postgres_contracts(self):
         # HYPOTHESIS: один control_tls не доказывает Django admission contracts.

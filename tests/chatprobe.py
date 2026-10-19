@@ -21,6 +21,36 @@ def main():
             "mop.client.chatprobe") is not None):
         return c.report("chatprobe")
     from mop.client import chatprobe as p
+    # HYPOTHESIS: #729 выдуманный ACK не подтверждается штатным native wire.
+    # Фикстура фиксирует только конечный набор полей и точную корреляцию;
+    # отсутствие status/idle остаётся unknown, а не успешным native прогоном.
+    # SOLUTION: whitelist projection и отдельный normal-only Unix callback.
+    # RESULT: RED — projection отсутствует; GREEN — чистая логика и owned normal
+    # Docker 2.1.302: msgV=1 idle, dropped наблюдались; delivered остаётся unknown.
+    # STATUS: FIXED — see #729
+    if not c.check("#729 native receipt projection exists", callable(getattr(p, "peer_receipt_projection", None))):
+        return c.report("chatprobe")
+    user_id, subscription = "user-id", "subscription-id"
+    receipt = dict(msgV=1, type="control", action="peer_message_status", orig_msg_id=user_id,
+                   status="held", reason="private detail", from_="private path", token="secret")
+    project = lambda frame: p.peer_receipt_projection((json.dumps(frame)+"\n").encode(), user_id, subscription)
+    c.expect("#729 exact native status projection", project(receipt),
+        dict(action="peer_message_status", orig_msg_id=user_id, status="held", msgV=1))
+    for status in ("held", "denied", "expired", "delivered", "refused", "dropped"):
+        c.expect("#729 finite status " + status, project({**receipt, "status": status})["status"], status)
+    for change in ({"action": "message_accepted"}, {"status": "accepted"}, {"orig_msg_id": subscription},
+                   {"orig_msg_id": "other"}, {"status": []}, {"msgV": True}, {"type": "user"}):
+        c.expect("#729 invented or uncorrelated receipt", project({**receipt, **change}), None)
+    idle = dict(type="control", action="peer_idle_notice", orig_msg_id=subscription, state="idle")
+    c.expect("#729 observes absent idle version without silently authorizing it", project(idle),
+        dict(action="peer_idle_notice", orig_msg_id=subscription, state="idle", msgV=None))
+    c.expect("#729 observes versioned idle", project({**idle, "msgV": 1})["msgV"], 1)
+    c.expect("#729 user id is never idle subscription", project({**idle, "orig_msg_id": user_id}), None)
+    for state in ("busy", "unknown", [], None):
+        c.expect("#729 unknown idle state", project({**idle, "state": state}), None)
+    duplicate = b'{"type":"control","action":"peer_message_status","orig_msg_id":"user-id","status":"held","status":"delivered","msgV":1}\n'
+    c.expect("#729 ambiguous wire is not evidence", p.peer_receipt_projection(duplicate, user_id, subscription), None)
+    c.expect("#729 bounded native projection", p.peer_receipt_projection(b" "*8193, user_id, subscription), None)
     dirty = {"PATH": "/usr/bin", "HOME": "/real", "ANTHROPIC_API_KEY": "secret",
              "ANTHROPIC_AUTH_TOKEN": "secret", "HTTP_PROXY": "https://real",
              "MOP_BUS_CONFIG": "secret", "CLAUDE_CODE_OAUTH_TOKEN": "secret",
@@ -205,6 +235,114 @@ def main():
                          {"key": {"procStart": "54321", "procStart_type": "str", "peer_token_present": True}}):
             c.check("#613 missing/mismatched contract unknown", not p.live_contract_observed([{**row, **modified}]))
         c.check("#613 empty live capture unknown", not p.live_contract_observed([]))
+    # HYPOTHESIS: одинаковый /model может не породить PostModelSwitch; наличие
+    # сокета, --model и passive model.id не доказывают подтверждение модели.
+    # SOLUTION: opt-in fixture sink до exec, активация только после live proof;
+    # строгая bounded проекция и отдельное причинное окно каждой команды.
+    # RESULT: RED сначала на отсутствующих parser/settings/verdict функциях.
+    # STATUS: FIXED — see #643
+    import shlex
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    features = ("model_hook_projection", "probe_settings", "capture_model_hook",
+                "model_switch_observed")
+    feature_available = {name: c.check("#643 function " + name,
+        callable(getattr(p, name, None))) for name in features}
+    payload = dict(hook_event_name="PostModelSwitch", session_id="sid",
+                   to_model=p.MODEL, from_model=p.SECOND_MODEL, prompt="private-prompt",
+                   transcript_path="private-transcript", token="private-token", at_ns=1)
+    if feature_available["model_hook_projection"]:
+        project = lambda body: p.model_hook_projection(json.dumps(body).encode(), 50)
+        projected = project(payload)
+        c.expect("#643 exact bounded projection", projected, dict(event="PostModelSwitch",
+            session_id="sid", to_model=p.MODEL, from_model=p.SECOND_MODEL, at_ns=50))
+        c.check("#643 raw private fields never retained", "private-" not in json.dumps(projected))
+        for raw in (b"", b"{", b"[]", b"null", b"\xff", b"{}" + b" " * 4094,
+                    b'{"hook_event_name":"Stop","hook_event_name":"PostModelSwitch"}',
+                    b"[" * 1000 + b"0" + b"]" * 1000):
+            c.expect("#643 malformed/at-limit/duplicate input dropped", p.model_hook_projection(raw, 50), None)
+        for modified in ({"session_id": "../foreign"}, {"session_id": "x" * 129},
+                {"session_id": []}, {"to_model": {}}, {"to_model": ""},
+                {"to_model": "a\nb"}, {"from_model": "x" * 129},
+                {"hook_event_name": "Statusline"}, {"hook_event_name": "Stop"}):
+            c.expect("#643 invalid identity/model/event dropped", project({**payload, **modified}), None)
+        c.expect("#643 passive model cannot stand in for switch", project(dict(
+            hook_event_name="PostModelSwitch", session_id="sid", model={"id": p.MODEL})), None)
+        c.expect("#643 absent from-model stays unknown", project(dict(hook_event_name="PostModelSwitch",
+            session_id="sid", to_model=p.MODEL))["from_model"], None)
+        submit = project(dict(hook_event_name="UserPromptSubmit", session_id="sid", prompt="private"))
+        c.expect("#643 hook positive control contains no prompt", submit, dict(
+            event="UserPromptSubmit", session_id="sid", to_model=None, from_model=None, at_ns=50))
+    if feature_available["probe_settings"]:
+        c.expect("#643 default settings unchanged", p.probe_settings(), {"permissions": {"defaultMode": "default"}})
+        target = "/private/with space ' and $/model-hooks.jsonl"
+        settings = p.probe_settings(target)
+        c.expect("#643 only fixed explicit hooks", sorted(settings["hooks"]),
+                 ["PostModelSwitch", "SessionStart", "UserPromptSubmit"])
+        command_hook = settings["hooks"]["PostModelSwitch"][0]["hooks"][0]
+        argv = shlex.split(command_hook["command"])
+        c.expect("#643 quoted trusted interpreter and fixed module", argv,
+                 [str(Path(sys.executable).resolve()), "-I", str(Path(p.__file__).resolve()),
+                  "--capture-model-hook", target])
+        c.check("#643 command hook has finite timeout", 0 < command_hook["timeout"] <= 2)
+        c.check("#643 no statusline model authority", "statusLine" not in settings)
+    if feature_available["capture_model_hook"]:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "model-hooks.jsonl"
+            c.check("#643 inactive output drops hook", not p.capture_model_hook(output, json.dumps(payload).encode(), 50))
+            c.check("#643 hook cannot create authority/output file", not output.exists())
+            output.touch(mode=0o600)
+            c.check("#643 valid active sink captures", p.capture_model_hook(output, json.dumps(payload).encode(), 50))
+            c.expect("#643 sink contains safe projection only", json.loads(output.read_text()), dict(
+                event="PostModelSwitch", session_id="sid", to_model=p.MODEL,
+                from_model=p.SECOND_MODEL, at_ns=50))
+            before = output.read_bytes()
+            c.check("#643 malformed sink write dropped", not p.capture_model_hook(output, b"{", 51))
+            c.expect("#643 malformed does not change evidence", output.read_bytes(), before)
+            alias = Path(directory) / "alias"
+            alias.symlink_to(output)
+            try:
+                accepted = p.capture_model_hook(alias, json.dumps(payload).encode(), 52)
+            except OSError:
+                accepted = False
+            c.check("#643 output symlink refused", not accepted)
+            c.expect("#643 symlink target unchanged", output.read_bytes(), before)
+            # Настоящий pipe проверяет stdin-timeout, но это не native acceptance.
+            argv = [sys.executable, "-I", p.__file__, "--capture-model-hook", str(output)]
+            child = subprocess.run(argv, input=json.dumps(payload).encode(), capture_output=True, timeout=2)
+            c.expect("#643 fixed hook subprocess is silent", (child.returncode, child.stdout, child.stderr), (0, b"", b""))
+            c.expect("#643 fixed subprocess writes one safe record", len(output.read_text().splitlines()), 2)
+            child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                child.stdin.write(b"{")
+                child.stdin.flush()
+                child.wait(timeout=1)
+                c.expect("#643 stalled stdin quietly expires", child.returncode, 0)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
+            c.expect("#643 stalled stdin never becomes evidence", len(output.read_text().splitlines()), 2)
+    if feature_available["model_switch_observed"]:
+        rows = [dict(pid=123, sessionId="sid", process_config_matches=True,
+            socket_path_present=True, process=dict(pid=123, start_ticks="456", state="S"),
+            socket_peer=dict(pid=123, start_ticks="456"),
+            key=dict(peer_token_present=True, procStart="456", procStart_type="str"))]
+        event = dict(event="PostModelSwitch", session_id="sid", to_model=p.MODEL,
+                     from_model=p.SECOND_MODEL, at_ns=50)
+        observe = lambda events, before=rows, after=rows: p.model_switch_observed(
+            events, before, after, 40, 60, 30, p.MODEL, p.SECOND_MODEL)
+        c.check("#643 scoped timed native event observed", observe([event]))
+        c.check("#643 same-model without hook is not confirmation", not observe([]))
+        for modified in ({"at_ns": 39}, {"at_ns": 61}, {"session_id": "foreign"},
+                         {"event": "UserPromptSubmit"}, {"to_model": p.SECOND_MODEL},
+                         {"from_model": None}):
+            c.check("#643 stale/foreign/non-switch event unknown", not observe([{**event, **modified}]))
+        c.check("#643 missing live process unknown", not observe([event], after=[]))
+        c.check("#643 changed registry unknown", not observe([event], after=[{**rows[0], "sessionId": "new"}]))
+        c.check("#643 activation after command unknown", not p.model_switch_observed(
+            [event], rows, rows, 40, 60, 45, p.MODEL, p.SECOND_MODEL))
     command = importlib.import_module("mop.cli.dev.chat-probe")
     calls = []
     def fake_run(root, timeout, history_module=None):
@@ -229,6 +367,393 @@ def main():
             _, _, code = run_command(command.main, ["--history-module", value])
             c.check("#613 CLI rejects unsafe history source", bool(code))
         c.expect("#613 rejected history never launches", len(calls), count)
+    # HYPOTHESIS: 2.1.302 подавляет даже explicit hooks в --bare; пустой sink
+    # не различает suppression и неподдержанную same-model семантику.
+    # SOLUTION: выводить unsupported лишь по явному native --help contract;
+    # неизвестный контракт остаётся unknown, --bare никогда не удаляется.
+    # RESULT: owned run a: пустой sink при трёх успешных fixture turns; RED
+    # на отсутствующем разборщике capability до изменения verdict.
+    # STATUS: FIXED — see #643
+    if c.check("#643 native bare capability parser exists", callable(getattr(p, "bare_skips_hooks", None))):
+        native = ("  --bare   Minimal mode: skip hooks (those defined\n"
+                  "             in settings and by installed plugins).\n  --betas <x> other")
+        c.check("#643 wrapped native skip contract recognized", p.bare_skips_hooks(native))
+        for text in ("", "--help", "  --bare Minimal mode\n  --other skip hooks", "--not-bare skip hooks"):
+            c.check("#643 absent contract not invented", not p.bare_skips_hooks(text))
+    hook_calls = []
+    def fake_hooks(root, timeout, history_module=None, model_hooks=False):
+        hook_calls.append((str(root), timeout, history_module, model_hooks))
+        return {"report_path": "/private/report.json", "scenarios": {}, "errors": []}
+    with patched(p, run=fake_hooks):
+        _, _, code = run_command(command.main, ["--output", "/private", "--model-hooks"])
+        c.expect("#643 CLI opt-in accepted", code, 0)
+        c.expect("#643 CLI forwards explicit hook mode", hook_calls, [("/private", 20, None, True)])
+    # HYPOTHESIS: --bare отключает settings hooks; снять его на host небезопасно.
+    # SOLUTION: отдельный local-only Docker fixture, whitelist snapshot и две
+    # независимые проверки: inspect до старта и kernel proof до native exec.
+    # RESULT: RED на отсутствующих mode/isolation воротах, не import failure.
+    # STATUS: FIXED — see #643
+    normal_calls = []
+    def fake_normal(root, timeout, history_module=None, model_hooks=False, isolated_normal=False):
+        normal_calls.append((model_hooks, isolated_normal))
+        return {"report_path": "/private/report.json", "scenarios": {}, "errors": []}
+    with patched(p, run=fake_normal):
+        _, _, code = run_command(command.main, ["--model-hooks", "--isolated-normal"])
+        c.expect("#643 explicit isolated normal CLI accepted", code, 0)
+        c.expect("#643 normal mode delegated, never host flag", normal_calls, [(True, True)])
+        count = len(normal_calls)
+        for args in (["--isolated-normal"], ["--isolated-normal", "--model-hooks",
+                     "--history-module", "/explicit/session.py"]):
+            _, _, code = run_command(command.main, args)
+            c.check("#643 isolated normal only accepts fixed hook experiment", bool(code))
+        c.expect("#643 invalid mode never launches", len(normal_calls), count)
+    name = "mop.client.chatprobe_isolation"
+    if not c.check("#643 isolated normal boundary exists", importlib.util.find_spec(name) is not None):
+        return c.report("chatprobe")
+    d = importlib.import_module(name)
+    required = ("fixture_sources", "local_docker_endpoint", "container_create_args",
+                "container_config_errors", "runtime_isolation_errors", "runtime_projection")
+    if not all([c.check("#643 boundary function " + name, callable(getattr(d, name, None)))
+                for name in required]):
+        return c.report("chatprobe")
+    sources = ("mop/client/chatprobe.py", "mop/client/chatprobe_isolation.py")
+    c.expect("#643 snapshot copies only two tracked fixture modules", d.fixture_sources(
+        [*sources, ".env", "mop/session.py", "CLAUDE.md", ".claude/settings.json", "inventory.yaml"]), sources)
+    try:
+        d.fixture_sources([sources[0]])
+        c.fail("#643 missing tracked fixture refused", "accepted")
+    except ValueError:
+        c.check("#643 missing tracked fixture refused", True)
+    c.expect("#643 local Unix daemon accepted", d.local_docker_endpoint("unix:///var/run/docker.sock"),
+             "unix:///var/run/docker.sock")
+    for endpoint in ("", "tcp://127.0.0.1:2375", "ssh://localhost", "unix://remote/run/docker.sock",
+                     "unix:///run/../run/docker.sock", "unix:///run/docker.sock?x=y", "unix:///run/s\n"):
+        try:
+            d.local_docker_endpoint(endpoint)
+            c.fail("#643 remote or ambiguous Docker refused", endpoint)
+        except ValueError:
+            c.check("#643 remote or ambiguous Docker refused", True)
+    built = d.container_create_args("sha256:image", "mop-chatprobe-owned", "nonce", 26430)
+    for key, value in (("--network", "none"), ("--cgroupns", "private"), ("--ipc", "private"),
+                       ("--user", "26430:26430"), ("--cap-drop", "ALL"),
+                       ("--security-opt", "no-new-privileges=true")):
+        c.expect("#643 container isolation argument " + key, built[built.index(key) + 1], value)
+    c.check("#643 no bind/socket/host namespace flags", not any(arg in built for arg in
+            ("-v", "--volume", "--mount", "--volumes-from", "--privileged", "--pid", "--device", "--env-file")))
+    c.check("#643 fixture UID is unprivileged", "0:0" not in built)
+    info = {"Id": "owned-id", "Image": "sha256:image", "Mounts": [],
+        "Config": {"User": "26430:26430", "Labels": {d.OWNER_LABEL: "nonce"}, "Volumes": None},
+        "HostConfig": {"NetworkMode": "none", "PidMode": "", "CgroupnsMode": "private", "IpcMode": "private",
+            "Privileged": False, "CapDrop": ["ALL"], "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges=true"], "Binds": None, "Mounts": None,
+            "Devices": [], "DeviceRequests": None, "VolumesFrom": None}}
+    c.expect("#643 independent inspect accepts owned fixture", d.container_config_errors(info, "sha256:image", "nonce", 26430), [])
+    import copy
+    mutations = [("NetworkMode", "host"), ("PidMode", "host"), ("PidMode", "container:other"),
+        ("CgroupnsMode", "host"), ("IpcMode", "host"), ("Privileged", True),
+        ("CapAdd", ["SYS_ADMIN"]), ("CapDrop", []), ("SecurityOpt", []),
+        ("Binds", ["/home:/host:ro"]), ("Mounts", [{"Source": "/run"}]),
+        ("Devices", [{"PathOnHost": "/dev/sda"}]), ("VolumesFrom", ["other"])]
+    for key, value in mutations:
+        bad = copy.deepcopy(info)
+        bad["HostConfig"][key] = value
+        c.check("#643 unsafe inspect refused " + key, bool(d.container_config_errors(bad, "sha256:image", "nonce", 26430)))
+    for changed in ({"Mounts": [{"Source": "/var/run/docker.sock"}]}, {"Image": "other"},
+                    {"Config": {**info["Config"], "User": "0"}},
+                    {"Config": {**info["Config"], "Labels": {d.OWNER_LABEL: "foreign"}}},
+                    {"Config": {**info["Config"], "Volumes": {"/host": {}}}}):
+        c.check("#643 foreign/mounted/root fixture refused", bool(d.container_config_errors(
+            {**info, **changed}, "sha256:image", "nonce", 26430)))
+    namespaces = {name: name + ":[100]" for name in ("pid", "mnt", "net", "cgroup", "ipc")}
+    evidence = dict(uid=26430, euid=26430, groups=[26430], cap_eff="0000000000000000", no_new_privs=1,
+        namespaces={name: name + ":[200]" for name in namespaces}, interfaces=["lo"],
+        proc_private=True, cgroup_readonly=True, cgroup_root="/", run_sockets_absent=True,
+        external_network_unreachable=True)
+    c.expect("#643 kernel evidence proves distinct namespaces", d.runtime_isolation_errors(evidence, namespaces, 26430), [])
+    for key, value in (("uid", 0), ("euid", 0), ("groups", [0, 26430]), ("cap_eff", "1"),
+            ("no_new_privs", 0), ("interfaces", ["lo", "eth0"]), ("proc_private", False),
+            ("cgroup_readonly", False), ("cgroup_root", "/host/cgroup"), ("run_sockets_absent", False),
+            ("external_network_unreachable", False), ("namespaces", namespaces), ("namespaces", {})):
+        c.check("#643 incomplete/unsafe kernel proof refused " + key,
+            bool(d.runtime_isolation_errors({**evidence, key: value}, namespaces, 26430)))
+    projected = d.runtime_projection({**evidence, "environ": "secret", "mountinfo": "secret", "token": "secret"})
+    c.expect("#643 runtime projection exact allowlist", projected, evidence)
+    c.check("#643 runtime projection contains no raw secrets", "secret" not in json.dumps(projected))
+    nested = {**evidence, "namespaces": {**evidence["namespaces"], "unknown_token": "secret"}}
+    c.check("#643 nested runtime metadata also whitelisted", "secret" not in json.dumps(d.runtime_projection(nested)))
+    default_calls = []
+    with patched(p, _run_fixture=lambda *args: default_calls.append(args)):
+        p.run("/private", 7, model_hooks=True)
+    c.expect("#643 default still delegates to bare without normal override", default_calls, [("/private", 7, None, True)])
+    with tempfile.TemporaryDirectory() as directory:
+        normal_calls = []
+        if c.check("#643 internal normal guard exists", callable(getattr(p, "_normal_guard", None))):
+            with patched(p, _normal_guard=lambda: (_ for _ in ()).throw(RuntimeError("kernel blocker"))):
+                try:
+                    p._run_fixture(Path(directory) / "unsafe", model_hooks=True, _normal=True)
+                    c.fail("#643 internal normal mode refuses missing kernel proof", "accepted")
+                except RuntimeError as error:
+                    c.expect("#643 kernel blocker reaches caller", str(error), "kernel blocker")
+        c.check("#643 kernel refusal happens before output/native fixture", not (Path(directory) / "unsafe").exists())
+    # HYPOTHESIS: обычный tracked source имеет 0664 в shared worktree;
+    # это не metadata доверия native install и не повод ослаблять ELF guard.
+    # SOLUTION: source whitelist разрешает group-write, native — никогда.
+    # RESULT: RED после реального отказа до build; host CLI не запущен.
+    # STATUS: FIXED — see #643
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "source.py"
+        source.write_text("trusted fixture code")
+        source.chmod(0o664)
+        try:
+            result = d._copy_regular(source, Path(directory) / "copied.py")
+            c.expect("#643 tracked nonsensitive source permits ordinary worktree mode", result["size"], source.stat().st_size)
+        except RuntimeError as error:
+            c.fail("#643 tracked nonsensitive source permits ordinary worktree mode", str(error))
+        for data, mode in ((b"#!/bin/sh\n", 0o755), (b"\x7fELFnative", 0o775)):
+            source.write_bytes(data)
+            source.chmod(mode)
+            try:
+                d._copy_regular(source, Path(directory) / ("native-" + str(mode)), native=True)
+                c.fail("#643 script/group-writable native refused", "accepted")
+            except RuntimeError:
+                c.check("#643 script/group-writable native refused", True)
+    # Host managed policy должна останавливать даже metadata/copy/build.
+    with tempfile.TemporaryDirectory() as directory:
+        actions = []
+        with patched(p, managed_paths=lambda: ["/etc/claude-code/managed-settings.json"]), patched(d,
+                _docker_endpoint=lambda *args: actions.append("docker")):
+            report = p.run(Path(directory) / "refused", model_hooks=True, isolated_normal=True)
+        c.check("#643 host managed policy refuses normal fixture", bool(report["errors"]))
+        c.expect("#643 policy checked before Docker/copy", actions, [])
+    # HYPOTHESIS: policy может появиться, пока проверяется Docker/build;
+    # проверки лишь при входе недостаточно для copy и actual start.
+    # SOLUTION: повторные ворота непосредственно перед snapshot и start.
+    # RESULT: backend ниже синтетический, native/daemon не запускаются.
+    # STATUS: FIXED — see #643
+    from types import SimpleNamespace
+    for policy_phase in ("after-version", "after-inspect"):
+        actions = []
+        state = {"policy": False, "owner": None, "created": False, "removed": False, "image": False}
+        cid = "c" * 64
+        def fake_docker(argv, **kwargs):
+            if argv[0] == "git":
+                return SimpleNamespace(returncode=0, stdout=("\0".join(sources) + "\0").encode(), stderr=b"")
+            words = argv[3:]
+            actions.append(tuple(words[:2]))
+            output = ""
+            if words[0] == "version":
+                state["policy"] = policy_phase == "after-version"
+            elif words[0] == "build":
+                state["owner"] = words[words.index("--label") + 1].split("=", 1)[1]
+                state["image"] = True
+            elif words[:2] == ["image", "inspect"]:
+                output = json.dumps([{"Id": "sha256:image", "Config": {"Labels": {d.OWNER_LABEL: state["owner"]}}}])
+            elif words[0] == "create":
+                state["created"] = True
+                output = cid
+            elif words[:2] == ["container", "inspect"]:
+                config = copy.deepcopy(info)
+                config.update(Id=cid, State={"Running": False, "Pid": 0})
+                config["Config"]["Labels"][d.OWNER_LABEL] = state["owner"]
+                output = json.dumps([config])
+                state["policy"] = policy_phase == "after-inspect"
+            elif words[0] == "start":
+                raise RuntimeError("fake backend refuses native execution")
+            elif words[:2] == ["image", "ls"]:
+                if state["image"] and not state["removed"]:
+                    output = "sha256:image"
+            elif words[:2] == ["image", "rm"]:
+                state["removed"] = True
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
+        def fake_copy(*args, **kwargs):
+            actions.append(("copy",))
+            return {"sha256": "synthetic-test-only"}
+        with tempfile.TemporaryDirectory() as directory, patched(p,
+                managed_paths=lambda: ["managed"] if state["policy"] else []), patched(d,
+                _docker_endpoint=lambda *args: "unix:///var/run/docker.sock", _copy_regular=fake_copy), patched(
+                d.shutil, which=lambda name: "/usr/bin/" + name), patched(d.subprocess, run=fake_docker):
+            report = p.run(Path(directory) / "report", model_hooks=True, isolated_normal=True)
+        c.check("#643 late policy reports refusal " + policy_phase, bool(report["errors"]))
+        c.check("#643 late policy never starts native " + policy_phase, not any(a[0] == "start" for a in actions))
+        if policy_phase == "after-version":
+            c.check("#643 late policy refuses before source/native copy", ("copy",) not in actions)
+        else:
+            c.check("#643 refused created fixture is cleaned", report["cleanup"].get("container_removed"))
+    # HYPOTHESIS: bookworm apt python3 даёт 3.11, хотя owned fixture нужен 3.12.
+    # SOLUTION: публичный Python 3.12 image и его interpreter, без host install.
+    # RESULT: RED на трёх свойствах старого image; GREEN после смены base/entry.
+    # STATUS: FIXED — see #743
+    dockerfile = d._dockerfile(26430, "owned")
+    c.check("#743 owned fixture uses Python 3.12 base", dockerfile.startswith("FROM python:3.12-slim-bookworm\n"))
+    c.check("#743 apt cannot select a different fixture Python", " install -y --no-install-recommends python3 " not in dockerfile)
+    c.check("#743 entry uses the image Python", '"/usr/local/bin/python3", "-I"' in dockerfile)
+    # HYPOTHESIS: strict empty MCP не проверяет empty -> list_changed discovery.
+    # SOLUTION: только explicit normal Docker opt-in, stdlib toy и узкие evidence.
+    # RESULT: RED на CLI/library и шести helper-ах; GREEN — прежние и новые
+    # проверки. Native acceptance измеряется отдельно, unknown не равен успеху.
+    # STATUS: FIXED — see #743
+    activation_calls = []
+    def fake_activation(root, timeout, **options):
+        activation_calls.append(options)
+        return {"report_path": "/private/report.json", "scenarios": {}, "errors": []}
+    with patched(p, run=fake_activation):
+        _, _, code = run_command(command.main, ["--model-hooks", "--isolated-normal", "--mcp-activation"])
+        c.expect("#743 explicit activation CLI accepted", code, 0)
+        c.expect("#743 activation explicitly forwarded", activation_calls,
+            [dict(history_module=None, model_hooks=True, isolated_normal=True, mcp_activation=True)])
+        count = len(activation_calls)
+        for args in (["--mcp-activation"], ["--model-hooks", "--mcp-activation"],
+                ["--isolated-normal", "--mcp-activation"], ["--model-hooks", "--isolated-normal",
+                 "--mcp-activation", "--history-module", "/explicit/session.py"]):
+            _, _, code = run_command(command.main, args)
+            c.check("#743 unsafe activation CLI refused", bool(code))
+        c.expect("#743 invalid activation cannot reach runner", len(activation_calls), count)
+    # У library такие же ворота: monkeypatch не заменяет эксперимент native.
+    if "mcp_activation" in inspect.signature(p.run).parameters:
+        for options in ({}, {"model_hooks": True}, {"isolated_normal": True},
+                dict(model_hooks=True, isolated_normal=True, history_module="/explicit/session.py")):
+            with patched(p, _run_fixture=lambda *a, **k: c.fail("#743 unsafe host fallback", "called")), patched(
+                    d, run=lambda *a, **k: c.fail("#743 unsafe Docker dispatch", "called")):
+                try:
+                    p.run("/private", mcp_activation=True, **options)
+                    c.fail("#743 library refuses invalid activation", "accepted")
+                except ValueError:
+                    c.check("#743 library refuses invalid activation", True)
+        delegated = []
+        with patched(p, managed_paths=lambda: []), patched(d, run=lambda *a, **k: delegated.append((a, k))):
+            p.run("/private", 7, model_hooks=True, isolated_normal=True, mcp_activation=True)
+        c.expect("#743 opt-in only dispatches to Docker", delegated,
+            [(("/private", 7, []), {"mcp_activation": True})])
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                p._run_fixture(Path(directory) / "host", model_hooks=True, mcp_activation=True)
+                c.fail("#743 internal activation has no host path", "accepted")
+            except ValueError:
+                c.check("#743 internal activation has no host path", True)
+            c.check("#743 host refusal precedes files", not (Path(directory) / "host").exists())
+    else:
+        c.fail("#743 library explicit activation boundary", "option missing")
+    for args in (("/bin/claude", "/settings", "sid", "/socket"),):
+        built = p.probe_command(*args)
+        c.expect("#743 default strict MCP remains empty", built[built.index("--mcp-config") + 1], '{"mcpServers":{}}')
+        c.check("#743 default MCP remains strict", "--strict-mcp-config" in built)
+    required = ("mcp_frame_projection", "provider_tool_projection", "mcp_toy_reply",
+                "mcp_activation_evidence", "toy_process_owned", "mcp_cleanup_evidence")
+    if not all([c.check("#743 helper " + name, callable(getattr(p, name, None))) for name in required]):
+        return c.report("chatprobe")
+    project = lambda frame, direction="client", at=10, method=None: p.mcp_frame_projection(
+        json.dumps(frame).encode(), direction, at, method)
+    rpc = lambda method, **params: dict(jsonrpc="2.0", id=1, method=method, params=params)
+    initial = rpc("initialize", protocolVersion="2025-11-25", token="private-token")
+    c.expect("#743 initialize projection drops params", project(initial),
+        dict(direction="client", kind="request", method="initialize", at_ns=10))
+    empty = dict(jsonrpc="2.0", id=1, result={"tools": []})
+    c.expect("#743 actual empty list response projection", project(empty, "server", 20, "tools/list"),
+        dict(direction="server", kind="result", method="tools/list", at_ns=20, tool_count=0, tool_names=[]))
+    active = dict(jsonrpc="2.0", id=2, result={"tools": [{"name": p.MCP_TOOL, "description": "private-detail",
+        "inputSchema": {"private-token": "private-prompt"}}]})
+    c.expect("#743 list projection contains names not schemas", project(active, "server", 50, "tools/list"),
+        dict(direction="server", kind="result", method="tools/list", at_ns=50, tool_count=1, tool_names=[p.MCP_TOOL]))
+    notify = dict(jsonrpc="2.0", method="notifications/tools/list_changed")
+    c.expect("#743 standard notification projection", project(notify, "server", 40),
+        dict(direction="server", kind="notification", method="notifications/tools/list_changed", at_ns=40))
+    for raw in (b"", b"{", b"null", b"[]", b" "*8193, b' {"jsonrpc":"2.0","method":"initialize","method":"tools/list","id":1}',
+            b'{"jsonrpc":"2.0","method":"initialize","id":NaN}'):
+        c.expect("#743 malformed/ambiguous/oversized wire dropped", p.mcp_frame_projection(raw, "client", 10), None)
+    for frame, direction, method in ((rpc("untrusted-method"), "client", None),
+            (empty, "client", "tools/list"), (notify, "client", None), (initial, "server", None),
+            ({**empty, "error": {}}, "server", "tools/list"), (initial, "client", "tools/list")):
+        c.expect("#743 wrong direction/shape/context is not evidence", project(frame, direction, method=method), None)
+    for name in ("private prompt", "x"*129, "bad\nname", {}, None):
+        body = {"tools": [{"name": name}], "messages": [{"content": "private-prompt"}], "token": "private-token"}
+        c.expect("#743 invalid provider tool names dropped", p.provider_tool_projection(body, 10), None)
+    provider = {"tools": [{"name": "Bash"}, {"name": p.MCP_PROVIDER_TOOL}], "messages": "private-prompt", "token": "private-token"}
+    c.expect("#743 provider projection is bounded names/count only", p.provider_tool_projection(provider, 60),
+        dict(at_ns=60, tool_count=2, tool_names=["Bash", p.MCP_PROVIDER_TOOL]))
+    c.expect("#743 huge provider catalogue is dropped", p.provider_tool_projection({"tools": [{"name": "Bash"}]*129}, 10), None)
+    reply = p.mcp_toy_reply(initial, False)
+    c.expect("#743 toy initialize succeeds with listChanged capability", reply["result"]["capabilities"], {"tools": {"listChanged": True}})
+    c.expect("#743 toy protocol version negotiated", reply["result"]["protocolVersion"], "2025-11-25")
+    c.expect("#743 preactivation toy catalogue exactly empty", p.mcp_toy_reply(rpc("tools/list"), False)["result"], {"tools": []})
+    tools = p.mcp_toy_reply(rpc("tools/list"), True)["result"]["tools"]
+    c.expect("#743 activation publishes one fixed safe tool", [tool["name"] for tool in tools], [p.MCP_TOOL])
+    c.expect("#743 toy schema cannot carry scripts/argv/files", tools[0]["inputSchema"],
+        {"type": "object", "properties": {}, "additionalProperties": False})
+    for params in ({"name": p.MCP_TOOL, "arguments": {}}, {"name": "Bash", "arguments": {"command": "bad"}},
+                   {"name": p.MCP_TOOL, "arguments": {"file": "/etc/passwd"}}):
+        result = p.mcp_toy_reply(rpc("tools/call", **params), False)
+        c.check("#743 inactive toy always refuses call", "error" in result)
+        if params != {"name": p.MCP_TOOL, "arguments": {}}:
+            c.check("#743 active toy refuses arbitrary authority", "error" in p.mcp_toy_reply(rpc("tools/call", **params), True))
+    c.expect("#743 safe toy call is fixed text", p.mcp_toy_reply(rpc("tools/call", name=p.MCP_TOOL, arguments={}), True)["result"],
+        {"content": [{"type": "text", "text": "fixture-only pong"}]})
+    c.expect("#743 toy does not answer initialized notification", p.mcp_toy_reply(dict(jsonrpc="2.0", method="notifications/initialized"), False), None)
+    events = [project(initial), project(reply, "server", 11, "initialize"),
+        project(rpc("tools/list"), at=19), project(empty, "server", 20, "tools/list"),
+        project(notify, "server", 40), project(rpc("tools/list"), at=49), project(active, "server", 50, "tools/list")]
+    before = [dict(pid=123, sessionId="sid", process_config_matches=True, socket_path_present=True,
+        process=dict(pid=123, start_ticks="456", state="S"), socket_peer=dict(pid=123, start_ticks="456"),
+        key=dict(peer_token_present=True, procStart="456", procStart_type="str"))]
+    pre = p.provider_tool_projection({"tools": [{"name": "Bash"}]}, 25)
+    post = p.provider_tool_projection(provider, 60)
+    verdict = lambda e=events, r=[pre, post], after=before: p.mcp_activation_evidence(e, r, before, after, 30)
+    c.expect("#743 genuine stable empty->active discovery observed", verdict()["outcome"], "observed")
+    c.check("#743 actual provider tool presence measured", verdict()["provider_tool_observed"])
+    c.expect("#743 discovery alone is sufficient with absent provider tool", verdict(r=[pre, {**pre, "at_ns": 60}])["outcome"], "observed")
+    c.expect("#743 provider tool alone is sufficient without server requery", verdict(e=events[:5])["outcome"], "observed")
+    for e, r, after in ((events[:5], [pre, {**pre, "at_ns": 60}], before),
+            (events, [pre, post], []), (events, [pre, post], [{**before[0], "sessionId": "new"}]),
+            (events[2:], [pre, post], before), (events[0:3] + events[4:], [pre, post], before),
+            (events[:4] + events[5:], [pre, post], before), (events, [post], before),
+            (events, [{**post, "at_ns": 25}, post], before)):
+        c.expect("#743 missing/stale evidence cannot become native acceptance", verdict(e, r, after)["outcome"], "unknown")
+    script = Path("/tmp/mp-own/mcp/toy.py")
+    argv = [str(Path(sys.executable).resolve()), "-I", str(script)]
+    c.check("#743 toy ownership requires exact descendant argv", p.toy_process_owned(123, argv, {123}, script))
+    for args, descendants in ((argv + ["untrusted"], {123}), (argv, {456}), (["python3", "-c", "bad"], {123}),
+            ([argv[0], "-I", "/other/toy.py"], {123})):
+        c.check("#743 foreign interpreter/script is not owned", not p.toy_process_owned(123, args, descendants, script))
+    proc = dict(kind="process", pid=123, start_ticks="456", at_ns=1)
+    cleanup = dict(verified=True, owned_processes=[dict(pid=123, start_ticks="456", command="python3.12")], leftovers=[])
+    c.check("#743 observed toy tracked and gone proves cleanup", p.mcp_cleanup_evidence([proc], cleanup)["verified"])
+    for bad in ({**cleanup, "verified": False}, {**cleanup, "owned_processes": []},
+            {**cleanup, "leftovers": [dict(pid=123, start_ticks="456")]},
+            {**cleanup, "owned_processes": [dict(pid=123, start_ticks="new")]}):
+        c.check("#743 cleanup cannot adopt untracked/reused/live toy", not p.mcp_cleanup_evidence([proc], bad)["verified"])
+    c.check("#743 absent toy is not fabricated process cleanup", not p.mcp_cleanup_evidence([], cleanup)["verified"])
+    # Синтетический HTTP handler проверяет retention, не native discovery.
+    import io
+    raw_body = json.dumps({**provider, "stream": False, "model": "fixture-model",
+        "messages": [{"role": "user", "content": "private-prompt"}]}).encode()
+    handler = object.__new__(p.Handler)
+    handler.path = "/v1/messages"
+    handler.headers = {"x-api-key": "chat-probe-dummy-key", "Content-Length": str(len(raw_body))}
+    handler.rfile, handler.wfile = io.BytesIO(raw_body), io.BytesIO()
+    handler.server = SimpleNamespace(mcp_activation=True, requests=[], auth_checks=[], errors=[])
+    handler.send_response = handler.send_header = handler.end_headers = lambda *args: None
+    handler.do_POST()
+    retained = handler.server.requests
+    c.check("#743 actual handler retention excludes raw body/prompts/tokens", len(retained) == 1
+        and "body" not in retained[0] and "private-" not in json.dumps(retained))
+    c.expect("#743 retained provider names derive from request", retained[0]["provider"]["tool_names"], ["Bash", p.MCP_PROVIDER_TOOL])
+    compile(p.MCP_TOY_SOURCE, "fixed-stdlib-toy", "exec")
+    c.check("#743 toy source has fixed trusted module and no subprocess", '"/opt/probe/chatprobe.py"' in p.MCP_TOY_SOURCE
+        and "subprocess" not in p.MCP_TOY_SOURCE and "socket" not in p.MCP_TOY_SOURCE)
+    with tempfile.TemporaryDirectory() as directory:
+        actions = []
+        with patched(p, _normal_guard=lambda: (_ for _ in ()).throw(RuntimeError("kernel blocker"))):
+            try:
+                p._prepare_mcp_toy(Path(directory))
+                c.fail("#743 toy generation requires kernel proof", "accepted")
+            except RuntimeError as error:
+                c.expect("#743 toy kernel refusal is loud", str(error), "kernel blocker")
+        c.expect("#743 kernel refusal creates no script/marker/log", list(Path(directory).iterdir()), [])
+        with patched(p, managed_paths=lambda: ["/etc/claude-code/managed-mcp.json"]), patched(d,
+                _docker_endpoint=lambda *args: actions.append("docker")):
+            report = p.run(Path(directory) / "refused", model_hooks=True, isolated_normal=True, mcp_activation=True)
+        c.check("#743 activation cannot evade host managed policy", bool(report["errors"]))
+        c.expect("#743 activation managed refusal precedes Docker", actions, [])
+        c.expect("#743 refused activation is unknown", report["scenarios"]["mcp-activation"]["outcome"], "unknown")
     return c.report("chatprobe")
 
 

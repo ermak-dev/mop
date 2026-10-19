@@ -16,10 +16,13 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
+from uuid import UUID
 
 from mop.client import control as api
 
 _CONTEXT = ContextVar('mop_https_context', default=None)
+_LIMITS = ContextVar('mop_https_limits', default=None)
+_BEFORE_REQUEST = ContextVar('mop_https_before_request', default=None)
 
 # Конечный inventory #624/642; unsupported не означает accepted/no-op.
 SURFACES = dict.fromkeys((
@@ -32,15 +35,14 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add', 'send', 'landing'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
 GAPS = {
     'agents': 'live address aggregation and private endpoint inbox binding',
-    'add': 'role creation admission and readiness',
     'update': 'update admission',
-    'recycle': 'recycle admission', 'send': 'message admission/receipts',
+    'recycle': 'recycle admission',
     'dispatch': 'dispatch admission and scoped target selection',
     'model': 'session model action', 'models': 'inference model query',
     'attach': 'private terminal physical resolver/capability discovery',
@@ -113,6 +115,10 @@ def route(modname, argv):
         if modname.startswith(prefix + '.'):
             name = group + ' ' + modname.rsplit('.', 1)[-1]
             return name if name in SURFACES else None
+    # #713: recursive rotation leaves принадлежат одному ещё неподключённому
+    # surface. Leaf не должен уходить в legacy context через общий server case.
+    if modname == 'mop.cli.server.proxykey' or modname.startswith('mop.cli.server.proxykey.'):
+        return 'server proxykey'
     if modname == 'mop.cli.server.user':
         return 'server user'
     if modname.startswith('mop.cli.server.user.'):
@@ -129,14 +135,18 @@ def route(modname, argv):
 
 
 @contextmanager
-def use(context):
+def use(context, *, limits=None, before_request=None):
     """Внутрипроцессный context для MCP/tests; не хранится и не сериализуется."""
     if type(context) is not api.ServerContext:
         raise api.ClientError('explicit HTTPS server context required')
     token = _CONTEXT.set(context)
+    budget = _LIMITS.set(limits)
+    guard = _BEFORE_REQUEST.set(before_request)
     try:
         yield
     finally:
+        _BEFORE_REQUEST.reset(guard)
+        _LIMITS.reset(budget)
         _CONTEXT.reset(token)
 
 
@@ -176,37 +186,27 @@ def plain(value):
     return value
 
 
-# Лишь делегируемые действия; человеческий override/terminal/node Admin не
-# появляется у гранта от имени роли или от прав human owner.
-_GRANT_ACTIONS = frozenset('execution.' + action for action in (
-    'create_puppet', 'update_puppet', 'restart_puppet', 'recycle_puppet', 'delete_puppet',
-    'wipe_puppet', 'stop_allocation', 'send_message', 'dispatch_task', 'view_delivery',
-    'deliver_report', 'send_session_command', 'change_session_model', 'view_usage',
-    'view_landing', 'acquire_landing', 'release_landing')) | frozenset((
-    'catalog.view_project', 'catalog.view_pool', 'operations.view_operation',
-    'access.view_role', 'controller.view_models'))
 _TOOL_LOCK = threading.RLock()
 
 
 def allowed(declaration, identity):
+    """Одинаковые действия для Actor; kind только проверяет форму/бизнес-fence."""
+    from mop.client.action_catalogue import ACTIONS_V1
     actions = declaration.get('actions')
-    if (type(identity) is not api.Identity or identity.action_permissions is None or
+    if (not api.canonical_identity(identity) or
+            type(identity.action_permissions) is not frozenset or
+            not identity.action_permissions <= ACTIONS_V1 or
             not isinstance(actions, list) or
-            any(not isinstance(action, str) for action in actions)):
+            any(not isinstance(action, str) or action not in ACTIONS_V1 for action in actions)):
         return False
     if not actions and declaration.get('annotations') != 'readonly':
         return False
-    required = frozenset(actions)
     if declaration.get('human_only') is True and identity.kind != 'human':
         return False
-    delegated = identity.grant_id is not None
-    if delegated and identity.kind == 'service' and not required <= _GRANT_ACTIONS:
-        return False
-    return (identity.kind in ('human', 'service') if delegated
-            else identity.kind in ('human', 'agent')) and required <= identity.action_permissions
+    return frozenset(actions) <= identity.action_permissions
 
 
-def tool_call(words, declaration, values):
+def tool_call(words, declaration, values, *, with_status=False):
     """MCP вызывает тот же dispatcher/commandlet, а не второй API adapter.
 
     Блокировка нужна из-за process-global stdout; команда не исполняется в
@@ -215,7 +215,11 @@ def tool_call(words, declaration, values):
     from mop import cli
     if SURFACES.get(' '.join(words)) != 'bound':
         raise api.ClientError('unsupported MCP commandlet')
-    argv = cli.tool_argv(declaration.get('args', []), values)
+    try:
+        argv = cli.tool_argv(declaration.get('args', []), values)
+    except ValueError as error:
+        # Фразы собственного codec безопасны: loud сохраняет причину отказа.
+        raise api.ClientError(str(error)) from None
     out, err = io.StringIO(), io.StringIO()
     with _TOOL_LOCK, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
@@ -223,7 +227,8 @@ def tool_call(words, declaration, values):
         except SystemExit as error:
             code = error.code
     text = out.getvalue() + err.getvalue()
-    return text.rstrip() or ('done' if code == 0 else 'command refused')
+    result = text.rstrip() or ('done' if code == 0 else 'command refused')
+    return (result, code) if with_status else result
 
 
 def emit(value, *, credential):
@@ -252,6 +257,18 @@ def _operation_options(p, *, binding_required=True):
     p.add_argument('--wait', type=float)
 
 
+def _resource_id(value):
+    """Send принимает только canonical UUID; имя/сокет не становятся local target."""
+    valid = False
+    try:
+        valid = str(UUID(value)) == value
+    except ValueError:
+        pass
+    if not valid:
+        raise api.ClientError('send requires canonical resource ids, not local recipients or puppet names')
+    return value
+
+
 def _render_operation(operation, *, credential):
     # Только canonical receipt; никакого stdout исходного message/credential.
     emit({'schema_version': operation.schema_version, 'epoch': operation.epoch,
@@ -274,6 +291,21 @@ def _operation_note(operation):
           '; request_id=' + operation.request_id + '; epoch=' + operation.epoch, file=sys.stderr)
 
 
+def _landing_recovery(client, intent, credential):
+    """Никакого повторного POST: даже совпадение — observation, не receipt."""
+    print('landing command outcome unknown; read-only recovery is not a command receipt; '
+          'do not retake automatically; project_id=' + intent.project_id + '; epoch=' + intent.epoch +
+          '; expected_revision=' + intent.expected_revision + '; owner_id=' + str(intent.owner_id), file=sys.stderr)
+    try:
+        recovery = client.recover_landing(intent)
+    except api.ClientError as error:
+        print('landing observation failed: ' + _failure(error, credential), file=sys.stderr)
+        return 3
+    emit({**recovery.snapshot.envelope(), 'recovery': {'matched': recovery.matched,
+          'command_outcome': 'unknown', 'historical_receipt': False}}, credential=credential)
+    return 3
+
+
 def invoke(words, argv, *, origin=None, ca_file=None):
     """Один CLI handler для dispatcher и MCP; stdout — только ответ команды."""
     operation = selected = lookup_failure = None
@@ -285,11 +317,22 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         p = parser(words)
         if words == 'mcp':
             p.add_argument('--check', action='store_true')
+            for field in ('project', 'node', 'client'):
+                p.add_argument('--' + field + '-id')
+            p.add_argument('--body-standby', action='store_true')
+            for field in ('bootstrap', 'context', 'deadline'):
+                p.add_argument('--body-' + field)
             args = p.parse_args(argv)
-            if not args.check:
-                print('unsupported: server action-permission catalogue and private inbox lifecycle are not bound',
-                      file=sys.stderr)
-                return 2
+            body = (args.body_bootstrap, args.body_context, args.body_deadline)
+            if args.body_standby or any(value is not None for value in body):
+                if (not args.body_standby or not all(body) or args.check
+                        or any(value is not None for value in (args.project_id, args.node_id, args.client_id))
+                        or origin is not None or ca_file is not None or _CONTEXT.get() is not None):
+                    print('body mode requires only its explicit files and deadline', file=sys.stderr)
+                    return 2
+                from . import _mcp
+                return _mcp.serve_body(*body)
+            scope = api.CapabilityScope(args.project_id, args.node_id, args.client_id)
         elif words in ('health', 'profile', 'diagnose'):
             args = p.parse_args(argv)
         elif words == 'stat':
@@ -312,6 +355,27 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                     raise api.ClientError('usage days must be within 1..366')
                 end = datetime.now(timezone.utc).date() + timedelta(days=1)
                 args.start, args.end = (end - timedelta(days=days)).isoformat(), end.isoformat()
+        elif words == 'landing':
+            p.add_argument('action', choices=('show', 'take', 'give', 'recover-take', 'recover-give'))
+            p.add_argument('project_id')
+            p.add_argument('--epoch')
+            p.add_argument('--expected-revision')
+            p.add_argument('--owner-id', type=int)
+            args = p.parse_args(argv)
+            if args.action == 'show':
+                if args.expected_revision is not None or args.owner_id is not None:
+                    raise api.ClientError('landing show accepts only project id and optional epoch')
+                api._key(args.project_id)
+                if args.epoch is not None:
+                    api._key(args.epoch)
+            else:
+                args.command = 'take' if args.action.endswith('take') else 'release'
+                api.landing_binding(args.command, args.project_id, args.epoch, args.expected_revision)
+                if args.action.startswith('recover-'):
+                    prepare = api.LandingIntent(args.command, args.project_id, args.epoch,
+                        args.expected_revision, args.owner_id)
+                elif args.owner_id is not None:
+                    raise api.ClientError('landing mutation derives the actual human actor, not an owner-id argument')
         elif words == 'addresses':
             p.add_argument('project_id')
             p.add_argument('--limit', type=int, default=100)
@@ -331,6 +395,35 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
             args = p.parse_args(argv)
+        elif words == 'send':
+            # Эти опции требуют иной authority/holder lifecycle, не скрытого
+            # перевода на bus или UDS. Отказ даже до чтения private stdin.
+            unsupported = {'--list', '--local', '--mode', '--force', '--notify-when-idle', '--reply-to'}
+            options = argv[:argv.index('--')] if '--' in argv else argv
+            if (argv and argv[0] == 'list') or any(word.split('=', 1)[0] in unsupported for word in options):
+                print('unsupported: local recipients/listing, legacy routing/permission mode, takeover and '
+                      'idle notifications (trusted holder endpoint is not bound)', file=sys.stderr)
+                return 2
+            p.add_argument('puppet_id', type=_resource_id)
+            p.add_argument('message')
+            p.add_argument('--priority', choices=('now', 'next', 'later'), default='next')
+            p.add_argument('--wait-seconds', type=int, default=0)
+            p.add_argument('--incarnation', type=_resource_id)
+            _operation_options(p, binding_required=False)
+            args = p.parse_args(argv)
+            args.request_id = api.new_request_id(args.request_id)
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+            api.admission_deadline(args.not_after)
+            values = (args.epoch, args.incarnation, args.expected_revision)
+            args.explicit_binding = all(value is not None for value in values)
+            if any(value is not None for value in values) and not args.explicit_binding:
+                raise api.ClientError('provide epoch, incarnation and expected-revision together')
+            if args.explicit_binding:
+                _resource_id(args.epoch)
+                target = api.Target(args.puppet_id, args.incarnation, args.expected_revision)
+            if not 0 <= args.wait_seconds <= 60:
+                raise api.ClientError('wait-seconds must be within 0..60; it is not an idle/delivery receipt')
         elif words in ('restart', 'wipe', 'stop', 'delete'):
             p.add_argument('puppet_id')
             p.add_argument('--incarnation')
@@ -354,6 +447,21 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             if args.explicit_binding:
                 prepare = api.PreparedCommand(words, api.Target(args.puppet_id, args.incarnation,
                     args.expected_revision), args.epoch, args.request_id, args.not_after)
+        elif words == 'add':
+            p.add_argument('project_id')
+            p.add_argument('--node-id', required=True)
+            p.add_argument('--definition-id', required=True)
+            p.add_argument('--epoch', required=True)
+            p.add_argument('--request-id')
+            p.add_argument('--not-after')
+            p.add_argument('--wait', type=float)
+            args = p.parse_args(argv)
+            # Create не имеет target/CAS. Весь intent фиксируется до context/TLS.
+            args.request_id = api.new_request_id(args.request_id)
+            if args.not_after is None:
+                args.not_after = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+            prepare = api.CreateCommand(args.project_id, args.node_id, args.definition_id,
+                args.epoch, args.request_id, args.not_after)
         elif words == 'build':
             p.add_argument('project_id')
             p.add_argument('--policy-id', required=True)
@@ -393,6 +501,18 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         if hasattr(args, 'wait') and args.wait is not None:
             if not 0 < args.wait <= api.Limits().wait_timeout:
                 raise api.ClientError('wait must be within the client wait limit')
+        if words == 'send':
+            if args.message == '-':
+                try:
+                    # TextIO может декодировать несколько bytes на символ. После
+                    # bounded read проверяем ещё UTF-8 byte limit; newline не режем.
+                    args.message = sys.stdin.read(api.MAX_MESSAGE_BYTES + 1)
+                except (OSError, UnicodeError):
+                    raise api.ClientError('message stdin is unavailable or invalid UTF-8') from None
+            args.message = api.message_text(args.message)
+            if args.explicit_binding:
+                prepare = api.PreparedCommand('send', target, args.epoch, args.request_id,
+                    args.not_after, message=args.message, priority=args.priority, wait_seconds=args.wait_seconds)
         if words == 'diagnose' and missing(origin):
             # Как empty у прежней сводки (#536): not-ready -- информация, не отказ.
             emit({'schema_version': 1, 'ready': False, 'missing': missing(origin),
@@ -404,19 +524,42 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                   'trust': 'explicit CA (unverified)' if selected.ca_file else 'system CA (unverified)',
                   'network_observed': False}, credential=selected.token)
             return 0
-        client = api.Client(selected)
-        if words in ('restart', 'wipe', 'stop', 'delete') and not args.explicit_binding:
+        client = api.Client(selected, limits=_LIMITS.get() or api.Limits(), before_request=_BEFORE_REQUEST.get())
+        if words in ('restart', 'wipe', 'stop', 'delete', 'send') and not args.explicit_binding:
             view = client.read_puppet(args.puppet_id)
+            params = dict(message=args.message, priority=args.priority,
+                          wait_seconds=args.wait_seconds) if words == 'send' else {}
             prepare = {'restart': client.prepare_restart, 'wipe': client.prepare_wipe,
-                       'stop': client.prepare_stop, 'delete': client.prepare_delete}[words](view.target, epoch=view.epoch,
-                                                           not_after=args.not_after, request_id=args.request_id)
+                       'stop': client.prepare_stop, 'delete': client.prepare_delete,
+                       'send': client.prepare_send}[words](view.target, epoch=view.epoch,
+                           not_after=args.not_after, request_id=args.request_id, **params)
         if words == 'health':
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
-        elif words in ('profile', 'mcp'):
+        elif words == 'profile':
             emit({'schema_version': 1, **plain(client.identity())}, credential=selected.token)
+        elif words == 'mcp':
+            from . import _mcp
+            if not args.check:
+                return _mcp.serve(selected, scope)
+            capabilities = client.capabilities(scope)
+            emit({'schema_version': 1, 'catalogue_version': capabilities.catalogue_version,
+                  'epoch': capabilities.epoch, 'actor': plain(capabilities.identity),
+                  'scope': plain(scope), 'private_inbox': _mcp.PRIVATE_INBOX}, credential=selected.token)
         elif words == 'stat':
             emit(client.proxy_usage(start=args.start, end=args.end, group_by=args.group_by),
                  credential=selected.token)
+        elif words == 'landing':
+            if args.action == 'show':
+                emit(client.read_landing(args.project_id, epoch=args.epoch).envelope(), credential=selected.token)
+            elif args.action.startswith('recover-'):
+                return _landing_recovery(client, prepare, selected.token)
+            else:
+                try:
+                    value = client.change_landing(args.command, args.project_id, epoch=args.epoch,
+                        expected_revision=args.expected_revision)
+                except api.UnknownLanding as error:
+                    return _landing_recovery(client, error.intent, selected.token)
+                emit(value.envelope(), credential=selected.token)
         elif words == 'addresses':
             emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
                  credential=selected.token)

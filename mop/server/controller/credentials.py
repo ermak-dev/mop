@@ -18,13 +18,15 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 
 from mop.common import credentials as p
+from mop.common.endpoint import DeliveryFrame, DeliveryResult
+from mop.server.sessions.endpoints import Conflict as EndpointConflict, Capacity as EndpointCapacity, Unavailable as EndpointUnavailable
 from mop.server.access import services as access
 from mop.server.access.grants import Grants, Conflict as GrantConflict, StorageUnavailable as GrantUnavailable
 from mop.server.access.delegation import RoleBinding
 from mop.server.sessions.services import Assignments
 from mop.server.secrets import services as secrets
 from mop.server.preparation import services as preparation
-from mop.server.secrets.crypto import SecretCryptoError
+from mop.server.secrets.crypto import SecretCryptoError, SecretCryptoUnavailable
 from . import bootstrap
 from .models import Installation
 from .runtime import Runtime, Backpressure, require_restore_ready, verify_installation, maintenance, close_pools
@@ -78,6 +80,8 @@ class CurrentBindings:
         epoch = Installation.objects.values_list('epoch', flat=True).get()
         if self.assignments.readiness(binding, epoch=UUID(str(epoch))) is None:
             return None
+        from .initialselection import require_initial_rbac_activation
+        require_initial_rbac_activation(grant_id)
         return RoleBinding(binding.project_id, binding.target_id, binding.incarnation_id,
             binding.role, binding.bundle_digest, binding.grant_id, binding.owner_id)
 
@@ -130,8 +134,9 @@ class CreateActivation:
             if row is None or set(row.projects.values_list('pk', flat=True)) != {binding.project_id}:
                 raise access.Denied('matching claimed create required for grant activation')
             stages = tuple(operations.Step.objects.select_for_update().filter(operation=row).order_by('ordinal'))
-            if (tuple(step.name for step in stages) != ('scheduler_register', 'apply_identity', 'confirm_ready', 'activate_grant')
-                    or any(step.outcome != 'succeeded' or step.quiescent_at is None for step in stages[:3])):
+            from mop.common.initialcreate import PHASES
+            if (tuple(step.name for step in stages) != PHASES
+                    or any(step.outcome != 'succeeded' or step.quiescent_at is None for step in stages[:-1])):
                 raise access.Denied('matching claimed create required for grant activation')
             step = stages[-1]
             if (step.token is None or step.attempt_id != step.token or step.dispatched_at is None
@@ -140,6 +145,10 @@ class CreateActivation:
                 raise access.Denied('matching claimed create required for grant activation')
             keys = {'node:'+str(binding.node_id), 'project:'+str(binding.project_id),
                     'puppet:'+str(binding.target_id), 'target:'+str(binding.target_id)}
+            from mop.server.operations.launch import validate_claims
+            from .createbinding import LaunchSupport
+            validate_claims(row, step, keys)
+            LaunchSupport().require(binding, row)
             claims = tuple(operations.ResourceClaim.objects.filter(operation=row, released_at=None,
                 resource_id__in=keys).order_by('resource_id').values_list('resource_id', 'step_id', 'token'))
             if {claim[0] for claim in claims} != keys:
@@ -214,6 +223,8 @@ class CredentialApplication:
         self.grants.secrets.authority = CurrentRetention(self, self.grants.secrets.authority)
         self.store = secrets.SecretStore(provider=provider, authorizer=CurrentAccess(self),
             delivery_gate=delivery_gate if delivery_gate is not None else AwaitAssignment(self))
+        from .endpointcommands import PrivateCommands
+        self.private = PrivateCommands(self)
 
     @secrets.storage_errors
     def fence(self):
@@ -233,7 +244,11 @@ class CredentialApplication:
         self.fence()
         actor = (access.token_context(credential.value, grants=self.local_grants)
                  if credential.kind == 'token' else access.session_context(credential.value))
-        if command is p.Command.CREATE:
+        if command is p.Command.SEND_REPORT:
+            result = self.private.send(actor, **args)
+        elif command is p.Command.TAKE_DELIVERY:
+            result = self.private.take(actor, **args)
+        elif command is p.Command.CREATE:
             result = self.store.create(actor, **args)
         elif command is p.Command.STAGE:
             result = self.store.stage(actor, **args)
@@ -250,11 +265,33 @@ class CredentialApplication:
         elif command is p.Command.PUBLISH_DEFINITION:
             row = self.grants.publish_definition(actor, **args)
             result = p.DefinitionInfo(row.id, row.role, row.digest, row.project_id, row.owner_id)
+        elif command is p.Command.LAUNCH:
+            from .launchdelivery import deliver
+            result = deliver(self, actor, args['work'])
+        elif command is p.Command.INITIAL_LAUNCH:
+            from .launchdelivery import deliver_initial
+            result = deliver_initial(self, actor, args['work'])
+        elif command is p.Command.MANAGEMENT_CONTEXT:
+            from .managementcontext import deliver
+            result = deliver(self, actor, args['request'])
         elif command is p.Command.DEFINITION:
             row = self.grants.read_definition(actor, **args)
             result = p.DefinitionBytes(row.id, row.role, row.digest, row.manifest, row.prompt, row.provenance)
         elif command is p.Command.APPROVE_DEFINITION:
             result = self.grants.approve_definition(actor, **args)
+        elif command is p.Command.PREPARE_REPLACEMENT:
+            from .replacement import ReplacementPreparation
+            row = self.grants.prepare_replacement(actor, authority=ReplacementPreparation(self, **args))
+            result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
+                row.role, row.digest, row.state, row.revision, row.credential_version_id)
+        elif command is p.Command.RESERVE_INITIAL_GRANT:
+            from .initialselection import InitialReservationApprovals
+            authority = InitialReservationApprovals(self.preparation.approval_query(), actor, **args)
+            grants = Grants(provider=self.store.provider, bindings=CurrentBindings(), approvals=authority)
+            grants.secrets.authority = CurrentRetention(self, grants.secrets.authority)
+            row = grants.reserve(actor, **authority.arguments())
+            result = p.GrantReceipt(row.id, row.project_id, row.target_id, row.incarnation,
+                row.role, row.digest, row.state, row.revision, row.credential_version_id)
         elif command in (p.Command.RESERVE_GRANT, p.Command.PROVISION_GRANT, p.Command.ACTIVATE_GRANT):
             if command is p.Command.ACTIVATE_GRANT:
                 authority = CreateActivation(self, actor, args['grant_id'])
@@ -287,6 +324,10 @@ class CredentialApplication:
 
 
 def _wire(value):
+    if type(value) is dict:
+        if len(value) > 128 or any(type(key) is not str for key in value):
+            raise p.CredentialError('invalid credential result fields')
+        return {key: _wire(item) for key, item in value.items()}
     if type(value) is bytes:
         return p.encoded(value)
     if type(value) is UUID:
@@ -297,7 +338,7 @@ def _wire(value):
         return [_wire(item) for item in value]
     if type(value) in (secrets.SecretMetadata, secrets.VersionMetadata, secrets.AddressedSecret,
                        p.DefinitionBytes, p.DefinitionInfo, p.GrantReceipt, p.PreparationInfo,
-                       p.PreparationBytes, p.ApprovalReceipt):
+                       p.PreparationBytes, p.ApprovalReceipt, DeliveryFrame, DeliveryResult):
         return {f.name: _wire(getattr(value, f.name)) for f in fields(value)}
     if value is None or type(value) in (str, int, bool):
         return value
@@ -332,11 +373,30 @@ def compose(*, key_id):
         close_pools()
 
 
-def _failure(exc):
+def _failure(exc, *, private=False, management=False):
+    if management and isinstance(exc, (SecretCryptoUnavailable, secrets.StorageUnavailable, GrantUnavailable)):
+        # Только типизированная недоступность, не любой crypto/auth отказ.
+        return {'ok': False, 'error': {'code': 'unavailable', 'message': str(exc)}}
+    if private:
+        # Конечные send/take сохраняют domain verdict, а не схлопывают
+        # conflict/capacity/not-found/unavailable в отказ authority (403).
+        for kind, code in ((EndpointConflict, 'conflict'), (EndpointCapacity, 'capacity'),
+                           (access.NotVisible, 'not_found'),
+                           ((EndpointUnavailable, SecretCryptoError, secrets.StorageUnavailable), 'unavailable')):
+            if isinstance(exc, kind):
+                return {'ok': False, 'error': {'code': code, 'message': str(exc)}}
+        # Untyped ValueError может прийти и из crypto/driver: не передаём его
+        # целиком. Только фиксированные input verdicts публичного Sessions port;
+        # сами правила (UTF-8 bound/deadline) остаются у domain owner.
+        if type(exc) is ValueError and str(exc) in (
+                'canonical UUID required', 'invalid private message', 'invalid delivery options',
+                'aware delivery deadline required', 'delivery deadline must be within 24 hours'):
+            return {'ok': False, 'error': {'code': 'invalid', 'message': str(exc)}}
     # Library phrases этих категорий уже безопасны: не обрезаем их второй раз.
     if isinstance(exc, (p.CredentialError, access.Denied, secrets.Refused, secrets.Conflict,
                         secrets.StorageUnavailable, secrets.TransactionBoundary, SecretCryptoError,
-                        preparation.Conflict, preparation.StorageUnavailable, GrantConflict, GrantUnavailable)):
+                        preparation.Conflict, preparation.StorageUnavailable, GrantConflict, GrantUnavailable,
+                        EndpointConflict, EndpointCapacity, EndpointUnavailable)):
         return {'ok': False, 'error': {'code': 'refused', 'message': str(exc)}}
     if type(exc) is PermissionError:
         return {'ok': False, 'error': {'code': 'refused', 'message': str(exc)}}
@@ -443,7 +503,9 @@ class CredentialService:
                     response = {'ok': True, 'result': result}
                     wire = p.frame(response)
                 except Exception as exc:
-                    wire = p.frame(_failure(exc))
+                    wire = p.frame(_failure(exc,
+                        private=command in (p.Command.SEND_REPORT, p.Command.TAKE_DELIVERY),
+                        management=command is p.Command.MANAGEMENT_CONTEXT))
                 writer.write(wire)
                 await writer.drain()
         except p.CredentialError as exc:

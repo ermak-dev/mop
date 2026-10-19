@@ -10,6 +10,8 @@ import tempfile
 from threading import Barrier
 from uuid import uuid4
 
+from _own_session_fixture import own_session
+
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
@@ -85,6 +87,16 @@ class Endpoints(TransactionTestCase):
         from mop.server.controller.endpointcrypto import EndpointCipher
         self.api = s.Endpoints(authority=authority,
             cipher=EndpointCipher(XChaCha20Provider(Keyring('test', {'test': b'k'*32})), 'isolated-ci'))
+        # #669: старые domain/HTTP contracts сохраняют локальный real-AEAD
+        # fixture; новый protected composition/socket проверяет отдельный
+        # _endpoint_credential_cases. Port получает credential, не actor claims.
+        def send_private_report(credential, *, sender_endpoint_id, sender_connection_nonce, **message):
+            actor = (auth.token_context(credential.value) if credential.kind == 'token'
+                     else auth.session_context(credential.value))
+            sender = (self.api.trusted_context(actor, sender_endpoint_id, sender_connection_nonce)
+                      if sender_endpoint_id is not None else None)
+            return self.api.send(actor, **message, sender=sender)
+        self.api.send_private_report = send_private_report
         from unittest.mock import patch
         binding = patch('mop.server.controller.endpointviews.endpoints', self.api)
         binding.start()
@@ -392,7 +404,7 @@ class Endpoints(TransactionTestCase):
     # STATUS: FIXED — see #702
     def test_case_socket_root_fits_sockaddr_un_under_nested_inherited_tmpdir(self):
         from unittest.mock import patch
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         # Наследуемый корень, как во вложенном hermetic: корень процесса внутри
         # корня родителя.
         outer = tempfile.TemporaryDirectory(prefix='mop-test-run-')
@@ -412,7 +424,7 @@ class Endpoints(TransactionTestCase):
                     await writer.wait_closed()
                 server = await asyncio.start_unix_server(external, path=path)
                 os.chmod(path, 0o600)
-                bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.05)
+                bridge = LocalBridge(own_session(path, self.external), timeout=.05)
                 try:
                     await bridge.start()
                     self.assertTrue(Path(bridge._callback).is_socket())
@@ -427,7 +439,7 @@ class Endpoints(TransactionTestCase):
         self.assertFalse(Path(directory).exists(), 'the case owns and removes its socket root')
 
     def test_real_unix_bridge_loop_acceptance_unknown_idle_and_shutdown(self):
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         from mop.server.sessions.delivery import DeliveryGateway
         from mop.server.controller.runtime import Runtime
         async def scenario():
@@ -444,7 +456,7 @@ class Endpoints(TransactionTestCase):
                         received.append(frame)
                         callback = frame['from'][4:]
                         r, w = await asyncio.open_unix_connection(callback)
-                        w.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'message_accepted',
+                        w.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'peer_message_status', 'status': 'delivered',
                             'orig_msg_id': frame['msg_id']})+'\n').encode())
                         await w.drain()
                         w.close()
@@ -454,7 +466,7 @@ class Endpoints(TransactionTestCase):
                         await writer.wait_closed()
                 server = await asyncio.start_unix_server(external, path=path)
                 os.chmod(path, 0o600)
-                bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.3)
+                bridge = LocalBridge(own_session(path, self.external), timeout=.3)
                 runtime = Runtime(adapters=(bridge,))
                 gateway = DeliveryGateway(runtime, self.api)
                 await runtime.start()
@@ -484,7 +496,7 @@ class Endpoints(TransactionTestCase):
         asyncio.run(scenario())
 
     def test_bridge_publish_without_application_ack_is_unknown_and_not_replayed(self):
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         from mop.common.endpoint import DeliveryFrame
         async def scenario():
             with socket_directory('mop-endpoint-') as directory:
@@ -501,7 +513,7 @@ class Endpoints(TransactionTestCase):
                         await writer.wait_closed()
                 server = await asyncio.start_unix_server(silent, path=path)
                 os.chmod(path, 0o600)
-                bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.05)
+                bridge = LocalBridge(own_session(path, self.external), timeout=.05)
                 await bridge.start()
                 try:
                     frame = DeliveryFrame(uuid4(), uuid4(), self.external, 'hello', 'next', False)
@@ -515,7 +527,7 @@ class Endpoints(TransactionTestCase):
         asyncio.run(scenario())
 
     def test_real_bridge_idle_notice_is_correlated_to_control_not_user_message(self):
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         from mop.common.endpoint import DeliveryFrame
         async def scenario():
             with socket_directory('mop-endpoint-') as directory:
@@ -530,8 +542,9 @@ class Endpoints(TransactionTestCase):
                         frame = json.loads(line)
                         frames.append(frame)
                         _, reply = await asyncio.open_unix_connection(frame['from'][4:])
-                        action = 'peer_idle_notice' if frame['type'] == 'control' else 'message_accepted'
-                        reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': action,
+                        receipt = ({'action': 'peer_idle_notice', 'state': 'idle'} if frame['type'] == 'control'
+                            else {'action': 'peer_message_status', 'status': 'delivered'})
+                        reply.write((json.dumps({'msgV': 1, 'type': 'control', **receipt,
                             'orig_msg_id': frame['msg_id']})+'\n').encode())
                         await reply.drain()
                         reply.close()
@@ -541,7 +554,7 @@ class Endpoints(TransactionTestCase):
                         await writer.wait_closed()
                 server = await asyncio.start_unix_server(external, path=path)
                 os.chmod(path, 0o600)
-                bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.3)
+                bridge = LocalBridge(own_session(path, self.external), timeout=.3)
                 await bridge.start()
                 try:
                     frame = DeliveryFrame(uuid4(), uuid4(), self.external, 'hello', 'next', True)
@@ -577,7 +590,7 @@ class Endpoints(TransactionTestCase):
         asyncio.run(scenario())
 
     def test_root_receiver_loop_delivers_real_socket_and_correlated_idle(self):
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         from mop.server.controller.endpointroot import create_endpoint_runtime
         async def scenario():
             with socket_directory('mop-endpoint-') as directory:
@@ -592,8 +605,9 @@ class Endpoints(TransactionTestCase):
                         frame = json.loads(line)
                         frames.append(frame)
                         _, reply = await asyncio.open_unix_connection(frame['from'][4:])
-                        action = 'peer_idle_notice' if frame['type'] == 'control' else 'message_accepted'
-                        reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': action,
+                        receipt = ({'action': 'peer_idle_notice', 'state': 'idle'} if frame['type'] == 'control'
+                            else {'action': 'peer_message_status', 'status': 'delivered'})
+                        reply.write((json.dumps({'msgV': 1, 'type': 'control', **receipt,
                             'orig_msg_id': frame['msg_id']})+'\n').encode())
                         await reply.drain()
                         reply.close()
@@ -606,7 +620,7 @@ class Endpoints(TransactionTestCase):
                 runtime, gateway = create_endpoint_runtime(self.api)
                 await runtime.start()
                 try:
-                    bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.3)
+                    bridge = LocalBridge(own_session(path, self.external), timeout=.3)
                     context = await gateway.attach(self.actor, self.endpoint.id, bridge)
                     task = gateway.start_receiver(context)
                     report = await runtime.database(self.send, notify_when_idle=True)
@@ -755,7 +769,7 @@ class Endpoints(TransactionTestCase):
         asyncio.run(self._late_native_write('timeout'))
 
     async def _late_native_write(self, action):
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         from mop.server.controller.endpointroot import create_endpoint_runtime
         with socket_directory('mop-endpoint-fence-') as directory:
             os.chmod(directory, 0o700)
@@ -772,7 +786,7 @@ class Endpoints(TransactionTestCase):
                     await writer.wait_closed()
             server = await asyncio.start_unix_server(external, path=path)
             os.chmod(path, 0o600)
-            bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=.05)
+            bridge = LocalBridge(own_session(path, self.external), timeout=.05)
             runtime, gateway = create_endpoint_runtime(self.api)
             await runtime.start()
             release, entered = asyncio.Event(), asyncio.Event()
@@ -904,7 +918,7 @@ class Endpoints(TransactionTestCase):
         asyncio.run(scenario())
 
     def test_native_acceptance_after_sender_revocation_cannot_write_idle_control(self):
-        from mop.client.local_bridge import OwnSession, LocalBridge
+        from mop.client.local_bridge import LocalBridge
         from mop.server.controller.endpointroot import create_endpoint_runtime
         async def scenario():
             with socket_directory('mop-endpoint-accept-') as directory:
@@ -926,7 +940,7 @@ class Endpoints(TransactionTestCase):
                 runtime, gateway = create_endpoint_runtime(self.api)
                 await runtime.start()
                 try:
-                    bridge = LocalBridge(OwnSession(path, os.getpid(), self.external), timeout=1)
+                    bridge = LocalBridge(own_session(path, self.external), timeout=1)
                     context = await gateway.attach(self.actor, self.endpoint.id, bridge)
                     report = await runtime.database(self.api.send, self.other_actor,
                         expected_epoch=self.installation.epoch, address=self.endpoint.address,
@@ -936,7 +950,7 @@ class Endpoints(TransactionTestCase):
                     await asyncio.wait_for(received.wait(), 2)
                     await runtime.database(self.auth.revoke_token, self.other_actor)
                     _, reply = await asyncio.open_unix_connection(frames[0]['from'][4:])
-                    reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'message_accepted',
+                    reply.write((json.dumps({'msgV': 1, 'type': 'control', 'action': 'peer_message_status', 'status': 'delivered',
                         'orig_msg_id': str(report.message_id)})+'\n').encode())
                     await reply.drain()
                     reply.close()

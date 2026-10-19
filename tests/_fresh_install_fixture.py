@@ -15,7 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class FreshPlanFixture:
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='mop-fresh-plan-')
+        # #677: только runtime установки держим коротким: вложенный TMPDIR
+        # hermetic не вмещает credential Unix endpoint. Lifetime и cleanup
+        # общие обоим файлам, HOME и остальные tempfiles остаются изолированы.
+        self.tmp = tempfile.TemporaryDirectory(prefix='mfi-', dir='/tmp')
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / 'install.json'
         self.spec = {

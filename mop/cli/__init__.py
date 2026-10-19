@@ -222,11 +222,13 @@ def declared(path):
             raise ValueError('MCP actions: Django action names, without legacy verbs')
     if type(decl.get('human_only', False)) is not bool:
         raise ValueError('MCP human_only: true or false')
-    from mop.common import soul  # здесь, а не наверху: пакет cli грузит каждая команда
-    for key, vocab in (("node_verbs", soul.NODE_VERBS), ("cluster_verbs", soul.CLUSTER_VERBS)):
-        verbs = decl.get(key, [])
-        if not isinstance(verbs, list) or set(verbs) - set(vocab):
-            raise ValueError(f"MCP {key}: a list of {', '.join(vocab)}")
+    # Современное actions-объявление не импортирует прежний role vocabulary.
+    if 'node_verbs' in decl or 'cluster_verbs' in decl:
+        from mop.common import soul
+        for key, vocab in (("node_verbs", soul.NODE_VERBS), ("cluster_verbs", soul.CLUSTER_VERBS)):
+            verbs = decl.get(key, [])
+            if not isinstance(verbs, list) or set(verbs) - set(vocab):
+                raise ValueError(f"MCP {key}: a list of {', '.join(vocab)}")
     if not isinstance(decl.get("dispatch", False), bool):
         raise ValueError("MCP dispatch: true or false")
     optional_seen = False
@@ -480,8 +482,13 @@ def client_command(modname):
 
 
 def main(argv):
+    # Node bootstrap — раньше даже _control/run: те импортируют client/config.
+    # Командлет сам переводит конечные отказы в stderr, без старого environment.
+    if argv[:1] == ["agent"]:
+        return command("mop.cli.service.agent")(argv[1:])
     # Новый bootstrap не читает context/.env даже до загрузки командлета.
-    if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"]):
+    if argv[:2] in (["server", "controller"], ["server", "credentials"], ["server", "install"],
+                    ["server", "preview"]):
         return run(command("mop.cli.server." + argv[1]), argv[2:])
     # Новый путь выбирается до legacy context/.env: даже отсутствующая capability
     # не должна открывать старый login store или импортировать NATS.

@@ -36,12 +36,32 @@ class AssignmentBindings:
             value.role, value.bundle_digest, value.grant_id, value.owner_id)
 
 
+class PreparationApprovals:
+    """Реальный SQL query Preparation; его отказ получает тип границы Access."""
+    def __init__(self, query):
+        self.query = query
+
+    def pin(self, binding):
+        from mop.server.access.services import Denied
+        try:
+            return self.query.pin(binding)
+        except PermissionError as error:
+            raise Denied(str(error)) from error
+
+    def validate(self, proof, binding):
+        from mop.server.access.services import Denied
+        try:
+            return self.query.validate(proof, binding)
+        except PermissionError as error:
+            raise Denied(str(error)) from error
+
+
 def local_grants():
     """SQL-only композиция живого exact approval; root/provider здесь нет."""
     from mop.server.access.services import Access
     from mop.server.preparation.services import Preparation
-    return Grants(provider=None, approvals=Preparation(provider=None, authorizer=Access()).approval_query(),
-                  bindings=AssignmentBindings())
+    query = Preparation(provider=None, authorizer=Access()).approval_query()
+    return Grants(provider=None, approvals=PreparationApprovals(query), bindings=AssignmentBindings())
 
 
 class Targets:
@@ -81,7 +101,8 @@ class ReceivingGrant:
         # #643: идентичность и готовность новой цели -- по выданному, ещё не
         # активному гранту; любое другое действие -- только по активному.
         from mop.server.access.models import Grant
-        if (action in ('apply_identity', 'confirm_ready')
+        from mop.common.initialcreate import MACHINE
+        if (action in MACHINE
                 and Grant.objects.filter(pk=grant_id, state='reserved').exists()):
             self.grants.authorize_launch(binding)
             return
@@ -98,6 +119,12 @@ class OperationWork:
     def current(self, operation_id, step_id):
         return WorkV1(**asdict(self.operations.current_machine(operation_id, step_id)))
 
+    def abort_unstarted(self, work):
+        return self.operations.abort_unstarted_create(MachineStep(**asdict(work)))
+
+    def reconcile_expired(self, *, limit):
+        return self.operations.reconcile_expired_creates(limit=limit)
+
     def claimed(self, work, attempt_id):
         self.operations.claimed_machine(MachineStep(**asdict(work)), attempt_id)
 
@@ -107,8 +134,33 @@ class OperationWork:
     def retired(self, target_id, executor_epoch):
         self.operations.retired_machine(target_id, executor_epoch)
 
+    def effect_lease(self, work):
+        return self.operations.effect_lease(MachineStep(**asdict(work)))
+
     def message_input(self, work):
         return self.operations.messages.input(MachineStep(**asdict(work)))
+
+    def launch_definition(self, work, attempt_id):
+        return self.operations.launch_machine.launch_definition(MachineStep(**asdict(work)), attempt_id)
+
+    def initial_native_attempt(self, work):
+        """Historical locator для readiness; не admission нового эффекта."""
+        from mop.server.operations import models as om
+        from mop.server.operations.launch import STAGES
+        from mop.server.sessions.services import Conflict
+        row = om.Operation.objects.get(pk=work.operation_id)
+        if row.action != 'create':
+            return None
+        stages = tuple(row.step_set.order_by('ordinal'))
+        if tuple(step.name for step in stages) != STAGES:
+            raise Conflict('fixed initial create phases required for readiness producer')
+        native = stages[STAGES.index('native_exec')]
+        if (native.token is None or native.attempt_id != native.token or native.outcome != 'succeeded'
+                or native.dispatched_at is None or native.quiescent_at is None
+                or not om.EffectReceipt.objects.filter(step=native, token=native.token, epoch=row.epoch,
+                    node_id=row.node_id, source_revision=row.expected_revision, applied=True).exists()):
+            raise Conflict('confirmed initial native producer attempt required')
+        return native.attempt_id
 
 
 def operations(*, grants=None, restart_support=None, message_support=None, message_cipher=None, endpoints=None,
@@ -128,17 +180,41 @@ def operations(*, grants=None, restart_support=None, message_support=None, messa
     return service
 
 
+def executor_discovery(execution, actor, node_id, *, host=False):
+    """Один SQL admission для canonical installation и scoped executor; без effects."""
+    from .models import Installation
+    from .runtime import short_transaction, require_restore_ready
+    from mop.server.sessions.services import Unavailable
+    try:
+        with short_transaction():
+            require_restore_ready(lock=True)
+            installation = Installation.objects.select_for_update().get(pk=1)
+            # Сохраняем весь прежний machine/node/project gate и bounded ambiguity
+            # check. Ни transport export, ни numeric pk не становятся identity.
+            previous, empty = execution.host_executor_state(actor, node_id) if host else (
+                execution.executor_state(actor, node_id), None)
+            result = dict(schema_version=1, installation_id=installation.identity,
+                epoch=str(installation.epoch), node_id=str(node_id), executor_epoch=str(previous))
+            return dict(**result, empty=empty) if host else result
+    except Installation.DoesNotExist:
+        raise Unavailable('controller installation is not initialized') from None
+    except RuntimeError as error:
+        raise Unavailable(str(error)) from None
+
+
 def authority():
     from uuid import UUID
     from django.db import transaction
     from mop.server.sessions.protocol import AuthorityV1
-    from mop.server.sessions.services import Unavailable
-    from .runtime import installation_snapshot, require_restore_ready
+    from mop.server.sessions.services import Conflict, Unavailable
+    from .runtime import installation_snapshot, require_restore_ready, RestoreGuardBusy
     try:
         if transaction.get_connection().in_atomic_block:
             require_restore_ready(lock=True)
         value = installation_snapshot()
         return AuthorityV1(UUID(value['epoch']), value['effects_enabled'])
+    except RestoreGuardBusy as error:
+        raise Conflict(str(error)) from None
     except RuntimeError as error:
         raise Unavailable(str(error)) from None
 

@@ -1,5 +1,6 @@
 """ORM каталог: intent отдельно от внешних фактов и receipts."""
 import uuid
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -251,3 +252,56 @@ class WorkspaceBinding(Record):
 
     class Meta(Record.Meta):
         constraints = Record.Meta.constraints + [models.UniqueConstraint(fields=('client', 'workspace_key'), name='workspace_client_key_unique')]
+
+
+class InitialCreatePolicy(ImmutableRecord):
+    """Явная SQL-политика source/model/consumer первого запуска, не image branch.
+
+    Публикуется trusted composition с точными refs; указатель выбора отдельный.
+    Definition/bootstrap -- идентификаторы публичных портов владельцев, не их ORM.
+    """
+    project = models.ForeignKey(Project, on_delete=models.PROTECT)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    definition_id = models.UUIDField()
+    bootstrap_revision = models.UUIDField()
+    # Scalar proof владельца Access; каталог не импортирует его ORM (#747).
+    rbac_profile_id = models.UUIDField(null=True)
+    rbac_profile_digest = models.CharField(max_length=64, default='')
+    image = models.ForeignKey(ImageRevision, on_delete=models.PROTECT)
+    source_origin = models.CharField(max_length=2048)
+    source_commit = models.CharField(max_length=64)
+    source_ref = models.CharField(max_length=256)
+    desired_model = models.CharField(max_length=128)
+    model_config_digest = models.CharField(max_length=64)
+    digest = models.CharField(max_length=64)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta(Record.Meta):
+        constraints = Record.Meta.constraints + [models.CheckConstraint(
+            condition=Q(source_commit__regex='^([0-9a-f]{40}|[0-9a-f]{64})$',
+                model_config_digest__regex='^[0-9a-f]{64}$', digest__regex='^[0-9a-f]{64}$'),
+            name='initial_create_policy_pins')]
+
+
+class InitialCreateConsumer(ImmutableRecord):
+    policy = models.ForeignKey(InitialCreatePolicy, on_delete=models.PROTECT)
+    purpose = models.CharField(max_length=32)
+    version_id = models.UUIDField()
+
+    class Meta(Record.Meta):
+        constraints = Record.Meta.constraints + [models.UniqueConstraint(fields=('policy', 'version_id'),
+            name='initial_create_consumer_reference'), models.CheckConstraint(condition=Q(purpose__in=(
+                'source_credential', 'bootstrap_input', 'model_config', 'model_credential')),
+                name='initial_create_consumer_purpose')]
+
+
+class InitialCreateSelection(Record):
+    """Настроенный выбор для frozen create(node,definition); не latest/default."""
+    project = models.ForeignKey(Project, on_delete=models.PROTECT)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    definition_id = models.UUIDField()
+    policy = models.ForeignKey(InitialCreatePolicy, on_delete=models.PROTECT)
+
+    class Meta(Record.Meta):
+        constraints = Record.Meta.constraints + [models.UniqueConstraint(
+            fields=('project', 'owner', 'definition_id'), name='initial_create_explicit_selection')]

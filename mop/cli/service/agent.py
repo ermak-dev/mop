@@ -1,70 +1,43 @@
-"""node agent: answers the bus about the puppets on this node (unit mop-agent)
+"""node agent: explicit private HTTPS bootstrap, one per node under systemd
 
-  mop agent            subscribe and serve, until stopped
-  mop agent --check    ask this node's agent over the bus whether it answers
+  mop agent --bootstrap /absolute/private/bootstrap.json --check
+  mop agent --bootstrap /absolute/private/bootstrap.json
 
-One per node, under systemd, outside the job spec (docs/BUS.md): it must
-answer precisely while a puppet is restarting.
+--check performs bounded authenticated executor discovery and verifies the
+installation identity, epoch and enrolled node. It never changes the executor
+fence, reconciles physical scopes, polls work or claims effects. An executor-only
+response without installation coordinates is refused, not upgraded locally.
+
+Normal serve is unavailable until a complete native physical startup root is
+bound. A transport export is not physical reconciliation or readiness evidence.
+No .env, bus.json, ready.json or previous login fallback is supported.
 """
+import argparse
 import asyncio
 import sys
 
-NATS_MISSING = "bus library needed: pip install --user --break-system-packages nats-py"
-
-
-async def serve(nats, agent, bus):
-    c = bus.config(bus.NODE_FILE)
-    node = agent.node_name()
-    conn = await nats.connect(
-        **bus.auth(c), name=f"mop-agent/{node}",
-        allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
-    # Креды-снимок -- на соединение (#603): его читает резолвер-путь узла
-    # (resolver_subject, #581), и соединение, открытое здесь, а не
-    # bus.connect(), иначе осталось бы без узлового имени. Снимок -- тот
-    # же c, что ушёл в auth: рукопожатие и identity видят одни креды.
-    conn.creds = c
-    subjects = await agent.attach(conn, node)
-    print(f"mop-agent: node {node}, subscribed to {', '.join(subjects)}", flush=True)
-    await asyncio.Event().wait()
-
-
-async def check(nats, agent, bus):
-    """Проверка прогоном, а не чтением конфига: юнит, упавший в бесконечный
-    реконнект, systemd вполне устраивает, и «запущен» не значит «подписан».
-    Спрашиваем через публичный субъект узла, а не через .rpc: туда узлу писать
-    и не положено — это и есть та граница прав, ради которой шину заводили.
-    Первый прогон проверки уткнулся ровно в неё, и был неправ он, а не права."""
-    c = bus.config(bus.NODE_FILE)
-    print(f"mop-agent: node {agent.node_name()}, bus {c['url']}, "
-          f"{len(agent.VERBS)} verbs ({len(agent.PUBLIC_VERBS)} public)")
-    nc = await nats.connect(**bus.auth(c), name="mop-agent/check",
-                            allow_reconnect=False, connect_timeout=5)
-    try:
-        msg = await bus.arequest(nc, bus.subject(agent.node_name(), "msg", project=bus.ADMIN),
-                                 bus.envelope("ping"), 5)
-        print(f"subscribed: {msg.data.decode()}")
-    finally:
-        await nc.close()
-
 
 def main(argv):
-    # nats -- до пакета: без него агенту нечего делать, и отказ должен
-    # называть лечение, а не падать трассой из импорта.
+    from mop.node.bootstrap_transport import BootstrapError, load
+    from mop.node.http_execution import Refused, Unavailable
+    from mop.node.native_startup import check_bootstrap, serve
+
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument('--bootstrap', required=True)
+    parser.add_argument('--check', action='store_true')
+    args = parser.parse_args(argv)
     try:
-        import nats
+        bootstrap = load(args.bootstrap)
+        if args.check:
+            asyncio.run(check_bootstrap(bootstrap))
+        else:
+            asyncio.run(serve(bootstrap))
+    except (BootstrapError, Refused, Unavailable) as error:
+        print(str(error), file=sys.stderr)
+        return 1
     except ImportError:
-        sys.exit(NATS_MISSING)
-    from mop.node import agent
-    from mop.common import bus
-    if "--check" in argv:
-        try:
-            asyncio.run(check(nats, agent, bus))
-        except Exception as e:
-            print(f"agent is NOT answering on its subject: {e}", file=sys.stderr)
-            return 1
-        return 0
-    try:
-        asyncio.run(serve(nats, agent, bus))
+        print('native agent HTTP runtime dependency is unavailable', file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
-        return 0
+        return 130
     return 0

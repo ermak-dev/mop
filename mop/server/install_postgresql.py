@@ -22,13 +22,15 @@ def provision(spec, admin, *, passwords):
     """Только явно новая БД. Ошибка после CREATE DATABASE не откатывает внешний мир."""
     import psycopg
     from psycopg import sql
-    from .installation import RUNTIME_ROLES, bootstrap_document
-    db, identities = dict(spec.database), dict(spec.identities)
-    roles = (*RUNTIME_ROLES, 'maintenance')
+    from .installation import (DATABASE_RUNTIME_ROLES, DATABASE_ROLES, DATABASE_CONNECTIONS,
+                               CREDENTIAL_CONNECTIONS, database_password, database_identity)
+    db = dict(spec.database)
+    roles = DATABASE_ROLES
+    identities = {role: database_identity(spec, role) for role in roles}
     if type(passwords) is not dict or set(passwords) != set(roles):
-        raise ValueError('database provisioning requires four distinct role passwords')
+        raise ValueError('database provisioning requires five distinct role passwords')
     for role in roles:
-        bootstrap_document(spec, role, password=passwords[role])
+        database_password(passwords[role])
         if len(passwords[role]) < 24 or not passwords[role].isascii():
             raise ValueError('database role passwords require at least 24 random ASCII characters')
     if len(set(passwords.values())) != len(roles):
@@ -48,8 +50,8 @@ def provision(spec, admin, *, passwords):
     capacity, reserved = admin.execute("SELECT current_setting('max_connections')::int, "
         "current_setting('superuser_reserved_connections')::int + "
         "coalesce(nullif(current_setting('reserved_connections', true), ''), '0')::int").fetchone()
-    if capacity - reserved < 32:
-        raise RuntimeError('PostgreSQL lacks 24 runtime plus 8 maintenance connection capacity')
+    if capacity - reserved < DATABASE_CONNECTIONS:
+        raise RuntimeError('PostgreSQL lacks 24 ordinary runtime plus 8 credential plus 8 maintenance connection capacity')
     if admin.execute('SELECT 1 FROM pg_database WHERE datname=%s', (db['name'],)).fetchone():
         raise RuntimeError('installation database already exists; use maintenance, never reinitialize')
     names = [identities[role] for role in roles]
@@ -70,8 +72,8 @@ def provision(spec, admin, *, passwords):
                     'NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 8 PASSWORD {}').format(
                         sql.Identifier(identities[role]), sql.Literal(_scram(passwords[role]))))
             created = True
-        admin.execute(sql.SQL('CREATE DATABASE {} OWNER {} CONNECTION LIMIT 32').format(
-            sql.Identifier(db['name']), sql.Identifier(identities['maintenance'])))
+        admin.execute(sql.SQL('CREATE DATABASE {} OWNER {} CONNECTION LIMIT {}').format(
+            sql.Identifier(db['name']), sql.Identifier(identities['maintenance']), sql.Literal(DATABASE_CONNECTIONS)))
         admin.execute(sql.SQL('REVOKE ALL ON DATABASE {} FROM PUBLIC').format(sql.Identifier(db['name'])))
         for role in roles:
             admin.execute(sql.SQL('GRANT CONNECT ON DATABASE {} TO {}').format(
@@ -82,7 +84,7 @@ def provision(spec, admin, *, passwords):
                 user=identities['maintenance'], password=passwords['maintenance'],
                 sslmode='verify-full', sslrootcert=db['tls_ca'], connect_timeout=5) as target:
             target.execute('REVOKE ALL ON SCHEMA public FROM PUBLIC')
-            for role in RUNTIME_ROLES:
+            for role in DATABASE_RUNTIME_ROLES:
                 user = sql.Identifier(identities[role])
                 target.execute(sql.SQL('GRANT USAGE ON SCHEMA public TO {}').format(user))
                 target.execute(sql.SQL('ALTER DEFAULT PRIVILEGES IN SCHEMA public '
@@ -99,6 +101,7 @@ def provision(spec, admin, *, passwords):
     finally:
         admin.execute('SELECT pg_advisory_unlock(%s)', (lock,))
     return {'database_created': True, 'services_started': False, 'runtime_connections': 24,
+            'credential_connections': CREDENTIAL_CONNECTIONS, 'total_connections': DATABASE_CONNECTIONS,
             'maintenance_connections': 8, 'connection_scope': 'managed-target-logins',
             'schema_owner': identities['maintenance']}
 
@@ -106,8 +109,10 @@ def provision(spec, admin, *, passwords):
 def verify(spec, connection):
     """Read-only acceptance внешней БД под maintenance, без CREATE ROLE/DB."""
     import psycopg
-    from .installation import RUNTIME_ROLES
-    db, identities = dict(spec.database), dict(spec.identities)
+    from .installation import (DATABASE_RUNTIME_ROLES, DATABASE_ROLES, DATABASE_CONNECTIONS,
+                               CREDENTIAL_CONNECTIONS, database_identity)
+    db = dict(spec.database)
+    identities = {role: database_identity(spec, role) for role in DATABASE_ROLES}
     parameters = connection.info.get_parameters()
     if not connection.pgconn.ssl_in_use or parameters.get('sslmode') != 'verify-full' or \
             parameters.get('sslrootcert') != db['tls_ca']:
@@ -120,9 +125,9 @@ def verify(spec, connection):
     try:
         owner, limit = connection.execute('SELECT pg_get_userbyid(datdba), datconnlimit '
             'FROM pg_database WHERE datname=current_database()').fetchone()
-        if owner != identities['maintenance'] or limit != 32:
+        if owner != identities['maintenance'] or limit != DATABASE_CONNECTIONS:
             raise RuntimeError('database owner or instance connection budget differs from installation')
-        for role in (*RUNTIME_ROLES, 'maintenance'):
+        for role in DATABASE_ROLES:
             name = identities[role]
             row = connection.execute('SELECT oid, rolsuper, rolcreatedb, rolcreaterole, rolreplication, '
                 'rolbypassrls, rolconnlimit, rolcanlogin FROM pg_roles WHERE rolname=%s', (name,)).fetchone()
@@ -149,11 +154,12 @@ def verify(spec, connection):
                 raise RuntimeError('runtime identity must not own database objects')
             _verify_relations(connection, name, identities['maintenance'])
             _verify_defaults(connection, oid, identities['maintenance'],
-                             [identities[role] for role in RUNTIME_ROLES])
-        _verify_login_scope(connection, [identities[role] for role in (*RUNTIME_ROLES, 'maintenance')])
+                             [identities[role] for role in DATABASE_RUNTIME_ROLES])
+        _verify_login_scope(connection, [identities[role] for role in DATABASE_ROLES])
     except psycopg.Error as error:
         raise RuntimeError('database verification unavailable: ' + type(error).__name__) from None
-    return {'verified': True, 'runtime_connections': 24, 'maintenance_connections': 8,
+    return {'verified': True, 'runtime_connections': 24, 'credential_connections': CREDENTIAL_CONNECTIONS,
+            'maintenance_connections': 8, 'total_connections': DATABASE_CONNECTIONS,
             'connection_scope': 'managed-target-logins', 'services_started': False}
 
 

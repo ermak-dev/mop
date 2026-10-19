@@ -1937,6 +1937,12 @@ def main():
             f.write("\n")
         return 0
     c = Checks()
+    # #714: старый импорт ещё допустим историческим callers до #645;
+    # modern renderer и его шаблон принадлежат только launch_spec.
+    from mop.server import launch_spec
+    for name in ('api_job_spec', 'API_WRAPPER', 'API_LAUNCH_CAPABILITIES'):
+        c.check(f'#714 historical spec reexports {name}',
+                getattr(spec, name) is getattr(launch_spec, name))
     for fn in (check_snapshot, check_template_version, check_llm_env_449,
                check_ca_section_557,
                check_wrapper_paths,

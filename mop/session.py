@@ -116,7 +116,7 @@ _HISTORY_COMPONENT = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
 _HISTORY_SID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
-def _history_json(raw):
+def identity_json(raw):
     """Строгий JSON: дубликаты ключей и нечисловые числа не являются объектом."""
     def pairs(items):
         out = {}
@@ -142,7 +142,7 @@ def _history_json(raw):
         raise ValueError("incompatible history JSON object") from e
 
 
-def _history_open(root, parts=(), directory=False):
+def identity_open(root, parts=(), directory=False):
     """Открыть от корня без единого symlink, включая промежуточные каталоги.
 
     dir_fd и O_NOFOLLOW не оставляют окна между realpath и open. Возвращённый
@@ -175,7 +175,7 @@ def _history_open(root, parts=(), directory=False):
         raise
 
 
-def _history_config(env):
+def process_config(env):
     """Корень из окружения процесса, не из RPC и не из путей транскрипта."""
     if not isinstance(env, dict):
         raise LookupError("live session environment is unknown")
@@ -207,7 +207,7 @@ def _history_project(cwd, env):
     return slug
 
 
-def _history_process(pid):
+def process_snapshot(pid):
     """Linux identity: boot id + start ticks; окружение и cwd именно PID.
 
     Чтения stat до и после не позволяют принять окружение переиспользованного
@@ -254,7 +254,7 @@ def _history_process(pid):
         raise LookupError("live session process identity is unavailable") from e
 
 
-def _history_peer(path):
+def socket_peer(path):
     """Проба без кадров, attach и inject: SO_PEERCRED связывает сокет с PID."""
     if not isinstance(path, str) or not os.path.isabs(path) or not hasattr(socket, "SO_PEERCRED"):
         raise LookupError("live session peer identity is unavailable")
@@ -276,6 +276,61 @@ def _history_peer(path):
         if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             raise LookupError("live session socket changed")
         return pid, uid, [after.st_dev, after.st_ino]
+
+
+def native_process(pid):
+    """Снимок foreground producer без discovery или чтения истории.
+
+    Namespace проверяет вызывающий в том же теле. TTY/pgrp/start повторяются
+    вокруг чтения окружения/cwd; живой PID сам по себе не является сессией.
+    """
+    def terminal():
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read(8192).rsplit(")", 1)[1].split()
+        if len(fields) < 20 or fields[0] in ("Z", "X", "x"):
+            raise LookupError("native process has exited")
+        encoded = int(fields[4]) & 0xffffffff
+        device = os.makedev((encoded >> 8) & 0xfff,
+                           (encoded & 0xff) | ((encoded >> 12) & 0xfff00))
+        stdin = os.stat(f"/proc/{pid}/fd/0")
+        namespaces = tuple((kind, os.stat(f"/proc/{pid}/ns/{kind}").st_ino)
+                           for kind in ("mnt", "pid", "user"))
+        return (fields[19], int(fields[2]), int(fields[5]), device,
+                stat.S_ISCHR(stdin.st_mode), stdin.st_rdev, namespaces)
+
+    try:
+        before = terminal()
+        process = process_snapshot(pid)
+        after = terminal()
+        if before != after or process["proc_start"] != before[0]:
+            raise LookupError("native process changed")
+        return {**process, "pgrp": before[1], "foreground": before[2],
+                "tty": before[3], "stdin_character": before[4],
+                "stdin_device": before[5], "namespaces": before[6]}
+    except (OSError, ValueError, IndexError) as error:
+        raise LookupError("native terminal process identity is unavailable") from error
+
+
+# Прежние приватные точки истории сохранены для её собственного discovery и
+# тестовых fences. Observer использует общие identity helpers, не history API.
+def _history_json(raw):
+    return identity_json(raw)
+
+
+def _history_open(root, parts=(), directory=False):
+    return identity_open(root, parts, directory)
+
+
+def _history_config(env):
+    return process_config(env)
+
+
+def _history_process(pid):
+    return process_snapshot(pid)
+
+
+def _history_peer(path):
+    return socket_peer(path)
 
 
 def _history_identity(cwd):

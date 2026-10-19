@@ -234,6 +234,37 @@ def check_real_cancellation(c):
             interrupted and len(owned) == 4 and all(p.returncode == -signal.SIGKILL for p in owned))
 
 
+# HYPOTHESIS: вложенный _lib.RUN_ROOT удлиняет state/service.sock сверх
+# production-предела; standalone installer-проверки скрывают ошибку (#677).
+# SPEC: оба полных файла проходят с глубоким owned TMPDIR и настоящими
+# clean/hostile HOME; bootstrap validation, daemon peers и ACL не подменяются.
+# SOLUTION: короткий private runtime принадлежит общему FreshPlanFixture,
+# а не HOME, всему tempfile-процесса или production socket validator.
+# RESULT: RED -- оба файла отвергли endpoint в обоих домах; GREEN -- те же
+# полные проверки и реальный bind/cleanup проходят без изменения production.
+# STATUS: FIXED — see #677.
+def check_installer_deep_tmpdir_677(c):
+    child_env = hermetic.child_env
+    names = [str(Path(hermetic.TESTS) / name)
+             for name in ('fresh_install.py', 'install_provision.py')]
+    with tempfile.TemporaryDirectory(prefix='mop-installer-parent-') as parent:
+        deep = Path(parent) / ('nested-' + 'x' * 80)
+        deep.mkdir(mode=0o700)
+        c.check('#677 inherited TMPDIR alone exceeds the credential socket bound',
+                len(os.fsencode(deep)) > 100)
+        verdicts = Verdicts()
+        # Только координата owned child; ambient TMPDIR/tempfile.tempdir не меняем.
+        with patch.object(hermetic, 'files', return_value=names), \
+                patch.object(hermetic, 'child_env', side_effect=lambda extra:
+                    child_env({**extra, 'TMPDIR': str(deep)}, strict=True)):
+            hermetic.check_runs(verdicts)
+        c.expect('#677 the same two complete files run in both actual HOME contexts',
+                 len(verdicts.rows), 4)
+        for what, ok in verdicts.rows:
+            c.check('#677 ' + what, ok)
+        c.expect('#677 nested test processes clean their owned TMPDIR', list(deep.iterdir()), [])
+
+
 def main():
     c = Checks()
     check_bounded_runs(c)
@@ -242,6 +273,7 @@ def main():
     check_communication_failure(c)
     check_real_pipes(c)
     check_real_cancellation(c)
+    check_installer_deep_tmpdir_677(c)
     return c.report('hermetic_runs')
 
 

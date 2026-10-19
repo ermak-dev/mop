@@ -5,10 +5,11 @@ import re
 from typing import Protocol, Callable
 from uuid import UUID
 
-ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone'))
+from mop.common.initialcreate import MACHINE as INITIAL_ACTIONS, CONFIRMATIONS as INITIAL_CONFIRMATIONS
+ACTIONS = frozenset(('restart_session', 'apply_identity', 'send_message', 'confirm_ready', 'wipe_clone')) | INITIAL_ACTIONS
 OUTCOMES = frozenset(('succeeded', 'failed', 'unknown'))
 EVIDENCE = frozenset(('session-replaced', 'identity-applied', 'ready', 'delivered', 'clone-wiped',
-    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running'))
+    'confirmed', 'connection-lost', 'not-started', 'failed-before-effect', 'effect-running', *INITIAL_CONFIRMATIONS.values()))
 FACT_FIELDS = {
     'states': frozenset(('running', 'dirty', 'session_count')),
     'clone': frozenset(('clean', 'branch', 'untracked', 'modified')),
@@ -104,6 +105,18 @@ class CredentialAssignment:
     epoch: UUID
     identity_receipt_id: UUID
     readiness_receipt_id: UUID
+
+
+@dataclass(frozen=True)
+class ManagementAssignment:
+    """SQL-only proof current runtime; не wire authority и не Work lease."""
+    binding: AssignmentBinding
+    epoch: UUID
+    identity_receipt_id: UUID
+    readiness_receipt_id: UUID
+    producer_id: UUID
+    model_receipt_id: int
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -250,6 +263,18 @@ class WorkPort(Protocol):
     def pending(self, *, node_id: UUID, executor_epoch: UUID, project_ids: tuple[UUID, ...],
                 limit: int) -> tuple[WorkV1, ...]: ...
     def current(self, operation_id: UUID, step_id: UUID) -> WorkV1: ...
+    def effect_lease(self, work: WorkV1) -> int:
+        """Конечный бюджет claimed фазы вместе с уборкой, без продления."""
+        ...
+    def initial_native_attempt(self, work: WorkV1) -> UUID | None:
+        """Historical locator для same-producer readiness; не допуск эффекта."""
+        ...
+    def abort_unstarted(self, work: WorkV1) -> bool:
+        """SQL definite abort до attempt; caller обязан commit до отказа."""
+        ...
+    def reconcile_expired(self, *, limit: int) -> tuple[UUID, ...]:
+        """Bounded recovery gaps без active attempt, не повтор эффектов."""
+        ...
     def claimed(self, work: WorkV1, attempt_id: UUID) -> None: ...
     def completed_result(self, work: WorkV1, attempt_id: UUID, outcome: str, evidence: str) -> None: ...
     def retired(self, target_id: UUID, executor_epoch: UUID) -> None: ...
@@ -268,6 +293,95 @@ class CleanCloneQuery(Protocol):
 class FactReader(Protocol):
     """Bounded read вне ORM transaction; отказ/unknown не превращается в empty."""
     def read(self, *, node_id: UUID, kind: str, limit: int) -> FactPageV1: ...
+
+
+@dataclass(frozen=True)
+class ReplacementLaunch:
+    """Пины destination; Root проверяет одобренную policy, не latest."""
+    bootstrap_revision: UUID
+    bootstrap_digest: str
+    image_digest: str
+    image_revision_id: UUID | None
+
+    def __post_init__(self):
+        if (type(self.bootstrap_revision) is not UUID
+                or self.image_revision_id is not None and type(self.image_revision_id) is not UUID
+                or any(type(value) is not str or re.fullmatch('[0-9a-f]{64}', value) is None
+                       for value in (self.bootstrap_digest, self.image_digest))):
+            raise ValueError('pinned replacement launch required')
+
+
+@dataclass(frozen=True)
+class ReplacementAuthority:
+    """Внутренний trusted SQL proof; wire parser намеренно отсутствует.
+
+    receipt/index означают successful scheduler stop (stop/wipe) или exact
+    registration readback (cutover), не claim, отправленный POST или observed
+    job без operation token. Для recycle cutover Root также проверяет wipe.
+    """
+    operation_id: UUID
+    step_id: UUID
+    token: UUID
+    epoch: UUID
+    action: str
+    phase: str
+    source: AssignmentBinding
+    source_expires_at: datetime
+    destination_incarnation_id: UUID
+    destination_grant_id: UUID
+    destination_generation: int
+    destination_revision: int
+    expires_at: datetime
+    launch: ReplacementLaunch
+    receipt_id: UUID
+    modify_index: int
+
+    def __post_init__(self):
+        for name in ('operation_id', 'step_id', 'token', 'epoch', 'destination_incarnation_id',
+                     'destination_grant_id', 'receipt_id'):
+            if type(getattr(self, name)) is not UUID:
+                raise ValueError('typed replacement ' + name + ' required')
+        if (type(self.source) is not AssignmentBinding or type(self.launch) is not ReplacementLaunch
+                or type(self.action) is not str or self.action not in ('update', 'recycle')
+                or type(self.phase) is not str or self.phase not in ('stop', 'cutover', 'wipe')
+                or self.phase != 'cutover' and self.action != 'recycle'):
+            raise ValueError('finite typed replacement authority required')
+        for value in (self.modify_index, self.destination_generation, self.destination_revision,
+                      self.source.generation, self.source.revision, self.source.owner_id):
+            positive(value)
+        for name in ('target_id', 'project_id', 'node_id', 'incarnation_id', 'executor_epoch'):
+            if type(getattr(self.source, name)) is not UUID:
+                raise ValueError('typed source binding required')
+        role_binding(self.source.role, self.source.bundle_digest, self.source.grant_id)
+        for stamp in (self.source_expires_at, self.expires_at):
+            if type(stamp) is not datetime or stamp.tzinfo is None or stamp.utcoffset() is None:
+                raise ValueError('aware replacement expiry required')
+
+
+class ReplacementPort(Protocol):
+    """Root-only SQL, caller transaction; не capability от caller JSON.
+
+    require берёт restore -> Assignment -> Operation -> Steps -> sorted
+    Resource locks, перечитывает actor/current rights, epoch, exact source,
+    immutable destination/policy/launch, exact held claims и stage token.
+    Проспективный grant обязан быть reserved с точным destination binding,
+    owner/subject и сроком, без смены Actor/token или потери ancestry. При
+    cutover требуется successful exact registration readback; при stop --
+    successful quiescent scheduler receipt с фактическим applied index; при
+    wipe -- этот stop и текущие права/deadline. Recycle registration требует
+    предшествующий successful wipe того же operation. Исторический receipt
+    не даёт повторить эффект. Никаких provider/network calls под locks.
+    """
+    def require(self, *, operation_id: UUID, step_id: UUID, token: UUID,
+                phase: str) -> ReplacementAuthority: ...
+    def stopped(self, work: WorkV1) -> ReplacementAuthority:
+        """Текущий claimed recycle wipe, включая его token и old-grant authority."""
+        ...
+
+
+class StoppedSourceAuthority(Protocol):
+    """Исключение только для exact wipe, не общий current/GrantAuthority."""
+    def authorize(self, work: WorkV1) -> None: ...
 
 
 InstallationQuery = Callable[[], AuthorityV1]

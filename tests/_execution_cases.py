@@ -691,6 +691,13 @@ class FakeWork:
     def current(self, operation_id, step_id):
         return self.work
 
+    def abort_unstarted(self, work):
+        # Generic fixture не моделирует initial create или его phase gaps.
+        return False
+
+    def reconcile_expired(self, *, limit):
+        return ()
+
     def claimed(self, work, attempt_id):
         self.started += 1
 

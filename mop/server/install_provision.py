@@ -106,16 +106,27 @@ def prepare(data, *, execute=subprocess.run):
             path.mkdir(mode=0o700)
             command(['chown', user + ':' + user, str(path)])
         Path(paths[base]).chmod(0o755)
-    # Собранная статика (#644/#695): пишет maintenance, читает только группа web.
-    shared = Path(paths['state']) / 'static'
-    shared.mkdir(mode=0o750)
-    command(['chown', users['maintenance'] + ':' + users['web'], str(shared)])
+    from .installation import CREDENTIAL_CLIENT_ROLES, shared_directories, specification
+    # Frontend-группа не читает private config/state credential-службы (0700).
+    for role in CREDENTIAL_CLIENT_ROLES:
+        command(['usermod', '--append', '--groups', users['credentials'], users[role]])
+    for item in shared_directories(specification(data)):
+        shared = Path(item['path'])
+        shared.mkdir(mode=int(item['mode'], 8))
+        shared.chmod(int(item['mode'], 8))
+        command(['chown', item['owner'] + ':' + item['group'], str(shared)])
     signing = secrets.token_hex(32).encode('ascii')
-    for role in ('maintenance', 'web', 'worker', 'gateway'):
+    for role in ('maintenance', 'web', 'worker', 'gateway', 'credentials'):
         path = Path(paths['configuration']) / role / 'django.key'
         _key(path, signing)
         command(['chown', users[role] + ':' + users[role], str(path)])
-    _key(Path(paths['root_trust']) / 'root.key', secrets.token_bytes(32))
+    # Maintenance recovery и runtime credential имеют разные private custody,
+    # но одинаковый root fingerprint; frontends не получают ни bytes, ни traversal.
+    root = secrets.token_bytes(32)
+    _key(Path(paths['root_trust']) / 'root.key', root)
+    credential_root = Path(paths['configuration']) / 'credentials' / 'root.key'
+    _key(credential_root, root)
+    command(['chown', users['credentials'] + ':' + users['credentials'], str(credential_root)])
     for key in ('backup', 'root_trust'):
         command(['chown', '-R', users['maintenance'] + ':' + users['maintenance'], paths[key]])
 
