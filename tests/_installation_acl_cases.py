@@ -45,7 +45,7 @@ class InstallationACL(unittest.TestCase):
         spec = self.base / 'spec.json'
         spec.write_text(json.dumps({'installation_id': self.spec.identity,
             'database': dict(self.spec.database), 'paths': dict(self.spec.paths),
-            'identities': dict(self.spec.identities)}))
+            'runtime': dict(self.spec.runtime), 'identities': dict(self.spec.identities)}))
         spec.chmod(0o600)
         env = {k: v for k, v in os.environ.items() if not k.startswith(('MOP_', 'DJANGO_', 'PG'))}
         source = Path(__file__).resolve().parents[1]

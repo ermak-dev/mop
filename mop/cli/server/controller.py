@@ -2,7 +2,7 @@
 
 Fresh-install foundation only; never imports old state or contacts HTTP/NATS.
 
-  setup --venv PATH             install the declared server extra in a new venv
+  setup --venv PATH             create or reuse the venv and install the declared server extra
   schema [--app NAME] [--write]  offline migration check; --write generates migrations
   check                         Django system checks and schema readiness
   migrate                       apply standard Django migrations
@@ -31,8 +31,6 @@ Restore requires stopped services and an empty target; no legacy import exists.
 import argparse
 import os
 from pathlib import Path
-import subprocess
-import sys
 
 
 def main(argv):
@@ -65,16 +63,10 @@ def main(argv):
         if not args.venv:
             parser.error('setup requires --venv')
         target = Path(args.venv).absolute()
-        if target.exists():
-            parser.error('setup requires a new venv path')
-        subprocess.run([sys.executable, '-m', 'venv', str(target)], check=True)
-        source = Path(__file__).resolve().parents[3]
-        if not (source / 'pyproject.toml').is_file():
-            raise RuntimeError('dependency setup requires a mop source tree')
-        subprocess.run([str(target / 'bin/python'), '-m', 'pip', 'install',
-                        str(source) + '[server]'], check=True)
-        subprocess.run([str(target / 'bin/python'), '-I', '-c',
-                        'import django, rest_framework, channels, psycopg, uvicorn, ldap, django_auth_ldap'], check=True)
+        # Тот же шаг, что зовёт установка (#807): venv вручную больше не
+        # расходятся с установленным.
+        from mop.server.install_runtime import create_venv
+        create_venv(target, pip_extra='server')
         return 0
     from mop.server.controller.runtime import configure, maintenance, serve, worker, create_admin, close_pools
     if args.action == 'enroll-node':

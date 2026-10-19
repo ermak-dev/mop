@@ -16,13 +16,20 @@
   apply         refuse until runtime executors and realtime composition are accepted
 
 The finite JSON specification contains only installation identity, PostgreSQL
-topology, absolute disjoint paths and six distinct OS service identities.
-Compatibility acceptance covers Python 3.12 with PostgreSQL 17 only.
+topology, absolute disjoint paths, the declared runtime and six distinct OS
+service identities. The runtime block names the python requirement, the private
+venv, the system apt packages and the pip extra; the system python must satisfy
+it and is never downgraded. Acceptance covers the >=3.12 requirement on
+PostgreSQL 17: Python 3.12 in the owned CI fixture and Debian 13's 3.13.
 It contains no passwords, root bytes or general settings. No legacy input is
 read and no old service is stopped. Plan does not execute provisioning.
-Dependencies use mop server controller setup --venv PATH and its declared server
-extra. Explicit provisioning --apply prepares only fresh local accounts, private
-roots, signing material and matching PostgreSQL client tools, before venv setup.
+Provisioning installs the declared system packages from the image and then
+creates the venv itself: system python, the declared server extra, offline
+wheels when the spec names them, and an import check for django, rest_framework,
+channels, psycopg, uvicorn, ldap and django_auth_ldap. `mop server controller
+setup --venv PATH` is the same idempotent step for manual maintenance.
+Explicit provisioning --apply prepares only fresh local accounts, private
+roots, signing material and matching PostgreSQL client tools, then the venv.
 It refuses existing trees/accounts and provisioned-DB topology: PostgreSQL server
 TLS/network provisioning needs its own explicit operator input. It starts no service,
 does not connect to the DB, does not invoke PVE and never claims runtime readiness.

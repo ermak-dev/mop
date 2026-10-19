@@ -112,12 +112,44 @@ any deployed old service merely by being present. Run its commands through
 `mop server controller`, not `manage.py`, `runserver`, or old `server web`.
 The dispatcher bypasses old context/environment initialization for this command.
 
-`setup --venv /absolute/new/path` is the stdlib-only source-tree installer. It
-installs the package's declared `[server]` extra into that new environment and
-checks its framework imports. The ordinary package install and node dependency
-list do not contain Django, Channels, DRF or psycopg. Use that environment's `mop`
-for subsequent controller commands. Setup installs software only, never creates
-trust roots, connects to an installation, runs migrations or starts a service.
+`setup --venv /absolute/path` is the stdlib-only source-tree installer. It
+creates the venv (or reuses an existing one), installs the package's declared
+`[server]` extra and checks its framework imports. The same idempotent step now
+runs inside `mop server install provisioning --apply` (#807); the manual command
+is maintenance, not a prerequisite of a fresh installation. The ordinary
+package install and node dependency list do not contain Django, Channels, DRF
+or psycopg. Setup installs software only, never creates trust roots, connects to
+an installation, runs migrations or starts a service.
+
+The installation specification declares its runtime explicitly (#807):
+
+```json
+"runtime": {
+  "python": ">=3.12",
+  "venv": "/absolute/private/venv",
+  "system_packages": ["build-essential", "curl", "git", "libldap2-dev",
+                      "libpq-dev", "libsasl2-dev", "python3-dev", "python3-venv",
+                      "rsync"],
+  "pip_extra": "server",
+  "wheels": "/absolute/offline/wheel-directory"
+}
+```
+
+`python` is a `>=X.Y` requirement, never an exact pin; `wheels` is optional and
+selects an offline `--no-index --find-links` install. Provisioning checks the
+system `python3` against it before the first system change and refuses a lower
+version rather than downgrading; the same run installs `postgresql-client-<major>`
+and the declared apt packages in one `--no-install-recommends` call, without
+`--allow-downgrades`. On Debian 13 the system 3.13.5 satisfies the requirement,
+and pip installs the declared server extra into the private venv; Debian's
+older `python3-django` (4.2) is not a substitute. `--user` and
+`--break-system-packages` are never used on the controller path.
+
+Rendered controller units execute the declared interpreter directly
+(`ExecStart=<venv>/bin/python -m mop.server.controller ...`) and pass it to the
+isolated HOST entries as `Environment=MOP_HOST_PYTHON=<venv>/bin/python` — the
+process-environment channel of #789/#804, never `node.env` and never a literal
+of the machine.
 
 `MOP_CONTROLLER_BOOTSTRAP` is the one explicit absolute path to a private JSON
 file. It is a startup selector, not a general environment-over-ORM precedence
@@ -326,8 +358,9 @@ bootstrap emits no contents and never replaces an existing file. The plural
 `render` resolves the declared credential primary UID/GID and exact web/worker
 UIDs from provisioned OS accounts, refusing missing, root or aliased identities
 and a mismatched socket group. Its credential unit invokes the existing
-`mop server credentials --bootstrap ... --socket ... --key-id root-v1
---socket-group GID --peer-uid WEB_UID --peer-uid WORKER_UID` lifecycle, with the
+`mop server credentials` lifecycle (`<venv>/bin/python -m mop.cli server
+credentials --bootstrap ... --socket ... --key-id root-v1
+--socket-group GID --peer-uid WEB_UID --peer-uid WORKER_UID`), with the
 same derived endpoint as the clients. Only this explicit binding removes
 `blocked_services.credentials`; a library preview without the OS coordinates
 still reports it blocked. The unit runs under the credentials OS account, permits
@@ -450,7 +483,9 @@ inside its new isolated container; the daemon is non-root and the default CI
 suite remains unprivileged. This creates no live pool service or host account
 and passes no installation inputs.
 
-Cold-start acceptance uses Python 3.12 + PostgreSQL 17 only. Its order is dependency
+Cold-start acceptance uses the declared runtime on PostgreSQL 17: Python 3.12 in
+the owned CI fixture and Debian 13's system 3.13.5 on the fresh-host fixture.
+Its order is dependency
 setup, provisioned PostgreSQL 17 and trust
 roots, `migrate`, `initialize`, `admin --username name`, `check`, then `serve` and
 `worker` under their restricted principals. `admin` reads and confirms the

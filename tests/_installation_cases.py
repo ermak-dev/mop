@@ -38,7 +38,12 @@ class FreshPostgreSQL(unittest.TestCase):
                          'host': settings.BOOTSTRAP['database']['HOST'], 'port': 5432,
                          'name': self.dbname, 'tls_ca': str(ca)},
             'paths': {name: str(self.base / name) for name in
-                      ('venv', 'configuration', 'state', 'backup', 'root_trust')},
+                      ('configuration', 'state', 'backup', 'root_trust')},
+            'runtime': {'python': '>=3.12', 'venv': str(self.base / 'venv'),
+                        'system_packages': ['build-essential', 'curl', 'git', 'libldap2-dev',
+                                            'libpq-dev', 'libsasl2-dev', 'python3-dev',
+                                            'python3-venv', 'rsync'],
+                        'pip_extra': 'server'},
             'identities': self.users})
         self.users['credential'] = self.users['credentials']
         db = settings.BOOTSTRAP['database']

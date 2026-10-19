@@ -11,7 +11,8 @@ import subprocess
 
 def document(spec):
     return {'installation_id': spec.identity, 'database': dict(spec.database),
-            'paths': dict(spec.paths), 'identities': dict(spec.identities)}
+            'paths': dict(spec.paths), 'runtime': dict(spec.runtime),
+            'identities': dict(spec.identities)}
 
 
 def _validate(data):
@@ -76,6 +77,8 @@ def prepare(data, *, execute=subprocess.run):
     paths, users = data['paths'], data['identities']
     for path in paths.values():
         _absent(path)
+    # Venv объявлена установкой (#807), но свежесть дерева -- то же правило.
+    _absent(data['runtime']['venv'])
     for user in users.values():
         for lookup in (pwd.getpwnam, grp.getgrnam):
             try:
@@ -84,6 +87,11 @@ def prepare(data, *, execute=subprocess.run):
                 continue
             raise RuntimeError('fresh service identity already exists; explicit maintenance required')
 
+    # Версия python проверяется до первого изменения: установка не
+    # даунгрейдит интерпретатор ради старых пакетов (#807).
+    from .install_runtime import create_venv, system_python
+    system_python(data['runtime']['python'], execute=execute)
+
     def command(argv):
         result = execute(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, timeout=600, check=False)
@@ -91,11 +99,16 @@ def prepare(data, *, execute=subprocess.run):
             raise RuntimeError('OS preparation failed; partial resources retained; explicit maintenance required')
 
     # mkdir без exist_ok резервирует новые деревья до packages/accounts. Venv
-    # создаёт отдельный setup; уже существующий путь всё равно запрещён выше.
+    # создаётся ниже, после пакетов сборки: python-ldap/ldap3/nkeys/pynacl --
+    # sdist и собираются на месте.
     for key in ('configuration', 'state', 'backup', 'root_trust'):
         _reserve(paths[key])
+    # Один apt за прогон: matching postgresql-client и явный список из образа
+    # (#807). Без recommends и без пина версии, чтобы apt не притянул другой
+    # python вместо системного.
     command(['apt-get', 'install', '-y', '--no-install-recommends',
-             'postgresql-client-' + str(data['database']['major'])])
+             'postgresql-client-' + str(data['database']['major']),
+             *data['runtime']['system_packages']])
     for user in users.values():
         command(['groupadd', '--system', user])
         command(['useradd', '--system', '--gid', user, '--no-create-home',
@@ -129,6 +142,10 @@ def prepare(data, *, execute=subprocess.run):
     command(['chown', users['credentials'] + ':' + users['credentials'], str(credential_root)])
     for key in ('backup', 'root_trust'):
         command(['chown', '-R', users['maintenance'] + ':' + users['maintenance'], paths[key]])
+    # Venv -- последним: пакеты сборки и заголовки уже стоят, а провал pip не
+    # откатывает OS, которую установка уже объявила частичной.
+    create_venv(Path(data['runtime']['venv']), pip_extra=data['runtime']['pip_extra'],
+                wheels=data['runtime'].get('wheels'), execute=execute, timeout=1800)
 
 
 def _key(path, value):

@@ -246,10 +246,13 @@ class InstalledCredentialUids(unittest.TestCase):
         self.admin.close()
         self.admin = psycopg.connect(**parameters, autocommit=True)
         paths = {name: str(base / name) for name in dict(self.spec.paths)}
-        paths['venv'] = sys.prefix
+        # #807: интерпретатор установки -- объявленный venv, не литерал; здесь
+        # это окружение, в котором уже стоят зависимости ворот.
+        runtime = {**dict(self.spec.runtime), 'venv': sys.prefix}
         self.users = users
         self.spec = replace(self.spec, identities=tuple(users.items()),
-                            paths=tuple(paths.items()), database=tuple(database.items()))
+                            paths=tuple(paths.items()), runtime=tuple(runtime.items()),
+                            database=tuple(database.items()))
         FreshPostgreSQL.provision(self)
         for name in ('configuration', 'state'):
             Path(paths[name]).mkdir(mode=0o755)

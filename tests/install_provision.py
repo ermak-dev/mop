@@ -26,6 +26,8 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
     def document(self):
         from mop.server.installation import specification
         self.spec['paths'] = {key: str(Path(self.tmp.name) / key) for key in self.spec['paths']}
+        self.spec['runtime'] = {**self.spec['runtime'],
+                                'venv': str(Path(self.tmp.name) / 'venv')}
         return specification(self.spec)
 
     def test_apply_flag_is_required_and_preview_never_executes(self):
@@ -145,13 +147,16 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         calls = []
         def execute(argv, **kwargs):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0)
+            return subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if argv[-1:] and 'version_info' in argv[-1] else b'')
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError):
             module.prepare(document, execute=execute)
         paths = document['paths']
-        self.assertFalse(Path(paths['venv']).exists(), 'setup owns venv creation')
+        # #807: venv создаёт сама установка, а не отдельный ручной setup.
+        self.assertTrue(Path(document['runtime']['venv']).is_dir(), 'installation owns the venv')
+        self.assertIn(['python3', '-m', 'venv', document['runtime']['venv']], calls)
         for role in document['identities']:
             for base in ('configuration', 'state'):
                 self.assertEqual((Path(paths[base]) / role).stat().st_mode & 0o777, 0o700)
@@ -168,7 +173,10 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         self.assertEqual(len(set(keys)), 1, 'auth signatures require shared signing material')
         for role in ('web', 'worker', 'gateway', 'builder'):
             self.assertFalse((Path(paths['configuration']) / role / 'root.key').exists())
-        self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends', 'postgresql-client-16'], calls)
+        # #807: apt -- один вызов, клиент PostgreSQL и системные пакеты из
+        # объявленного runtime, затем системный python и venv установки.
+        self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends', 'postgresql-client-16',
+                       *document['runtime']['system_packages']], calls)
         self.assertFalse(any('systemctl' in argv or 'ansible-playbook' in argv for argv in calls))
 
     # HYPOTHESIS: реальный OS executor расходится с review-artifact и не
@@ -183,7 +191,8 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         calls = []
         def execute(argv, **kwargs):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0)
+            return subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if argv[-1:] and 'version_info' in argv[-1] else b'')
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError):
@@ -214,7 +223,8 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
             with patch.object(module.os, 'geteuid', return_value=0), \
                  patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
                  patch.object(module.grp, 'getgrnam', side_effect=KeyError):
-                module.prepare(data, execute=lambda *a, **k: subprocess.CompletedProcess(a, 0))
+                module.prepare(data, execute=lambda *a, **k: subprocess.CompletedProcess(
+                    a[0], 0, b'3.13.5\n' if a[0][-1:] and 'version_info' in a[0][-1] else b''))
         finally:
             os.umask(mask)
         self.assertEqual(parent.stat().st_mode & 0o777, 0o755)
@@ -242,7 +252,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
              patch.object(module.grp, 'getgrnam', side_effect=KeyError), \
              patch.object(module, '_absent', side_effect=race):
             with self.assertRaises((OSError, RuntimeError)):
-                module.prepare(document, execute=lambda *a, **k: subprocess.CompletedProcess(a, 0))
+                module.prepare(document, execute=lambda *a, **k: subprocess.CompletedProcess(a, 0, b'3.13.5\n' if 'version_info' in a[-1] else b''))
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_service_composition_uses_purpose_bootstrap_and_native_tls_without_claiming_runtime(self):
@@ -294,7 +304,8 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError):
-            module.prepare(data, execute=lambda argv, **kw: (calls.append(argv) or subprocess.CompletedProcess(argv, 0)))
+            module.prepare(data, execute=lambda argv, **kw: (calls.append(argv) or subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if 'version_info' in argv[-1] else b'')))
         paths, users = data['paths'], data['identities']
         private = Path(paths['configuration']) / 'credentials'
         self.assertTrue((private / 'root.key').is_file(), 'credential root custody is missing')
@@ -330,7 +341,8 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         socket_dir = self.spec['paths']['state'] + '/credential-socket'
         self.assertIn('User=' + self.spec['identities']['credentials'], unit)
         self.assertIn('Group=' + self.spec['identities']['credentials'], unit)
-        self.assertIn('/bin/mop server credentials --bootstrap ' + config + '/bootstrap.json', unit)
+        self.assertIn('-m mop.cli server credentials --bootstrap ' + config + '/bootstrap.json', unit)
+        self.assertIn(self.spec['runtime']['venv'] + '/bin/python -m mop.cli server credentials', unit)
         self.assertIn('--socket ' + socket_dir + '/service.sock --key-id root-v1', unit)
         self.assertIn('--socket-group 1944 --peer-uid 1945 --peer-uid 1946', unit)
         self.assertIn('ReadWritePaths=' + self.spec['paths']['state'] + '/credentials ' + socket_dir, unit)

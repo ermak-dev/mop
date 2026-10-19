@@ -46,14 +46,49 @@ class Specification:
     identity: str
     database: tuple
     paths: tuple
+    runtime: tuple
     identities: tuple
 
     def __repr__(self):
         return '<fresh installation specification>'
 
 
+def _system_package(value):
+    """Имя apt-пакета без версии: пин `=X` -- это даунгрейд, а не установка."""
+    if type(value) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?', value):
+        raise ValueError('system package names must be plain lowercase apt names')
+    return value
+
+
+def declared_runtime(data):
+    """Объявленный runtime: python, приватный venv, apt-пакеты, pip extra (#807).
+
+    Установка не даунгрейдит python: требование `>=X.Y` только расширяет
+    допустимое, а системные пакеты не заменяют точные пины pip.
+    """
+    if type(data) is not dict:
+        raise ValueError('runtime must be an object')
+    allowed = {'python', 'venv', 'system_packages', 'pip_extra', 'wheels'}
+    if set(data) - allowed or not {'python', 'venv', 'system_packages', 'pip_extra'} <= set(data):
+        raise ValueError('unknown runtime keys or missing required keys')
+    from .install_runtime import requirement_minimum
+    requirement_minimum(data['python'])
+    venv = _path(data['venv'])
+    packages = data['system_packages']
+    if type(packages) not in (list, tuple) or not packages:
+        raise ValueError('runtime system packages must be a nonempty list')
+    names = tuple(dict.fromkeys(_system_package(item) for item in packages))
+    if data['pip_extra'] != 'server':
+        raise ValueError('runtime pip extra must be server')
+    result = {'python': data['python'], 'venv': venv,
+              'system_packages': list(names), 'pip_extra': data['pip_extra']}
+    if 'wheels' in data:
+        result['wheels'] = _path(data['wheels'])
+    return result
+
+
 def specification(data):
-    _keys(data, ('installation_id', 'database', 'paths', 'identities'), 'installation')
+    _keys(data, ('installation_id', 'database', 'paths', 'runtime', 'identities'), 'installation')
     identity = data['installation_id']
     if type(identity) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', identity):
         raise ValueError('invalid installation identity')
@@ -68,11 +103,17 @@ def specification(data):
     _name(db['name'], 'database')
     _path(db['tls_ca'])
     paths = data['paths']
-    _keys(paths, ('venv', 'configuration', 'state', 'backup', 'root_trust'), 'path')
+    _keys(paths, ('configuration', 'state', 'backup', 'root_trust'), 'path')
     for value in paths.values():
         _path(value)
+    runtime = declared_runtime(data['runtime'])
+    # Venv и offline wheels -- часть объявленного runtime, но дерево установки
+    # всё равно обязано не пересекаться: private trees не лежат друг в друге.
+    trees = {**paths, 'venv': runtime['venv']}
+    if 'wheels' in runtime:
+        trees['wheels'] = runtime['wheels']
     # Root custody и backup не могут оказаться в web/state/venv дереве.
-    items = list(paths.values())
+    items = list(trees.values())
     if any(a == b or PurePosixPath(a) in PurePosixPath(b).parents or
            PurePosixPath(b) in PurePosixPath(a).parents for i, a in enumerate(items) for b in items[i+1:]):
         raise ValueError('installation paths must be distinct nonoverlapping trees')
@@ -82,7 +123,8 @@ def specification(data):
         _name(value, 'OS')
     if len(set(identities.values())) != len(IDENTITIES) or 'root' in identities.values():
         raise ValueError('installation requires distinct non-root OS identities')
-    return Specification(identity, tuple(db.items()), tuple(paths.items()), tuple(identities.items()))
+    return Specification(identity, tuple(db.items()), tuple(paths.items()),
+                         tuple(runtime.items()), tuple(identities.items()))
 
 
 def load_specification(path):
@@ -101,7 +143,8 @@ def plan(spec):
                             'accounted_principals': 'managed-target-logins',
                             'roles': {role: 8 for role in DATABASE_ROLES}},
             'blockers': [{'owner': owner, 'reason': reason} for owner, reason in BLOCKERS],
-            'setup': 'mop server controller setup --venv ' + dict(spec.paths)['venv'],
+            'runtime': dict(spec.runtime),
+            'setup': 'python3 -m venv ' + dict(spec.runtime)['venv'],
             'provisioned_database': 'OS PostgreSQL package/service provisioning requires operator execution',
             'maintenance': 'direct configured remote PostgreSQL; HTTP and NATS are not prerequisites',
             'restore': 'native matching-major tools; stopped services; reconcile effects before enabling',
@@ -164,8 +207,14 @@ def provisioning_artifact(spec):
                  'group': '{{ item.group }}', 'mode': '0750'}, 'loop': shared},
             {'name': 'Install matching native PostgreSQL client tools', 'ansible.builtin.apt':
                 {'name': 'postgresql-client-' + str(db['major']), 'state': 'present'}},
+            # #807: системные зависимости из образа; python не пинится и не
+            # даунгрейдится -- версия проверяется отдельно в конечном executor.
+            {'name': 'Install declared system dependencies from the image', 'ansible.builtin.apt':
+                {'name': dict(spec.runtime)['system_packages'], 'state': 'present',
+                 'install_recommends': False}},
         ]}]
     return {'applied': False, 'receipt': None, 'units': [], 'playbook': playbook,
+            'runtime': dict(spec.runtime),
             'accounts': [{'name': user, 'system': True, 'shell': '/usr/sbin/nologin',
                           'create_home': False} for user in users.values()],
             'directories': directories,
@@ -350,7 +399,10 @@ def _credential_unit(spec, *, credential_uid, credential_gid, frontend_uids):
     except RuntimeError as error:
         raise ValueError(str(error)) from None
     config, state = paths['configuration'] + '/credentials', paths['state'] + '/credentials'
-    command = (paths['venv'] + '/bin/mop server credentials --bootstrap ' + config + '/bootstrap.json' +
+    # Интерпретатор объявляет установка: venv из runtime, не литерал хоста (#807).
+    python = dict(spec.runtime)['venv'] + '/bin/python'
+    command = (python + ' -m mop.cli server credentials'
+               ' --bootstrap ' + config + '/bootstrap.json' +
                ' --socket ' + socket_dir + '/service.sock --key-id root-v1 --socket-group ' + str(credential_gid))
     for role in CREDENTIAL_CLIENT_ROLES:
         command += ' --peer-uid ' + str(frontend_uids[role])
@@ -360,7 +412,8 @@ def _credential_unit(spec, *, credential_uid, credential_gid, frontend_uids):
     return '\n'.join([
         '[Unit]', 'Description=Fresh mop credential service', 'After=network-online.target',
         '[Service]', 'Type=simple', 'User=' + users['credentials'], 'Group=' + users['credentials'],
-        'WorkingDirectory=' + state, 'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
+        'WorkingDirectory=' + state, 'Environment=MOP_HOST_PYTHON=' + python,
+        'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
         'TimeoutStartSec=30', 'TimeoutStopSec=30', 'KillSignal=SIGTERM',
         'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only',
         'PrivateTmp=true', 'UMask=0077', 'TasksMax=64', 'LimitNOFILE=1024',
@@ -382,10 +435,13 @@ def service_artifact(spec, values, *, credential_uid=None, credential_gid=None, 
     budget = connection_budget({role: (1, settings['db_pool_max']) for role in RUNTIME_ROLES},
         runtime=settings['instance_db_connections'], maintenance=settings['admin_db_headroom'])
     paths, users = dict(spec.paths), dict(spec.identities)
+    # #807: юнит исполняет интерпретатор объявленного venv, а не литерал
+    # машины и не `bin/mop` (чей shebang -- python образа, не установки).
+    python = dict(spec.runtime)['venv'] + '/bin/python'
     units = {}
     for role in ('web', 'worker'):
         config, state = paths['configuration'] + '/' + role, paths['state'] + '/' + role
-        command = paths['venv'] + '/bin/mop server controller '
+        command = python + ' -m mop.server.controller '
         if role == 'web':
             command += ('serve --host ' + settings['http_bind'] + ' --port ' + str(settings['http_port']) +
                         ' --hostname ' + origin.hostname + ' --tls-cert ' + config + '/tls.crt' +
@@ -398,6 +454,9 @@ def service_artifact(spec, values, *, credential_uid=None, credential_gid=None, 
             'SupplementaryGroups=' + users['credentials'],
             'WorkingDirectory=' + state,
             'Environment=MOP_CONTROLLER_BOOTSTRAP=' + config + '/bootstrap.json',
+            # Установка объявляет интерпретатор для HOST-входов (#789/#804);
+            # канал -- process environment юнита, никогда не node.env.
+            'Environment=MOP_HOST_PYTHON=' + python,
             'ExecStart=' + command, 'Restart=on-failure', 'RestartSec=5',
             'TimeoutStartSec=30', 'TimeoutStopSec=30', 'KillSignal=SIGTERM',
             'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only',
