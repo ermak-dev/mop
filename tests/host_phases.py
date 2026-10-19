@@ -406,6 +406,49 @@ class EarlyStartCleanupTests(unittest.IsolatedAsyncioTestCase):
             adapter.release.set()
             await asyncio.gather(task, cleanup, return_exceptions=True)
 
+    # BUG #764: поздний inspect занимает active и становится ложным start owner.
+    # HYPOTHESIS: cleanup захватывает transient slot вместо исходного action.
+    # SOLUTION: physical supervisor сохраняет original start при создании;
+    # phase cleanup ждёт его outcome и concurrent inspect, не принимает inspect.
+    # RESULT: exact delayed-inspect regression и adjacent supervisor checks GREEN.
+    # STATUS: FIXED — see #764
+    async def test_completed_original_start_survives_concurrent_inspect_and_repeated_cleanup(self):
+        from mop.node.host_scope import Request
+        owner, adapter, body = self.owner()
+        adapter.release.set()
+        snapshot = await owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4())))
+        body.reference = snapshot.reference
+        inspect_entered, inspect_release = asyncio.Event(), asyncio.Event()
+        original = adapter.inspect
+        async def delayed(scope):
+            inspect_entered.set()
+            await inspect_release.wait()
+            return await original(scope)
+        adapter.inspect = delayed
+        observation = asyncio.create_task(owner.execute(owner.installed.node_uid,
+            Request('inspect', body.scope, str(uuid4()), snapshot.reference)))
+        await inspect_entered.wait()
+        waiter = asyncio.create_task(owner._cleanup_phase(body))
+        try:
+            await asyncio.sleep(0)
+            inspect_release.set()
+            await observation
+            await waiter
+            retained = body.cleanup
+            for _ in range(3):
+                await owner._cleanup_phase(body)
+                self.assertIs(body.cleanup, retained)
+            self.assertEqual(body.reference, snapshot.reference)
+            self.assertFalse(adapter.units[body.scope].populated)
+            self.assertEqual([name for name, _ in adapter.calls].count('start'), 1)
+            self.assertEqual([name for name, _ in adapter.calls].count('retire'), 1)
+            self.assertEqual(owner.active, {})
+            with self.assertRaisesRegex(Refused, 'replay'):
+                await owner.execute(owner.installed.node_uid, Request('start', body.scope, str(uuid4())))
+        finally:
+            inspect_release.set()
+            await asyncio.gather(observation, waiter, return_exceptions=True)
+
     async def test_uncertain_original_start_never_adopts_a_later_matching_unit(self):
         from mop.node.host_scope import Request, Unknown
         owner, adapter, body = self.owner()
