@@ -17,6 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 GATE_LABELS = (
+    '_endpoint_credential_uid_gate.EndpointCredentialUids'
+    '.test_private_wss_default_root_crosses_actual_frontend_uid',
     '_credential_uid_gate.CredentialSocketUids'
     '.test_distinct_frontend_uid_uses_only_group_protected_socket',
     '_credential_uid_gate.AddressedCredentialUids'

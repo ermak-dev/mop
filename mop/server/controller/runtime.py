@@ -128,6 +128,68 @@ class Backpressure(RuntimeError):
     """Локальный ресурс исчерпан; shared admission остаётся владельцем #625."""
 
 
+@contextmanager
+def _realtime_sql(deadline):
+    """Серверный statement_timeout следует оставшемуся общему DB budget.
+
+    Один PQfinish ограничивает driver wait, но pg_sleep/locks на здоровом
+    PostgreSQL ещё могли бы жить до штатных 5s. Не меняем общий backend и не
+    оборачиваем use case в новую atomic; session setting восстанавливается.
+    """
+    from django.db import connection, DatabaseError
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'")
+        previous = cursor.fetchone()[0]
+    def bounded(execute, sql, params, many, context):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('realtime database deadline expired before query')
+        # Оставляем время прочитать server-side cancellation и вернуть setting.
+        milliseconds = max(1, int(remaining * 1000) - 50)
+        if previous:
+            milliseconds = min(previous, milliseconds)
+        execute("SELECT set_config('statement_timeout', %s, false)", [str(milliseconds)], False, context)
+        return execute(sql, params, many, context)
+    try:
+        with connection.execute_wrapper(bounded):
+            yield
+    except DatabaseError as error:
+        if getattr(error.__cause__, 'sqlstate', None) == '57014':
+            raise TimeoutError('realtime database statement deadline exceeded') from None
+        raise
+    finally:
+        if connection.connection is not None and not connection.connection.closed:
+            if connection.needs_rollback:
+                # Не возвращаем в pool abort-нутый session с изменённым setting.
+                connection.connection.close()
+                connection.close()
+            else:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('statement_timeout', %s, false)", [str(previous)])
+
+
+def realtime_job(runtime, function, *args, **kwargs):
+    """Owned SQL job с единым 2s бюджетом очереди и driver waits, без outer atomic."""
+    args, kwargs = materialized(args), materialized(kwargs)
+    deadline = time.monotonic() + 2
+    def invoke():
+        from .postgresql.base import transaction_deadline
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('realtime database deadline expired before execution')
+        with transaction_deadline(remaining), _realtime_sql(deadline):
+            return function(*args, **kwargs)
+    task = asyncio.create_task(runtime.database(invoke))
+    task.add_done_callback(_observe)
+    return task
+
+
+async def realtime_database(runtime, function, *args, **kwargs):
+    job = realtime_job(runtime, function, *args, **kwargs)
+    async with asyncio.timeout(2):
+        return await asyncio.shield(job)
+
+
 class Runtime:
     """Владелец ограниченных потоков, async effects и долгоживущих adapters.
 
@@ -214,6 +276,12 @@ class Runtime:
         call = database_sync_to_async(_database_invoke, thread_sensitive=False, executor=self._database_executor)
         return await self._submit('database', self._database, self._database_capacity,
                                   lambda: call(function, args, kwargs))
+
+    def realtime_job(self, function, *args, **kwargs):
+        return realtime_job(self, function, *args, **kwargs)
+
+    async def realtime_database(self, function, *args, **kwargs):
+        return await realtime_database(self, function, *args, **kwargs)
 
     async def blocking(self, function, *args, **kwargs):
         # Только adapters с собственными timeout: поток Python нельзя убить.
@@ -561,9 +629,12 @@ def serve(host, port, *, hostnames=(), tls_cert=None, tls_key=None):
             raise RuntimeError('TLS certificate file is unavailable')
     settings.ALLOWED_HOSTS = names
     import uvicorn
+    # WS handshake пишет raw query в uvicorn.error на INFO даже без access log.
     uvicorn.run('mop.server.controller.asgi:application', host=host, port=port,
                 workers=1, lifespan='on', limit_concurrency=16, timeout_graceful_shutdown=10,
-                proxy_headers=False, server_header=False, ssl_certfile=tls_cert, ssl_keyfile=tls_key)
+                proxy_headers=False, server_header=False, ssl_certfile=tls_cert, ssl_keyfile=tls_key,
+                ws_max_size=401408, ws_max_queue=16, ws_per_message_deflate=False,
+                access_log=False, log_level='warning')
 
 
 def compose_worker(runtime, *, node_executor=None, executor=None, scheduler=None,

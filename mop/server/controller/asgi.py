@@ -24,6 +24,7 @@ class ControllerApplication:
         self.http_limit = http_limit
         self.active = 0
         self.started = False
+        self._cleanup = None
 
     async def __call__(self, scope, receive, send):
         if scope['type'] == 'lifespan':
@@ -46,6 +47,40 @@ class ControllerApplication:
         finally:
             self.active -= 1
 
+    async def _drain(self):
+        async def http():
+            while self.active:
+                await asyncio.sleep(.01)
+        # Оба drain остаются у root даже после внешнего deadline/cancel.
+        results = await asyncio.gather(self.gateway.aclose(), http(), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        await self.runtime.aclose()
+
+    async def aclose(self):
+        self.started = False
+        stop = getattr(self.gateway, 'stop_accepting', None)
+        if stop is not None:
+            stop()
+        if self._cleanup is None or (self._cleanup.done() and self._cleanup.exception() is not None):
+            self._cleanup = asyncio.create_task(self._drain())
+            self._cleanup.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        deadline = asyncio.get_running_loop().time() + 10
+        cancelled = None
+        while True:
+            try:
+                _, pending = await asyncio.wait((self._cleanup,), timeout=max(0, deadline-asyncio.get_running_loop().time()))
+                break
+            except asyncio.CancelledError as error:
+                # Повторная отмена не теряет owner и не растягивает 10s budget.
+                cancelled = error
+        if pending:
+            raise RuntimeError('controller shutdown incomplete: owned cleanup is still running')
+        self._cleanup.result()
+        if cancelled is not None:
+            raise cancelled
+
     async def lifespan(self, receive, send):
         while True:
             message = await receive()
@@ -55,19 +90,20 @@ class ControllerApplication:
                     await self.runtime.start()
                     await self.gateway.start()
                     self.started = True
-                except Exception as exc:
-                    await self.runtime.aclose()
+                except BaseException as exc:
+                    # Частичный gateway сохраняет cleanup SQL до закрытия Runtime.
+                    try:
+                        await self.aclose()
+                    except Exception as cleanup:
+                        exc = cleanup
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise exc
                     await send({'type': 'lifespan.startup.failed', 'message': str(exc)})
                     return
                 await send({'type': 'lifespan.startup.complete'})
             elif message['type'] == 'lifespan.shutdown':
-                self.started = False
                 try:
-                    async with asyncio.timeout(10):
-                        while self.active:
-                            await asyncio.sleep(.01)
-                        await self.gateway.aclose()
-                        await self.runtime.aclose()
+                    await self.aclose()
                 except Exception as exc:
                     await send({'type': 'lifespan.shutdown.failed', 'message': str(exc)})
                     return
