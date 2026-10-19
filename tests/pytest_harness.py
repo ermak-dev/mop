@@ -7,7 +7,7 @@ Django test ID сохранены; strict отказывает на любом �
 SOLUTION: pytest владеет verdict/collection; legacy main guards изолированы,
 Django cases используют native collection и общую owned pytest-django fixture.
 RESULT: RED — обход pytest, потерянные system checks и зелёный cleanup failure;
-GREEN — 23 focused cases и исходные 5 UID checks на Python 3.12/PostgreSQL 17,
+GREEN — 24 focused cases и исходные 5 UID checks на Python 3.12/PostgreSQL 17,
 полный исходный Django ID union проверен collect-only; SQL budgets неизменны.
 Переходный этап: legacy assertion bodies и HOME matrix scheduler сохранены.
 STATUS: FIXED — see #692
@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 import hermetic
 from _lib import run_command
+from _controller_fixture import main
 from mop.cli.dev import test as command
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,6 +103,24 @@ class PytestCommand(unittest.TestCase):
                     out, err, result = run_command(command.main, ['config', 'tests_lib', '--strict'])
                     self.assertEqual(result, 0, out + err)
                     self.assertIn('2 passed', out)
+
+    # HYPOTHESIS: configured label-run скрывает старый unittest main guard.
+    # RED: прямой запуск отдавал dotted label в unittest.loader._FailedTest.
+    # SOLUTION: тот же shared bootstrap, что у остальных Django entrypoints.
+    # RESULT: GREEN — native inventory проходит без унаследованных settings.
+    # STATUS: FIXED — see #692
+    def test_direct_entrypoint_bootstraps_the_native_inventory_without_inherited_settings(self):
+        import subprocess
+        label = 'pytest_harness.NativeInventory.test_every_existing_django_entrypoint_collects_its_original_id_union_without_running_it'
+        env = hermetic.child_env({})
+        env.pop('DJANGO_SETTINGS_MODULE', None)
+        env.pop('MOP_CONTROLLER_BOOTSTRAP', None)
+        result = subprocess.run([sys.executable, str(ROOT / 'tests/pytest_harness.py'), label],
+            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('::test_every_existing_django_entrypoint_collects_its_original_id_union_without_running_it PASSED', result.stdout)
+        self.assertIn('1 passed', result.stdout)
 
     def test_django_entrypoints_no_longer_construct_their_own_test_runner(self):
         source = (ROOT / 'tests/_controller_fixture.py').read_text()
@@ -268,4 +287,4 @@ class ProcessOwnership(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    raise SystemExit(main(sys.argv[1:] or ['pytest_harness']))
