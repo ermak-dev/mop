@@ -10,7 +10,7 @@ STATUS: FIXED — see #783
 """
 import asyncio
 from contextlib import ExitStack
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -29,6 +29,7 @@ from host_native import model_delivery
 from mop.common.producer import ProducerReport
 from mop.common.telemetry import SessionScope
 from mop.node.host_backend import Process
+from mop.node.host_handoff import LaunchWindow
 from mop.node.host_scope import Reference, Refused, Unknown
 from mop.node import host_scope_systemd as module
 
@@ -51,7 +52,7 @@ while True:
 '''
 
 
-class RootSocketProof(unittest.IsolatedAsyncioTestCase):
+class NativeProofFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='np-', dir='/tmp')
         self.home = Path(self.temp.name)
@@ -66,12 +67,16 @@ class RootSocketProof(unittest.IsolatedAsyncioTestCase):
         self.pins = SimpleNamespace(bootstrap_model='fixture-bootstrap')
         self.adapter = module.SystemdCgroupAdapter.__new__(module.SystemdCgroupAdapter)
         self.adapter._native_sockets = {}
+        # Явный Root retained-state port (#784): original window захвачен до
+        # launch; argv обязан нести именно его deadline, а не любой canonical.
+        self.window = LaunchWindow(datetime.now(timezone.utc), self.admission.work.not_after)
+        self.adapter._native_launches = {self.reference: (self.admission, self.window)}
         self.adapter.installed = SimpleNamespace(body_uid=os.getuid(), body_gid=os.getgid(),
             body=lambda scope: self.home, runner=Path('/opt/runtime/mop/node/host_body.py'))
         self.runner = Process(101, 1001, self.reference.boot_id)
         self.tmux = Process(103, 1003, self.reference.boot_id)
         self.native = None
-        self.deadline = (datetime.now(timezone.utc)+timedelta(seconds=30)).isoformat()
+        self.deadline = self.window.deadline.isoformat()
         self.session = str(uuid4())
         w = self.admission.work
         self.report_scope = SessionScope(*(UUID(getattr(w, key)) for key in
@@ -181,6 +186,8 @@ class RootSocketProof(unittest.IsolatedAsyncioTestCase):
         return await self.adapter.native_attachment(self.reference, self.report(),
             identity or self.identity(), self.tools, self.pins)
 
+
+class RootSocketProof(NativeProofFixture):
     async def test_missing_derived_socket_cannot_be_claimed_as_root_proof(self):
         self.native = Process(os.getpid(), 1002, self.reference.boot_id)
         self.assertFalse(self.path.exists())

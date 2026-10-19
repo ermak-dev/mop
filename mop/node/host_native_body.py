@@ -4,17 +4,16 @@
 Frontend не владеет этим объектом: root control и cgroup живут дольше polling.
 """
 import asyncio
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import shlex
 from uuid import uuid4
 
+from mop.common.management_context import body_deadline
 from mop.driver.launch import RegisteredLayout, Registration
 from mop.node.body_launch import SessionRuntime
 from mop.node.host_backend import Process
-from mop.node.host_handoff import LaunchWindow
 from mop.node.host_inputs import canonical_json
 from mop.node.host_native import ModelInputs, ProviderProfile
 from mop.node.host_native_lifetime import ProxyRegistration, ProxyTelemetry
@@ -124,7 +123,7 @@ class NativeBody:
         self.telemetry = ProxyTelemetry(self.channel)
         self.producer = ProxyRegistration(self.channel, self.registration, self.layout)
         self.runtime = SessionRuntime(self.producer, self.telemetry)
-        self.window = self.session_id = self.environment = None
+        self.launcher_deadline = self.session_id = self.environment = None
         self.started = False
         self.cleanup = None
 
@@ -132,9 +131,30 @@ class NativeBody:
         from mop.node.host_inputs import validate_admission
         validate_admission(self.submission.admission)
         result = await self.channel.request('checkpoint', dict(effect=effect, sequence=sequence))
-        if result != dict(approved=effect, sequence=sequence):
+        expected = dict(approved=effect, sequence=sequence)
+        if effect == 'native-input':
+            exact(result, (*expected, 'launcher_deadline'))
+            if self.launcher_deadline is not None:
+                raise Refused('original root launcher deadline cannot be replaced')
+            try:
+                deadline = body_deadline(result['launcher_deadline'])
+            except ValueError:
+                raise Refused('original root launcher deadline is invalid or expired') from None
+            if deadline > self.submission.admission.work.not_after:
+                raise Refused('root launcher deadline exceeds original intent')
+            expected['launcher_deadline'] = deadline.isoformat()
+        if result != expected:
             raise Refused('native body checkpoint approval changed')
         validate_admission(self.submission.admission)
+        if effect == 'native-input':
+            self.launcher_deadline = deadline
+        if effect == 'native-launch':
+            if self.launcher_deadline is None:
+                raise Refused('original root launcher deadline is absent')
+            try:
+                body_deadline(self.launcher_deadline.isoformat())
+            except ValueError:
+                raise Refused('original root launcher deadline expired before native launch') from None
         self.broker.effect = effect
 
     async def tmux(self, *args):
@@ -156,7 +176,6 @@ class NativeBody:
         home = l.runtime/'home'
         home.mkdir(mode=0o700)
         self.session_id = str(uuid4())
-        self.window = LaunchWindow(datetime.now(timezone.utc), self.submission.admission.work.not_after)
         hook = shlex.join([str(b.manifest.tools['python']), '-I', str(b.manifest.tools['hook']), 'hook'])
         settings = dict(permissions=dict(defaultMode='default'), hooks={
             event: [dict(hooks=[dict(type='command', command=hook, timeout=2)])]
@@ -166,7 +185,7 @@ class NativeBody:
         entry = b.config.installed.runner.parents[2]/'mop/client/body_entry.py'
         mcp = dict(mcpServers=dict(mop=dict(type='stdio', command=str(b.manifest.tools['python']),
             args=['-I', '-S', '-B', str(entry), '--scope', b.scope.unit,
-                  '--deadline', self.window.deadline.isoformat()])))
+                  '--deadline', self.launcher_deadline.isoformat()])))
         self.environment = dict(HOME=str(home), CLAUDE_CONFIG_DIR=str(config),
             PATH=str(b.manifest.tools['tmux'].parent)+':'+str(b.manifest.tools['git'].parent)+':/usr/bin:/bin',
             LANG='C.UTF-8', LC_ALL='C.UTF-8', TERM='xterm-256color', SHELL='/bin/sh',

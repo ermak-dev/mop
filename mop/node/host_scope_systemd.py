@@ -479,6 +479,7 @@ class SystemdCgroupAdapter:
         self._phase_limits = {}
         self._phase_cgroups = {}
         self._native_sockets = {}
+        self._native_launches = {}
         self.command = BoundedCommand()
         self._runner_identity = installed_file(installed.runner)
         for path in TOOLS:
@@ -600,6 +601,32 @@ class SystemdCgroupAdapter:
             raise Unknown('planned runner MainPID/start changed')
         return process
 
+    def retain_native_window(self, reference, admission):
+        """Root capture до первого body launch; повторный attempt не обновляет окно."""
+        from datetime import datetime, timezone
+        from mop.node.host_handoff import LaunchWindow
+        from mop.node.host_inputs import validate_admission, validate_scope
+        from mop.node.host_scope import Reference
+        validate_admission(admission)
+        if type(reference) is not Reference or admission.work.action != 'native_exec':
+            raise Refused('original native Reference and Admission required')
+        validate_scope(reference.scope, admission)
+        if reference in self._native_launches:
+            raise Refused('original native launch window already retained; renewal forbidden')
+        window = LaunchWindow(datetime.now(timezone.utc), admission.work.not_after)
+        self._native_launches[reference] = admission, window
+        return window
+
+    def native_window(self, reference, admission):
+        """Observation сверяет original binding, не renew и не новый effect lease."""
+        from mop.node.host_scope import Reference
+        from mop.node.http_execution import Admission
+        record = self._native_launches.get(reference)
+        if (type(reference) is not Reference or type(admission) is not Admission
+                or record is None or record[0] != admission):
+            raise Refused('original root native launch window binding is absent or changed')
+        return record[1]
+
     async def native_attachment(self, reference, report, identity, tools, pins):
         """Root повторно доказывает native/tmux в exact retained body cgroup."""
         from mop.common.producer import ProducerReport
@@ -640,9 +667,11 @@ class SystemdCgroupAdapter:
 
     async def native_launch(self, reference, launched, tools, pins):
         """До registry/ACK удерживаем только реальные процессы; это не producer proof."""
-        import json
-        from datetime import datetime, timezone
         from mop.node.host_backend import Process
+        record = self._native_launches.get(reference)
+        if record is None:
+            raise Refused('original root native launch window binding is absent or changed')
+        window = self.native_window(reference, record[0])
         runner = await self.runner_process(reference)
         # Installed PrivateUsers=no, без PrivatePIDs/RootDirectory/RootImage:
         # SO_PEERCRED и body proc PID/UID читаются в том же domain, не переводятся
@@ -707,15 +736,11 @@ class SystemdCgroupAdapter:
         if len(argv) != len(expected)+1 or argv[:-1] != expected:
             raise Refused('actual native argv differs from fixed approved initial launch')
         try:
-            mcp = json.loads(argv[-1])
-            entry = mcp['mcpServers']['mop']
-            args = entry['args']
-            deadline = datetime.fromisoformat(args[-1])
-            if deadline.tzinfo is not timezone.utc or deadline.isoformat() != args[-1]:
-                raise ValueError('canonical original UTC launcher deadline required')
+            mcp = json.loads(argv[-1], object_pairs_hook=unique)
             entrypoint = self.installed.runner.parents[2]/'mop/client/body_entry.py'
             exact_mcp = dict(mcpServers=dict(mop=dict(type='stdio', command=str(tools['python']),
-                args=['-I', '-S', '-B', str(entrypoint), '--scope', reference.scope.unit, '--deadline', deadline.isoformat()])))
+                args=['-I', '-S', '-B', str(entrypoint), '--scope', reference.scope.unit,
+                      '--deadline', window.deadline.isoformat()])))
             if mcp != exact_mcp:
                 raise ValueError('fixed MCP launch required')
         except (KeyError, IndexError, TypeError, ValueError):
@@ -1110,3 +1135,4 @@ class SystemdCgroupAdapter:
             self._phase_cgroups = {}
             for pinned in self._native_sockets.values(): pinned.close()
             self._native_sockets = {}
+            self._native_launches = {}
