@@ -88,13 +88,33 @@ class LegacyCheck(pytest.Item):
 
 
 @pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    from _pytest.unittest import TestCaseFunction
+    if hermetic.STRICT and isinstance(item, TestCaseFunction):
+        # Pytest заменяет исходный exception на XFailed без причины.
+        # В strict сохраняем исходные traceback/утверждение через addFailure.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(item, 'addExpectedFailure', item.addFailure)
+            yield
+    else:
+        yield
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
-    if hermetic.STRICT and report.skipped:
+    expected = hasattr(report, 'wasxfail')
+    if hermetic.STRICT and (report.skipped or expected):
         reason = report.longreprtext
+        kind = 'skipped test'
+        if expected:
+            kind = 'expected outcome'
+            reason = f'{report.wasxfail}\n{reason}'
+            # Session считает failed только без wasxfail: None тоже не годится.
+            del report.wasxfail
         report.outcome = 'failed'
-        report.longrepr = f'strict mode rejects skipped test {item.nodeid}: {reason}'
+        report.longrepr = f'strict mode rejects {kind} {item.nodeid}: {reason}'
 
 
 @pytest.hookimpl(tryfirst=True)
