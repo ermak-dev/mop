@@ -92,9 +92,12 @@ def path(value):
     return Path(value)
 
 
-def verify_artifact(filename, expected, *, root_owned=True, executable=False):
+def verify_artifact(filename, expected, *, root_owned=True, executable=False, native_size=None):
     """Не-follow всей цепочки, hash actual bytes и stability на том же inode."""
     from mop.node.host_scope_systemd import open_directory
+    if native_size is not None and (type(native_size) is not int
+            or not 0 < native_size <= 536870912 or executable is not True):
+        raise Refused('exact bounded executable native artifact size required')
     filename = path(str(filename))
     _sha(expected)
     directory = open_directory(filename.parent, owner=0 if root_owned else None, immutable=root_owned)
@@ -105,7 +108,8 @@ def verify_artifact(filename, expected, *, root_owned=True, executable=False):
             if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
                     or root_owned and (before.st_uid != 0 or before.st_mode & 0o022)
                     or before.st_mode & 0o6000 or executable and not before.st_mode & 0o111
-                    or not 0 <= before.st_size <= 67108864):
+                    or not 0 <= before.st_size <= (536870912 if native_size is not None else 67108864)
+                    or native_size is not None and before.st_size != native_size):
                 raise Refused('immutable bounded single-link installed runtime artifact required')
             h = hashlib.sha256()
             remaining = before.st_size
@@ -129,6 +133,7 @@ def verify_artifact(filename, expected, *, root_owned=True, executable=False):
 
 TOOLS = ('python', 'git', 'ssh', 'ansible', 'runner', 'ca', 'ansible_config')
 DIRECTORIES = ('empty', 'git_exec', 'python_root', 'ansible_plugins')
+NATIVE_TOOLS = (*TOOLS, 'native', 'tmux', 'hook', 'mcp')
 
 
 @dataclass(frozen=True)
@@ -144,11 +149,13 @@ class RuntimeManifest:
     def parse(cls, raw):
         value = _json(raw)
         exact(value, ('schema_version', 'capacity', 'images', 'tools', 'directories', 'artifacts'))
-        if type(value['schema_version']) is not int or value['schema_version'] != 1:
+        if type(value['schema_version']) is not int or value['schema_version'] not in (1, 2):
             raise Refused('unsupported installed runtime manifest')
+        native = value['schema_version'] == 2
         exact(value['capacity'], Capacity.__dataclass_fields__)
         capacity = Capacity(**value['capacity'])
-        exact(value['tools'], TOOLS)
+        tool_names = NATIVE_TOOLS if native else TOOLS
+        exact(value['tools'], tool_names)
         exact(value['directories'], DIRECTORIES)
         tools = {k: path(v) for k, v in value['tools'].items()}
         directories = {k: path(v) for k, v in value['directories'].items()}
@@ -157,7 +164,13 @@ class RuntimeManifest:
             raise Refused('explicit bounded runtime content closure required')
         names = set()
         for item in artifacts:
-            exact(item, ('path', 'sha256', 'executable'))
+            if native and type(item) is dict and item.get('path') == str(tools['native']):
+                exact(item, ('path', 'sha256', 'executable', 'kind', 'size'))
+                if (item['kind'] != 'native' or item['executable'] is not True
+                        or type(item['size']) is not int or not 0 < item['size'] <= 536870912):
+                    raise Refused('exact native-only installed artifact classification required')
+            else:
+                exact(item, ('path', 'sha256', 'executable'))
             filename = path(item['path'])
             _sha(item['sha256'])
             if type(item['executable']) is not bool or filename in names:
@@ -166,7 +179,7 @@ class RuntimeManifest:
         if not set(tools.values()) <= names:
             raise Refused('every fixed runtime executable/input requires an actual content hash')
         executables = {item['path'] for item in artifacts if item['executable']}
-        if any(str(tools[key]) not in executables for key in TOOLS if key not in ('ca', 'ansible_config')):
+        if any(str(tools[key]) not in executables for key in tool_names if key not in ('ca', 'ansible_config')):
             raise Refused('every fixed runtime executable requires executable content proof')
         images = value['images']
         if type(images) is not list or not 1 <= len(images) <= 256:
@@ -194,7 +207,8 @@ class RuntimeManifest:
         from mop.node.host_scope_systemd import open_directory
         names = {item['path'] for item in self.artifacts}
         for item in self.artifacts:
-            verify_artifact(item['path'], item['sha256'], executable=item['executable'])
+            verify_artifact(item['path'], item['sha256'], executable=item['executable'],
+                            native_size=item.get('size') if item.get('kind') == 'native' else None)
         for key, directory in self.directories.items():
             fd = open_directory(directory, owner=0, immutable=True)
             os.close(fd)

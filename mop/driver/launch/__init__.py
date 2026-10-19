@@ -124,24 +124,33 @@ class BundlePin:
 class RegisteredLayout:
     home: Path
     registration: Registration
+    # Только installed composition выбирает профиль, никогда wire input.
+    profile: str = 'default'
 
     def __post_init__(self):
         if (not isinstance(self.home, Path) or not self.home.is_absolute()
-                or '..' in self.home.parts or type(self.registration) is not Registration):
+                or '..' in self.home.parts or type(self.registration) is not Registration
+                or type(self.profile) is not str or self.profile not in ('default', 'host-native-v1')):
             raise ValueError('trusted absolute registered layout required')
         # sockaddr_un вмещает 108 байт sun_path c завершающим NUL (#677):
         # layout, чей session.sock не помещается, отказывает здесь, до spawn --
         # иначе тело умирает на bind молча, до первой готовности. Граница
         # проверена на настоящем kernel: 107 байт bind проходит, 108 -- нет.
         if len(os.fsencode(self.runtime/'session.sock')) > 107:
-            raise ValueError('registered runtime path does not fit sockaddr_un')
+            raise ValueError('registered runtime socket path does not fit sockaddr_un')
+        if self.profile == 'host-native-v1' and len(os.fsencode(self.hook_socket)) > 100:
+            raise ValueError('registered hook socket path exceeds bound')
 
     @property
     def clone(self):
+        if self.profile == 'host-native-v1':
+            return self.home/'repo'
         return self.home/'puppets'/self.registration.display_name
 
     @property
     def runtime(self):
+        if self.profile == 'host-native-v1':
+            return self.home/'r'
         w = self.registration.work
         # Incarnation UUID глобален; полное значение, без хеш-усечения. Два
         # UUID в Unix pathname не помещались в sockaddr_un уже при обычном HOME.
@@ -154,6 +163,18 @@ class RegisteredLayout:
     @property
     def launcher(self):
         return self.runtime/'launch'
+
+    @property
+    def hook_socket(self):
+        if self.profile != 'host-native-v1':
+            raise ValueError('fixed hook socket requires HOST native profile')
+        return self.runtime/'h'
+
+    @property
+    def management(self):
+        if self.profile != 'host-native-v1':
+            raise ValueError('fixed management handoff requires HOST native profile')
+        return self.runtime/'m'
 
 
 @dataclass(frozen=True)
