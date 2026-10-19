@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 """Канал сообщений без пула: python3 tests/channel.py
 
-Две части. Первая -- характеристика: оба фронтенда (`mop send` и инструмент
-`send` в MCP) прогоняются на заглушках шины и сокета, и их тексты и запросы
-агенту приколоты байт в байт такими, какими они были до #148. Вторая --
-сам канал (mop/client/channel.py): выбор пути по адресу, потолок ожидания, вердикт
--> текст.
+#793 (эпик #623): характеристика канала перенесена с удалённого легаси-фронтенда
+(`mop.cli.service.mcp.send` и `mop send` поверх шины/сокета) на канонический
+потребительский шов. Свойства #148/#213/#585 сохранены, но исполняются там, где
+они живут сегодня:
+
+  * `mop send <id> <text|->` -- конечная HTTPS-команда POST /api/v1/messages
+    (`tests/control_consumers.py` держит форму конверта; здесь -- маршрут,
+    отказы, границы и вердикт операции);
+  * приватная доставка отчёта -- POST /api/v1/reports и собственный WSS-потребитель
+    (`tests/private_inbox_client.py` на ветке #773); на дереве эпика private inbox
+    явно не связан, и это зафиксировано точным отказом;
+  * `mop.cli.service.mcp` больше не несёт инструментов: каталог строится из
+    деклараций командлетов (`tests/modern_mcp.py`, `tests/control_consumers.py`);
+  * `mop/client/channel.py` остаётся: route по адресу, потолок ожидания,
+    вердикт -> текст, `send_to_puppet` как тонкая обёртка `ops.send_to_puppet`.
+
+`unknown` -- честный терминальный исход обычной native-доставки на 2.1.302
+(решение по #785, отчёт /tmp/mop-623-task-specs/785-native-wire-contract-report.md):
+`accepted` не выдаётся за доставку, `delivered` не выводится ни из тишины, ни из
+записи, ни из простоя. Ни один старый сценарий не удалён молча: superseded-строки
+называют проверку-замену, unsupported-строки -- точный текст отказа.
 
 HYPOTHESIS (#148): маршрутизация трёх путей и поиск своей сессии жили во
 фронтенде MCP, а MAX_WAIT, обрезка ожидания и тексты «NOT DELIVERED — » и
 «inbox not listening — session is dead» -- ещё и копией в cli/core/send.py.
-SOLUTION: mop/client/channel.py -- send_to_puppet, send_local, send_to_master,
-MAX_WAIT, своя сессия; возвращает вердикт (данные), не печатает. Фронтенды
-только рисуют.
+SOLUTION: mop/client/channel.py -- вердикт (данные), не печать.
+STATUS: FIXED — see #148
 """
 import contextlib
-import io
 import os
+import re
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -24,46 +39,46 @@ from _lib import Checks, Msg, patched, patched_env, restored, run_command  # noq
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 os.environ.setdefault("MOP_SERVER_LAN", "127.0.0.1")
 
-from mop.common import bus, puppets  # noqa: E402
-from mop import session  # noqa: E402
-from mop.cli import lib  # noqa: E402
-from mop.cli.core import send as cli_send  # noqa: E402
-from mop.cli.service import mcp  # noqa: E402
+import json  # noqa: E402
 
-PUPPET = "pu-mop-9"
-NOTE = "was led by olga; now yours"
-OWNED = "pu-mop-9 is led by olga (work in its clone) — force=true takes it over"
+from _control_fixture import (Fixture, Response, KEY, EPOCH, TOKEN, PUPPET,  # noqa: E402
+                              INCARNATION, DEADLINE, PROJECT, OP, NODE,
+                              send_operation, puppet_row)
+from mop import cli, session  # noqa: E402
+from mop.cli import _control, _mcp, lib  # noqa: E402
+from mop.client import channel, control as api  # noqa: E402
+from mop.common import bus, busnames, ops, puppets  # noqa: E402
+
+# Канонический потребительский контекст: transient HTTPS, без .env и шины.
+CONTEXT = api.ServerContext("https://controller.example", TOKEN)
 SESS = {"name": "s1", "pid": 123, "messagingSocketPath": "/run/user/1000/cc-socks/123.sock",
         "cwd": "/w"}
 
+# Точные тексты канонических отказов: их читает человек и модель, поэтому
+# проверка держит их байт в байт, а не «содержит unsupported».
+UNSUPPORTED_LOCAL = ("unsupported: local recipients/listing, legacy routing/permission mode, takeover and "
+                     "idle notifications (trusted holder endpoint is not bound)")
+REFUSAL_ROLE_WS = ("unsupported: role creation/readiness and private WS terminal is not bound in this release")
+REFUSAL_TAIL = "unsupported: finite authorized tail backend API is not bound in this release"
+REFUSAL_TERMINAL = ("unsupported: private terminal physical resolver/capability discovery is not bound "
+                    "in this release")
+REFUSAL_LOCAL_TARGET = "send requires canonical resource ids, not local recipients or puppet names"
+REFUSAL_NO_CONTEXT = ("no HTTPS server context: set MOP_API_ORIGIN and MOP_API_TOKEN "
+                      "(the origin may also come from --api-origin)")
+BINDING = ["--epoch", EPOCH, "--incarnation", INCARNATION, "--expected-revision", "7"]
+SEND_ARGS = ["send", PUPPET, "hi", *BINDING, "--request-id", KEY, "--not-after", DEADLINE]
+PRIVATE_INBOX = {"available": False, "reason": "not_bound", "issue": 649}
+
 
 class Stubs:
-    """Заглушки шины, сокета и ростера на время блока with. Что спросили --
-    в calls, что ответить -- в answers по пути."""
+    """Заглушки сессий этого хоста: что спросили -- в calls."""
 
     def __init__(self):
         self.calls = []
-        self.answers = {}
         self.alive = True
         self.stack = contextlib.ExitStack()
 
-    def put(self, mod, name, fn):
-        """Подменить ещё один атрибут до конца блока."""
-        self.stack.enter_context(patched(mod, **{name: fn}))
-
     def __enter__(self):
-        def request(node, verb, **kw):
-            self.calls.append(("request", node, verb, kw))
-            return self._answer("request")
-
-        def ask(master_id, verb, **kw):
-            self.calls.append(("ask", master_id, verb, kw))
-            return self._answer("ask")
-
-        def send(sock, body, **kw):
-            self.calls.append(("session.send", sock, body, kw))
-            return self._answer("session.send")
-
         def find(target):
             if target == SESS["name"] or target == str(SESS["pid"]):
                 return SESS
@@ -71,38 +86,39 @@ class Stubs:
                 raise session.Ambiguous("'twins' matches several sessions: twins[1], twins[2] — specify pid")
             raise LookupError(f"session not found: {target}")
 
-        self.put(bus, "request", request)
-        self.put(bus, "ask", ask)
-        self.put(bus, "login", lambda: "anton")
-        self.put(session, "send", send)
-        self.put(session, "find", find)
-        self.put(session, "socket_alive", lambda path: self.alive)
-        self.put(session, "sessions", lambda: [SESS])
-        self.put(puppets, "running_alloc",
-                 lambda name: {"NodeName": "n1", "ClientStatus": "running"})
-        self.put(lib, "guard", lambda name: None)
-        self.put(mcp, "MASTER", True)
-        self.put(mcp, "MASTER_ID", "host-77")
-        self.put(mcp, "MY_INBOX", "mop.mop.master.host-77.inbox")
+        self.stack.enter_context(patched(session, find=find))
+        self.stack.enter_context(patched(session, socket_alive=lambda path: self.alive))
+        self.stack.enter_context(patched(session, sessions=lambda: [SESS]))
         return self
-
-    def _answer(self, path):
-        a = self.answers.get(path, {"msg_id": "m1"})
-        if isinstance(a, Exception):
-            raise a
-        return a
 
     def __exit__(self, *exc):
         self.stack.close()
 
 
-def cli(argv):
-    """`mop send` -> (код, stdout, stderr). sys.exit(строка) -- как у
-    интерпретатора: строка в stderr, код 1."""
-    out, err, code = run_command(cli_send.main, argv)
-    if isinstance(code, str):
-        err, code = err + code + "\n", 1
-    return code or 0, out, err
+def canonical(argv, responses=(), entry=None, connect_failure=False):
+    """Канонический командлет в процессе на заглушке HTTPS -> (out, err, code, fixture)."""
+    fixture = Fixture(*responses)
+    fixture.connect_failure = connect_failure
+    with patched(api, _DeadlineHTTPSConnection=fixture.factory), _control.use(CONTEXT):
+        out, err, code = run_command(entry or cli.main, argv)
+    return out, err, code, fixture
+
+
+def methods(fixture):
+    return [(call[0], call[1]) for call in fixture.calls]
+
+
+def posted(fixture):
+    body = fixture.calls[-1][2]
+    return json.loads(body) if body else None
+
+
+def accepted():
+    return Response(202, send_operation("accepted"))
+
+
+def declaration(name="send"):
+    return cli.declared(os.path.join(cli.PACKAGE, "core", name + ".py"))
 
 
 def check_bus_envelope_264(c):
@@ -119,7 +135,8 @@ def check_bus_envelope_264(c):
 
     Соединение -- заглушка: субъект с логином отвечает NoRespondersError,
     прежний -- эхом того, что пришло."""
-    import json
+    import inspect
+    from mop.common import busnames
     from mop.server import proxykey
     failed_before = c.failed
 
@@ -137,7 +154,6 @@ def check_bus_envelope_264(c):
         async def close(self):
             pass
 
-    from mop.common import busnames
     word = "Ωмега"
     raw = word.encode()
 
@@ -234,7 +250,6 @@ def check_bus_envelope_264(c):
     c.expect("bus.failure unchanged", {n: bus.failure(a) for n, a in cases.items()}, want_failure)
     verdict = getattr(bus, "verdict", None)
     if c.check("bus.verdict exists: the three-way check lives in one place", verdict is not None):
-        import inspect
         fn = getattr(bus, "results_from", None)
         c.check("bus.results_from must classify through bus.verdict",
                 fn is not None and "verdict(" in inspect.getsource(fn))
@@ -299,13 +314,19 @@ def check_stale_permissions_error_369(c):
     return c.failed == failed_before
 
 
-def check_agents_project_371(c):
+def check_project_selection_371(c):
     """HYPOTHESIS (#371): _roster фильтрует по подстроке отрендеренного
     origin (`project not in s["origin"]`): проект mop -- подстрока
     .../rumop.git, и agents(project="mop") показывает папетов rumop.
     SOLUTION: сравнение по значению PuppetRow -- puppets.project_of(origin),
     строка без origin -- «?», как row_project дашборда. Одно определение
-    проекта (CLAUDE.md). STATUS: FIXED — see #371"""
+    проекта (CLAUDE.md). STATUS: FIXED — see #371
+
+    #793: легаси-ростер MCP (`mcp._roster`) удалён. Замена -- та же проекция
+    на живом шве: `puppets.visible` выбирает джобы по значению project_of и
+    её же зовёт сервис кластера; клиент канонического `mop list` не строит
+    ростер вовсе и принимает только id проекта.
+    """
     from mop.common.state import PuppetRow
     failed_before = c.failed
 
@@ -315,16 +336,470 @@ def check_agents_project_371(c):
     rows = [row("pu-mop-1", "git@git.example:ermak/mop.git"),
             row("pu-rumop-1", "git@git.example:ermak/rumop.git"),
             row("pu-none-1", None)]
-    with patched(puppets, puppet_rows=lambda *a, **k: rows):
-        got = "\n".join(mcp._roster("mop"))
-        c.check("#371 agents(project=mop) shows the mop puppet", "pu-mop-1" in got, got)
-        c.check("#371 agents(project=mop) hides the rumop puppet", "pu-rumop-1" not in got, got)
-        c.check("#371 agents(project=mop) hides a puppet without origin",
-                "pu-none-1" not in got, got)
-        got = "\n".join(mcp._roster(""))
-        c.check("#371 no project: every puppet",
-                all(n in got for n in ("pu-mop-1", "pu-rumop-1", "pu-none-1")), got)
+    c.expect("#371 the project roster matches the project value",
+             [r.name for r in rows if r.origin and puppets.project_of(r.origin) == "mop"],
+             ["pu-mop-1"])
+    c.expect("#371 a project hides a puppet whose origin names another project",
+             [r.name for r in rows if r.origin and puppets.project_of(r.origin) == "rumop"],
+             ["pu-rumop-1"])
+    # Тот же выбор на сыром списке джобов, каким его видит сервис кластера.
+    def job(name, origin, kind="service"):
+        return {"ID": name, "Type": kind, "Meta": {"origin": origin}}
+    listing = [job("pu-mop-1", "git@git.example:ermak/mop.git"),
+               job("pu-rumop-1", "git@git.example:ermak/rumop.git"),
+               job("pu-none-1", None),
+               job("pu-cleanup", "git@h:x/y.git", kind="sysbatch")]
+    c.expect("#371 puppets.visible(mop) shows the mop puppet only",
+             [j["ID"] for j in puppets.visible(listing, "mop")], ["pu-mop-1"])
+    c.expect("#371 puppets.visible(mop) hides rumop",
+             "pu-rumop-1" in [j["ID"] for j in puppets.visible(listing, "mop")], False)
+    c.expect("#371 puppets.visible(mop) hides a puppet without origin",
+             "pu-none-1" in [j["ID"] for j in puppets.visible(listing, "mop")], False)
+    c.expect("#371 puppets.visible(admin) shows every service puppet",
+             [j["ID"] for j in puppets.visible(listing, bus.ADMIN)],
+             ["pu-mop-1", "pu-rumop-1", "pu-none-1"])
+    c.expect("#371 a sysbatch job is no puppet",
+             [j["ID"] for j in puppets.visible(listing, bus.ADMIN) if j["ID"] == "pu-cleanup"], [])
+    # Канонический клиент не выбирает проект по имени: только id ресурса.
+    out, err, code, fixture = canonical(["list", "--project-id", "mop"],
+                                        [Response(200, {})])
+    c.expect("#371 mop list refuses a project name, not a resource id", (code, out, err),
+             (1, "", "invalid control client input\n"))
+    c.expect("#371 no request is made for a name-based listing", fixture.calls, [])
     return c.failed == failed_before
+
+
+def check_canonical_send_793(c):
+    """Свойства прежней характеристики `mcp send` и `mop send`, исполненные
+    на каноническом конечном шве #642/#793: POST /api/v1/messages.
+
+    #793 replacement map (каждый прежний сценарий назван):
+      mcp puppet delivered -> operation receipt; accepted exits 3, never "delivered";
+      owner note / owner refusal / force -> parse_send refuses authority fields;
+      indeterminate delivery -> submission unknown, recover by request id;
+      wait idle -> --wait is a GET-only operation wait, never idle evidence;
+      notify_when_idle -> refused before I/O (legacy idle subscription unbound);
+      local session / ambiguous / master address -> canonical resource ids only;
+      bad priority / empty -> client-side refusals before I/O;
+      bus error -> transport/admission refusals of the HTTPS client.
+    """
+    # Конверт: одна конечная команда, поля -- только опубликованные.
+    out, err, code, fixture = canonical(SEND_ARGS, [accepted()])
+    c.expect("#793 send is one finite POST", methods(fixture), [("POST", "/api/v1/messages")])
+    c.expect("#793 the published send body", posted(fixture), {
+        "schema_version": 1, "epoch": EPOCH, "request_id": KEY, "target_id": PUPPET,
+        "incarnation": INCARNATION, "expected_revision": "7", "not_after": DEADLINE,
+        "params": {"message": "hi", "priority": "next", "wait_seconds": 0,
+                   "notify_when_idle": False}})
+    for private in ("hi", TOKEN):
+        c.check("#793 private input never reaches the URL",
+                private not in fixture.calls[-1][1], fixture.calls[-1][1])
+    # accepted -- приём команды, не доставка (решение A по #785).
+    c.expect("#793 an accepted operation is not delivery", code, 3)
+    receipt = json.loads(out)["operation"]
+    c.expect("#793 accepted is reported as accepted", receipt["state"], "accepted")
+    c.check("#793 no delivered claim for accepted", "delivered" not in out.lower(), out)
+    c.check("#793 no idle claim for accepted", "idle" not in out.lower(), out)
+    # explicit binding: detail не спрашивается вовсе.
+    c.expect("#793 explicit binding skips the detail read", len(fixture.calls), 1)
+    # Ровно один POST: потерянный ответ не повторяет эффект.
+    c.expect("#793 lost admission is recovered by request id, never reposted", code, 3)
+    # succeeded/failed -- серверный исход операции, не native delivery.
+    _, _, code, _ = canonical(SEND_ARGS, [Response(202, send_operation("succeeded"))])
+    c.expect("#793 a succeeded operation exits 0", code, 0)
+    out, _, code, _ = canonical(SEND_ARGS, [Response(202, send_operation("failed"))])
+    c.expect("#793 a failed operation exits 1", code, 1)
+
+    # Неизвестный исход: только GET-lookup по тому же ключу, без второго POST.
+    out, err, code, fixture = canonical(SEND_ARGS, [
+        OSError("lost reply"),
+        Response(404, {"schema_version": 1, "error": {
+            "code": "not_found", "message": "resource not found", "retryable": False}})])
+    c.expect("#793 an unknown submission exits 3", code, 3)
+    c.expect("#793 unknown is not reported as delivered", out, "")
+    c.check("#793 unknown names the request id, the epoch and the recovery",
+            f"submission unknown; request_id={KEY}; epoch={EPOCH}; "
+            f"recover with operation lookup; do not repeat the effect" in err, err)
+    c.expect("#793 recovery is GET-only", methods(fixture),
+             [("POST", "/api/v1/messages"),
+              ("GET", f"/api/v1/operations?request_id={KEY}&epoch={EPOCH}")])
+
+    # Ожидание операции -- не наблюдение простоя (#574): таймаут не отменяет
+    # операцию и не выдаёт idle.
+    fixture = Fixture(Response(202, send_operation("accepted")))
+    running = api.Client._read_operation(api._freeze(send_operation("running")))
+    with patched(api, _DeadlineHTTPSConnection=fixture.factory), \
+            patched(api.Client, wait_operation=lambda *a, **k: (_ for _ in ()).throw(
+                api.WaitTimeout(running))), \
+            _control.use(CONTEXT):
+        out, err, code = run_command(cli.main, SEND_ARGS + ["--wait", "1"])
+    c.expect("#793 a wait timeout exits 3", code, 3)
+    c.expect("#793 the operation is not cancelled", err, "wait expired; operation is not cancelled\n")
+    c.expect("#793 the receipt still names the operation", json.loads(out)["operation"]["state"], "running")
+    c.check("#793 a wait timeout is not idle evidence", "idle" not in out.lower(), out)
+    c.check("#793 a wait timeout is not delivery evidence", "delivered" not in out.lower(), out)
+
+    # Отказы транспорта и сервера -- своими строками, не «нет ответа».
+    out, err, code, fixture = canonical(SEND_ARGS, connect_failure=True)
+    c.expect("#793 a transport failure before admission exits 1", code, 1)
+    c.expect("#793 a transport failure has its own line", err, "control API transport unavailable\n")
+    c.expect("#793 a transport failure sends nothing", fixture.calls, [])
+    denied = Response(403, {"schema_version": 1, "error": {
+        "code": "permission_denied", "message": "nope", "retryable": False}})
+    out, err, code, _ = canonical(SEND_ARGS, [denied, accepted()])
+    c.expect("#793 a server refusal exits 1", code, 1)
+    c.expect("#793 a server refusal keeps its reason", err, "permission_denied: nope\n")
+    conflict = Response(409, {"schema_version": 1, "error": {
+        "code": "revision_conflict", "message": "stale revision", "retryable": False}})
+    out, err, code, _ = canonical(SEND_ARGS, [conflict, accepted()])
+    c.expect("#793 a CAS conflict exits 1", code, 1)
+    c.expect("#793 a CAS conflict keeps its reason", err, "revision_conflict: stale revision\n")
+
+    # Без полной привязки -- detail, и только его desired revision.
+    out, err, code, fixture = canonical(["send", PUPPET, "hi", "--request-id", KEY,
+                                         "--not-after", DEADLINE],
+                                        [Response(200, {"schema_version": 1, "epoch": EPOCH,
+                                                        "puppet": puppet_row()}), accepted()])
+    c.expect("#793 the detail read precedes the send", methods(fixture),
+             [("GET", f"/api/v1/puppets/{PUPPET}"), ("POST", "/api/v1/messages")])
+    c.expect("#793 the body takes the desired revision from detail",
+             (posted(fixture)["expected_revision"], posted(fixture)["incarnation"]),
+             ("7", INCARNATION))
+    out, err, code, fixture = canonical(["send", PUPPET, "hi"], [
+        Response(404, {"schema_version": 1, "error": {
+            "code": "not_found", "message": "resource not found", "retryable": False}})])
+    c.expect("#793 a missing puppet is refused before any send", (code, err),
+             (1, "not_found: resource not found\n"))
+    c.expect("#793 a missing puppet makes no POST", methods(fixture),
+             [("GET", f"/api/v1/puppets/{PUPPET}")])
+
+    # Текст сообщения: stdin ограничен, newline сохранён, NUL/пусто -- отказ.
+    fixture = Fixture(accepted())
+    with patched(api, _DeadlineHTTPSConnection=fixture.factory), _control.use(CONTEXT):
+        out, err, code = run_command(
+            cli.main, ["send", PUPPET, "-", *BINDING, "--request-id", KEY, "--not-after", DEADLINE],
+            stdin="private\nmessage\n")
+    c.expect("#793 stdin is one bounded message", (code, err), (3, ""))
+    c.expect("#793 newlines are preserved", posted(fixture)["params"]["message"], "private\nmessage\n")
+    for text in ("  ", "a\x00b", "x" * 16385, "\ud800"):
+        fixture = Fixture()
+        out, err, code, fixture = canonical(
+            ["send", PUPPET, text, *BINDING, "--request-id", KEY, "--not-after", DEADLINE],
+            [])
+        c.expect("#793 invalid message text is refused before I/O", (code, out, err),
+                 (1, "", "invalid control client input\n"))
+        c.expect("#793 invalid message text sends nothing", fixture.calls, [])
+
+    # Приоритет и границы ожидания -- поля команды, не догадки клиента.
+    out, err, code, fixture = canonical(SEND_ARGS + ["--priority", "later"], [accepted()])
+    c.expect("#793 priority travels", posted(fixture)["params"]["priority"], "later")
+    c.expect("#793 wait_seconds travels", canonical(
+        SEND_ARGS + ["--wait-seconds", "60"], [accepted()])[2], 3)
+    c.expect("#793 wait_seconds 0 is a valid command field", canonical(
+        SEND_ARGS + ["--wait-seconds", "0"], [accepted()])[2], 3)
+    for value in ("-1", "61"):
+        out, err, code, fixture = canonical(SEND_ARGS + ["--wait-seconds", value], [])
+        c.expect("#793 wait_seconds out of range is refused before I/O",
+                 (code, out, err, fixture.calls),
+                 (1, "", "wait-seconds must be within 0..60; it is not an idle/delivery receipt\n", []))
+    for value in ("0", "61", "nan", "inf"):
+        out, err, code, fixture = canonical(SEND_ARGS + ["--wait", value], [])
+        c.expect("#793 a bounded GET-only wait refuses an invalid bound",
+                 (code, out, err, fixture.calls),
+                 (1, "", "wait must be within the client wait limit\n", []))
+    out, err, code, fixture = canonical(SEND_ARGS + ["--priority", "asap"], [])
+    c.expect("#793 an unknown priority is refused before I/O",
+             (code, out, err, fixture.calls), (1, "", "invalid command arguments\n", []))
+    # partial binding: не смешивать detail и явные поля.
+    out, err, code, fixture = canonical(["send", PUPPET, "hi", "--epoch", EPOCH], [])
+    c.expect("#793 a partial binding is refused before I/O",
+             (code, out, err, fixture.calls),
+             (1, "", "provide epoch, incarnation and expected-revision together\n", []))
+
+    # Адресат -- только canonical resource id. Это замена локальной сессии,
+    # pid, сокета и адреса мастера: маршрутов по имени больше нет.
+    for target in ("s1", "123", "/tmp/inbox.sock", "anton%2Eermak.host-7", "twins"):
+        out, err, code, fixture = canonical(["send", target, "hi"], [])
+        c.expect(f"#793 {target!r} is not a canonical send target",
+                 (code, out, err, fixture.calls),
+                 (1, "", REFUSAL_LOCAL_TARGET + "\n", []))
+    out, err, code, fixture = canonical(
+        ["send", PUPPET, "hi", "--epoch", EPOCH.upper(), "--incarnation", INCARNATION,
+         "--expected-revision", "7"], [])
+    c.expect("#793 a non-canonical id is refused", (code, err),
+             (1, REFUSAL_LOCAL_TARGET + "\n"))
+    out, err, code, fixture = canonical(
+        ["send", PUPPET, "hi", *BINDING, "--request-id", KEY, "--not-after", DEADLINE,
+         "--expected-revision", "07"], [])
+    c.expect("#793 a non-canonical revision is refused", (code, err),
+             (1, "invalid control client input\n"))
+    c.expect("#793 a refused target sends nothing", fixture.calls, [])
+
+    # Явно неподдерживаемые легаси-опции -- до I/O и с точным текстом.
+    for option in (["--force"], ["--mode", "bypass"], ["--notify-when-idle"],
+                   ["--local"], ["--reply-to", "private:other"]):
+        out, err, code, fixture = canonical(SEND_ARGS + option, [])
+        c.expect(f"#793 {option[0]} is unsupported before I/O",
+                 (code, out, err, fixture.calls), (2, "", UNSUPPORTED_LOCAL + "\n", []))
+    for argv in (["send", "list"], ["send", "--list"]):
+        out, err, code, fixture = canonical(argv, [])
+        c.expect(f"#793 {argv!r} is unsupported before I/O",
+                 (code, out, err, fixture.calls), (2, "", UNSUPPORTED_LOCAL + "\n", []))
+    # Литеральный текст после `--` не становится опцией.
+    out, err, code, fixture = canonical(
+        ["send", PUPPET, *BINDING, "--request-id", KEY, "--not-after", DEADLINE, "--", "--mode"],
+        [accepted()])
+    c.expect("#793 text after -- is a literal message", posted(fixture)["params"]["message"], "--mode")
+
+    # Нет контекста -- отказ до любого I/O и с именами недостающих переменных.
+    out, err, code = run_command(cli.main, SEND_ARGS)
+    c.expect("#793 send without a server context refuses",
+             (code, out, err), (1, "", REFUSAL_NO_CONTEXT + "\n"))
+
+    # MCP: та же декларация и тот же обработчик; авторитета в теле нет.
+    decl = declaration("send")
+    c.expect("#793 the MCP send declares the finite server actions",
+             decl.get("actions"), ["execution.send_message", "operations.view_operation"])
+    c.check("#793 the MCP send declares no legacy role verbs",
+            not ({"node_verbs", "cluster_verbs", "dispatch"} & decl.keys()), decl)
+    c.check("#793 the MCP send has no human-only fence",
+            decl.get("human_only", False) is False, decl)
+    c.check("#793 the MCP send takes no owner/force/reply_to/notify arguments",
+            not ({"owner", "force", "reply_to", "reply-to", "notify_when_idle"} & {
+                arg["name"] for arg in decl.get("args", [])}), decl.get("args"))
+    actions = frozenset(decl["actions"])
+    agent = api.Identity(4, "agent", 7, NODE, KEY, actions)
+    c.check("#793 a delegated agent with the actions may send",
+            _control.allowed(decl, agent), decl)
+    c.expect("#793 a missing action refuses the tool",
+             _control.allowed(decl, api.Identity(4, "agent", 7, NODE, KEY, frozenset(
+                 {"execution.send_message"}))), False)
+
+    # Серверный разбор -- единственная власть: owner/force/role не поля команды.
+    from mop.server.operations.commands import parse_dispatch, parse_send
+    body = posted(fixture)
+    c.expect("#793 the published send parses as a SendCommand",
+             type(parse_send(json.loads(json.dumps(body)))).__name__, "SendCommand")
+    for field in ({"owner": "anton"}, {"force": True}, {"role": "builder"},
+                  {"reply_to": "private:other"}, {"from_name": "pu-mop-3"}):
+        refused = False
+        try:
+            parse_send(json.loads(json.dumps({**body, **field})))
+        except Exception as error:
+            refused = "unknown command fields are not allowed" in str(error)
+        c.check(f"#793 the server refuses authority field {sorted(field)[0]!r}", refused, field)
+    # dispatch -- отдельная операция, не «send с флагом» (#579/#585), и на
+    # дереве эпика она не связана: точный отказ.
+    out, err, code, fixture = canonical(["dispatch", PUPPET, "task"], [])
+    # `mop dispatch` доходит до лаунчера ролей: модуля командлета нет, и отказ
+    # один -- терминал роли не связан. Точный текст тот же, что у `mop master`.
+    c.expect("#793 dispatch is a separate, unbound operation",
+             (code, out, err, fixture.calls), (2, "", REFUSAL_ROLE_WS + "\n", []))
+    c.expect("#793 dispatch parses as its own server command",
+             type(parse_dispatch(json.loads(json.dumps(body)))).__name__, "DispatchCommand")
+    c.check("#793 no dispatch tool is exposed",
+            "dispatch" not in _mcp.commandlets(), sorted(_mcp.commandlets()))
+    return True
+
+
+def check_role_channel_585(c):
+    """#585, вторая часть (перенесено на канонический шов #793): вид
+    говорящего, адреса, отказ от аренды в send, dispatch, каталог инструментов,
+    autopick. Легаси-маршрут MCP удалён, но свойства живут:
+
+      * грант -- не человек и не мастер: `mop profile` отдаёт канонический Actor
+        с owner+grant, а human_only-командлет (add) ему отказан;
+      * send роли не несёт owner/force/reply_to: серверный parse_send отказывает
+        таким полям, а тело клиента их не строит;
+      * грант ничего не broadcast: у конечного клиента нет такого пути;
+      * dispatch -- отдельная операция в своём канале;
+      * autopick -- чистая функция с прежними свойствами.
+    """
+    # Сначала -- классификация говорящего: она осталась в канале.
+    c.expect("#585 a grant is its own actor", channel.actor(GRANT), channel.GRANT)
+    for bad in ("puppet-mop", None, ""):
+        try:
+            channel.actor(bad)
+            c.fail(f"#662 puppet creds ({bad!r}) are no speaker", "no refusal")
+        except ValueError as e:
+            c.check(f"#662 puppet creds ({bad!r}) are refused", "unsupported" in str(e), str(e))
+    c.expect("#585 a person", channel.actor("anton"), channel.HUMAN)
+    with patched(bus, config=lambda *a: {"user": GRANT}):
+        c.expect("#585 a grant is no human owner", channel.human_login(), None)
+    with patched(bus, config=lambda *a: {"user": "anton"}):
+        c.expect("#585 a person is still owner", channel.human_login(), "anton")
+    c.expect("#585 human send keeps its lease fields",
+             channel.send_fields(channel.HUMAN, "host-7", "inbox", True, "anton"),
+             {"from_name": "host-7", "owner": "anton", "force": True, "reply_to": "inbox"})
+    c.expect("#585 a grant's send claims no ownership and no force",
+             channel.send_fields(channel.GRANT, "pu-mop-3", "inbox", True, "anton"),
+             {"from_name": "pu-mop-3", "reply_to": "inbox"})
+
+    # #793: адрес процесса MCP как субъекта шины (`<grant>.<host>-<pid>`,
+    # reply_to=_MOP_REPLY...) больше не существует -- private inbox не связан.
+    # Замена: канонический Actor не выводится из имени роли или из grant, его
+    # отдаёт сервер; human_only остаётся границей.
+    out, err, code, fixture = canonical(["profile"], [
+        Response(200, {"schema_version": 1, "epoch": EPOCH, "user_id": 4, "kind": "agent",
+                       "human_owner_id": 7, "node_id": None, "grant_id": KEY,
+                       "action_permissions": ["execution.send_message"]})])
+    c.expect("#585 a grant is reported as a delegated agent", code, 0)
+    profile = json.loads(out)
+    c.expect("#585 the canonical actor is the server's, with owner and grant",
+             (profile["kind"], profile["human_owner_id"], profile["grant_id"]),
+             ("agent", 7, KEY))
+    c.expect("#585 profile reads only the authenticated identity",
+             methods(fixture), [("GET", "/api/v1/identity")])
+    add = declaration("add")
+    add_actions = frozenset(add["actions"])
+    c.check("#585 a grant does not inherit a human-only commandlet",
+            not _control.allowed(add, api.Identity(4, "agent", 7, NODE, KEY, add_actions)), add)
+    c.check("#585 a human with the actions may run it",
+            _control.allowed(add, api.Identity(7, "human", 7, None, None, add_actions)), True)
+
+    # Send: авторитета в теле нет; сервер отказывает лишним полям.
+    from mop.server.operations.commands import parse_send
+    _, _, _, fixture = canonical(SEND_ARGS, [accepted()])
+    body = posted(fixture)
+    c.expect("#585 a canonical send names no sender authority",
+             sorted(body), ["epoch", "expected_revision", "incarnation", "not_after",
+                            "params", "request_id", "schema_version", "target_id"])
+    c.expect("#585 no lease or reply transport travels in send params",
+             sorted(body["params"]), ["message", "notify_when_idle", "priority", "wait_seconds"])
+    for field in ("owner", "force", "from_name", "reply_to", "_caller"):
+        refused = False
+        try:
+            parse_send(json.loads(json.dumps({**body, field: "x"})))
+        except Exception as error:
+            refused = "unknown command fields are not allowed" in str(error)
+        c.check(f"#585 the server refuses {field!r} in a send body", refused, field)
+    # Никакого broadcast: канонический send доходит до сервера, даже когда
+    # любой путь шины подменён отказом.
+    def refuse_bus(*a, **k):
+        raise AssertionError("a canonical send reached the legacy bus")
+    with patched(bus, request=refuse_bus, gather=refuse_bus, ask=refuse_bus):
+        out, err, code, fixture = canonical(SEND_ARGS, [accepted()])
+    c.expect("#585 a canonical send never touches the legacy bus",
+             (code, methods(fixture)), (3, [("POST", "/api/v1/messages")]))
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel in ("mop/cli/core/send.py", "mop/cli/_control.py"):
+        src = open(os.path.join(root, rel)).read()
+        c.check(f"#585 {rel} has no bus path", "mop.common.bus" not in src
+                and "bus.request" not in src, rel)
+    c.check("#585 the send body carries one target, never a broadcast mask",
+            body["target_id"] == PUPPET and "*" not in json.dumps(body), body["target_id"])
+    # dispatch: своя операция и свой отказ на несвязанном дереве.
+    out, err, code, fixture = canonical(["dispatch", PUPPET, "task"], [])
+    c.expect("#585 dispatch is refused as unbound", (code, err), (2, REFUSAL_ROLE_WS + "\n"))
+    c.expect("#585 dispatch sends nothing", fixture.calls, [])
+
+    # autopick: чистая функция, прежние свойства.
+    rows = [
+        {"name": "pu-mop-1", "project": "mop", "receives_dispatch": False, "free": True, "owner": None},
+        {"name": "pu-mop-2", "project": "mop", "receives_dispatch": True, "free": False, "owner": None},
+        {"name": "pu-mop-3", "project": "mop", "receives_dispatch": True, "free": True, "owner": "olga"},
+        {"name": "pu-x-1", "project": "x", "receives_dispatch": True, "free": True, "owner": None},
+        {"name": "pu-mop-5", "project": "mop", "receives_dispatch": True, "free": True, "owner": "anton"},
+        {"name": "pu-mop-4", "project": "mop", "receives_dispatch": True, "free": True, "owner": None},
+    ]
+    c.expect("#585 autopick: eligible, free, same project, lease allows",
+             channel.pick(rows, "mop", "anton"), "pu-mop-4")
+    c.expect("#585 autopick: own lease is fine",
+             channel.pick([r for r in rows if r["name"] != "pu-mop-4"], "mop", "anton"), "pu-mop-5")
+    c.expect("#585 autopick: a master role is not a receiving target",
+             channel.pick([rows[0]], "mop", "anton"), None)
+    c.expect("#585 autopick: another project is not eligible",
+             channel.pick([rows[3]], "mop", "anton"), None)
+    c.expect("#585 autopick: nobody eligible", channel.pick(rows[:4], "mop", "anton"), None)
+    # #662: папетные креды -- не говорящий и не цель каталога.
+    c.expect("#662 an unsupported speaker carries no tools",
+             channel.tools_for(None, None, {}), set())
+    return True
+
+
+def check_role_api_585(c):
+    """#585: адреса роли, подписки, dispatch и каталог инструментов.
+
+    #793 replacement map:
+      watch_inbox / on_inbox who-poll -> MCP has no bus subscription; the private
+        inbox capability is explicitly unavailable and `mop master` refuses;
+      grant receives dispatch -> the canonical dispatch surface is unbound, and
+        only the server parser owns DispatchCommand;
+      route/own_inbox/tools_for -> live library code, asserted unchanged.
+    """
+    grant = "grant-" + "a" * 32
+    c.expect("#585 grant may answer a human master's address",
+             channel.route("anton%2Eermak.wate.lan-7", channel.GRANT),
+             ("master", "anton%2Eermak.wate.lan-7"))
+    c.expect("#585 legacy master address without login",
+             channel.route("host-1", channel.GRANT), ("master", "host-1"))
+    for label in ("builder", "s1"):
+        try:
+            got = channel.route(label, channel.GRANT)
+            c.fail(f"#585 {label!r} is not an address of a role", got)
+        except LookupError as e:
+            c.check("#585 the refusal says how to address", "job name" in str(e), str(e))
+    with Stubs() as s:
+        c.expect("#585 a human still routes any name to a master inbox",
+                 channel.route("builder"), ("master", "builder"))
+        c.expect("#585 a human still reaches a session on its host",
+                 channel.route("s1"), ("local", SESS))
+        c.expect("#585 a human routes a pid to the session",
+                 channel.route("123"), ("local", SESS))
+
+    # #793: роль не слушает ничей инбокс в процессе. Замена свойства --
+    # явная недоступность private inbox и точный отказ команд.
+    c.expect("#793 the MCP declares the private inbox unavailable", _mcp.PRIVATE_INBOX, PRIVATE_INBOX)
+    c.check("#793 the instructions name the missing inbox capability",
+            "private inbox unavailable" in _mcp.INSTRUCTIONS
+            and "no agents, report, idle notifications, endpoint registration" in _mcp.INSTRUCTIONS,
+            _mcp.INSTRUCTIONS)
+    out, err, code, fixture = canonical(["master"], [])
+    c.expect("#793 a role's private WS terminal is unsupported", (code, out, err),
+             (2, "", REFUSAL_ROLE_WS + "\n"))
+    c.expect("#793 the unsupported role launch sends nothing", fixture.calls, [])
+
+    # #585 dispatch -- своя операция; на каноническом дереве несвязана, и
+    # авторитета в теле нет. Замена прежнего «with/without the capability».
+    from mop.server.operations.commands import parse_dispatch
+    _, _, _, fixture = canonical(SEND_ARGS, [accepted()])
+    body = posted(fixture)
+    dispatch = parse_dispatch(json.loads(json.dumps(body)))
+    c.expect("#585 dispatch is its own command type",
+             type(dispatch).__name__, "DispatchCommand")
+    c.check("#585 dispatch carries no owner, force or role authority",
+            not ({"owner", "force", "role", "_caller"} & set(body)), body)
+    c.expect("#585 dispatch never broadcasts", "*" not in json.dumps(body), True)
+    actor = channel.actor(grant)
+    c.expect("#585 the grant's channel stays a role channel", actor, channel.GRANT)
+
+    # Каталог инструментов: из capabilities и объявлений командлетов.
+    decls = {"wipe": {"node_verbs": ["wipe"]}, "add": {"cluster_verbs": ["add"]},
+             "drain": {"cluster_verbs": ["drain"]}, "models": {}}
+    hand = channel.HAND_TOOLS
+    c.expect("#585 a human keeps every tool",
+             channel.tools_for(channel.HUMAN, None, decls), (set(hand) | set(decls)) - {"dispatch"})
+    c.expect("#662 an unknown speaker carries no tools",
+             channel.tools_for("legacy", None, decls), set())
+    decls["profile"] = {"cluster_verbs": []}
+    # Пресет-«рабочий без alloc»: send/tail не видны -- их нечем
+    # маршрутизировать (node_of идёт alloc); профиль остаётся.
+    c.expect("#585 puppet role with no cluster verbs routes nothing",
+             channel.tools_for(channel.GRANT, caps_of("puppet"), decls),
+             {"profile"})
+    c.expect("#585 puppet role with declared roster/alloc: discovery and channel",
+             channel.tools_for(channel.GRANT, caps_of("puppet", cluster_verbs=["roster", "alloc"]),
+                               decls),
+             {"agents", "send", "tail", "profile"})
+    c.expect("#585 master role: its verbs, dispatch, declared commandlets",
+             channel.tools_for(channel.GRANT, caps_of("master"), decls),
+             {"agents", "send", "tail", "slash", "dispatch", "wipe", "add", "profile"})
+    c.expect("#585 empty node_verbs: no channel tools",
+             channel.tools_for(channel.GRANT, caps_of("puppet", node_verbs=[]), decls),
+             {"profile"})
+    c.expect("#585 a grant without a bundle fails closed",
+             channel.tools_for(channel.GRANT, None, decls), set())
+    return True
 
 
 GRANT = "grant-" + "a" * 32
@@ -358,211 +833,6 @@ def caps_of(role, **over):
     return soul.from_manifest(doc, b"prompt").manifest.capabilities
 
 
-def check_role_channel_585(c):
-    """HYPOTHESIS (#585): профиль MCP решает вопрос «мастер ли мы» одной
-    проверкой `not is_puppet(user)`, и делегированный принципал роли
-    (grant-<id>, #579) выходит мастером: весь каталог командлетов, owner
-    человеком в каждом send, подписка на чужие master-инбоксы. А легаси-
-    папет (puppet-<проект>) шлёт send в node.<n>.rpc, куда его креды не
-    пишут (natsconf.puppet_permissions -- только .msg): живой peer-send
-    pu2/pu4 упал permissions violation.
-    SOLUTION: channel.actor -- два вида говорящего (human/grant, #662);
-    легаси-папет проекта -- больше не говорящий (отказ);
-    легаси -- канал msg; grant -- адрес = имя джоба, без owner/force/
-    reply_to, свой узел из окружения тела, адресат -- verb peers своего
-    узла, каталог инструментов -- из capabilities бандла; dispatch --
-    отдельная операция в своём канале; autopick -- только
-    receives_dispatch + свободный клон + проект + аренда."""
-    from mop.client import channel
-    # Сначала -- поведение сегодняшнего маршрута, без нового API: красный
-    # обязан быть про маршрут, а не про отсутствующее имя.
-    with patched(bus, config=lambda *a: {"user": GRANT}):
-        c.expect("#585 a grant is not a master profile", mcp.is_master(), False)
-
-    # Неподдерживаемый говорящий (#662): папетные креды проекта и их
-    # отсутствие -- больше не вид говорящего. Ни канала msg, ни каталога
-    # инструментов: процесс поднимается пустым, fail closed.
-    c.expect("#662 an unsupported speaker carries no tools",
-             channel.tools_for(None, None, {}), set())
-    # Человек -- байт в байт прежний запрос (характеристика выше): без channel.
-
-    # Грант: адрес -- имя джоба, ни владельца, ни force; reply_to -- только
-    # транспорт вестей в инбокс процесса (решение мастера по C5). Узел
-    # адресата -- глаголом alloc кластера под своим токеном (C4: roster/alloc
-    # выдаются ролям декларативно), не broadcast.
-    env = {"MOP_PUPPET": "pu-mop-3"}
-    with Stubs() as s, patched_env(**env):
-        # Профиль -- тот, что модуль вывел бы из кредов гранта, а не
-        # подставленный руками.
-        with patched(bus, config=lambda *a: {"user": GRANT}):
-            s.put(mcp, "MASTER", mcp.is_master())
-        s.put(mcp, "KIND", "grant")
-        s.put(mcp, "CAPS", caps_of("puppet"))
-        s.put(mcp, "MASTER_ID", f"{GRANT}.host-77")
-        s.put(mcp, "MY_INBOX", f"_MOP_REPLY.{GRANT}.host-77")
-        s.put(bus, "login", lambda: GRANT)
-        s.put(bus, "gather", lambda *a, **kw: c.fail("#585 grant never broadcasts", a))
-
-        got = mcp.send(PUPPET, "hi", force=True)
-        c.expect("#585 grant send delivered", got, "pu-mop-9: delivered (msg_id=m1)")
-        c.expect("#585 grant reaches the target's node",
-                 [x[1:3] for x in s.calls if x[0] == "request"], [("n1", "send")])
-        kw = s.calls[-1][3]
-        c.expect("#585 grant send is plain rpc", kw.get("channel", "rpc"), "rpc")
-        c.expect("#585 grant names itself by its job",
-                 kw.get("from_name"), "pu-mop-3")
-        c.expect("#585 no false owner binding", "owner" in kw, False)
-        c.expect("#585 plain send takes no lease: force does not travel",
-                 "force" in kw, False)
-        c.expect("#585 the process inbox is transport only (reply_to), not the sender",
-                 (kw.get("reply_to"), kw.get("from_name")),
-                 (f"_MOP_REPLY.{GRANT}.host-77", "pu-mop-3"))
-        c.expect("#585 me() of a grant", mcp.me(), "pu-mop-3")
-    return True
-
-
-def check_role_api_585(c):
-    """#585, вторая часть: вид говорящего, адреса, подписки, dispatch,
-    каталог инструментов, autopick -- новое API канала."""
-    from mop.client import channel
-    try:
-        actor = channel.actor
-    except AttributeError as e:
-        c.fail("#585 channel.actor exists", str(e))
-        return False
-    c.expect("#585 grant is its own actor", actor(GRANT), channel.GRANT)
-    # #662: папетные креды проекта и отсутствие кредов -- не говорящий:
-    # классификация отказывает, а не выдаёт легаси-канал.
-    for bad in ("puppet-mop", None):
-        try:
-            actor(bad)
-            c.fail(f"#662 puppet creds ({bad!r}) are no speaker", "no refusal")
-        except ValueError as e:
-            c.check(f"#662 puppet creds ({bad!r}) are refused",
-                    "unsupported" in str(e), str(e))
-    c.expect("#585 a person", actor("anton"), channel.HUMAN)
-    with patched(bus, config=lambda *a: {"user": GRANT}):
-        c.expect("#585 a grant is no human owner", channel.human_login(), None)
-    with patched(bus, config=lambda *a: {"user": "anton"}):
-        c.expect("#585 a person is still owner", channel.human_login(), "anton")
-    env = {"MOP_PUPPET": "pu-mop-3"}
-    with Stubs() as s, patched_env(**env):
-        s.put(mcp, "MASTER", False)
-        s.put(mcp, "KIND", channel.GRANT)
-        s.put(mcp, "CAPS", caps_of("puppet"))
-        s.put(mcp, "MASTER_ID", f"{GRANT}.host-77")
-        s.put(mcp, "MY_INBOX", f"_MOP_REPLY.{GRANT}.host-77")
-        s.put(bus, "login", lambda: GRANT)
-        s.put(bus, "gather", lambda *a, **kw: c.fail("#585 grant never broadcasts", a))
-
-        # Адреса: старые адреса мастеров-людей работают в переходе, имя
-        # роли адресом не является, сокеты соседей по хосту -- не путь роли.
-        old = "anton%2Eermak.wate.lan-7"
-        c.expect("#585 grant may answer a human master's address",
-                 channel.route(old, channel.GRANT), ("master", old))
-        c.expect("#585 legacy master address without login",
-                 channel.route("host-1", channel.GRANT), ("master", "host-1"))
-        for label in ("builder", "s1"):
-            try:
-                got = channel.route(label, channel.GRANT)
-                c.fail(f"#585 {label!r} is not an address of a role", got)
-            except LookupError as e:
-                c.check("#585 the refusal says how to address", "job name" in str(e), str(e))
-        c.expect("#585 a human still routes any name to a master inbox",
-                 channel.route("builder"), ("master", "builder"))
-        c.expect("#585 a human still reaches a session on its host",
-                 channel.route("s1"), ("local", SESS))
-
-        # Многопроцессный MCP одного тела: свой инбокс -- транспорт вестей,
-        # опрос мастеров (who) роль не слушает и мастером не считается.
-        subs = []
-        s.put(bus, "subscribe", lambda subj, h: subs.append(subj))
-        s.put(bus, "ERROR_LISTENERS", [])
-        with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]):
-            mcp.watch_inbox()
-            c.expect("#585 a role answers no who-poll", "error" in mcp.on_inbox({"verb": "who"}), True)
-        c.expect("#585 a role MCP subscribes its own inbox only",
-                 subs, [f"_MOP_REPLY.{GRANT}.host-77"])
-
-        # dispatch: без права -- отказ; с правом -- свой канал, без owner.
-        c.check("#585 dispatch refused without the capability",
-                "not permitted" in mcp.dispatch(PUPPET, "task"))
-        s.put(mcp, "CAPS", caps_of("master"))
-        got = mcp.dispatch(PUPPET, "task")
-        c.expect("#585 dispatch delivered", got, "pu-mop-9: delivered (msg_id=m1)")
-        last = s.calls[-1]
-        c.expect("#585 dispatch is its own operation", (last[1], last[2], last[3].get("channel")),
-                 ("n1", "dispatch", "dispatch"))
-        c.expect("#585 dispatch body carries no authority",
-                 [k for k in ("owner", "force", "role", "_caller") if k in last[3]], [])
-        c.expect("#585 dispatch names the sender by its job", last[3].get("from_name"), "pu-mop-3")
-        # autopick: мастер-роль чистая, но не принимает -- выбран рабочий.
-        from mop.common.state import PuppetRow
-
-        def row(name, kind, receives, owner=None):
-            r = PuppetRow(name, "n1", "running", kind, kind, owner,
-                          origin="git@h:ermak/mop.git", soul="x")
-            object.__setattr__(r, "receives_dispatch", receives) if receives is not None else None
-            return r
-        s.put(puppets, "puppet_rows", lambda sizes=True: [
-            row("pu-mop-1", "free", False), row("pu-mop-2", "busy", True),
-            row(PUPPET, "free", True), row("pu-mop-8", "free", None)])
-        s.put(bus, "PROJECT", "mop")
-        got = mcp.dispatch("", "task")
-        c.expect("#585 autopick dispatches to the receiving free puppet",
-                 (got, s.calls[-1][3].get("name")), ("pu-mop-9: delivered (msg_id=m1)", PUPPET))
-        s.put(puppets, "puppet_rows", lambda sizes=True: [row("pu-mop-1", "free", False)])
-        c.check("#585 autopick with nobody eligible refuses with a reason",
-                "no puppet" in mcp.dispatch("", "task"))
-        s.put(mcp, "KIND", channel.HUMAN)
-        s.put(mcp, "MASTER", True)
-        c.check("#585 a human has no dispatch: send keeps its lease semantics",
-                "not permitted" in mcp.dispatch(PUPPET, "task"))
-
-    # Каталог инструментов: из capabilities и объявлений командлетов.
-    decls = {"wipe": {"node_verbs": ["wipe"]}, "add": {"cluster_verbs": ["add"]},
-             "drain": {"cluster_verbs": ["drain"]}, "models": {}}
-    hand = channel.HAND_TOOLS
-    c.expect("#585 a human keeps every tool",
-             channel.tools_for(channel.HUMAN, None, decls), (set(hand) | set(decls)) - {"dispatch"})
-    c.expect("#662 an unknown speaker carries no tools",
-             channel.tools_for("legacy", None, decls), set())
-    decls["profile"] = {"cluster_verbs": []}
-    # Пресет-«рабочий без alloc»: send/tail не видны -- их нечем
-    # маршрутизировать (node_of идёт alloc); профиль остаётся.
-    c.expect("#585 puppet role with no cluster verbs routes nothing",
-             channel.tools_for(channel.GRANT, caps_of("puppet"), decls),
-             {"profile"})
-    c.expect("#585 puppet role with declared roster/alloc: discovery and channel",
-             channel.tools_for(channel.GRANT, caps_of("puppet", cluster_verbs=["roster", "alloc"]),
-                               decls),
-             {"agents", "send", "tail", "profile"})
-    c.expect("#585 master role: its verbs, dispatch, declared commandlets",
-             channel.tools_for(channel.GRANT, caps_of("master"), decls),
-             {"agents", "send", "tail", "slash", "dispatch", "wipe", "add", "profile"})
-    c.expect("#585 empty node_verbs: no channel tools",
-             channel.tools_for(channel.GRANT, caps_of("puppet", node_verbs=[]), decls),
-             {"profile"})
-    c.expect("#585 a grant without a bundle fails closed",
-             channel.tools_for(channel.GRANT, None, decls), set())
-
-    # autopick: чистая функция.
-    rows = [
-        {"name": "pu-mop-1", "project": "mop", "receives_dispatch": False, "free": True, "owner": None},
-        {"name": "pu-mop-2", "project": "mop", "receives_dispatch": True, "free": False, "owner": None},
-        {"name": "pu-mop-3", "project": "mop", "receives_dispatch": True, "free": True, "owner": "olga"},
-        {"name": "pu-x-1", "project": "x", "receives_dispatch": True, "free": True, "owner": None},
-        {"name": "pu-mop-5", "project": "mop", "receives_dispatch": True, "free": True, "owner": "anton"},
-        {"name": "pu-mop-4", "project": "mop", "receives_dispatch": True, "free": True, "owner": None},
-    ]
-    c.expect("#585 autopick: eligible, free, same project, lease allows",
-             channel.pick(rows, "mop", "anton"), "pu-mop-4")
-    c.expect("#585 autopick: own lease is fine",
-             channel.pick([r for r in rows if r["name"] != "pu-mop-4"], "mop", "anton"), "pu-mop-5")
-    c.expect("#585 autopick: nobody eligible", channel.pick(rows[:4], "mop", "anton"), None)
-    return True
-
-
 def check_body_binding_585(c):
     """#585, третья часть: бандл тела -- не самообъявление, и инбокс
     процесса роли ездит своим транспортом.
@@ -579,15 +849,18 @@ def check_body_binding_585(c):
     с загруженным бандлом, а корень стоит ровно там, где раскладка тела
     держит инкарнацию этого джоба (driver.soul_dir); channel.own_inbox даёт
     принципалу субъект под private_prefix. Фикстура -- настоящий пресет
-    пакета (soul.catalogue), не переписанный руками манифест."""
-    import json
+    пакета (soul.catalogue), не переписанный руками манифест.
+
+    #793: MCP-процесс больше не держит инбокс вовсе; источник `MY_INBOX`
+    заменён явной недоступностью private inbox. own_inbox остаётся чистым
+    свойством канала (им пользуется композиция тела на ветке #773).
+    """
     import shutil
     import tempfile
     import uuid
     from mop import driver
-    from mop.common import busnames, souldirs
+    from mop.common import souldirs
     from mop.common import soul as souls
-    from mop.client import channel
 
     presets = souls.catalogue([souldirs.PACKAGE_DIR])
     if not c.check("#585 the package catalogue holds the worker preset",
@@ -711,11 +984,14 @@ def check_body_binding_585(c):
              channel.own_inbox("anton.ermak", f"anton%2Eermak.{local}"),
              bus.inbox(f"anton%2Eermak.{local}"))
 
+    # #793: процесс MCP инбокса не держит -- ни своего, ни чужого.
     here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     with open(os.path.join(here, "mop", "cli", "service", "mcp.py")) as f:
         text = f.read()
-    c.check("#585 the MCP process inbox comes from the channel helper",
-            "MY_INBOX = channel.own_inbox(" in text)
+    c.check("#793 the MCP service builds no process inbox",
+            "MY_INBOX" not in text and "master_id" not in text, text)
+    c.expect("#793 the private inbox is an explicit unavailable contract",
+             _mcp.PRIVATE_INBOX, PRIVATE_INBOX)
     return True
 
 
@@ -732,12 +1008,15 @@ def check_tool_routes_585(c):
     SOLUTION: требования hand-инструментов -- полные маршруты: agents
     roster+states, send/tail/slash alloc+свой глагол узла, dispatch --
     alloc+roster (autopick обещан описанием) и право dispatch. Пресеты
-    пакета их проходят; фиксстура -- настоящий каталог (soul.catalogue),
+    пакета их проходят; фикстура -- настоящий каталог (soul.catalogue),
     не переписанный руками манифест. Каталог -- UX: прав не выдаёт,
-    урезает только видимость не-маршрутизируемого инструмента."""
+    урезает только видимость не-маршрутизируемого инструмента. STATUS: FIXED — see #585
+
+    #793: описание send читается не из удалённого легаси-инструмента, а из
+    канонической декларации и докстринга командлета.
+    """
     from mop.common import souldirs
     from mop.common import soul as souls
-    from mop.client import channel
     presets = souls.catalogue([souldirs.PACKAGE_DIR])
     for role in ("puppet", "master"):
         if role not in presets:
@@ -801,184 +1080,211 @@ def check_tool_routes_585(c):
             "dispatch" not in channel.tools_for(
                 channel.GRANT, without(master, node=("states",)), {}))
 
-    # Описание send обязано говорить правду обо всех видах говорящих:
-    # аренду берёт send человека, не роли.
-    import inspect
-    c.check("#585 the send description scopes the claim to a human master",
-            inspect.getsource(mcp.send) and True)
-    src = inspect.getsource(mcp.send)
-    c.check("#585 send says a role's send claims no ownership",
-            "no lease" in src or "claims no" in src or "never claims" in src, src)
+    # Описание send обязано говорить правду о последствиях: адресат -- id
+    # ресурса, takeover и idle-подписка не поддержаны до I/O, владельца нет.
+    path = os.path.join(cli.PACKAGE, "core", "send.py")
+    doc = cli.docstring(path)
+    c.check("#585 the send description names the target as a resource id",
+            "assignment resource id" in doc, doc)
+    c.check("#585 the send description refuses takeover and idle before I/O",
+            "--force" in doc and "--notify-when-idle" in doc and "unsupported" in doc, doc)
+    c.check("#585 send claims no ownership argument",
+            "owner" not in {arg["name"] for arg in declaration("send").get("args", [])})
     return True
 
 
-def main():
-    c = Checks()
+def check_private_inbox_793(c):
+    """#793: явные unsupported-контракты там, где канонической поверхности
+    ещё нет. Каждая строка -- точный отказ, который видит человек и модель;
+    ни один прежний сценарий не вычеркнут ради зелёного.
 
-    # ─── характеристика: MCP ──────────────────────────────────────────────
-    with Stubs() as s:
-        mcp_request = {"name": PUPPET, "message": "hi", "priority": "next", "wait": 0,
-                       "notify": False, "from_name": "host-77", "owner": "anton",
-                       "force": False, "reply_to": "mop.mop.master.host-77.inbox",
-                       "timeout": bus.TIMEOUT}
-        s.answers["request"] = {"msg_id": "m1"}
-        c.expect("mcp puppet delivered", mcp.send(PUPPET, "hi"), "pu-mop-9: delivered (msg_id=m1)")
-        c.expect("mcp puppet request", s.calls[-1], ("request", "n1", "send", mcp_request))
+    Superseded / unsupported map:
+      local-session socket routing -> `mop send` canonical ids only;
+      bus inbox <login>.<host>-<pid> -> `mop addresses` private:<uuid> records,
+        no process inbox (channel.own_inbox remains a pure library property);
+      mcp.watch_inbox/on_inbox/refused_inbox -> private inbox not_bound;
+      dispatch/agents/tail/slash/master -> exact finite-gap refusals;
+      #437 dead session inbox -> a socket/path is not a delivery address.
+    """
+    # Приватная доставка отчёта: контракт отчёта на сервере существует, но
+    # клиентский WSS-потребитель в этом дереве не связан.
+    c.expect("#793 the MCP private inbox contract", _mcp.PRIVATE_INBOX, PRIVATE_INBOX)
+    c.check("#793 the installed client names the absent capability",
+            "private inbox unavailable (#649)" in _mcp.INSTRUCTIONS,
+            _mcp.INSTRUCTIONS)
+    # Легаси-поверхности не возвращены и не подделаны: их нет вовсе.
+    from mop.cli.service import mcp as mcp_service
+    for name in ("send", "dispatch", "watch_inbox", "on_inbox", "on_bus_error",
+                 "refused_inbox", "master_id", "is_master", "me", "_roster", "instructions"):
+        c.expect(f"#793 mcp.{name} is gone, not faked", hasattr(mcp_service, name), False)
 
-        s.answers["request"] = {"msg_id": "m1", "owner_note": NOTE}
-        c.expect("mcp owner note", mcp.send(PUPPET, "hi"),
-                 f"pu-mop-9: delivered (msg_id=m1); {NOTE}")
+    for command, text in (
+            (["master"], REFUSAL_ROLE_WS),
+            (["agents"], REFUSAL_ROLE_WS),
+            (["report"], REFUSAL_ROLE_WS),
+            (["deliveries"], REFUSAL_ROLE_WS),
+            (["dispatch"], REFUSAL_ROLE_WS),
+            (["slash", "s1", "/model"], REFUSAL_ROLE_WS),
+            (["tail", "s1"], REFUSAL_TAIL),
+            (["attach", "s1"], REFUSAL_TERMINAL),
+            (["session", "terminal", "s1"], REFUSAL_TERMINAL)):
+        out, err, code, fixture = canonical(command, [])
+        c.expect(f"#793 {' '.join(command)} is an explicit unsupported contract",
+                 (code, out, err), (2, "", text + "\n"))
+        c.expect(f"#793 {' '.join(command)} performs no I/O", fixture.calls, [])
 
-        s.answers["request"] = {"error": OWNED}
-        c.expect("mcp owner refusal", mcp.send(PUPPET, "hi"), f"pu-mop-9: NOT DELIVERED — {OWNED}")
-        s.answers["request"] = {"msg_id": "m1"}
-        mcp.send(PUPPET, "hi", force=True)
-        c.expect("mcp force travels", s.calls[-1][3]["force"], True)
+    # #213: подписка человека сужается до его собственного токена; субъект
+    # инбокса жив, но каноническая доставка адресуется только записям
+    # addresses, а не субъекту шины.
+    local = f"{os.uname().nodename}-{os.getpid()}"
+    mine = bus.inbox(f"anton%2Eermak.{local}", "mop")
+    from mop.server import operators
+    perms = operators.permissions({"role": "user", "projects": ["mop"]}, "anton.ermak")
+    c.expect("#213 a person subscribes only to their own master prefix",
+             [m for m in perms["allow"] if ".master." in m and m.endswith(".>")],
+             ["mop.mop.master.anton%2Eermak.>"])
+    c.check("#213 the inbox lies under that prefix", mine.startswith("mop.mop.master.anton%2Eermak."), mine)
+    row = {"id": KEY, "session_id": OP, "address": f"private:{EPOCH}", "project_id": PROJECT,
+           "external_session_id": "ext", "display_name": "d",
+           "expires_at": "2026-10-20T00:00:00Z", "state": "registered", "live": True}
+    out, err, code, fixture = canonical(["addresses", PROJECT],
+                                        [Response(200, {"schema_version": 1, "addresses": [row]})])
+    c.expect("#793 an authorized endpoint address is reported", code, 0)
+    c.expect("#793 addresses are private endpoint records, not subjects",
+             json.loads(out)["addresses"][0]["address"], f"private:{EPOCH}")
+    for bad in (dict(row, address=mine), dict(row, address="/tmp/inbox.sock"),
+                dict(row, address="host-1")):
+        out, err, code, _ = canonical(["addresses", PROJECT],
+                                      [Response(200, {"schema_version": 1, "addresses": [bad]})])
+        c.expect("#793 a bus subject or socket is not a delivery address",
+                 (code, out, err), (1, "", "invalid address page\n"))
+    foreign = dict(row, project_id=OP)
+    out, err, code, _ = canonical(["addresses", PROJECT],
+                                  [Response(200, {"schema_version": 1, "addresses": [foreign]})])
+    c.expect("#793 an address from another project is refused",
+             (code, err), (1, "invalid address page\n"))
+    # #437: мёртвый сокет сессии -- не адрес. Замена прежнего on_inbox-вердикта:
+    # путь отклоняется ещё разбором адресата канонического send.
+    out, err, code, fixture = canonical(["send", "/run/user/1000/private/master-123.sock", "report"], [])
+    c.expect("#437 a dead session socket is not a delivery path",
+             (code, out, err), (1, "", REFUSAL_LOCAL_TARGET + "\n"))
+    c.expect("#437 no delivery is attempted to a dead socket", fixture.calls, [])
+    return True
 
-        # #574 ревью 3 п.5: тело молчит -- {"error", "timeout"}: доставка
-        # неизвестна, не отказана. Отдельная строка, не «NOT DELIVERED»:
-        # повторять высланное можно, звать чужую аренду заново -- нет.
-        s.answers["request"] = {"error": "pu-mop-9: the body did not answer in 20s",
-                                "timeout": True}
-        c.expect("mcp indeterminate delivery",
-                 mcp.send(PUPPET, "hi"),
-                 "pu-mop-9: DELIVERY UNKNOWN — pu-mop-9: the body did not answer in 20s")
-        s.answers["request"] = {"msg_id": "m1"}
 
-        s.answers["request"] = bus.BusError("node agent n1 did not answer in 20s")
-        c.expect("mcp bus error", mcp.send(PUPPET, "hi"),
-                 "pu-mop-9: NOT DELIVERED — node agent n1 did not answer in 20s")
+def check_mcp_check_226_481(c):
+    """#226/#481 на каноническом `mop mcp --check`: адрес не выдумывается, а
+    срез полномочий задаётся явно, а не окружением.
 
-        s.answers["request"] = {"msg_id": "m1", "idle": "went idle after 12s"}
-        c.expect("mcp wait idle", mcp.send(PUPPET, "hi", wait_seconds=30),
-                 "pu-mop-9: delivered (msg_id=m1), idle: went idle after 12s")
-        c.expect("mcp wait request", (s.calls[-1][3]["wait"], s.calls[-1][3]["notify"],
-                                      s.calls[-1][3]["timeout"]), (30, False, 30 + bus.TIMEOUT))
-        s.answers["request"] = {"msg_id": "m1"}
-        c.expect("mcp wait not idle", mcp.send(PUPPET, "hi", wait_seconds=30),
-                 "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s")
-        # #574: ошибка наблюдения простоя -- не молчаливое «не дождался»:
-        # узел называет причину, и она доезжает тем же вердиктом.
-        s.answers["request"] = {"msg_id": "m1", "idle": None,
-                                "idle_error": "idle observation failed"}
-        c.expect("mcp idle error keeps the reason",
-                 mcp.send(PUPPET, "hi", wait_seconds=30),
-                 "pu-mop-9: delivered (msg_id=m1), idle: idle observation failed")
-        mcp.send(PUPPET, "hi", wait_seconds=9999)
-        c.expect("mcp wait clamped", s.calls[-1][3]["wait"], 600)
-        mcp.send(PUPPET, "hi", wait_seconds=-5)
-        c.expect("mcp negative wait", s.calls[-1][3]["wait"], 0)
+    HYPOTHESIS (#226): `mop mcp --check` -- отдельный процесс; MASTER_ID
+    строился из его собственного pid, и напечатанный адрес с инбоксом не
+    слушал никто. Отданный папету, он уводит ответ в пустоту.
+    SOLUTION: вывод -- каталог и явная недоступность private inbox, без
+    адреса процесса. HYPOTHESIS (#481): claude с MCP mop без MOP_PROJECT
+    жил в admin-срезе и был невидим в проекте. SOLUTION: срез задаётся
+    только явным --project-id; окружение не голосует.
+    """
+    catalogue = {"schema_version": 1, "catalogue_version": 1, "epoch": EPOCH,
+                 "actor": {"user_id": 7, "kind": "human", "human_owner_id": 7,
+                           "node_id": None, "grant_id": None},
+                 "scope": {"project_id": None, "node_id": None, "client_id": None},
+                 "actions": []}
+    out, err, code, fixture = canonical(["mcp", "--check"], [Response(200, catalogue)])
+    c.expect("#226 --check succeeds with a server context", code, 0)
+    body = json.loads(out)
+    c.expect("#226 --check reports the explicit scope",
+             body["scope"], {"project_id": None, "node_id": None, "client_id": None})
+    c.expect("#226 --check names the private inbox as unavailable",
+             body["private_inbox"], PRIVATE_INBOX)
+    c.expect("#226 the catalogue query carries no invented scope",
+             fixture.calls[-1][1], "/api/v1/capabilities?schema_version=1")
+    c.expect("#226 --check prints no <login>.<host>-<pid> address",
+             re.findall(r"\b[\w-]+\.[\w-]+-\d+\b", out), [])
+    c.expect("#226 --check prints no .inbox subject", ".inbox" in out, False)
+    c.expect("#226 --check prints no process master id", local_address() in out, False)
+    c.expect("#226 no address is fabricated for a check process", fixture.calls[0][0], "GET")
 
-        c.expect("mcp notify", mcp.send(PUPPET, "hi", notify_when_idle=True),
-                 "pu-mop-9: delivered (msg_id=m1); will notify when it frees up")
-        c.expect("mcp notify request", s.calls[-1][3]["notify"], True)
-        # С ожиданием подписку держать незачем: ответ и так дождётся.
-        mcp.send(PUPPET, "hi", notify_when_idle=True, wait_seconds=5)
-        c.expect("mcp notify with wait", s.calls[-1][3]["notify"], False)
+    # #481 replacement: hostile ambient MOP_PROJECT does not choose the slice.
+    with patched_env(MOP_PROJECT="other"):
+        out, err, code, fixture = canonical(["mcp", "--check"], [Response(200, catalogue)])
+    c.expect("#481 the ambient project does not decide the scope", code, 0)
+    c.expect("#481 the scope stays explicit under a hostile environment",
+             fixture.calls[-1][1], "/api/v1/capabilities?schema_version=1")
+    with patched_env(MOP_PROJECT="other"):
+        out, err, code, fixture = canonical(["mcp", "--check", "--project-id", PROJECT],
+                                            [Response(200, dict(catalogue, scope={
+                                                "project_id": PROJECT, "node_id": None,
+                                                "client_id": None}))])
+    c.expect("#481 an explicit --project-id is the only project scope",
+             fixture.calls[-1][1],
+             f"/api/v1/capabilities?schema_version=1&project_id={PROJECT}")
+    # Без контекста -- отказ с именами недостающих переменных, не выдуманный
+    # локальный адрес.
+    out, err, code = run_command(cli.main, ["mcp", "--check"])
+    c.expect("#226 --check without a context refuses", (code, out, err),
+             (1, "", REFUSAL_NO_CONTEXT + "\n"))
 
-        # Локальная сессия.
-        s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        c.expect("mcp local delivered", mcp.send("s1", "hi"), "s1: delivered (msg_id=m2)")
-        c.expect("mcp local call", s.calls[-1],
-                 ("session.send", SESS["messagingSocketPath"], "hi",
-                  {"priority": "next", "from_name": "host-77", "wait_idle": 0}))
-        s.answers["session.send"] = {"msg_id": "m2", "idle": {"state": "idle"}}
-        c.expect("mcp local idle", mcp.send("123", "hi", wait_seconds=5),
-                 "s1: delivered (msg_id=m2), idle: idle")
-        s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        c.expect("mcp local not idle", mcp.send("s1", "hi", wait_seconds=5),
-                 "s1: delivered (msg_id=m2), idle: did not wait it out")
-        s.alive = False
-        c.expect("mcp local dead", mcp.send("s1", "hi"), "s1: inbox not listening — session is dead")
-        s.alive = True
-        # Несколько сессий с одним именем -- стоп, а не мастер: молча взять
-        # первую значит однажды написать не тому. #662: без кредов инструмент
-        # не регистрируется (нет оболочки loud), поэтому сырая функция
-        # обязана поднять Ambiguous -- зарегистрированная отдаст её текстом.
-        try:
-            mcp.send("twins", "hi")
-            c.fail("mcp local ambiguous", "routed on")
-        except session.Ambiguous as e:
-            c.check("mcp local ambiguous stops the send", "twins" in str(e), str(e))
+    # #250 replacement: MOP_BRANCH не инструкция MCP, а контекст интеграционной
+    # ветки, который читает lib.default_branch -- единственный потребитель.
+    from mop.common import context as ctx
+    with ctx.use(ctx.Context(branch="swarm")):
+        c.expect("#250 the integration branch comes from the context",
+                 lib.default_branch(), "origin/swarm")
+    with ctx.use(ctx.Context()):
+        branch = lib.default_branch()
+    c.check("#250 without a branch the default origin branch applies",
+            branch in ("origin/master", "origin/main") or branch.startswith("origin/"), branch)
+    return True
 
-        # Мастер -- всё остальное.
-        s.answers["ask"] = {"msg_id": "m3"}
-        c.expect("mcp master delivered", mcp.send("host-1", "hi", priority="now"),
-                 "host-1: delivered (msg_id=m3)")
-        c.expect("mcp master call", s.calls[-1],
-                 ("ask", "host-1", "message", {"text": "hi", "priority": "now", "from": "host-77"}))
-        s.answers["ask"] = {"error": "master host-1 has no session — nowhere to deliver the note"}
-        c.expect("mcp master refusal", mcp.send("host-1", "hi"),
-                 "host-1: NOT DELIVERED — master host-1 has no session — nowhere to deliver the note")
-        s.answers["ask"] = bus.BusError("master host-1 is not on the bus")
-        c.expect("mcp master bus error", mcp.send("host-1", "hi"),
-                 "host-1: NOT DELIVERED — master host-1 is not on the bus")
 
-        c.expect("mcp bad priority", mcp.send(PUPPET, "hi", priority="asap"),
-                 "priority must be one of now, next, later")
-        c.expect("mcp empty", mcp.send(PUPPET, "  "), "empty message, nothing to send")
+def check_mcp_descriptions_434(c):
+    """#434: модель читает канонические декларации и инструкции, а не
+    внутреннее устройство канала. Легаси-описания агентов/send/tail заменены
+    каноническим send-докстрингом и `_mcp.INSTRUCTIONS`; свойство прежнее:
+    действие и последствие -- да, транспортный механизм -- нет."""
+    text = _mcp.INSTRUCTIONS
+    c.check("#434 the instructions are model-facing English", isinstance(text, str) and text)
+    c.check("#434 the instructions hide legacy transport internals", not any(
+        word in text for word in ("Nomad", "NATS", "tmux", "neighboring node")), text)
+    c.check("#434 the instructions keep the finite surface", all(
+        word in text for word in ("Authenticated management tools only", "authorizes actual resources",
+                                  "private inbox unavailable")))
+    path = os.path.join(cli.PACKAGE, "core", "send.py")
+    doc = cli.docstring(path)
+    c.check("#434 send retains the force/ownership refusal",
+            "--force" in doc and "unsupported" in doc and "no trusted holder endpoint" in doc, doc)
+    c.check("#434 send hides legacy transport internals", not any(
+        word in doc for word in ("tmux", "skipSlashCommands", "neighboring node")), doc)
+    # Единственное упоминание шины -- запрет, а не инструкция: отказ переписать
+    # доставку на bus/UDS/SSH обязан остаться видимым.
+    c.check("#434 the only transport mention is a refusal",
+            "never bus/UDS/SSH" in doc and "fallback" in doc, doc)
+    decl = declaration("send")
+    c.check("#434 the declaration offers no legacy routing flags",
+            not ({"--force", "--mode", "--local", "--reply-to", "--notify-when-idle"}
+                 & {arg.get("flag") for arg in decl.get("args", [])}), decl.get("args"))
+    c.check("#434 the tool catalogue exposes no removed surfaces",
+            not ({"agents", "tail", "slash", "dispatch", "report", "master"}
+                 & set(_mcp.commandlets())), sorted(_mcp.commandlets()))
+    mcp_doc = open(os.path.join(cli.PACKAGE, "service", "mcp.py")).read()
+    c.check("#434 --check describes an offline catalogue, not live reachability",
+            "does not register an endpoint or confirm native delivery" in mcp_doc
+            and "can reach" not in mcp_doc)
+    return True
 
-        # ─── характеристика: mop send ─────────────────────────────────────
-        cli_request = {"name": PUPPET, "message": "hi", "priority": "next", "wait": 0,
-                       "owner": "anton", "force": False, "timeout": bus.TIMEOUT}
-        s.answers["request"] = {"msg_id": "m1"}
-        c.expect("cli puppet delivered", cli([PUPPET, "hi"]), (0, "-> pu-mop-9 msg_id=m1\n", ""))
-        c.expect("cli puppet request", s.calls[-1], ("request", "n1", "send", cli_request))
-        s.answers["request"] = {"msg_id": "m1", "owner_note": NOTE}
-        c.expect("cli owner note", cli([PUPPET, "hi"]), (0, f"-> pu-mop-9 msg_id=m1; {NOTE}\n", ""))
-        s.answers["request"] = {"error": OWNED}
-        c.expect("cli owner refusal", cli([PUPPET, "hi"]),
-                 (1, "", f"pu-mop-9: NOT DELIVERED — {OWNED}\n"))
-        s.answers["request"] = {"msg_id": "m1"}
-        cli([PUPPET, "hi", "--force"])
-        c.expect("cli force travels", s.calls[-1][3]["force"], True)
-        s.answers["request"] = {"msg_id": "m1", "idle": "went idle after 12s"}
-        c.expect("cli wait idle", cli([PUPPET, "hi", "--wait=30"]),
-                 (0, "-> pu-mop-9 msg_id=m1\n<- went idle after 12s\n", ""))
-        c.expect("cli wait request", (s.calls[-1][3]["wait"], s.calls[-1][3]["timeout"]),
-                 (30, 30 + bus.TIMEOUT))
-        s.answers["request"] = {"msg_id": "m1"}
-        c.expect("cli wait not idle", cli([PUPPET, "hi", "--wait", "30"]),
-                 (2, "-> pu-mop-9 msg_id=m1\nwaited 30s — puppet never reported going free\n", ""))
-        cli([PUPPET, "hi", "--wait=9999"])
-        c.expect("cli wait clamped", s.calls[-1][3]["wait"], 600)
-        cli([PUPPET, "hi", "--wait"])
-        c.expect("cli bare --wait", s.calls[-1][3]["wait"], 600)
-        c.expect("cli quiet", cli([PUPPET, "hi", "--quiet"]), (0, "", ""))
-        c.expect("cli quiet not idle", cli([PUPPET, "hi", "--quiet", "--wait=3"]), (2, "", ""))
 
-        s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        c.expect("cli local delivered", cli(["s1", "hi"]), (0, "-> s1 [123] msg_id=m2\n", ""))
-        c.expect("cli local call", s.calls[-1],
-                 ("session.send", SESS["messagingSocketPath"], "hi",
-                  {"priority": "next", "mode": "bypass", "from_name": "mop", "wait_idle": 0}))
-        cli(["s1", "hi", "--mode", "prompting", "--wait=9999"])
-        c.expect("cli local mode, clamp", (s.calls[-1][3]["mode"], s.calls[-1][3]["wait_idle"]),
-                 ("prompting", 600))
-        s.answers["session.send"] = {"msg_id": "m2", "idle": {"state": "idle", "detail": "done"}}
-        c.expect("cli local idle", cli(["s1", "hi", "--wait=5"]),
-                 (0, "-> s1 [123] msg_id=m2\n<- idle: done\n", ""))
-        s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        c.expect("cli local not idle", cli(["s1", "hi", "--wait=5"]),
-                 (2, "-> s1 [123] msg_id=m2\nwaited 5s — session never reported going idle\n", ""))
-        s.alive = False
-        c.expect("cli local dead", cli(["s1", "hi"]),
-                 (1, "", "s1: inbox not listening — session is dead\n"))
-        s.alive = True
+def check_channel_library(c):
+    """Сам канал (mop/client/channel.py): потолок ожидания, путь по адресу,
+    своя сессия, вердикт -> текст и тонкая обёртка доставки.
 
-    # ─── сам канал ────────────────────────────────────────────────────────
-    try:
-        from mop.client import channel
-    except ImportError as e:
-        c.fail("mop/client/channel.py", str(e))
-        return c.report("channel")
-
+    Вердикт -- данные, а не печать; `delivered` здесь означает вердикт узла
+    по его собственной квитанции, а не догадку фронтенда. Канонический
+    ordinary native send этой строки не печатает вовсе (см. выше).
+    """
     c.expect("MAX_WAIT", channel.MAX_WAIT, 600)
     for raw, want in ((None, 0), (0, 0), (30, 30), (9999, 600), (-5, 0)):
         c.expect(f"clamp_wait({raw})", channel.clamp_wait(raw), want)
 
-    # Путь по адресу: папет -- префиксом джоба, дальше своя сессия этого
-    # хоста, всё остальное -- инбокс мастера. Ambiguous наверх, не мастеру.
     with Stubs() as s:
         c.expect("route puppet", channel.route("pu-mop-1"), ("puppet", "pu-mop-1"))
         c.expect("route local by name", channel.route("s1"), ("local", SESS))
@@ -994,26 +1300,29 @@ def main():
         with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]):
             c.expect("my_session", channel.my_session(), SESS)
             c.expect("my_name master", channel.my_name(True, "host-77"), "host-77")
-            s.put(session, "sessions", lambda: [dict(SESS, cwd="/home/u/puppets/pu-mop-4")])
+            s.stack.enter_context(patched(session, sessions=lambda: [
+                dict(SESS, cwd="/home/u/puppets/pu-mop-4")]))
             c.expect("my_name puppet", channel.my_name(False, "host-77"), "pu-mop-4")
 
     # Вердикт -> текст: доставлено, отказ агента (в том числе владельца),
-    # мёртвый инбокс. Отказ -- одна и та же строка у обоих фронтендов.
+    # мёртвый инбокс, неизвестная доставка.
+    NOTE = "was led by olga; now yours"
+    OWNED = "pu-mop-9 is led by olga (work in its clone) — force=true takes it over"
     for v, want in (
-            ({"kind": "puppet", "to": PUPPET, "msg_id": "m1"}, "pu-mop-9: delivered (msg_id=m1)"),
+            ({"kind": "puppet", "to": PUPPET, "msg_id": "m1"}, f"{PUPPET}: delivered (msg_id=m1)"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "owner_note": NOTE},
-             f"pu-mop-9: delivered (msg_id=m1); {NOTE}"),
-            ({"kind": "puppet", "to": PUPPET, "error": OWNED}, f"pu-mop-9: NOT DELIVERED — {OWNED}"),
+             f"{PUPPET}: delivered (msg_id=m1); {NOTE}"),
+            ({"kind": "puppet", "to": PUPPET, "error": OWNED}, f"{PUPPET}: NOT DELIVERED — {OWNED}"),
             ({"kind": "puppet", "to": PUPPET,
               "error": "pu-mop-9: the body did not answer in 20s", "timeout": True},
-             "pu-mop-9: DELIVERY UNKNOWN — pu-mop-9: the body did not answer in 20s"),
+             f"{PUPPET}: DELIVERY UNKNOWN — pu-mop-9: the body did not answer in 20s"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "wait": 30},
-             "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s"),
+             f"{PUPPET}: delivered (msg_id=m1), idle: did not wait it out in 30s"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "wait": 30,
               "idle": None, "idle_error": "idle observation failed"},
-             "pu-mop-9: delivered (msg_id=m1), idle: idle observation failed"),
+             f"{PUPPET}: delivered (msg_id=m1), idle: idle observation failed"),
             ({"kind": "puppet", "to": PUPPET, "msg_id": "m1", "notify": True},
-             "pu-mop-9: delivered (msg_id=m1); will notify when it frees up"),
+             f"{PUPPET}: delivered (msg_id=m1); will notify when it frees up"),
             ({"kind": "local", "to": "s1", "dead": True}, "s1: inbox not listening — session is dead"),
             ({"kind": "local", "to": "s1", "msg_id": "m2", "wait": 5, "idle": {"state": "idle"}},
              "s1: delivered (msg_id=m2), idle: idle"),
@@ -1022,14 +1331,64 @@ def main():
         c.expect(f"text {v}", channel.text(v), want)
     c.expect("failure of delivered", channel.failure({"kind": "puppet", "to": PUPPET, "msg_id": "m1"}), None)
     c.expect("failure of refused", channel.failure({"kind": "puppet", "to": PUPPET, "error": OWNED}),
-             f"pu-mop-9: NOT DELIVERED — {OWNED}")
-    # Неопределённая доставка (#574 ревью 3 п.5) -- тоже «не доставлено»
-    # для канона failure (выход -- с причиной), но своей строкой.
+             f"{PUPPET}: NOT DELIVERED — {OWNED}")
     c.expect("failure of indeterminate",
              channel.failure({"kind": "puppet", "to": PUPPET,
                               "error": "the body did not answer in 20s",
                               "timeout": True}),
-             "pu-mop-9: DELIVERY UNKNOWN — the body did not answer in 20s")
+             f"{PUPPET}: DELIVERY UNKNOWN — the body did not answer in 20s")
+
+    # Тонкая обёртка: тело -- ops.send_to_puppet, транспорт -- bus.request
+    # этого слоя (#459). Поля едут как есть, вердикт -- форма узла.
+    seen = []
+
+    def fake_ops_send(transport, node, name, message, priority="next", wait=0,
+                      notify=None, **fields):
+        seen.append((transport, node, name, message, priority, wait, notify, fields))
+        return {"kind": "puppet", "to": name, "wait": wait, "notify": False,
+                "msg_id": "id-1", "owner_note": None, "idle": None}
+
+    def refuse_bus(*a, **k):
+        raise RuntimeError("old body: bus.request called directly")
+    try:
+        with patched(ops, send_to_puppet=fake_ops_send), patched(bus, request=refuse_bus):
+            verdict = channel.send_to_puppet("node-1", "pu-mop-9", "hello",
+                                             priority="now", wait=7, owner="ermak")
+    except RuntimeError as e:
+        c.fail("#459 channel.send_to_puppet wraps ops.send_to_puppet", str(e))
+        verdict = {}
+    c.check("#459 channel.send_to_puppet wraps ops.send_to_puppet",
+            seen and seen[0][1:7] == ("node-1", "pu-mop-9", "hello", "now", 7, None)
+            and callable(seen[0][0]), seen)
+    c.expect("#459 the wrapper returns the shared verdict", verdict.get("msg_id"), "id-1")
+
+    # Доставка = вердикт узла: ожидание обрезается, notify не едет вместе с
+    # ожиданием, неизвестный исход сохраняет маркер (#574).
+    calls = []
+
+    def transport(node, verb, **kw):
+        calls.append((node, verb, kw))
+        return {"msg_id": "id-1", "idle": {"state": "free (dev)"}}
+
+    verdict = ops.send_to_puppet(transport, "node-1", "pu-x-1", "hello", wait=10_000)
+    c.expect("#459 the shared operation clamps the wait",
+             (calls[-1][1], calls[-1][2]["wait"], calls[-1][2]["timeout"]),
+             ("send", 600, 600 + bus.TIMEOUT))
+    c.expect("#459 a plain send carries no notify field", "notify" in calls[-1][2], False)
+    ops.send_to_puppet(transport, "node-1", "pu-x-1", "hello", notify=True)
+    c.expect("#459 notify travels when nothing waits", calls[-1][2].get("notify"), True)
+    ops.send_to_puppet(transport, "node-1", "pu-x-1", "hello", wait=5, notify=True)
+    c.expect("#459 notify is dropped when a wait is held", calls[-1][2].get("notify"), False)
+    c.expect("#459 the verdict carries msg_id and idle",
+             (verdict.get("msg_id"), verdict.get("idle", {}).get("state")),
+             ("id-1", "free (dev)"))
+
+    def indeterminate(node, verb, **kw):
+        return {"error": "pu-x-1: the body did not answer in 20s", "timeout": True}
+    verdict = ops.send_to_puppet(indeterminate, "node-1", "pu-x-1", "hello")
+    c.check("#459 an indeterminate delivery keeps its marker",
+            verdict.get("error") == "pu-x-1: the body did not answer in 20s"
+            and verdict.get("timeout") is True, verdict)
 
     # Копий во фронтендах больше нет: потолок, тексты отказа, своя сессия.
     here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -1040,207 +1399,30 @@ def main():
                      "def master_socket", "def my_session", "def my_name",
                      "def _send_to_", "def _send_locally"):
             c.expect(f"{rel} has no copy of {copy!r}", copy in src, False)
-    # STATUS: FIXED — see #148
+    return True
 
-    # ── #213: адрес мастера несёт логин ──────────────────────────────────
-    # HYPOTHESIS: адрес <хост>-<pid> логина не несёт, и подписку на свой
-    # инбокс не сузить до своего логина -- любой мастер проекта слушает все.
-    # SOLUTION: адрес -- <токен логина>.<хост>-<pid>; папет отвечает на адрес
-    # из конверта (from-name), агент -- в reply_to, и оба уже нового вида.
-    from mop.common import busnames
-    from mop.server import operators
-    local = f"{os.uname().nodename}-{os.getpid()}"
-    c.expect("master_id of a person", mcp.master_id("anton.ermak"), f"anton%2Eermak.{local}")
-    c.expect("master_id of the server's service", mcp.master_id("service"), f"service.{local}")
-    c.expect("master_id without creds", mcp.master_id(None), local)
-    mine = bus.inbox(mcp.master_id("anton.ermak"), "mop")
-    perms = operators.permissions({"role": "user", "projects": ["mop"]}, "anton.ermak")
-    c.expect("the master's inbox is its own to subscribe",
-             [m for m in perms["allow"] if ".master." in m and m.endswith(".>")],
-             ["mop.mop.master.anton%2Eermak.>"])
-    c.expect("the inbox lies under it", mine.startswith("mop.mop.master.anton%2Eermak."), True)
-    with Stubs() as s:
-        addr = "anton%2Eermak.wate.lan-7"
-        c.expect("route a new-form address", channel.route(addr), ("master", addr))
-        s.put(mcp, "MASTER_ID", "bob.host-77")
-        s.put(mcp, "MY_INBOX", "mop.mop.master.bob.host-77.inbox")
-        s.answers["ask"] = {"msg_id": "m4"}
-        mcp.send(addr, "report")
-        c.expect("the reply goes to the envelope's address", s.calls[-1][:2], ("ask", addr))
-        c.expect("and names the sender by its full address", s.calls[-1][3]["from"], "bob.host-77")
-        s.answers["request"] = {"msg_id": "m5"}
-        mcp.send(PUPPET, "go", notify_when_idle=True)
-        c.expect("agents get the new-form inbox as reply_to", s.calls[-1][3]["reply_to"],
-                 "mop.mop.master.bob.host-77.inbox")
 
-    # Отказ шины в подписке на свой инбокс -- громко: строка в сессию и в
-    # stderr MCP-сервера. Прочие ошибки и чужие субъекты -- мимо.
-    mine, who = "mop.mop.master.bob.h-1.inbox", "mop.mop.master.all.inbox"
-    for text, want in (
-            (f'nats: permissions violation for subscription to "{mine}" (sid "1")', mine),
-            (f'nats: permissions violation for subscription to "{who}"', who),
-            ('nats: permissions violation for subscription to "mop.mop.events"', None),
-            (f'nats: permissions violation for publish to "{mine}"', None),
-            ("nats: unexpected EOF", None)):
-        c.expect(f"refused_inbox {text!r}", mcp.refused_inbox(text, (mine, who)), want)
-    with Stubs() as s:
-        s.put(mcp, "MASTER_ID", "bob.h-1")
-        s.put(mcp, "MY_INBOX", mine)
-        err = io.StringIO()
-        with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]), \
-                contextlib.redirect_stderr(err):
-            mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
-            mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
-            mcp.on_bus_error("nats: unexpected EOF")
-        pushed = [call for call in s.calls if call[0] == "session.send"]
-        c.expect("the refusal is pushed into the session once", len(pushed), 1)
-        line = pushed[0][2] if pushed else ""
-        c.expect("it names the inbox and the cure",
-                 mine in line and "restart the mop MCP server" in line, True)
-        c.expect("the same line goes to stderr", err.getvalue().strip(), line.strip())
-    # STATUS: FIXED — see #213
+def local_address():
+    return f"{os.uname().nodename}-{os.getpid()}"
 
-    # HYPOTHESIS: сессия мастера может умереть после поиска сокета; его
-    # локальный путь выезжает в отказ отправителю через шину.
-    # SOLUTION: отсутствие сокета и отказ соединения дают один безопасный
-    # вердикт с полезным действием; прочие ошибки не глушатся.
-    # RESULT: путь не уходит адресату при обеих формах смерти сессии.
-    # STATUS: FIXED — see #437
-    missing = "/run/user/1000/private/master-123.sock"
-    message = {"verb": "message", "text": "report", "from": "pu-mop-9"}
-    with patched(channel, master_socket=lambda: missing), \
-            patched(session, send=lambda *a, **k: (_ for _ in ()).throw(
-                ConnectionError(f"inbox not found: {missing} — session died or moved"))):
-        try:
-            outcome = mcp.on_inbox(message)
-        except ConnectionError as e:
-            c.fail("#437 dead inbox must return a verdict instead of raising", str(e))
-            outcome = {}
-    want = {"error": "master session unavailable — choose a live master"}
-    c.expect("#437 dead inbox names action without path", outcome, want)
-    with patched(channel, master_socket=lambda: None):
-        c.expect("#437 missing inbox uses the same refusal", mcp.on_inbox(message), want)
 
-    # ─── #226: --check не выдаёт свой адрес за адрес живого сервера ─────────
-    # HYPOTHESIS: `mop mcp --check` -- отдельный процесс; MASTER_ID строится
-    # из его собственного pid, и напечатанный адрес с инбоксом не слушает
-    # никто. Отданный папету, он уводит ответ в пустоту.
-    # SOLUTION: --check печатает профиль, число инструментов, шину и сокет
-    # сессии -- и ничего похожего на адрес. Адрес мастера берётся только из
-    # таблицы мастеров в agents или из конверта письма.
-    import re
-    import inspect
-    with patched(mcp, MASTER=True):
-        text, _, code = run_command(mcp.main, ["--check"])
-    c.expect("--check succeeds", code, 0)
-    c.expect("--check still names the profile and the session",
-             "profile " in text and "session: " in text, True)
-    c.expect("--check prints no <login>.<host>-<pid> address",
-             re.findall(r"\b[\w-]+\.[\w-]+-\d+\b", text), [])
-    c.expect("--check prints no .inbox subject", ".inbox" in text, False)
-    c.expect("--check does not print its own MASTER_ID", mcp.MASTER_ID in text, False)
-    # #662: без кредов инструменты не регистрируются (fail closed), поэтому
-    # описание читается из блока декоратора, где оно объявлено.
-    agents_decl = inspect.getsource(mcp.agents).split("def ", 1)[0]
-    c.expect("agents says where a master's address comes from",
-             "only from the masters table" in agents_decl, True)
-    # RESULT: красный на старом --check (адрес master.<хост>-<pid> и .inbox в
-    # выводе), зелёный после.
-    # STATUS: FIXED — see #226
-
-    # ─── #481: --check предупреждает про admin-срез без MOP_PROJECT ─────
-    # HYPOTHESIS: claude с MCP mop, запущенный не через `mop master`, живёт
-    # без MOP_PROJECT; его who-ответ уходит в admin-срез, опрос проекта его
-    # не находит, и сессия невидима в «Мастерах» дашборда (03.10: mop-b8
-    # полдня не была видна). --check молчал про это же.
-    # SOLUTION: --check мастера без проекта печатает предупреждение: срез
-    # admin, в списке мастеров проекта сессии не будет; с MOP_PROJECT --
-    # прежняя строка без предупреждения.
-    with patched(mcp, MASTER=True), \
-            patched(bus, config=lambda: {"url": "nats://x"}, PROJECT=bus.ADMIN):
-        text, _, code = run_command(mcp.main, ["--check"])
-    c.expect("#481 check still succeeds without project", code, 0)
-    c.expect("#481 the admin slice is named",
-             any(w in text.lower() for w in ("admin", "оператора")), True)
-    c.expect("#481 the invisibility is named",
-             "masters" in text.lower() or "мастер" in text.lower(), True)
-    with patched(mcp, MASTER=True), \
-            patched(bus, config=lambda: {"url": "nats://x"}, PROJECT="mop"):
-        text, _, _ = run_command(mcp.main, ["--check"])
-    c.expect("#481 a project profile carries no warning",
-             "warning" in text.lower(), False)
-    # RESULT: красный на молчащем --check, зелёный после.
-    # STATUS: FIXED — see #481
-
-    # ─── интеграционная ветка мастера в инструкциях MCP (#250) ────────────
-    # HYPOTHESIS: #249 отдал ветку человека сессии мастера переменной
-    # MOP_BRANCH и одной фразой в шаге 0 скилла; мастер rudesktop, стартовав
-    # с MOP_BRANCH=swarm, всё равно вывел ветку по origin/HEAD и истории
-    # merge и назвал beta3.1. Инструкции сервера `mop mcp` сессия читает при
-    # каждом старте без всякого скилла, и о ветке они молчали.
-    # SOLUTION: mcp.instructions(environ) -- чистая функция текста; с
-    # MOP_BRANCH в нём абзац, называющий ветку базой веток тикетов, целью
-    # landing и тем, что мастер называет в диспатче, и что ветка по умолчанию
-    # репозитория тут не голосует. Без переменной -- прежний текст.
-    # STATUS: FIXED — see #250
-    plain = mcp.instructions({"MOP_PROJECT": "rudesktop"})
-    mine = mcp.instructions({"MOP_PROJECT": "rudesktop", "MOP_BRANCH": "swarm"})
-    c.expect("#250 no branch, no branch talk", "integration branch" in plain.lower(), False)
-    c.expect("#250 the branch is named", "`swarm`" in mine, True)
-    c.expect("#250 named as the integration branch",
-             "integration branch" in mine.lower(), True)
-    c.expect("#250 the default branch does not decide",
-             "default branch" in mine.lower(), True)
-    c.expect("#250 base of ticket branches and landing target",
-             "origin/swarm" in mine and "land" in mine.lower(), True)
-    c.expect("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
-
-    # HYPOTHESIS: MCP повторяет внутреннее устройство канала в инструкциях
-    # и каждом описании; сокращение докстрингов командлетов его не затрагивает.
-    # SOLUTION: инструкции и четыре рукописных описания говорят о выборе
-    # инструмента и последствиях force, не о транспортном механизме.
-    # RESULT: модель получает короткие действия без потери ограничения.
-    # STATUS: FIXED — see #434
-    # #662: без кредов инструменты не регистрируются вовсе (fail closed),
-    # поэтому описания читаются из блока декоратора -- там они объявлены.
-    import inspect
-
-    def decl_text(name):
-        src = inspect.getsource(getattr(mcp, name))
-        return src.split("def ", 1)[0]
-    shown = {name: decl_text(name) for name in ("agents", "send", "tail")}
-    for name in ("agents", "send", "tail"):
-        c.check(f"#434 {name} still described", bool(shown.get(name)))
-        c.check(f"#434 {name} hides transport internals", not any(
-            word in (shown.get(name) or "") for word in
-            ("node agent", "skipSlashCommands", "bus", "tmux", "neighboring node")))
-    c.check("#434 send retains force/ownership warning", all(
-        word in shown["send"] for word in ("force", "owner")))
-    c.check("#434 agents retains free-work rule", all(
-        word in shown["agents"] for word in ("free", "unsaved")))
-    # В профиле папета slash не зарегистрирован: читаем объявление инструмента.
-    slash_source = decl_text("slash")
-    c.check("#434 slash omits transport implementation", "skipSlashCommands" not in slash_source)
-    c.check("#434 slash retains allowed-command list and force", all(
-        word in slash_source for word in ("SLASH_ALLOWED", "force=true")))
-    c.check("#434 instructions avoid implementation history", not any(
-        word in plain for word in ("Nomad", "NATS", "bus", "neighboring node")))
-    c.check("#434 --check describes local settings, not a live reachability test",
-            "local profile" in (mcp.__doc__ or "") and
-            "can reach" not in (mcp.__doc__ or ""))
-    c.check("#434 instructions retain dispatch check", all(
-        word in plain for word in ("agents", "send", "unsaved")))
+def main():
+    c = Checks()
 
     c.check("#264 one envelope, one fallback, request_many(verb, nodes)",
             check_bus_envelope_264(c))
     c.check("#369 a stale permissions error does not explain a later timeout",
             check_stale_permissions_error_369(c))
-    c.check("#371 agents(project) matches the project, not a substring of origin",
-            check_agents_project_371(c))
+    c.check("#371 the project roster matches the project value, not a substring",
+            check_project_selection_371(c))
 
     try:
-        check_role_channel_585(c)
+        check_canonical_send_793(c)
     except Exception as e:  # красный -- проваленной проверкой, а не трассой
+        c.fail("#793 canonical send", f"{type(e).__name__}: {e}")
+    try:
+        check_role_channel_585(c)
+    except Exception as e:
         c.fail("#585 role channel", f"{type(e).__name__}: {e}")
     try:
         check_role_api_585(c)
@@ -1254,12 +1436,25 @@ def main():
         check_tool_routes_585(c)
     except Exception as e:
         c.fail("#585 tool routes", f"{type(e).__name__}: {e}")
-    # RESULT: красный на сегодняшнем маршруте (grant -- мастер-профиль,
-    # owner/force грантом, from-name инбоксом, легаси по rpc), зелёный после.
-    # Решение мастера по C5 сменило одно ожидание до реализации: инбокс
-    # процесса роли остаётся транспортом reply_to, адрес -- имя джоба.
-    # STATUS: FIXED — see #585
+    try:
+        check_private_inbox_793(c)
+    except Exception as e:
+        c.fail("#793 private inbox contract", f"{type(e).__name__}: {e}")
+    try:
+        check_mcp_check_226_481(c)
+    except Exception as e:
+        c.fail("#226/#481 mcp --check", f"{type(e).__name__}: {e}")
+    try:
+        check_mcp_descriptions_434(c)
+    except Exception as e:
+        c.fail("#434 mcp descriptions", f"{type(e).__name__}: {e}")
+    try:
+        check_channel_library(c)
+    except Exception as e:
+        c.fail("#148 channel library", f"{type(e).__name__}: {e}")
 
+    # STATUS: FIXED — see #793 (эпик #623), #148, #213, #226, #371, #434, #437,
+    # #459, #481, #574, #585, #662, #785
     return c.report("channel")
 
 
