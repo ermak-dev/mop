@@ -14,8 +14,9 @@ from mop.node.host_phase_probe import snapshot_sources
 
 # HYPOTHESIS: новый initial_transfer отсутствует в explicit source closure.
 # SOLUTION: переносить публичный common module, не брать ambient package.
-# RESULT: actual probe и isolated import дают RED до исправления closure.
-# STATUS: RED — see #766
+# RESULT: actual probe/isolated import RED; GREEN 7/7 файлов и 147 admission
+# checks в owned UID/systemd fixture; native/ready/production RBAC не доказаны.
+# STATUS: FIXED — see #766
 class PlannedProbeSources(unittest.TestCase):
     def test_snapshot_imports_phase_budgets_without_ambient_package(self):
         source = Path(__file__).resolve().parents[1]
