@@ -256,6 +256,121 @@ class NativeInventory(unittest.TestCase):
                 self.assertIn('owned skip reason', report.longrepr)
 
 
+class FreshPolicyProcess(unittest.TestCase):
+    def run_fresh(self, argv, directory, *, strict):
+        import subprocess
+        env = hermetic.child_env({'PYTHONPATH': os.pathsep.join(
+            (str(directory / 'tests'), str(ROOT), str(ROOT / 'tests')))}, strict=strict)
+        result = subprocess.run(argv, cwd=directory, env=env, capture_output=True,
+                                text=True, timeout=90)
+        self.assertNotIn('setup_test_environment() was already called', result.stdout + result.stderr)
+        return result
+
+    def run_cli(self, directory, *, strict):
+        # Настоящий process exit командлета, не объект report/замоканный pytest.
+        # Меняем только координату синтетического plan; сам runner неизменён.
+        driver = ('import sys, hermetic; from mop.cli.dev import test as command; '
+                  'command.root = lambda: sys.argv[1]; '
+                  'raise SystemExit(command.main(sys.argv[2:]))')
+        return self.run_fresh([sys.executable, '-c', driver, str(directory),
+                              'boundary', *(['--strict'] if strict else [])],
+                             directory, strict=False)
+
+    def policy_root(self, directory):
+        root = Path(directory)
+        (root / 'tests').mkdir()
+        (root / 'pyproject.toml').write_text('[tool.pytest.ini_options]\npython_files = ["*.py"]\n')
+        return root
+
+
+class FreshNativePolicy(FreshPolicyProcess):
+    # BUG: strict report был FAILED, но wasxfail оставлял настоящий exit 0.
+    # HYPOTHESIS: expected-outcome classification надо снять целиком, включая
+    # XPASS; оригинальный unittest exception нельзя терять в pytest XFailed.
+    # SOLUTION: strict удаляет wasxfail после upstream hooks и направляет
+    # unittest expected failure в addFailure с исходным exception/traceback.
+    # RESULT: RED — controller/outer CLI [0, 0] для xfail/expectedFailure/XPASS;
+    # GREEN — [1, 1], прежние nonstrict outcomes, 25 harness и 5 UID checks.
+    # STATUS: FIXED — see #767
+    def invoke(self, body, *, strict=True, outer=False):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='mop-native-policy-') as directory:
+            root = self.policy_root(directory)
+            (root / 'tests/_boundary.py').write_text('import unittest, pytest\n' + body)
+            argv = [sys.executable, str(ROOT / 'tests/controller.py'), '_boundary.Boundary']
+            if outer:
+                (root / 'tests/boundary.py').write_text(
+                    'import subprocess\nraise SystemExit(subprocess.call(' + repr(argv) + '))\n')
+                return self.run_cli(root, strict=strict)
+            return self.run_fresh(argv, root, strict=strict)
+
+    def assert_rejected(self, body, *reasons, code=1):
+        results = [self.invoke(body, outer=outer) for outer in (False, True)]
+        evidence = '\n'.join(f'{mode} exit={result.returncode}\n{result.stdout}{result.stderr}'
+                             for mode, result in zip(('controller child', 'outer CLI'), results))
+        self.assertEqual([result.returncode for result in results], [code, code], evidence)
+        for result in results:
+            for reason in reasons:
+                self.assertIn(reason, result.stdout + result.stderr)
+
+    def test_strict_native_pytest_xfail_has_nonzero_child_and_outer_exit(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @pytest.mark.xfail(reason="owned xfail reason")\n'
+            '    def test_required(self): self.fail("owned failing call was executed")\n',
+            'Boundary::test_required', 'owned xfail reason', 'owned failing call was executed')
+
+    def test_strict_native_unittest_expected_failure_keeps_original_reason_and_exits_one(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @unittest.expectedFailure\n'
+            '    def test_required(self): self.fail("owned expected-failure reason")\n',
+            'Boundary::test_required', 'owned expected-failure reason')
+
+    def test_strict_native_pytest_xpass_has_nonzero_child_and_outer_exit(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @pytest.mark.xfail(reason="owned xpass reason")\n'
+            '    def test_required(self): pass\n', 'Boundary::test_required', 'owned xpass reason')
+
+    def test_strict_native_unittest_unexpected_success_stays_red(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @unittest.expectedFailure\n'
+            '    def test_required(self): pass\n', 'Boundary::test_required', 'Unexpected success')
+
+    def test_strict_native_skip_setup_and_import_failures_stay_red(self):
+        for body, reason in (
+                ('class Boundary(unittest.TestCase):\n'
+                 '    @unittest.skip("owned skip reason")\n'
+                 '    def test_required(self): pass\n', 'owned skip reason'),
+                ('class Boundary(unittest.TestCase):\n'
+                 '    @classmethod\n'
+                 '    def setUpClass(cls): raise RuntimeError("owned setup failure")\n'
+                 '    def test_required(self): pass\n', 'owned setup failure')):
+            with self.subTest(reason=reason):
+                self.assert_rejected(body, 'Boundary::test_required', reason)
+        self.assert_rejected('raise ImportError("owned import failure")\n', 'owned import failure')
+
+    def test_nonstrict_native_expected_outcomes_keep_standard_exit_and_classification(self):
+        for decorator, body, expected, status in (
+                ('pytest.mark.xfail(reason="owned reason")', 'self.fail("owned failure")', 0, '1 xfailed'),
+                ('unittest.expectedFailure', 'self.fail("owned failure")', 0, '1 xfailed'),
+                ('pytest.mark.xfail(reason="owned reason")', 'pass', 0, '1 xpassed'),
+                ('pytest.mark.xfail(reason="owned reason", strict=True)', 'pass', 1, '1 failed'),
+                ('unittest.expectedFailure', 'pass', 1, '1 failed'),
+                ('unittest.skip("owned reason")', 'pass', 0, '1 skipped')):
+            with self.subTest(decorator=decorator, body=body):
+                result = self.invoke('class Boundary(unittest.TestCase):\n'
+                    f'    @{decorator}\n    def test_required(self): {body}\n', strict=False)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, expected, output)
+                self.assertIn(status, output)
+
+    def test_inactive_xfail_marker_is_still_a_mandatory_passing_test(self):
+        result = self.invoke('class Boundary(unittest.TestCase):\n'
+            '    @pytest.mark.xfail(False, reason="inactive expectation")\n'
+            '    def test_required(self): pass\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 passed', result.stdout)
+
+
 class ProcessOwnership(unittest.TestCase):
     def test_successful_child_cannot_leave_an_owned_process_group_or_temp_root(self):
         import _pytest_plugin
