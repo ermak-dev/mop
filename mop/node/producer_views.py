@@ -129,7 +129,7 @@ class _CurrentProducerView(BindingsResolver):
         self.runtime, self.authority = runtime, authority
         self._anchor = runtime._layout
         self._proof, self._identity = runtime._proof, runtime._identity
-        layout = RegisteredLayout(self._anchor.home, authority.registration)
+        layout = RegisteredLayout(self._anchor.home, authority.registration, profile=self._anchor.profile)
         if (layout.clone, layout.runtime, layout.tmux_socket, layout.launcher) != (
                 self._anchor.clone, self._anchor.runtime, self._anchor.tmux_socket, self._anchor.launcher):
             raise Refused('current producer view changed physical paths')

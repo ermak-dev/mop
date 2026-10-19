@@ -18,6 +18,11 @@ if [[ "${1:-}" == "host-root" ]]; then
     shift
     exec /usr/bin/python3 -I -S -B "$PROJECT/mop/node/host_root.py" "$@"
 fi
+# Standby MCP получает только scope/deadline, не argv с bearer или wire paths.
+if [[ "${1:-}" == "host-body-mcp" ]]; then
+    shift
+    exec /usr/bin/python3 -I -S -B "$PROJECT/mop/client/body_entry.py" "$@"
+fi
 # Пакет находится по PYTHONPATH, а не по текущему каталогу: зовут из любого.
 export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
 # Процессом, а не source: `mop mcp` говорит по stdio, и ему нужен чистый

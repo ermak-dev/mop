@@ -91,14 +91,18 @@ class _Session:
         """Только finite phase exchange поверх уже pinned root authority session."""
         from mop.node.host_scope import encode
         from mop.node.host_phases import Submission, address
+        from mop.node.host_native import NativeSubmission
         from mop.node.http_execution import EffectGuard
         self.check(self.authority)
-        if type(request) is Submission:
+        if type(request) in (Submission, NativeSubmission):
             raw = request.encode()
         else:
             if type(request) is not dict:
                 raise Refused('finite planned request required')
-            if request.get('action') != 'phase_ack':
+            if request.get('action') in ('native_poll', 'native_dispatch', 'native_validate', 'native_complete'):
+                from mop.node.host_native_lifetime import mailbox_request
+                mailbox_request(request)
+            elif request.get('action') != 'phase_ack':
                 address(request)
             raw = encode(request)
         async with asyncio.timeout(self.client.timeout):
@@ -117,8 +121,8 @@ class _Session:
                         or request.get('action') != 'phase_checkpoint'
                         or value['attempt_id'] != request['attempt_id']):
                     raise Refused('planned checkpoint requires its actual Runtime Admission guard')
-                from mop.node.host_phases import CHECKPOINTS
-                plan = CHECKPOINTS[guard.admission.work.action]
+                from mop.node.host_phases import checkpoint_plan
+                plan = checkpoint_plan(guard.admission.work.action)
                 if (type(value['sequence']) is not int or not 0 <= value['sequence'] < len(plan)
                         or plan[value['sequence']] != value['effect']):
                     raise Refused('planned checkpoint effect/sequence changed')
@@ -142,7 +146,15 @@ class _Session:
             raise (Refused if value['status'] == 'refused' else Unknown)(error)
         if value['status'] != 'ok' or value['error'] is not None or type(value['phase']) is not dict:
             raise Refused('invalid planned HOST response status')
+        if 'native' in value['phase']:
+            from mop.node.host_native import phase_parse
+            return phase_parse(value['phase'])
         return value['phase']
+
+    async def native_mailbox(self, request):
+        from mop.node.host_native_lifetime import mailbox_request
+        mailbox_request(request)
+        return await self.planned(request)
 
     async def _request(self, action, epoch=None, executor_epoch=None, empty=None):
         if self.authority is not None:

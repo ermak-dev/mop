@@ -502,6 +502,108 @@ class SystemdCgroupAdapter:
             raise Unknown('planned runner MainPID/start changed')
         return process
 
+    async def native_attachment(self, reference, report, identity, tools, pins):
+        """Root повторно доказывает native/tmux в exact retained body cgroup."""
+        from mop.common.producer import ProducerReport
+        if type(report) is not ProducerReport:
+            raise Refused('typed installed body native report required')
+        result = await self.native_launch(reference, dict(pid=report.pid, process_start=report.process_start,
+            session_id=report.scope.session_id, tmux_pid=identity['tmux_pid'], tmux_start=identity['tmux_start']), tools, pins)
+        result['socket_inode'] = identity['socket_inode']
+        return result
+
+    async def native_launch(self, reference, launched, tools, pins):
+        """До registry/ACK удерживаем только реальные процессы; это не producer proof."""
+        import json
+        from datetime import datetime, timezone
+        from mop.node.host_backend import Process
+        runner = await self.runner_process(reference)
+        boot, ticks = launched['process_start'].split(':')
+        native = Process(launched['pid'], int(ticks), boot)
+        tmux = Process(launched['tmux_pid'], int(launched['tmux_start']), reference.boot_id)
+        if native.boot_id != reference.boot_id or len({runner.pid, native.pid, tmux.pid}) != 3:
+            raise Refused('actual native/tmux PID/start/boot changed')
+        for name, process in (('native', native), ('tmux', tmux)):
+            try:
+                current = Process.read(process.pid)
+            except OSError as error:
+                raise Unknown('actual '+name+' PID/start unavailable before root proof: '+type(error).__name__) from error
+            if current != process:
+                raise Refused('actual native/tmux PID/start/boot changed')
+        body = self.installed.body(reference.scope)
+        runtime = body/'r'
+        facts = {}
+        for name, process in (('native', native), ('tmux', tmux)):
+            fd, step = None, 'proc directory'
+            try:
+                fd = open_directory(Path('/proc')/str(process.pid))
+                step = 'status'
+                status = parse_proc_status(read_bytes_at(fd, 'status', limit=16384))
+                if (status['Uid'].split() != [str(self.installed.body_uid)]*4
+                        or status['Gid'].split() != [str(self.installed.body_gid)]*4):
+                    raise Refused('actual native/tmux UID/GID changed')
+                step = 'executable'
+                executable = os.readlink('exe', dir_fd=fd)
+                if executable != str(tools[name]):
+                    raise Refused('actual native/tmux executable differs from installed content')
+                step = 'cgroup'
+                cgroup = read_at(fd, 'cgroup', limit=4096)
+                if cgroup.strip() != '0::'+reference.scope.cgroup:
+                    raise Refused('actual native/tmux is outside exact retained cgroup')
+                step = 'working directory'
+                if name == 'native' and os.readlink('cwd', dir_fd=fd) != str(body/'repo'):
+                    raise Refused('actual native cwd differs from fixed clone')
+                for namespace in ('mnt', 'pid', 'user'):
+                    step = 'namespace '+namespace
+                    if os.readlink('ns/'+namespace, dir_fd=fd) != os.readlink('/proc/'+str(runner.pid)+'/ns/'+namespace):
+                        raise Refused('actual native/tmux namespace differs from body runner')
+                step = 'argv'
+                raw = read_bytes_at(fd, 'cmdline', limit=16384)
+                if not raw.endswith(b'\x00'):
+                    raise Refused('bounded actual native/tmux argv required')
+                argv = tuple(part.decode('utf-8') for part in raw[:-1].split(b'\x00'))
+                facts[name] = dict(process=process.wire(), executable=executable, argv=list(argv))
+            except OSError as error:
+                raise Unknown('actual '+name+' '+step+' unavailable: '+type(error).__name__) from error
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        argv = facts['native']['argv']
+        expected = [str(tools['native']), '--model', pins.bootstrap_model, '--session-id', launched['session_id'],
+            '--messaging-socket-path', str(runtime/'session.sock'), '--permission-mode', 'default',
+            '--settings', str(runtime/'settings.json'), '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config']
+        if len(argv) != len(expected)+1 or argv[:-1] != expected:
+            raise Refused('actual native argv differs from fixed approved initial launch')
+        try:
+            mcp = json.loads(argv[-1])
+            entry = mcp['mcpServers']['mop']
+            args = entry['args']
+            deadline = datetime.fromisoformat(args[-1])
+            if deadline.tzinfo is not timezone.utc or deadline.isoformat() != args[-1]:
+                raise ValueError('canonical original UTC launcher deadline required')
+            entrypoint = self.installed.runner.parents[2]/'mop/client/body_entry.py'
+            exact_mcp = dict(mcpServers=dict(mop=dict(type='stdio', command=str(tools['python']),
+                args=['-I', '-S', '-B', str(entrypoint), '--scope', reference.scope.unit, '--deadline', deadline.isoformat()])))
+            if mcp != exact_mcp:
+                raise ValueError('fixed MCP launch required')
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise Refused('actual native MCP argv differs from fixed isolated body entry') from None
+        fd = self._cgroup(reference.scope)
+        try:
+            members = read_at(fd, 'cgroup.procs').splitlines()
+            if any(str(p.pid) not in members for p in (runner, native, tmux)):
+                raise Refused('actual native attachment is not in retained cgroup')
+        finally:
+            os.close(fd)
+        try:
+            changed = any(Process.read(p.pid) != p for p in (runner, native, tmux))
+        except OSError as error:
+            raise Unknown('actual attachment PID/start disappeared during root proof: '+type(error).__name__) from error
+        if changed or await self.runner_process(reference) != runner:
+            raise Refused('actual native attachment changed during root proof')
+        return dict(reference=reference.wire(), runner=runner.wire(), **facts,
+            session_id=launched['session_id'])
+
     async def cleanup_workspace(self, reference, connection, python):
         # Никакого root walk/rmtree. Fixed cleanup runner ждёт root на том же socket.
         from mop.node.host_backend import Process

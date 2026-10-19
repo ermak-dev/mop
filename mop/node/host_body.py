@@ -13,7 +13,14 @@ BODY_SOURCES = (
     'mop/node/host_phase_source.py', 'mop/node/host_phases.py', 'mop/node/host_inputs.py',
     'mop/node/host_input_files.py', 'mop/node/http_execution.py', 'mop/common/initialcreate.py',
     'mop/common/bootstrap_envelope.py', 'mop/common/credentials.py', 'mop/common/soul.py',
-    'mop/common/busnames.py', 'mop/common/paths.py',
+    'mop/common/busnames.py', 'mop/common/paths.py', 'mop/common/installed_content.py',
+    'mop/node/host_native.py', 'mop/node/host_native_body.py', 'mop/node/host_native_owner.py',
+    'mop/node/host_native_lifetime.py', 'mop/node/host_handoff.py', 'mop/node/body_launch.py',
+    'mop/node/native_observer.py', 'mop/node/execution_adapters.py', 'mop/node/producer_views.py',
+    'mop/node/producer_registration.py', 'mop/node/telemetry.py', 'mop/session.py',
+    'mop/driver/__init__.py', 'mop/driver/launch/__init__.py', 'mop/common/telemetry.py',
+    'mop/common/producer.py', 'mop/common/readiness.py', 'mop/common/management_context.py',
+    'mop/common/config.py', 'mop/common/fsutil.py', 'mop/common/plugins.py',
 )
 
 
@@ -281,10 +288,15 @@ class Broker:
         from mop.node.host_phases import Submission, Projection
         from mop.node.host_input_files import BodyReader
         from mop.common.initialcreate import CONFIRMATIONS
-        from mop.node.http_execution import Refused
+        from mop.node.http_execution import Refused, Unavailable
         while True:
             raw = await read_frame(self.reader)
-            submission = Submission.decode(raw)
+            from mop.node.host_scope import decode
+            if decode(raw).get('action') == 'native_exec':
+                from mop.node.host_native import NativeSubmission
+                submission = NativeSubmission.decode(raw)
+            else:
+                submission = Submission.decode(raw)
             if submission.descriptor.scope != self.scope:
                 raise Refused('body phase scope differs from installed derived control channel')
             self.active = submission
@@ -296,10 +308,17 @@ class Broker:
             if Projection.from_delivery(value) != submission.projection:
                 raise Refused('body snapshot projection changed')
             try:
+                if submission.admission.work.action == 'native_exec':
+                    from mop.node.host_native_body import NativeBody
+                    # Один in-process owner, не subprocess нового body broker.
+                    self.native = NativeBody(self, submission, value)
+                    await self.native.run()
+                    return
                 await {'prepare_body': self.prepare, 'bootstrap_body': self.bootstrap, 'initial_identity': self.identity}[submission.admission.work.action](value)
             except Exception as error:
-                # Только library Refused уже безопасен; YAML/tool raw exception — нет.
-                reason = str(error) if isinstance(error, Refused) else type(error).__name__
+                # Library refusal/unavailable уже безопасны; raw tool errors — нет.
+                reason = str(error) if isinstance(error, (Refused, Unavailable)) else (
+                    'body failed at '+str(self.effect)+': '+type(error).__name__)
                 self.writer.write(encode(dict(schema_version=1, action='body_failed',
                     attempt_id=submission.admission.attempt_id, error=reason))+b'\n')
                 await self.writer.drain()

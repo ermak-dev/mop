@@ -969,8 +969,164 @@ class ActualPrivateInputTests(unittest.TestCase):
         self.assertEqual(sum(r is not None for r in results), 1)
 
 
+class ActualHandoffTests(unittest.TestCase):
+    # HYPOTHESIS: root handoff в body-writable namespace требует no-replace
+    # atomic rename; hard-link draft виден клиенту с nlink=2 и непригоден.
+    # Проверки исполняются реальными UID, не monkeypatch ownership/geteuid.
+    def setUp(self):
+        self.assertEqual(os.geteuid(), 0)
+        self.assertIsNotNone(importlib.util.find_spec('mop.node.host_handoff'),
+                             'root-owned fixed native handoff is missing (#760)')
+        from mop.node import host_handoff
+        from mop.node.host_scope import Installed
+        from mop.common.management_context import BodyBootstrap, ManagementContext, ManagementRequest
+        from mop.common.telemetry import SessionScope
+        from uuid import UUID
+        import re
+        self.m = host_handoff
+        self.tmp = tempfile.TemporaryDirectory(prefix='mop-owned-handoff-')
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.base.chmod(0o755)
+        self.bodies, self.stage = self.base/'bodies', self.base/'stage'
+        self.bodies.mkdir(mode=0o755)
+        self.stage.mkdir(mode=0o700)
+        self.a, self.scope, _ = selected('native_exec')
+        self.installed = Installed(NODE, BODY, BODY, Path('/opt/fixture/mop/node/host_body.py'),
+                                   self.bodies, self.base/'node-private')
+        self.home = self.installed.body(self.scope)
+        self.home.mkdir(mode=0o700)
+        self.runtime, self.management = self.home/'r', self.home/'r/m'
+        self.runtime.mkdir(mode=0o700)
+        self.management.mkdir(mode=0o700)
+        for p in (self.home, self.runtime, self.management): os.chown(p, BODY, BODY)
+        info = self.home.stat()
+        self.workspace = info.st_dev, info.st_ino
+        now = datetime.now(timezone.utc)
+        self.window = self.m.LaunchWindow(now, now+timedelta(seconds=120))
+        w = self.a.work
+        request = ManagementRequest(SessionScope(*(UUID(getattr(w, name)) for name in
+            ('epoch', 'target_id', 'incarnation_id', 'node_id', 'executor_epoch')),
+            'actual-fixture-session', uuid4()), w.generation)
+        # Public trust anchor из новой owned image, не host config/credentials.
+        pem = re.search(r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----\n',
+            Path('/etc/ssl/certs/ca-certificates.crt').read_text(), re.S).group()
+        self.bootstrap = BodyBootstrap(request, 'owned-handoff', uuid4(), uuid4(), UUID(w.grant_id),
+            self.window.deadline, 'https://owned.invalid', pem, BODY)
+        self.context = ManagementContext(request, self.bootstrap.installation_id,
+            self.bootstrap.restore_generation, self.bootstrap.project_id, self.bootstrap.grant_id,
+            42, uuid4(), 7, self.window.deadline, 'c'*40)
+        self.owner = self.m.HandoffOwner(self.installed, self.scope, self.workspace,
+                                         self.stage, self.bootstrap, self.window)
+        self.addCleanup(self.owner.close)
+
+    def body_read(self, leaf):
+        return as_uid(BODY, lambda: json.loads((self.management/leaf).read_bytes()))
+
+    def test_private_bootstrap_then_exact_context_no_rebind_or_node_read(self):
+        first = self.owner.publish_bootstrap()
+        self.assertIs(self.owner.publish_bootstrap(), first)
+        self.assertFalse((self.management/'context').exists())
+        boot = self.body_read('bootstrap')
+        self.assertTrue(boot['ok'], boot)
+        self.assertNotIn('token', boot['value'])
+        receipt = self.owner.publish_context(self.context)
+        self.assertIs(self.owner.publish_context(self.context), receipt)
+        self.assertEqual(self.body_read('context')['value'], self.context.wire())
+        self.assertNotIn(self.context.token, repr(receipt))
+        for path in self.management.iterdir():
+            info = path.stat()
+            self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), info.st_nlink),
+                             (BODY, BODY, 0o400, 1))
+            denied = as_uid(NODE, lambda: path.read_text())
+            self.assertFalse(denied['ok'])
+        with self.assertRaises(Refused): self.owner.publish_context(replace(self.context, token='d'*40))
+        with self.assertRaises(Refused): self.owner.publish_context(replace(self.context, subject_id=43))
+        self.assertEqual(self.body_read('context')['value']['token'], 'c'*40)
+
+    def test_publication_has_single_private_inode_before_and_after_atomic_visibility(self):
+        real = self.m._rename_absent
+        seen = []
+        def observe(source_fd, destination_fd, leaf):
+            before = os.stat(leaf, dir_fd=source_fd, follow_symlinks=False)
+            self.assertEqual((before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode), before.st_nlink),
+                             (BODY, BODY, 0o400, 1))
+            self.assertFalse((self.management/leaf).exists())
+            denied = as_uid(BODY, lambda: (self.owner.staging.path/leaf).read_bytes().hex())
+            self.assertFalse(denied['ok'], 'body must not open its own inode before publication')
+            real(source_fd, destination_fd, leaf)
+            after = os.stat(leaf, dir_fd=destination_fd, follow_symlinks=False)
+            self.assertEqual((before.st_dev, before.st_ino, after.st_nlink),
+                             (after.st_dev, after.st_ino, 1))
+            seen.append(leaf)
+        with patch.object(self.m, '_rename_absent', side_effect=observe):
+            self.owner.publish_bootstrap()
+            self.owner.publish_context(self.context)
+        self.assertEqual(seen, ['bootstrap', 'context'])
+
+    def test_unknown_destination_and_directory_replacement_never_adopted(self):
+        foreign = self.management/'bootstrap'
+        foreign.symlink_to('/never-follow-this-handoff')
+        with self.assertRaises(Refused): self.owner.publish_bootstrap()
+        self.assertTrue(foreign.is_symlink())
+        foreign.unlink()
+        self.management.rename(self.runtime/'old-m')
+        self.management.mkdir(mode=0o700)
+        os.chown(self.management, BODY, BODY)
+        with self.assertRaises(Refused): self.owner.publish_bootstrap()
+        self.assertEqual(list(self.management.iterdir()), [])
+
+    def test_ambiguous_publication_recovers_original_inode_without_rewriting(self):
+        real = self.m._rename_absent
+        def lost(source_fd, destination_fd, leaf):
+            real(source_fd, destination_fd, leaf)
+            raise OSError('fixture-publication-ACK-lost-private-detail')
+        with patch.object(self.m, '_rename_absent', side_effect=lost), self.assertRaises(Refused) as caught:
+            self.owner.publish_bootstrap()
+        self.assertNotIn('private-detail', str(caught.exception))
+        inode = (self.management/'bootstrap').stat().st_ino
+        recovered = self.owner.publish_bootstrap()
+        self.assertIs(recovered, self.owner.publish_bootstrap())
+        self.assertEqual((self.management/'bootstrap').stat().st_ino, inode)
+        self.assertEqual(self.body_read('bootstrap')['value'], self.bootstrap.wire())
+
+    def test_context_refuses_disappeared_or_modified_bootstrap_after_publication(self):
+        self.owner.publish_bootstrap()
+        path = self.management/'bootstrap'
+        original = path.read_bytes()
+        path.chmod(0o600)
+        path.write_bytes(original+b' ')
+        path.chmod(0o400)
+        with self.assertRaises(Refused): self.owner.publish_context(self.context)
+        path.unlink()
+        with self.assertRaises(Refused): self.owner.publish_context(self.context)
+        self.assertFalse((self.management/'context').exists())
+
+    def test_concurrent_destination_collision_is_not_overwritten(self):
+        real = self.m._rename_absent
+        def collide(source_fd, destination_fd, leaf):
+            (self.management/leaf).symlink_to('/foreign-never-follow')
+            real(source_fd, destination_fd, leaf)
+        with patch.object(self.m, '_rename_absent', side_effect=collide), self.assertRaises(Refused):
+            self.owner.publish_bootstrap()
+        self.assertTrue((self.management/'bootstrap').is_symlink())
+        self.assertEqual(self.owner.retained, ())
+
+    def test_context_needs_exact_bootstrap_and_original_scope_and_live_deadline(self):
+        with self.assertRaises(Refused): self.owner.publish_context(self.context)
+        self.owner.publish_bootstrap()
+        for changes in (dict(request=replace(self.context.request, generation=self.context.request.generation+1)),
+                        dict(project_id=uuid4()), dict(grant_id=uuid4()), dict(installation_id='other'),
+                        dict(expires_at=datetime.now(timezone.utc)-timedelta(seconds=1))):
+            with self.subTest(fields=tuple(changes)), self.assertRaises(Refused):
+                self.owner.publish_context(replace(self.context, **changes))
+        self.assertFalse((self.management/'context').exists())
+        with patch.object(self.m, '_now', return_value=self.window.deadline+timedelta(seconds=1)), self.assertRaises(Refused):
+            self.owner.publish_context(self.context)
+
+
 if __name__ == '__main__':
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(ActualPrivateInputTests)
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         raise SystemExit(1)

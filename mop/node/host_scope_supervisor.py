@@ -362,7 +362,8 @@ class SocketServer:
             value = decode(raw)
             if (type(value) is dict and value.get('action') in (
                     'prepare_body', 'bootstrap_body', 'initial_identity', 'phase_status',
-                    'phase_checkpoint', 'phase_ack', 'retire_owned', 'cleanup_owned')):
+                    'phase_checkpoint', 'phase_ack', 'retire_owned', 'cleanup_owned',
+                    'native_exec', 'native_poll', 'native_dispatch', 'native_validate', 'native_complete')):
                 if not hasattr(self.supervisor, 'handle_planned'):
                     raise Refused('installed HOST planned phase broker unavailable')
                 if (peer_credentials(writer.get_extra_info('socket')) != peer

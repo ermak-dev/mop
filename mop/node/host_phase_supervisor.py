@@ -80,6 +80,7 @@ class Body:
     cleanup: object = None
     connection_error: str | None = None
     cleanup_connection: object = None
+    native: object = None
 
 
 class PhaseOwner(Supervisor):
@@ -114,12 +115,19 @@ class PhaseOwner(Supervisor):
 
     def status(self, item):
         body = self.bodies[item.submission.descriptor.scope]
-        return dict(status=item.status, receipt=item.phase_receipt, error=item.error,
+        result = dict(status=item.status, receipt=item.phase_receipt, error=item.error,
             admission=admission_wire(item.submission.admission),
             reference=body.reference.wire() if body.reference else None,
             checkpoint=dict(effect=item.pending.effect, sequence=item.pending.sequence) if item.pending and not item.pending.approved else None,
             runtime_digest=self.manifest.content_digest, resources=self.manifest.project(body.projection).wire(),
             acknowledged=item.acknowledged)
+        if getattr(body, 'native', None) is not None and body.native.item is item:
+            result['native'] = body.native.status()
+        return result
+
+    def submit_native(self, request):
+        from mop.node.host_native_owner import submit_native
+        return submit_native(self, request)
 
     def submit(self, request):
         if self._closed or not self._confirmed:
@@ -174,7 +182,9 @@ class PhaseOwner(Supervisor):
     async def checkpoint(self, item, effect, sequence):
         if time.monotonic() >= item.deadline or item.pending is not None:
             raise Refused('planned original effect cutoff expired or checkpoint overlaps')
-        if CHECKPOINTS[item.submission.admission.work.action][sequence] != effect:
+        from mop.node.host_phases import checkpoint_plan
+        plan = checkpoint_plan(item.submission.admission.work.action)
+        if type(sequence) is not int or not 0 <= sequence < len(plan) or plan[sequence] != effect:
             raise Refused('planned compiled effect sequence changed')
         item.pending, item.approved = Checkpoint(effect, sequence), asyncio.Event()
         await item.approved.wait()
@@ -338,6 +348,8 @@ class PhaseOwner(Supervisor):
         await asyncio.shield(self._phase_cleanup_task(body))
 
     async def _cleanup_owned(self, body):
+        if body.native is not None:
+            await body.native.aclose()
         start = self._starts.get(body.scope)
         retired = None
         if start is not None:
@@ -398,7 +410,19 @@ class PhaseOwner(Supervisor):
         try:
             value = decode(raw)
             action = value.get('action') if type(value) is dict else None
-            if action in CHECKPOINTS:
+            if action == 'native_exec':
+                from mop.node.host_native import NativeSubmission
+                item = self.submit_native(NativeSubmission.decode(raw))
+                result = self.status(item)
+            elif action in ('native_poll', 'native_dispatch', 'native_validate', 'native_complete'):
+                from mop.node.host_native_owner import mailbox_exchange
+                peer = peer_credentials(writer.get_extra_info('socket'))
+                if peer[1] != self.installed.node_uid:
+                    raise Refused('native mailbox caller is not the actual node UID')
+                process = Process.read(peer[0])
+                worker = str(process.pid)+':'+str(process.start)+':'+process.boot_id
+                result = await mailbox_exchange(self, value, worker)
+            elif action in CHECKPOINTS:
                 item = self.submit(Submission.decode(raw))
                 result = self.status(item)
             elif action == 'phase_ack':
@@ -447,11 +471,20 @@ class PhaseOwner(Supervisor):
                     self._phase_cleanup_task(body)
                     # Только submission cleanup; последующий status не начинает эффект.
                 result = self.status(item)
+            if 'native' in result:
+                from mop.node.host_native import phase_wire
+                result = phase_wire(result)
             response = dict(schema_version=1, status='ok', phase=result, error=None)
+            encode(response)
         except (Refused, Unknown) as error:
             response = dict(schema_version=1, status='refused' if isinstance(error, Refused) else 'unknown', phase=None, error=str(error))
         except Exception as error:
-            response = dict(schema_version=1, status='unknown', phase=None, error='planned exchange failed: '+type(error).__name__)
+            reason = 'planned exchange failed: '+type(error).__name__
+            if isinstance(error, ModuleNotFoundError):
+                import re
+                if type(error.name) is str and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,159}', error.name):
+                    reason += ' ('+error.name+')'
+            response = dict(schema_version=1, status='unknown', phase=None, error=reason)
         writer.write(encode(response)+b'\n')
         await writer.drain()
         # Только finite transport ACK; ownership phase по нему не передаётся.
