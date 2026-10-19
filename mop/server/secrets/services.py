@@ -384,6 +384,12 @@ class RetainedSecrets:
         if type(scope) is not RetentionScope:
             raise Refused('trusted retention scope required')
         version = m.SecretVersion.objects.select_related('secret__installation').get(pk=version_id)
+        self._reference_scope(scope, version)
+        return version
+
+    def _reference_scope(self, scope, version):
+        if type(scope) is not RetentionScope:
+            raise Refused('trusted retention scope required')
         row = version.secret
         if (row.project_id, row.kind, row.name, row.purpose) != (scope.project_id, 'credential', scope.name, scope.purpose):
             raise Refused('retained secret target mismatch')
@@ -392,7 +398,11 @@ class RetainedSecrets:
 
     @storage_errors
     def check_reference(self, scope, version_id):
-        self._reference(scope, version_id)
+        # Metadata gate не тянет immutable ciphertext при каждом re-admission.
+        if type(scope) is not RetentionScope:
+            raise Refused('trusted retention scope required')
+        version = m.SecretVersion.objects.select_related('secret').defer('envelope', 'nonce').get(pk=version_id)
+        self._reference_scope(scope, version)
 
     @storage_errors
     def check_project_references(self, version_ids, *, project_id):
@@ -404,7 +414,7 @@ class RetainedSecrets:
         ids = tuple(version_ids)
         if len(ids) > 32 or any(type(value) is not uuid.UUID for value in ids) or len(set(ids)) != len(ids):
             raise Refused('invalid project secret references')
-        rows = tuple(m.SecretVersion.objects.select_related('secret').filter(pk__in=ids))
+        rows = tuple(m.SecretVersion.objects.select_related('secret').defer('envelope', 'nonce').filter(pk__in=ids))
         if len(rows) != len(ids):
             raise Refused('project secret reference is unavailable')
         for version in rows:
@@ -416,7 +426,7 @@ class RetainedSecrets:
 
     @storage_errors
     def validate_policy_reference(self, version_id, *, project_id):
-        version = m.SecretVersion.objects.select_related('secret').get(pk=version_id)
+        version = m.SecretVersion.objects.select_related('secret').defer('envelope', 'nonce').get(pk=version_id)
         if version.secret.project_id != project_id or version.secret.purpose != 'policy':
             raise Refused('approved policy secret reference mismatch')
         available(version.secret)
@@ -459,6 +469,30 @@ class InitialLaunchSecrets:
         if type(scope) is not InitialConsumerScope or scope.purpose not in CONSUMERS:
             raise Refused('finite initial launch consumer scope required')
         self.authority.check_consumer(actor, scope)
+        result = self._consumer(scope)
+        self.authority.check_consumer(actor, scope)
+        return result
+
+    @storage_errors
+    def read_bootstrap_batch(self, actor, scopes):
+        """Finite all-or-nothing batch; post-check также pre-check следующего decrypt.
+
+        Между соседними provider calls нет внешнего ожидания кроме SQL read
+        exact версии. Каждый checkpoint заново читает весь authority graph;
+        после окончательного отказа следующий decrypt никогда не начинается.
+        """
+        outside_transaction()
+        if (type(scopes) is not tuple or len(scopes) > 32
+                or any(type(scope) is not InitialConsumerScope or scope.purpose != 'bootstrap_input' for scope in scopes)):
+            raise Refused('finite bootstrap consumer batch required')
+        self.authority.check_bootstrap_consumers(actor, scopes)
+        values = []
+        for scope in scopes:
+            values.append(self._consumer(scope))
+            self.authority.check_bootstrap_consumers(actor, scopes)
+        return tuple(values)
+
+    def _consumer(self, scope):
         version = m.SecretVersion.objects.select_related('secret__installation').get(pk=scope.version_id)
         row = version.secret
         expected_purpose = dict(source_credential='git', bootstrap_input='project', model_config='project', model_credential='proxy')
@@ -472,7 +506,6 @@ class InitialLaunchSecrets:
         value = reveal(self.provider, envelope, context(row, version))
         if len(value) != version.size:
             raise SecretCryptoError('secret envelope size mismatch')
-        self.authority.check_consumer(actor, scope)
         return dict(purpose=scope.purpose, version_id=str(version.id), name=row.name, kind=row.kind, value=value)
 
 

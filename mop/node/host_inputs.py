@@ -10,13 +10,13 @@ import hashlib
 import json
 import re
 
+from mop.common import initial_transfer as transfer
 from mop.node.host_scope import Scope, canonical, exact, unique
 from mop.node.http_execution import Admission, Refused, Work, counter, stamp
 
 MAX_FILE_BYTES = 1048576
 MAX_TOTAL_BYTES = 16777216
-PURPOSES = {action: 'initial_'+action+'_v1' for action in
-            ('prepare_body', 'bootstrap_body', 'initial_identity', 'native_exec')}
+PURPOSES = transfer.PURPOSES
 DELIVERY_FIELDS = ('schema_version', 'work', 'phase', 'bootstrap_revision', 'bootstrap_digest',
     'image_digest', 'display_name', 'image_revision', 'image_policy', 'selection',
     'git_name', 'git_email', 'role', 'bootstrap', 'consumers')
@@ -26,11 +26,28 @@ def now():
     return datetime.now(timezone.utc)
 
 
-@dataclass(frozen=True)
+_DEFAULT = object()
+
+
+@dataclass(frozen=True, init=False)
 class Limits:
     max_files: int = 64
     max_bytes: int = 8388608
     max_file_bytes: int = 262144
+    _bootstrap_bytes: int = field(default=262144, init=False, repr=False)
+
+    def __init__(self, max_files=64, max_bytes=8388608, max_file_bytes=_DEFAULT):
+        default = max_file_bytes is _DEFAULT
+        object.__setattr__(self, 'max_files', max_files)
+        object.__setattr__(self, 'max_bytes', max_bytes)
+        object.__setattr__(self, 'max_file_bytes', transfer.DEFAULT_BYTES if default else max_file_bytes)
+        self.__post_init__()
+        # Explicit caller caps остаются hard, включая явно переданные 262144.
+        object.__setattr__(self, '_bootstrap_bytes', min(max_bytes, transfer.phase_limit('bootstrap_body'))
+            if default else max_file_bytes)
+
+    def file_bytes(self, action):
+        return self._bootstrap_bytes if action == 'bootstrap_body' else self.max_file_bytes
 
     def __post_init__(self):
         if (type(self.max_files) is not int or not 1 <= self.max_files <= 256
@@ -52,8 +69,7 @@ def _sha(value):
 
 def canonical_json(value):
     try:
-        return json.dumps(value, sort_keys=True, separators=(',', ':'),
-                          ensure_ascii=True, allow_nan=False).encode('ascii')
+        return transfer.canonical_json(value)
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise Refused('finite phase input JSON required') from None
 
@@ -203,9 +219,8 @@ def pack(admission, scope, delivery):
     validate_scope(scope, admission)
     selected = _delivery(delivery, admission.work)
     payload = canonical_json(selected)
-    raw = canonical_json(dict(schema_version=1, purpose=PURPOSES[admission.work.action],
-        scope=scope.wire(), admission=admission_wire(admission),
-        payload_digest=digest(payload), payload=payload.decode('ascii')))
+    raw = transfer.private_frame(payload, phase=admission.work.action,
+        scope=scope.wire(), admission=admission_wire(admission))
     descriptor = Descriptor(scope, admission.attempt_id, digest(raw))
     return Envelope.parse(raw, descriptor, admission, backend_epoch=scope.epoch,
                           node_id=scope.node_id, executor_epoch=scope.executor_epoch)

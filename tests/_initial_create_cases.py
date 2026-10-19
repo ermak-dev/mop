@@ -629,6 +629,36 @@ class InitialCreatePhases(TransactionTestCase):
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
                 outcome='succeeded', evidence=CONFIRMATIONS[phase])
 
+    # HYPOTHESIS #751: настоящая approved выдача допускает замену fragments
+    # при прежнем digest полного retained envelope, которого body не получал.
+    # SPEC: один canonical envelope, проверяемый body без ORM/provider.
+    # RED: PG17 — ValueError not raised: real delivery accepts fragments
+    # unrelated to selected digest (после настоящих create/prepare claims).
+    # SOLUTION: owner читает original retained bytes, wire несёт только envelope.
+    # RESULT: PG17 — genuine выдача проходит, legacy mixed fragments отказаны;
+    # все phase purpose/consumer restrictions и exact approval pins прежние.
+    # STATUS: FIXED — see #751.
+    def test_bootstrap_body_rejects_mixed_content_from_real_approved_delivery(self):
+        from copy import deepcopy
+        from mop.server.controller.launchdelivery import deliver_initial
+        from mop.server.sessions.protocol import work_to_wire
+        from mop.common.initialcreate import parse_delivery
+        from mop.common import credentials as p
+        row = self.create()
+        execution, actor = self.machine()
+        work, attempt = self.claim_next(execution, actor, row, 'prepare_body')
+        execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
+            outcome='succeeded', evidence='body-prepared')
+        work, _ = self.claim_next(execution, actor, row, 'bootstrap_body')
+        wire = work_to_wire(work)
+        value = deliver_initial(self.credential_app(), actor, wire)
+        self.assertEqual(parse_delivery(value, wire), value)
+        mixed = deepcopy(value)
+        mixed['bootstrap'] = dict(tasks=p.encoded(b'- command: unapproved-private\n'),
+            variables=p.encoded(b'answer: 0\n'))
+        with self.assertRaises(ValueError, msg='real delivery accepts fragments unrelated to selected digest'):
+            parse_delivery(mixed, wire)
+
     def test_approved_bootstrap_bytes_are_delivered_only_to_bootstrap_phase(self):
         from mop.server.controller import launchdelivery
         from mop.server.sessions.protocol import work_to_wire
@@ -642,8 +672,12 @@ class InitialCreatePhases(TransactionTestCase):
         deliver = getattr(launchdelivery, 'deliver_initial', None)
         self.assertIsNotNone(deliver, 'purpose-specific bootstrap delivery is missing')
         payload = deliver(self.credential_app(), actor, work_to_wire(work))
-        self.assertEqual(p.binary(payload['bootstrap']['tasks']), b'- debug: msg=hello\n')
-        self.assertEqual(p.binary(payload['bootstrap']['variables']), b'answer: 42\n')
+        from mop.common.bootstrap_envelope import decode_base64
+        self.assertEqual(set(payload['bootstrap']), {'envelope'})
+        content = decode_base64(payload['bootstrap']['envelope'], payload['bootstrap_digest'])
+        self.assertEqual(content.tasks, b'- debug: msg=hello\n')
+        self.assertEqual(content.variables, b'answer: 42\n')
+        self.assertEqual(content.secret_refs, ())
         self.assertIsNone(payload['role'])
         self.assertEqual(payload['consumers'], [])
 
@@ -699,6 +733,11 @@ class InitialCreatePhases(TransactionTestCase):
             if payload['role'] is not None:
                 self.assertEqual(p.binary(payload['role']['prompt']), b'fixture role')
             self.assertEqual(payload['bootstrap'] is not None, phase == 'bootstrap_body')
+            if phase == 'bootstrap_body':
+                from mop.common.bootstrap_envelope import decode_base64
+                content = decode_base64(payload['bootstrap']['envelope'], payload['bootstrap_digest'])
+                self.assertEqual((content.tasks, content.variables, content.secret_refs),
+                    (b'- debug: msg=approved\n', b'approved: true\n', (boot.active_version_id,)))
             if phase == 'native_exec':
                 native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),

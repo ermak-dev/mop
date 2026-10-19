@@ -182,11 +182,16 @@ class RestartHandler:
         return tuple(result)
 
     def current(self, operation_id, step_id):
+        return self._current_admission(operation_id, step_id)[0]
+
+    def _current_admission(self, operation_id, step_id):
+        """Только свежий SQL proof; детали живут в транзакции одного checkpoint."""
         if not transaction.get_connection().in_atomic_block:
             raise Refused('transaction_boundary')
         self._ports()
         installation = self.ops._installation()
-        row = m.Operation.objects.select_for_update().get(pk=operation_id,
+        row = m.Operation.objects.select_for_update(of=('self',)).select_related(
+            'restartbinding', 'createbinding__reservation').get(pk=operation_id,
             action__in=('restart', 'send', 'dispatch', 'wipe', 'create'), target_kind='puppet')
         step = m.Step.objects.select_for_update().get(pk=step_id, operation=row)
         value = self._value(row, step)
@@ -201,10 +206,10 @@ class RestartHandler:
             raise Refused('operation_conflict')
         if target != expected:
             raise Refused('revision_conflict')
-        handler.require(target, row)
+        required = handler.require(target, row)
         if m.Step.objects.filter(operation=row, ordinal__lt=step.ordinal).exclude(outcome='succeeded').exists():
             raise Refused('operation_conflict')
-        return value
+        return value, row, step, required
 
     def claimed(self, work, attempt_id):
         if self.current(work.operation_id, work.step_id) != work:

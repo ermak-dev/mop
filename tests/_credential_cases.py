@@ -402,7 +402,7 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
             with self.assertRaises(PermissionError):
                 app.grants.bindings.retirement(grant_id, 1)
 
-    def reserved_grant(self, *, secret_names=()):
+    def reserved_grant(self, *, secret_names=(), bootstrap_content=None):
         from datetime import timedelta
         import uuid
         from django.utils import timezone
@@ -413,8 +413,8 @@ print(json.dumps({'id': str(item.id), 'revision': item.revision}))
         with override_settings(BOOTSTRAP=self.bootstrap):
             app = self.service.application()
         actor = self.access.token_context(self.token)
-        revision = app.preparation.publish(actor, project_id=self.project.id, tasks=b'tasks', variables=b'',
-            provenance='fixture', commit='a' * 40)
+        revision = app.preparation.publish(actor, project_id=self.project.id, **(bootstrap_content or dict(
+            tasks=b'tasks', variables=b'', provenance='fixture', commit='a' * 40)))
         app.preparation.approve(actor, revision.id)
         manifest = b'{"version":1,"soul":"worker","runtime":{"driver":"any","receives_dispatch":true},"capabilities":{"node_verbs":[],"cluster_verbs":[],"spawn":[],"dispatch":false},"prompt":"soul.md"}'
         if secret_names:

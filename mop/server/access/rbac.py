@@ -10,6 +10,7 @@ from uuid import UUID
 
 from django.contrib.auth.models import Group
 from django.db import transaction
+from django.db.models import Exists, OuterRef
 
 from . import models as m, services as auth
 
@@ -41,13 +42,19 @@ def require_profile(profile_id, digest, *, definition_id, owner_id, project_id, 
     rows = m.AgentRBACProfile.objects.select_related('definition')
     if lock:
         rows = rows.select_for_update(of=('self',))
+    elif live:
+        # Каждый unlocked checkpoint читает profile + revocation одним fresh
+        # snapshot; следующий вызов не переиспользует прежнюю ORM row.
+        rows = rows.annotate(current_revocation=Exists(m.ProfileRevocation.objects.filter(profile_id=OuterRef('pk'))))
     row = rows.filter(pk=profile_id).first()
     if (row is None or (row.digest, row.definition_id, row.definition.owner_id, row.definition.project_id) !=
             (digest, definition_id, owner_id, project_id)
             or canonical_groups(row.group_ids) != row.group_ids
             or profile_digest(row.definition_id, row.group_ids) != row.digest):
         raise auth.Denied('selected agent RBAC profile scope or immutable proof changed')
-    if live and m.ProfileRevocation.objects.filter(profile=row).exists():
+    # После ожидания row lock нужен новый snapshot: revoke мог завершиться,
+    # пока SELECT FOR UPDATE ждал. Его нельзя переносить в annotation выше.
+    if live and (m.ProfileRevocation.objects.filter(profile=row).exists() if lock else row.current_revocation):
         raise auth.Denied('selected agent RBAC profile is revoked')
     return row
 

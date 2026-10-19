@@ -206,15 +206,16 @@ class LaunchSupport:
     def require_planned(self, target, operation):
         from mop.server.operations.models import ScheduledPuppet
         from mop.server.operations.service import Refused
-        self.selection(target, operation)
+        selected = self.selection(target, operation)
         require_anchor(target.node_id, operation.createbinding.scheduler_id)
         if ScheduledPuppet.objects.filter(target_id=target.target_id).exists():
             raise Refused('revision_conflict', safe_reason='planned create already has a scheduler job')
+        return selected
 
     def require(self, target, operation):
         from mop.server.operations.models import ScheduledPuppet
         from mop.server.operations.service import Refused
-        self.selection(target, operation)
+        selected = self.selection(target, operation)
         binding = operation.createbinding
         enrolled = require_anchor(target.node_id, binding.scheduler_id)
         if binding.applied_index is None or binding.dispatched_job is None:
@@ -226,6 +227,7 @@ class LaunchSupport:
                 or binding.dispatched_job.get('Constraints') != [dict(
                     LTarget='${node.unique.id}', Operand='=', RTarget=str(enrolled.nomad_node_id))]):
             raise Refused('revision_conflict', safe_reason='the exact registered job or placement of the new target changed')
+        return selected
 
 
 def service(*, grants=None, issuer=None, scheduler=None, activator=None):

@@ -194,15 +194,22 @@ def bind_session(user_id, session_key):
 def _resolve(actor):
     if type(actor) is not ActorContext:
         raise Denied('trusted actor context required')
-    binding = m.CredentialBinding.objects.filter(pk=actor.credential_id).first()
-    user = get_user_model().objects.filter(pk=actor.user_id).first()
+    # Один свежий credential snapshot вместо трёх независимых SELECT.
+    # ORM row не переживает вызов; permission cache нового User не разделяется
+    # ни с другим checkpoint, ни с provider wait.
+    binding = m.CredentialBinding.objects.select_related('token_user__auth_token').filter(pk=actor.credential_id).first()
+    user = (binding.token_user if binding is not None and binding.token_user_id == actor.user_id
+            else get_user_model().objects.filter(pk=actor.user_id).first())
     if binding is None or user is None:
         raise Denied('credential revoked')
     _check_binding(binding, user)
     if actor != _context(binding, user):
         raise Denied('actor does not match credential')
     if binding.token_user_id is not None:
-        token = Token.objects.filter(user=user).first()
+        try:
+            token = user.auth_token
+        except Token.DoesNotExist:
+            token = None
         if (binding.token_user_id != user.pk or token is None
                 or not constant_time_compare(binding.token_digest, _digest(token.key))):
             raise Denied('token revoked or rotated')
@@ -283,9 +290,22 @@ class Access:
         user = get_user_model().objects.filter(pk=owner_id).first()
         if user is None:
             raise Denied('human owner is unavailable')
+        self._owner_scope(user, project_ids)
+        _require_permissions(user, action, 'current human owner permission required')
+
+    def authorize_launch_issuer(self, actor, *, owner_id, project_id):
+        """Human issuer и owner проверяются одной свежей matrix без provider wait."""
+        user = _resolve(actor)
+        if actor.grant_id is not None or user.pk != owner_id or user.kind != 'human':
+            raise Denied('authenticated human launch issuer required')
+        self._owner_scope(user, (project_id,))
+        for action in ('execution.create_puppet', 'access.issue_grant'):
+            _require_permissions(user, action, 'current human owner permission required')
+
+    def _owner_scope(self, user, project_ids):
         if user.kind != 'human':
             raise Denied('human owner required')
-        identity = _identity(user)
+        _identity(user)
         projects = set(project_ids)
         if projects != set(Catalog.current_project_ids(projects)):
             raise Denied('human owner project is unavailable')
@@ -293,17 +313,28 @@ class Access:
             allowed = set(m.ProjectMembership.objects.filter(user=user, source__enabled=True).values_list('project_id', flat=True))
             if not projects <= allowed:
                 raise Denied('human owner no longer belongs to project')
-        _require_permissions(user, action, 'current human owner permission required')
 
     def authorize(self, actor, action, *, project_ids=(), node_ids=(), client_ids=()):
+        return self._authorize_actions(actor, (action,), project_ids=project_ids,
+            node_ids=node_ids, client_ids=client_ids)
+
+    def authorize_initial_bootstrap(self, actor, *, project_id, node_id):
+        """Один свежий machine scope для claim и чтения exact bootstrap фазы."""
+        node_executor(actor, node_id, reason='enrolled node service required')
+        return self._authorize_actions(actor, ('execution.claim_work', 'execution.read_launch'),
+            project_ids=(project_id,), node_ids=(node_id,))
+
+    def _authorize_actions(self, actor, actions, *, project_ids=(), node_ids=(), client_ids=()):
         if type(actor) is ActorContext and actor.grant_id is not None:
             if self.grants is None:
                 raise Denied('delegation resolver is not bound')
-            return self.grants.authorize(actor, action, project_ids=project_ids,
-                                         node_ids=node_ids, client_ids=client_ids)
+            for action in actions:
+                self.grants.authorize(actor, action, project_ids=project_ids,
+                    node_ids=node_ids, client_ids=client_ids)
+            return
         # Один pipeline для human/agent/service (#685): неизвестное действие
         # отказывает одинаково до всяких видовых веток.
-        if action not in ACTIONS:
+        if any(action not in ACTIONS for action in actions):
             raise Denied('action is not registered')
         user = _resolve(actor)
         projects, nodes, clients = set(project_ids), set(node_ids), set(client_ids)
@@ -331,9 +362,10 @@ class Access:
             allowed = set(visible_project_ids(actor))
             if not projects <= allowed:
                 raise NotVisible('resource not found')
-            if action in GLOBAL_ACTIONS and not _global(user):
+            if any(action in GLOBAL_ACTIONS for action in actions) and not _global(user):
                 raise Denied('installation-wide scope required')
-        _require_permissions(user, action, 'action permission required')
+        for action in actions:
+            _require_permissions(user, action, 'action permission required')
 
 
 class AuthorizedCatalog(Catalog):

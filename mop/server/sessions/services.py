@@ -2,7 +2,7 @@
 from datetime import timedelta
 from uuid import UUID
 from django.db import IntegrityError, transaction
-from django.db.models import Q, F
+from django.db.models import Q, F, Exists, OuterRef
 from django.utils import timezone
 from mop.server.access.context import ActorKind
 from mop.server.access.services import Access, Denied, current_actor, node_executor
@@ -29,6 +29,9 @@ class UnboundWork:
 
     def current(self, operation_id, step_id):
         raise Unavailable('operation work port is not bound')
+
+    def initial_bootstrap(self, work, attempt_id):
+        raise Unavailable('initial bootstrap work port is not bound')
 
     def abort_unstarted(self, work):
         raise Unavailable('operation work port is not bound')
@@ -126,24 +129,26 @@ class Assignments:
         Projection не является разрешением: потребитель проверяет текущие права,
         grant и expected revision ещё раз перед выдачей допуска/credential bytes.
         """
-        row = m.Assignment.objects.select_related('current_incarnation', 'owner').filter(
+        scope = dict(attempt__assignment_id=OuterRef('pk'), attempt__incarnation_id=OuterRef('current_incarnation_id'),
+            attempt__generation=OuterRef('generation'), attempt__role=OuterRef('role'),
+            attempt__bundle_digest=OuterRef('bundle_digest'), attempt__grant_id=OuterRef('grant_id'),
+            attempt__state='succeeded')
+        row = m.Assignment.objects.select_related('current_incarnation', 'owner').annotate(
+            current_node_project=Exists(NodeProject.objects.filter(node_id=OuterRef('node_id'), project_id=OuterRef('project_id'))),
+            current_identity=Exists(m.IdentityApplication.objects.filter(**scope)),
+            current_readiness=Exists(m.ReadinessReceipt.objects.filter(**scope))).filter(
             pk=target_id, project_id=project_id).first()
         if row is None or row.owner_id is None or row.current_incarnation_id is None:
             return None
         incarnation = row.current_incarnation
         if (not row.owner.is_active or row.expires_at <= timezone.now() or not incarnation.accepting
                 or incarnation.assignment_id != row.id or incarnation.node_id != row.node_id
-                or not NodeProject.objects.filter(node_id=row.node_id, project_id=row.project_id).exists()):
+                or not row.current_node_project):
             return None
         role_binding(row.role, row.bundle_digest, row.grant_id)
-        scope = dict(attempt__assignment_id=row.id, attempt__incarnation_id=incarnation.id,
-            attempt__generation=row.generation, attempt__role=row.role,
-            attempt__bundle_digest=row.bundle_digest, attempt__grant_id=row.grant_id,
-            attempt__state='succeeded')
         return AssignmentBinding(row.id, row.project_id, row.node_id, incarnation.id,
             incarnation.executor_epoch, row.owner_id, row.role, row.bundle_digest, row.grant_id,
-            row.generation, row.revision, m.IdentityApplication.objects.filter(**scope).exists(),
-            m.ReadinessReceipt.objects.filter(**scope).exists())
+            row.generation, row.revision, row.current_identity, row.current_readiness)
 
     def target(self, target_id, *, lock=False):
         """Внутренний SQL-only binding; lock берётся после installation guard."""
@@ -510,6 +515,9 @@ class MachineExecution:
             raise ValueError('typed version 1 work required')
         row = m.Assignment.objects.select_for_update().get(pk=work.target_id)
         machine(actor, row.node_id, action, (row.project_id,))
+        return self._assignment_work(row, work)
+
+    def _assignment_work(self, row, work):
         if row.node_id != work.node_id or row.current_incarnation_id != work.incarnation_id:
             raise Conflict('target node or incarnation changed')
         incarnation = m.ExecutionIncarnation.objects.select_for_update().get(pk=work.incarnation_id)
@@ -526,10 +534,13 @@ class MachineExecution:
             raise Conflict('assignment admission changed')
         return row
 
-    def _admit(self, row, work):
+    def _live_assignment(self, row, work):
         if (row.owner_id is None or not row.owner.is_active
                 or row.expires_at <= timezone.now() or work.not_after <= timezone.now()):
             raise Conflict('assignment or command is no longer live')
+
+    def _admit(self, row, work):
+        self._live_assignment(row, work)
         if not m.ExecutionIncarnation.objects.get(pk=work.incarnation_id).accepting:
             # Не ослабляем generic grant gate: old binding для exact recycle
             # wipe проверяется отдельным SQL Root port, не current().
@@ -841,6 +852,36 @@ class MachineExecution:
                 raise Conflict('action input operation changed')
             self._admit(row, work)
             return work, attempt.id
+
+    def initial_bootstrap_admission(self, actor, work):
+        """Fresh execution + operation + receiving grant, без тройного обхода.
+
+        Operation port сам проверяет reserved grant и issuer/ancestry, затем
+        exact definition/selection и четыре resource claims в этой транзакции.
+        Generic action_admission и active-only действия от этого не меняются.
+        """
+        if type(work) is not WorkV1 or work.action != 'bootstrap_body':
+            raise Denied('typed initial bootstrap work required')
+        with transaction.atomic():
+            # Source -- locator. _authority ниже берёт restore lock до любых
+            # Assignment/Operation locks и доказывает epoch/effects заново.
+            source = m.AssignmentAttempt.objects.select_related('incarnation').get(
+                operation_id=work.operation_id, step_id=work.step_id, executor_user_id=actor.user_id)
+            current = self._work(source)
+            if current != work:
+                raise Conflict('addressed bootstrap work changed')
+            self._authority(current)
+            row = m.Assignment.objects.select_for_update().get(pk=current.target_id)
+            Access().authorize_initial_bootstrap(actor, project_id=row.project_id, node_id=row.node_id)
+            self._assignment_work(row, current)
+            attempt = m.AssignmentAttempt.objects.select_for_update().get(pk=source.id)
+            if attempt.state != 'claimed' or attempt.lease_until <= timezone.now():
+                raise Conflict('action input admission expired or completed')
+            self._live_assignment(row, current)
+            admitted, definition, selected = self.work.initial_bootstrap(current, attempt.id)
+            if admitted != current:
+                raise Conflict('action input operation changed')
+            return attempt.id, definition, selected
 
     def executor_state(self, actor, node_id):
         """Предыдущий epoch приходит из controller DB, не имени/marker нового агента."""
