@@ -775,6 +775,139 @@ class FreshOwnerDeath(unittest.TestCase):
             if result is not None:
                 self.remove_probe_root(result, child)
 
+    # BUG: поздний нормальный exit body удаляет HOME живого потомка, хотя
+    # enclosing lease его slot остаётся retained после exit scheduler-а.
+    # HYPOTHESIS: _cleanup_run_root ищет leases только вниз от своего RUN_ROOT,
+    # а lease владельца лежит в TMPDIR снаружи вложенного корня body.
+    # SOLUTION: корень, созданный прямо в каталоге lease, принадлежит lifetime
+    # владельца: body atexit его не удаляет, каталог целиком удаляет owner
+    # после receipt; без enclosing lease cleanup прежний.
+    # RESULT: RED — scheduler/CLI 1, после нормального exit 0 body HOME исчез,
+    # живой потомок получил FileNotFoundError; GREEN — тот же потомок S читает
+    # свои данные, HOME/TMPDIR/RUN_ROOT и retained lease на месте. Safe slot и
+    # fixture по-прежнему удаляют свои пути; 80 focused + 5 UID, Python 3.12/PG17.
+    # STATUS: FIXED — see #787
+    def test_late_body_exit_keeps_live_descendant_home_in_retained_home_slot(self):
+        self.test_late_body_exit_keeps_live_descendant_home_in_retained_fixture(home_slot=True)
+
+    def test_late_body_exit_keeps_live_descendant_home_in_retained_fixture(self, *, home_slot=False):
+        result = child = None
+        expected = 'still used by the live descendant'
+        try:
+            with tempfile.TemporaryDirectory(prefix='mop-787-late-') as directory, probe_children() as register:
+                root = Path(directory)
+                foreign = root / 'unrelated-directory'
+                foreign.mkdir()
+                (foreign / 'sentinel').write_text('not owned by the body')
+                driver, child_record, owner_record, result_record = self.prepare(
+                    root, close_streams=True, home_slot=home_slot)
+                descendant_record, descendant_io = root / 'descendant.json', root / 'descendant-io.json'
+                release_body, release_descendant = root / 'release-body', root / 'release-descendant'
+                # Detached потомок body: cwd и данные в HOME, который body
+                # получил от hermetic внутри своего RUN_ROOT в owned TMPDIR.
+                descendant = ('import json, os, pathlib, sys, time\n'
+                    'home = pathlib.Path(sys.argv[1])\n'
+                    f'(home / "live-descendant-data").write_text({expected!r})\n'
+                    f'record = pathlib.Path({str(descendant_record)!r})\n'
+                    'record.with_suffix(".tmp").write_text(json.dumps({"pid": os.getpid(), "home": str(home), '
+                    '"cwd": os.getcwd()}))\nrecord.with_suffix(".tmp").replace(record)\n'
+                    'expires = time.monotonic() + 60\n'
+                    f'while not pathlib.Path({str(release_descendant)!r}).exists() and time.monotonic() < expires:\n'
+                    '    time.sleep(.01)\nresult = {"home_exists": home.exists()}\n'
+                    'try: result["data"] = (home / "live-descendant-data").read_text()\n'
+                    'except OSError as error: result["error"] = type(error).__name__ + ": " + str(error)\n'
+                    f'io = pathlib.Path({str(descendant_io)!r})\n'
+                    'io.with_suffix(".tmp").write_text(json.dumps(result))\nio.with_suffix(".tmp").replace(io)\n'
+                    'time.sleep(60)\n')
+                (root / 'tests/boundary.py').write_text('import json, os, pathlib, subprocess, sys, time\n'
+                    f'sys.path.insert(0, {hermetic.TESTS!r})\nimport hermetic, _lib\n'
+                    'fd = os.open(os.devnull, os.O_WRONLY)\nos.dup2(fd, 1)\nos.dup2(fd, 2)\nos.close(fd)\n'
+                    f'subprocess.Popen([sys.executable, "-c", {descendant!r}, hermetic.HOME], cwd=hermetic.HOME, '
+                    'start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, '
+                    'stderr=subprocess.DEVNULL)\nexpires = time.monotonic() + 10\n'
+                    f'while not pathlib.Path({str(descendant_record)!r}).exists():\n'
+                    '    if time.monotonic() >= expires: raise AssertionError("descendant did not start")\n'
+                    '    time.sleep(.01)\n'
+                    f'path = pathlib.Path({str(child_record)!r})\n'
+                    'path.with_suffix(".tmp").write_text(json.dumps({"pid": os.getpid(), "home": hermetic.HOME, '
+                    '"body_root": _lib.RUN_ROOT}))\npath.with_suffix(".tmp").replace(path)\n'
+                    'expires = time.monotonic() + 60\n'
+                    f'while not pathlib.Path({str(release_body)!r}).exists() and time.monotonic() < expires:\n'
+                    '    time.sleep(.01)\n')
+                unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                outsider = register(unrelated.pid)
+                process = self.launch(driver, root)
+                child = self.wait_record(child_record, process)
+                body = register(child['pid'])
+                grandchild = self.wait_record(descendant_record, process)
+                late = register(grandchild['pid'])
+                owner = self.wait_record(owner_record, process)
+                try:
+                    output = process.communicate(timeout=15)[0]
+                finally:
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGINT)
+                        process.communicate(timeout=15)
+                result = json.loads(result_record.read_text())
+                home = Path(result['home'])
+                retained = {'home': home.exists(), 'data': (home / 'live-descendant-data').read_text()
+                            if (home / 'live-descendant-data').exists() else None,
+                            'tmpdir': Path(result['tmpdir']).exists(), 'run_root': Path(result['run_root']).exists()}
+                # Body adopted probe subreaper-ом после смерти owner: release —
+                # обычный exit body с его atexit, reap — по точному PID/start.
+                release_body.touch()
+                body_exit, expires = None, time.monotonic() + 10
+                while identity(child['pid']) == body and time.monotonic() < expires:
+                    try:
+                        pid, status = os.waitpid(child['pid'], os.WNOHANG)
+                    except ChildProcessError:
+                        pid = 0
+                    if pid == child['pid']:
+                        body_exit = os.waitstatus_to_exitcode(status)
+                    time.sleep(.01)
+                body_gone = identity(child['pid']) is None
+                state = Path(f"/proc/{grandchild['pid']}/stat").read_text().rsplit(')', 1)[1].split()[0]
+                after_body = {name: Path(result[name]).exists() for name in ('home', 'tmpdir', 'run_root')}
+                release_descendant.touch()
+                expires = time.monotonic() + 10
+                while not descendant_io.exists() and time.monotonic() < expires:
+                    time.sleep(.01)
+                io = json.loads(descendant_io.read_text()) if descendant_io.exists() else None
+                lease_path = Path(result['tmpdir']) / '.mop-owned-process.json'
+                lease = json.loads(lease_path.read_text()) if lease_path.exists() else None
+                self.evidence(('#787 direct HOME slot' if home_slot else '#787 fixture') +
+                    ' late body exit under retained lease: ' + json.dumps({
+                    **result, 'outer_exit': process.returncode, 'owner': owner,
+                    'owner_gone': identity(owner['pid']) is None, 'body': body, 'body_root': child['body_root'],
+                    'body_exit': body_exit, 'body_reaped': body_gone, 'descendant': late,
+                    'descendant_cwd': grandchild['cwd'], 'same_descendant_alive': identity(grandchild['pid']) == late,
+                    'descendant_state': state, 'retained_at_outer_exit': retained,
+                    'paths_after_late_body_exit': after_body, 'descendant_io': io, 'lease': lease,
+                    'unrelated_group_survived': identity(unrelated.pid) == outsider}))
+                self.assertEqual(process.returncode, 1, output)
+                self.assertIn('quiescence receipt', output)
+                self.assertIsNone(identity(owner['pid']))
+                self.assertEqual(retained, {'home': True, 'data': expected, 'tmpdir': True, 'run_root': True})
+                self.assertEqual(body_exit, 0, 'the body must exit normally through its own atexit')
+                self.assertTrue(body_gone)
+                self.assertEqual(identity(grandchild['pid']), late)
+                self.assertNotIn(state, ('Z', 'X'))
+                self.assertEqual(grandchild['cwd'], os.path.realpath(result['home']))
+                self.assertTrue(after_body['home'],
+                    'late body atexit deleted HOME while its registered descendant remained alive')
+                self.assertEqual(after_body, {'home': True, 'tmpdir': True, 'run_root': True})
+                self.assertEqual(io, {'home_exists': True, 'data': expected})
+                self.assertEqual(lease['state'], 'retained')
+                self.assertEqual(lease['owner'], owner)
+                self.assertIn('quiescence receipt', lease['error'])
+                self.assertEqual(identity(unrelated.pid), outsider)
+                self.assertEqual((foreign / 'sentinel').read_text(), 'not owned by the body')
+        finally:
+            if result is not None:
+                self.remove_probe_root(result, child)
+
     def remove_probe_root(self, result, child):
         import _lib
         self.assertIsNone(identity(child['pid']), 'retained directories cannot be removed while body exists')

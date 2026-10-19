@@ -31,13 +31,40 @@ import types
 # только без незавершённых process leases (#776). Durable lease внутри дерева
 # виден также cleanup предка в другом интерпретаторе; exit owner сам по себе
 # не освобождает ни HOME, ни ancestor. Обычные mkdtemp не меняются.
+# Корень body, созданный прямо в каталоге lease (TMPDIR от
+# OwnedProcessDirectory), — часть этого каталога (#787): exit body не
+# доказывает, что его detached потомки ушли из HOME. Его удаляет только
+# владелец lease, целиком и после receipt quiescence своего subreaper-а.
+PROCESS_LEASE_NAME = '.mop-owned-process.json'
 RUN_ROOT = tempfile.mkdtemp(prefix="mop-test-run-")
 tempfile.tempdir = RUN_ROOT
 os.environ["TMPDIR"] = RUN_ROOT
-PROCESS_LEASE_NAME = '.mop-owned-process.json'
+
+
+def _enclosing_lease(root):
+    """Lease каталога, в котором создан root, или None.
+
+    Решение принимается при создании корня: owner пишет lease до старта
+    body. Непроверяемое отсутствие lease не даёт права на rmtree."""
+    lease = os.path.join(os.path.dirname(root), PROCESS_LEASE_NAME)
+    try:
+        os.lstat(lease)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass
+    return lease
+
+
+ENCLOSING_LEASE = _enclosing_lease(RUN_ROOT)
 
 
 def _cleanup_run_root():
+    if ENCLOSING_LEASE is not None:
+        # Lifetime корня принадлежит владельцу lease: удаление делегировано
+        # ему после доказанной quiescence, retained lease держит HOME.
+        return
+
     def unreadable(error):
         # Невозможность проверить leases не даёт разрешения на rmtree.
         raise error
@@ -60,6 +87,7 @@ class OwnedProcessDirectory:
 
     Владение ровно своим mkdtemp, не произвольным путём вызывающего. Receipt
     проверяет process owner; этот lifetime не сигналит PID и не удаляет DB.
+    Каталог — TMPDIR body: его RUN_ROOT и HOME удаляются только здесь (#787).
     """
     def __init__(self, script, *, parent=None):
         self.path = tempfile.mkdtemp(prefix='mp-', dir=parent)
