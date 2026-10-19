@@ -9,9 +9,11 @@
   * `mop send <id> <text|->` -- конечная HTTPS-команда POST /api/v1/messages
     (`tests/control_consumers.py` держит форму конверта; здесь -- маршрут,
     отказы, границы и вердикт операции);
-  * приватная доставка отчёта -- POST /api/v1/reports и собственный WSS-потребитель
-    (`tests/private_inbox_client.py` на ветке #773); на дереве эпика private inbox
-    явно не связан, и это зафиксировано точным отказом;
+  * приватная доставка отчёта -- POST /api/v1/reports и `mop delivery` как
+    читающий GET квитанции (#773/#785); обычный native 2.1.302 честно
+    заканчивается unknown, а не выдуманной доставкой;
+  * `mop dispatch` -- отдельная связанная операция POST /api/v1/dispatches
+    (#757), а не send с флагом и не role-route;
   * `mop.cli.service.mcp` больше не несёт инструментов: каталог строится из
     деклараций командлетов (`tests/modern_mcp.py`, `tests/control_consumers.py`);
   * `mop/client/channel.py` остаётся: route по адресу, потолок ожидания,
@@ -25,9 +27,14 @@
 всегда равна или сильнее прежней проверки: две вакуумные проверки #793 усилены
 в #799, а опции без именованной замены перечислены в заметке #799 ниже.
 
+#803: объединённый кандидат связал dispatch (#757), report/delivery (#785) и
+project_limit (#761); проверки ниже утверждают этот контракт, а не прежний
+общий role-route отказ. #434-инвентарь перечисляет связанные поверхности точно.
+
 #799, неблокирующие замечания review к #793 (комментарий, без замены):
-  * dispatch/agents/report/deliveries/slash идут общим role-route и по тексту
-    неотличимы от произвольного неизвестного слова;
+  * agents/deliveries/slash идут общим role-route и по тексту
+    неотличимы от произвольного неизвестного слова (dispatch исправлен #757,
+    report/delivery -- #785);
   * `#793 lost admission is recovered by request id` повторяет уже проверенный
     exit-3 (на #793 это были строки 405-406);
   * без именованной замены удалены `--quiet`, bare `--wait`, текст #481 warning,
@@ -78,6 +85,15 @@ REFUSAL_NO_CONTEXT = ("no HTTPS server context: set MOP_API_ORIGIN and MOP_API_T
 BINDING = ["--epoch", EPOCH, "--incarnation", INCARNATION, "--expected-revision", "7"]
 SEND_ARGS = ["send", PUPPET, "hi", *BINDING, "--request-id", KEY, "--not-after", DEADLINE]
 PRIVATE_INBOX = {"available": False, "reason": "not_bound", "issue": 649}
+# Опубликованный конверт приватной доставки (#773/#785): message и delivery
+# -- разные идентичности, квитанция несёт обе.
+REPORT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+REPORT_DELIVERY_ID = "11111111-2222-4333-8444-555555555555"
+
+def REPORT_RECEIPT(state="accepted"):
+    return {"schema_version": 1, "delivery": {
+        "id": REPORT_DELIVERY_ID, "message_id": REPORT_ID, "operation_request_id": None,
+        "state": state, "idle": False}}
 
 
 class Stubs:
@@ -606,17 +622,26 @@ def check_canonical_send_793(c):
         except Exception as error:
             refused = "unknown command fields are not allowed" in str(error)
         c.check(f"#793 the server refuses authority field {sorted(field)[0]!r}", refused, field)
-    # dispatch -- отдельная операция, не «send с флагом» (#579/#585), и на
-    # дереве эпика она не связана: точный отказ.
-    out, err, code, fixture = canonical(["dispatch", PUPPET, "task"], [])
-    # `mop dispatch` доходит до лаунчера ролей: модуля командлета нет, и отказ
-    # один -- терминал роли не связан. Точный текст тот же, что у `mop master`.
-    c.expect("#793 dispatch is a separate, unbound operation",
-             (code, out, err, fixture.calls), (2, "", REFUSAL_ROLE_WS + "\n", []))
+    # dispatch -- отдельная операция, не «send с флагом» (#579/#585). #757
+    # связал её с собственным командлетом и POST /api/v1/dispatches: полная
+    # привязка обходит detail, а тело разбирает серверный parse_dispatch.
+    out, err, code, fixture = canonical(
+        ["dispatch", PUPPET, "task", *BINDING, "--request-id", KEY, "--not-after", DEADLINE],
+        [accepted()])
+    c.expect("#793 dispatch is one finite POST to its own operation",
+             (code, methods(fixture)), (3, [("POST", "/api/v1/dispatches")]))
     c.expect("#793 dispatch parses as its own server command",
-             type(parse_dispatch(json.loads(json.dumps(body)))).__name__, "DispatchCommand")
-    c.check("#793 no dispatch tool is exposed",
-            "dispatch" not in _mcp.commandlets(), sorted(_mcp.commandlets()))
+             type(parse_dispatch(json.loads(json.dumps(posted(fixture))))).__name__, "DispatchCommand")
+    c.check("#757 dispatch is exposed as its own finite tool",
+            "dispatch" in _mcp.commandlets()
+            and _mcp.commandlets()["dispatch"][2].get("actions")
+            == ["execution.dispatch_task", "operations.view_operation"],
+            _mcp.commandlets().get("dispatch"))
+    # Частичная привязка -- отказ до I/O, как у send.
+    out, err, code, fixture = canonical(["dispatch", PUPPET, "task", "--epoch", EPOCH], [])
+    c.expect("#793 a partial dispatch binding is refused before I/O",
+             (code, out, err, fixture.calls),
+             (1, "", "provide epoch, incarnation and expected-revision together\n", []))
     return True
 
 
@@ -706,10 +731,28 @@ def check_role_channel_585(c):
                 and "bus.request" not in src, rel)
     c.check("#585 the send body carries one target, never a broadcast mask",
             body["target_id"] == PUPPET and "*" not in json.dumps(body), body["target_id"])
-    # dispatch: своя операция и свой отказ на несвязанном дереве.
-    out, err, code, fixture = canonical(["dispatch", PUPPET, "task"], [])
-    c.expect("#585 dispatch is refused as unbound", (code, err), (2, REFUSAL_ROLE_WS + "\n"))
-    c.expect("#585 dispatch sends nothing", fixture.calls, [])
+    # dispatch: своя операция в своём канале (#757); аренды и broadcast нет.
+    out, err, code, fixture = canonical(
+        ["dispatch", PUPPET, "task", *BINDING, "--request-id", KEY, "--not-after", DEADLINE],
+        [Response(202, send_operation("accepted"))])
+    c.expect("#585 dispatch is its own bound operation",
+             (code, methods(fixture)), (3, [("POST", "/api/v1/dispatches")]))
+    body = posted(fixture)
+    c.expect("#585 a canonical dispatch names no sender authority",
+             sorted(body), ["epoch", "expected_revision", "incarnation", "not_after",
+                            "params", "request_id", "schema_version", "target_id"])
+    c.check("#585 dispatch never broadcasts", "*" not in json.dumps(body), body["target_id"])
+    # Ключ фиксирован до detail: без него ответ операции нечем сверить.
+    out, err, code, fixture = canonical(
+        ["dispatch", PUPPET, "task", "--request-id", KEY, "--not-after", DEADLINE], [
+            Response(200, {"schema_version": 1, "epoch": EPOCH, "puppet": puppet_row()}), accepted()])
+    c.expect("#585 dispatch without binding exits 3 on admission", code, 3)
+    c.expect("#585 dispatch without binding reads detail, then its own operation",
+             methods(fixture),
+             [("GET", f"/api/v1/puppets/{PUPPET}"), ("POST", "/api/v1/dispatches")])
+    c.expect("#585 the detail read supplies dispatch's binding",
+             (posted(fixture)["expected_revision"], posted(fixture)["incarnation"]),
+             ("7", INCARNATION))
 
     # autopick: чистая функция, прежние свойства.
     rows = [
@@ -768,9 +811,14 @@ def check_role_api_585(c):
     # #793: роль не слушает ничей инбокс в процессе. Замена свойства --
     # явная недоступность private inbox и точный отказ команд.
     c.expect("#793 the MCP declares the private inbox unavailable", _mcp.PRIVATE_INBOX, PRIVATE_INBOX)
+    # #785: report submission and receipt queries are finite tools now, so the
+    # instructions name them as such and keep only the receiver/holder inbox
+    # (agents roster, endpoint registration, native receiver) unavailable.
     c.check("#793 the instructions name the missing inbox capability",
-            "private inbox unavailable" in _mcp.INSTRUCTIONS
-            and "no agents, report, idle notifications, endpoint registration" in _mcp.INSTRUCTIONS,
+            "Receiver/holder inbox unavailable by default (#649)" in _mcp.INSTRUCTIONS
+            and "no agents roster, endpoint registration or native receiver" in _mcp.INSTRUCTIONS
+            and "Private report submission and receipt queries are finite tools" in _mcp.INSTRUCTIONS
+            and "queued submissions are not native acceptance" in _mcp.INSTRUCTIONS,
             _mcp.INSTRUCTIONS)
     out, err, code, fixture = canonical(["master"], [])
     c.expect("#793 a role's private WS terminal is unsupported", (code, out, err),
@@ -1134,7 +1182,7 @@ def check_private_inbox_793(c):
     # клиентский WSS-потребитель в этом дереве не связан.
     c.expect("#793 the MCP private inbox contract", _mcp.PRIVATE_INBOX, PRIVATE_INBOX)
     c.check("#793 the installed client names the absent capability",
-            "private inbox unavailable (#649)" in _mcp.INSTRUCTIONS,
+            "Receiver/holder inbox unavailable by default (#649)" in _mcp.INSTRUCTIONS,
             _mcp.INSTRUCTIONS)
     # Легаси-поверхности не возвращены и не подделаны: их нет вовсе.
     # HYPOTHESIS (#799): проверялся шим mop/cli/service/mcp.py, который лишь
@@ -1152,9 +1200,7 @@ def check_private_inbox_793(c):
     for command, text in (
             (["master"], REFUSAL_ROLE_WS),
             (["agents"], REFUSAL_ROLE_WS),
-            (["report"], REFUSAL_ROLE_WS),
             (["deliveries"], REFUSAL_ROLE_WS),
-            (["dispatch"], REFUSAL_ROLE_WS),
             (["slash", "s1", "/model"], REFUSAL_ROLE_WS),
             (["tail", "s1"], REFUSAL_TAIL),
             (["attach", "s1"], REFUSAL_TERMINAL),
@@ -1163,6 +1209,40 @@ def check_private_inbox_793(c):
         c.expect(f"#793 {' '.join(command)} is an explicit unsupported contract",
                  (code, out, err), (2, "", text + "\n"))
         c.expect(f"#793 {' '.join(command)} performs no I/O", fixture.calls, [])
+
+    # #757/#785: dispatch, report and delivery are bound finite surfaces now;
+    # the shared role-route refusal no longer applies to them. Their contract
+    # is exercised where it lives: dispatch in check_canonical_send_793, the
+    # private report/receipt pair here, against the published envelope.
+    out, err, code, fixture = canonical(
+        ["dispatch", PUPPET, "task", *BINDING, "--request-id", KEY, "--not-after", DEADLINE],
+        [accepted()])
+    c.expect("#793 dispatch is bound to its own finite operation",
+             (code, methods(fixture)), (3, [("POST", "/api/v1/dispatches")]))
+    report_args = ["report", "private:"+EPOCH, "status", "--epoch", EPOCH,
+                   "--message-id", REPORT_ID, "--priority", "next"]
+    out, err, code, fixture = canonical(report_args, [Response(202, REPORT_RECEIPT())])
+    c.expect("#793 report is one finite private POST",
+             (code, methods(fixture)), (0, [("POST", "/api/v1/reports")]))
+    c.expect("#793 the report carries only published fields",
+             sorted(posted(fixture)), ["address", "epoch", "message_id", "not_after",
+                                       "notify_when_idle", "operation_request_id",
+                                       "priority", "schema_version", "text"])
+    out, err, code, fixture = canonical(["delivery", REPORT_DELIVERY_ID],
+                                        [Response(200, REPORT_RECEIPT())])
+    c.expect("#793 a receipt query is one finite GET",
+             (code, methods(fixture)), (0, [("GET", "/api/v1/deliveries/"+REPORT_DELIVERY_ID)]))
+    c.expect("#793 a receipt states acceptance, not native delivery",
+             (json.loads(out)["delivery"]["state"], "delivered" in out.lower()), ("accepted", False))
+    out, err, code, fixture = canonical(["delivery", "--epoch", EPOCH, "--message-id", REPORT_ID],
+                                        [Response(404, {"schema_version": 1, "error": {
+                                            "code": "not_found", "message": "resource not found",
+                                            "retryable": False}})])
+    c.expect("#793 an absent receipt is unknown, never a repost",
+             (code, methods(fixture)),
+             (3, [("GET", f"/api/v1/deliveries?schema_version=1&epoch={EPOCH}&message_id={REPORT_ID}")]))
+    c.check("#793 unknown delivery says it is never re-sent",
+            "never re-sent" in err and "unknown" in err, err)
 
     # #213: подписка человека сужается до его собственного токена; субъект
     # инбокса жив, но каноническая доставка адресуется только записям
@@ -1277,9 +1357,12 @@ def check_mcp_descriptions_434(c):
     c.check("#434 the instructions are model-facing English", isinstance(text, str) and text)
     c.check("#434 the instructions hide legacy transport internals", not any(
         word in text for word in ("Nomad", "NATS", "tmux", "neighboring node")), text)
+    # #785 bound private report submission and receipt queries; the inventory
+    # now names those finite tools and keeps only the receiver/holder inbox out.
     c.check("#434 the instructions keep the finite surface", all(
         word in text for word in ("Authenticated management tools only", "authorizes actual resources",
-                                  "private inbox unavailable")))
+                                  "Private report submission and receipt queries are finite tools",
+                                  "Receiver/holder inbox unavailable by default (#649)")))
     path = os.path.join(cli.PACKAGE, "core", "send.py")
     doc = cli.docstring(path)
     c.check("#434 send retains the force/ownership refusal",
@@ -1294,9 +1377,17 @@ def check_mcp_descriptions_434(c):
     c.check("#434 the declaration offers no legacy routing flags",
             not ({"--force", "--mode", "--local", "--reply-to", "--notify-when-idle"}
                  & {arg.get("flag") for arg in decl.get("args", [])}), decl.get("args"))
+    # #757 bound dispatch; #785 bound report/delivery; #761 bound project_limit.
+    # The removed role surfaces stay absent; the added finite ones are named
+    # exactly, so an accidental extra tool still fails the check.
     c.check("#434 the tool catalogue exposes no removed surfaces",
-            not ({"agents", "tail", "slash", "dispatch", "report", "master"}
-                 & set(_mcp.commandlets())), sorted(_mcp.commandlets()))
+            not ({"agents", "tail", "slash", "master"} & set(_mcp.commandlets())), sorted(_mcp.commandlets()))
+    c.check("#434 the tool catalogue carries exactly the bound finite surfaces",
+            set(_mcp.commandlets()), {
+                'add', 'addresses', 'build', 'delete', 'delivery', 'detail', 'diagnose',
+                'dispatch', 'health', 'landing', 'list', 'node_drain', 'node_up', 'operation',
+                'profile', 'project_limit', 'project_list', 'report', 'restart', 'send',
+                'stat', 'stop', 'wipe'})
     mcp_doc = open(os.path.join(cli.PACKAGE, "service", "mcp.py")).read()
     c.check("#434 --check describes an offline catalogue, not live reachability",
             "does not register an endpoint or confirm native delivery" in mcp_doc
@@ -1485,7 +1576,7 @@ def main():
         c.fail("#148 channel library", f"{type(e).__name__}: {e}")
 
     # STATUS: FIXED — see #793 (эпик #623), #148, #213, #226, #371, #434, #437,
-    # #459, #481, #574, #585, #662, #785
+    # #459, #481, #574, #585, #662, #785, #803
     return c.report("channel")
 
 

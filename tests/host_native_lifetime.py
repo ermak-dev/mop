@@ -127,9 +127,9 @@ class LifetimeTests(unittest.IsolatedAsyncioTestCase):
             for name in ('first-node', 'replacement-node', 'expired-phase-node')}
         item = SimpleNamespace()
         # Только protocol seam; real proc/socket/TTY observer ниже не подменяется.
-        async def check():
+        async def mailbox_open():
             if mailbox.closed: raise Refused('original mailbox closed')
-        life = SimpleNamespace(item=item, mailbox=mailbox, check=check)
+        life = SimpleNamespace(item=item, mailbox=mailbox, check=mailbox_open)
         root = SimpleNamespace(_attempt=lambda *args: item, bodies={scope: SimpleNamespace(native=life, cleanup=None)})
         for name, frontend in frontends.items():
             async def exchange(request, process=name):
@@ -383,7 +383,7 @@ class PopulatedStatusTests(unittest.IsolatedAsyncioTestCase):
     def populated(self, *, bounded=False, escaped=False):
         from types import SimpleNamespace
         from uuid import UUID
-        from host_native import model_delivery
+        from _host_native import model_delivery
         from mop.common.telemetry import SessionScope
         from mop.node.host_backend import Process
         from mop.node.host_native_owner import NativeOwner
@@ -533,7 +533,7 @@ class PopulatedStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_escaped_installation_rejects_before_native_dispatch(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
-        from host_native import model_delivery
+        from _host_native import model_delivery
         from mop.node.host_inputs import pack
         from mop.node.host_native import NativeSubmission, ModelInputs, ProviderProfile
         from mop.node.host_native_owner import submit_native
@@ -579,7 +579,7 @@ class ProxyDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from types import SimpleNamespace
         from uuid import UUID
-        from host_native import model_delivery
+        from _host_native import model_delivery
         from mop.common.producer import ProducerReport
         from mop.common.telemetry import SessionScope
         from mop.node.host_scope import Reference

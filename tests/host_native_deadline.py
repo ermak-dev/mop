@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import _lib  # noqa: F401
 import hermetic  # noqa: F401
-from host_native_proof import NativeProofFixture
+from _host_native import NativeProofFixture
 from mop.common.management_context import body_deadline
 from mop.node.host_handoff import LaunchWindow
 from mop.node.host_scope import Refused
@@ -158,8 +158,14 @@ class OriginalDeadline(NativeProofFixture):
         root = SimpleNamespace(_closed=False, _confirmed=True, _bound_epoch=self.scope.epoch,
             identity=SimpleNamespace(node_id=self.scope.node_id), _backend_epoch=self.scope.executor_epoch,
             attempts={}, capacity=20, bodies={self.scope: body}, _owned={self.scope: self.reference},
-            manifest=SimpleNamespace(project=Mock(), require_native_release=Mock(), verify=Mock(),
-                directories=dict(python_root=sys.path[0]), tools=dict(ca=profile.ca)),
+            # #781: pre-dispatch status budget reads the installed manifest;
+            # fake mirrors the real RuntimeManifest surface, not the assertions.
+            manifest=SimpleNamespace(
+                project=Mock(return_value=SimpleNamespace(wire=lambda: dict(
+                    image_revision='image', policy_id='policy'))),
+                require_native_release=Mock(), verify=Mock(),
+                content_digest='a'*64, directories=dict(python_root=sys.path[0]),
+                tools=dict(ca=profile.ca, native=Path('/opt/tools/native'), tmux=Path('/opt/tools/tmux'))),
             installed=SimpleNamespace(runner=self.adapter.installed.runner, node_uid=os.getuid()),
             _store=Mock(return_value=store), config=SimpleNamespace(snapshots=self.home), adapter=self.adapter)
         self.adapter._native_launches.clear()

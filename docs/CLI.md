@@ -10,7 +10,7 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop dispatch`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project limit`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop delivery`, `mop detail`, `mop diagnose`, `mop dispatch`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project limit`, `mop project list`, `mop report`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
@@ -132,6 +132,18 @@ before that query. Outstanding/unknown operations return exit 3; recover
 through mop operation with the original key/epoch, never by reposting. MCP
 requires the full explicit binding. The explicit HTTPS origin/CA and transient
 Django token follow mop health.
+```
+
+#### mop delivery
+
+```text
+mop delivery [delivery-id | --epoch UUID --message-id UUID]: read a private delivery receipt
+
+Returns committed controller state, not a WebSocket write acknowledgement.
+Queued, attempting and unknown states do not prove native application acceptance.
+Terminal unknown is the truthful outcome for an ordinary native 2.1.302
+delivery and is never re-sent; recovery is read-only by the original key.
+Idle is a separate matched native observation. Access uses the current Actor.
 ```
 
 #### mop detail
@@ -308,6 +320,20 @@ principal recycles without one: the server keeps the approved policy.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
+```
+
+#### mop report
+
+```text
+mop report <address> <text|-> --epoch UUID [--message-id UUID] [--operation-request-id UUID] [--not-after UTC] [--priority next|now] [--notify-when-idle]: submit a private report
+
+The opaque private address is not an assignment UUID. Message identity is fixed
+before I/O and is distinct from operation correlation. A queued or accepted HTTP
+submission is not native delivery. Lost submissions recover by GET only; a 404
+remains unknown and never triggers a repost. A committed unknown state is
+terminal for native 2.1.302 ordinary delivery: it is never re-sent, and the
+message id/epoch recover it read-only. Text '-' reads bounded UTF-8 stdin.
+Receiver registration, native sockets and holder headers are not public options.
 ```
 
 #### mop restart
@@ -850,6 +876,29 @@ is written. A commandlet with an empty docstring is refused, named.
 
 The reference is committed: an edit to a commandlet's docstring ships with
 the regenerated docs/CLI.md in the same commit, or CI is red.
+```
+
+#### mop dev inbox-probe
+
+```text
+mop dev inbox-probe --output new-dir [--native-binary PATH] [--timeout 1..30]: owned native private-inbox fixture
+
+Builds the existing isolated normal nonroot Docker fixture with a finite source
+closure and the declared aiohttp dependency. Runtime has no network except its
+own loopback HTTPS/WSS and dummy Messages provider. No host config, credentials,
+mounts, pool, model settings or native startup composition are used or changed.
+Requires the installed native 2.1.302. The scenario is classified by that
+version's receipt contract (docs/CHANNEL.md): an ordinary user frame gets no
+positive native receipt, so unknown is a truthful terminal outcome and is never
+re-sent. observed requires exactly one native user write, no re-send, verified
+holder/task/callback cleanup, and either unknown or an explicit native
+delivered (accepted) / explicit refusal (unavailable); silence, drained write,
+idle, provider or UI activity never upgrade it, and accepted is never reported
+without explicit delivered. The fixture home is prepared, not cold-boot
+onboarding proof. The controlled WSS receipt is not PostgreSQL commit proof;
+real PostgreSQL integration is a separate check. The report records source
+hashes, actual version, kernel isolation and cleanup. Re-verify the contract
+when the native version changes.
 ```
 
 #### mop dev openapi

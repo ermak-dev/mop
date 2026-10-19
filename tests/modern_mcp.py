@@ -254,7 +254,10 @@ class NativeStdio(unittest.TestCase):
                 init = rpc(1, 'initialize', {'protocolVersion': '2025-11-25',
                     'capabilities': {}, 'clientInfo': {'name': 'owned-fixture', 'version': '1'}})
                 self.assertNotIn('error', init, init)
-                self.assertIn('private inbox unavailable', init['result']['instructions'])
+                # #785: report/receipt queries became finite tools; only the
+                # receiver/holder inbox stays unavailable in the instructions.
+                self.assertIn('Receiver/holder inbox unavailable by default (#649)',
+                              init['result']['instructions'])
                 self.assertEqual(init['result']['capabilities']['experimental']['private_inbox']['available'], False)
                 process.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n'); process.stdin.flush()
                 tools = rpc(2, 'tools/list')['result']['tools']

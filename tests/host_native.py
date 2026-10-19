@@ -24,6 +24,7 @@ import _lib  # noqa: F401
 import hermetic  # noqa: F401
 from _host_inputs_data import selected
 from mop.driver.launch import Registration, RegisteredLayout
+from _host_native import model_delivery
 
 
 def registration(action='native_exec'):
@@ -91,33 +92,6 @@ def native_api():
     assert importlib.util.find_spec('mop.node.host_native') is not None, \
         'strict HOST native consumer codec is missing (#760)'
     return importlib.import_module('mop.node.host_native')
-
-
-def model_delivery():
-    import base64
-    import hashlib
-    from uuid import uuid4
-    from _body_fixture import bundle
-    from mop.node.host_inputs import canonical_json
-    a, scope, value = selected('native_exec')
-    role = bundle()
-    a = replace(a, work=replace(a.work, role=role.role, bundle_digest=role.digest))
-    value['work'] = a.work.wire()
-    value['role'] = dict(manifest=role.manifest.to_dict(), prompt=base64.b64encode(role.prompt).decode())
-    config_id, credential_id = str(uuid4()), str(uuid4())
-    config = dict(schema_version=1, profile_version=1, provider_profile='owned-fixture-v1',
-        credential_version=credential_id, proof_strategy='bootstrap-to-desired',
-        bootstrap_model='fixture-bootstrap', desired_model='fixture-desired')
-    raw = canonical_json(config)
-    value['selection'].update(desired_model=config['desired_model'], model_config_digest=hashlib.sha256(raw).hexdigest(),
-        consumers=[dict(purpose='model_config', version_id=config_id),
-                   dict(purpose='model_credential', version_id=credential_id)])
-    credential = dict(schema_version=1, provider_profile='owned-fixture-v1', token='fixture-secret-not-for-repr')
-    value['consumers'] = [dict(purpose='model_config', version_id=config_id, name='NODE_OPTIONS',
-        kind='file', value=base64.b64encode(raw).decode()),
-        dict(purpose='model_credential', version_id=credential_id, name='../../arbitrary',
-             kind='credential', value=base64.b64encode(canonical_json(credential)).decode())]
-    return a, scope, value
 
 
 def ready_fixture():
