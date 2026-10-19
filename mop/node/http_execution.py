@@ -5,6 +5,7 @@ claim — короткий допуск, не обещание exactly-once вн
 """
 import asyncio
 from dataclasses import dataclass
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
 import re
@@ -12,6 +13,10 @@ import ssl
 from typing import Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+
+
+# Только concrete initial-HOST dispatch; общий transport не принимает callbacks.
+_native_dispatch = ContextVar('native_http_dispatch', default=None)
 
 
 class Refused(ValueError):
@@ -194,8 +199,26 @@ class HttpsTransport:
         limit = self._bootstrap_limit if (method, path) == ('POST', 'work/initial-launch') and (
             type(payload) is dict and payload.get('action') == 'bootstrap_body') else self.response_limit
         import aiohttp
+        dispatch = _native_dispatch.get()
+        if dispatch is not None:
+            from mop.node.host_native_lifetime import NativeDispatch
+            if type(dispatch) is not NativeDispatch:
+                raise Refused('concrete native Root dispatch owner required')
+            dispatch.http(self, method, path, payload, params)
         if self._session is None:
+            transport = self
+            class RootCheckedRequest(aiohttp.ClientRequest):
+                async def send(request, connection):
+                    current = _native_dispatch.get()
+                    if current is not None:
+                        from mop.node.host_native_lifetime import NativeDispatch
+                        if type(current) is not NativeDispatch or current.client.transport is not transport:
+                            raise Refused('native HTTP request lost its original transport owner')
+                        # После connector slot/DNS/TLS, до первых HTTP bytes.
+                        await current.check()
+                    return await super().send(connection)
             self._session = aiohttp.ClientSession(
+                request_class=RootCheckedRequest,
                 connector=aiohttp.TCPConnector(limit=self.connections, ssl=self._tls),
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
                 headers={'Authorization': 'Token ' + self._token, 'Accept': 'application/json'},

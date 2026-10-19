@@ -250,13 +250,12 @@ async def run_native(owner, body, item):
 
 
 async def mailbox_exchange(owner, request, worker):
-    """Один короткий poll/complete; node peer уже pinned SocketServer'ом."""
+    """Finite Root readback до/вокруг HTTP; OS peer и frontend ticket не смешиваются."""
     from mop.node.host_scope import Scope
-    action = request.get('action')
-    keys = ('schema_version', 'action', 'scope', 'attempt_id')
-    exact(request, keys if action == 'native_poll' else (*keys, 'id', 'ticket', 'answer', 'error'))
-    if type(request['schema_version']) is not int or request['schema_version'] != 1:
-        raise Refused('unsupported native mailbox exchange')
+    from mop.node.host_native_lifetime import mailbox_request
+    mailbox_request(request)
+    action = request['action']
+    worker = worker+':'+request['frontend']
     scope, attempt = Scope.parse(request['scope']), canonical(request['attempt_id'])
     item = owner._attempt(scope, attempt)
     body = owner.bodies[scope]
@@ -264,13 +263,21 @@ async def mailbox_exchange(owner, request, worker):
     if life is None or life.item is not item or body.cleanup is not None:
         raise Refused('native mailbox has no original live retained attachment')
     await life.check()
+    # check() содержит awaits: lifetime/cleanup нельзя взять из старого sample.
+    if body.native is not life or life.item is not item or body.cleanup is not None:
+        raise Refused('native dispatch original retained lifetime changed during readback')
     if action == 'native_poll':
         return dict(operation=life.mailbox.poll(worker))
-    if action != 'native_complete':
-        raise Refused('native mailbox exchange action is not enabled')
+    if action in ('native_dispatch', 'native_validate'):
+        return life.mailbox.dispatch(worker, request['id'], request['ticket'], request['digest'],
+            request['deadline'], begin=action == 'native_dispatch')
+    if not life.mailbox.current(worker, request['id'], request['ticket']).started:
+        raise Refused('native completion requires its original admitted HTTP dispatch')
+    await life.check()
+    if body.native is not life or life.item is not item or body.cleanup is not None:
+        raise Refused('native completion original retained lifetime changed')
     if request['error'] is not None:
         life.mailbox.fail(worker, request['id'], request['ticket'], request['error'])
     else:
         life.mailbox.complete(worker, request['id'], request['ticket'], request['answer'])
-    await life.check()
     return dict(completed=request['id'])

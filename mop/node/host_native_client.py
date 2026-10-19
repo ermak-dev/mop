@@ -4,12 +4,13 @@
 закрывает только frontend HTTP/socket tasks, никогда root/body/native lifetime.
 """
 import asyncio
+from uuid import uuid4
 
 from mop.node.host_native import ModelInputs, NativeSubmission, ProviderProfile
 from mop.node.host_native_lifetime import execute_proxy
 from mop.node.host_phase_client import PlannedExecutor, _Owned
 from mop.node.host_phases import Projection, admitted
-from mop.node.host_scope import Reference, canonical
+from mop.node.host_scope import Reference, Unknown, canonical
 from mop.node.http_execution import Admission, Refused, Unavailable
 
 
@@ -19,16 +20,23 @@ class LifetimeWorker:
         self.task = self.cleanup = None
         self.closed = False
         self.last_error = None
+        self.frontend = str(uuid4())
+        self.current = None
 
     async def exchange(self, request):
+        from mop.node.host_backend_client import BackendClient
+        if type(self.backend) is not BackendClient:
+            raise Refused('native dispatch requires the installed Root BackendClient')
         async with self.backend.connect() as session:
             return await session.native_mailbox(request)
 
     def address(self, action):
-        return dict(schema_version=1, action=action, scope=self.scope.wire(), attempt_id=self.attempt)
+        return dict(schema_version=1, action=action, scope=self.scope.wire(), attempt_id=self.attempt,
+            frontend=self.frontend)
 
     async def run(self):
         while not self.closed:
+            error = None
             try:
                 value = await self.exchange(self.address('native_poll'))
                 operation = value['operation']
@@ -36,17 +44,21 @@ class LifetimeWorker:
                     await asyncio.sleep(.025)
                     continue
                 answer = error = None
+                self.current = operation
                 try:
-                    answer = await execute_proxy(self.client, operation)
-                except (Refused, Unavailable, OSError, TimeoutError, ValueError) as failure:
-                    error = str(failure) if isinstance(failure, (Refused, Unavailable)) else type(failure).__name__
+                    answer = await execute_proxy(self.client, operation, worker=self)
+                except (Refused, Unavailable, Unknown, OSError, TimeoutError, ValueError) as failure:
+                    error = str(failure) if isinstance(failure, (Refused, Unavailable, Unknown)) else type(failure).__name__
+                finally:
+                    self.current = None
                 await self.exchange(dict(**self.address('native_complete'), id=operation['id'],
                     ticket=operation['ticket'], answer=answer, error=error))
                 self.last_error = error
-            except (Refused, Unavailable, OSError, TimeoutError, ValueError) as error:
-                # Root/cgroup не принадлежит этому frontend. Retry только finite
-                # observation/оригинальной записи, не native exec/producer mint.
-                self.last_error = str(error) if isinstance(error, (Refused, Unavailable)) else type(error).__name__
+            except (Refused, Unavailable, Unknown, OSError, TimeoutError, ValueError) as failure:
+                # Root/cgroup не принадлежит этому frontend или Root exchange потерян
+                # (Unknown). Retry только finite poll, не native exec/producer mint.
+                reason = str(failure) if isinstance(failure, (Refused, Unavailable, Unknown)) else type(failure).__name__
+                self.last_error = error+'; completion not acknowledged: '+reason if error else reason
                 await asyncio.sleep(.1)
 
     def start(self):

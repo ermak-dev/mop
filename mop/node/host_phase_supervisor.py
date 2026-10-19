@@ -414,7 +414,7 @@ class PhaseOwner(Supervisor):
                 from mop.node.host_native import NativeSubmission
                 item = self.submit_native(NativeSubmission.decode(raw))
                 result = self.status(item)
-            elif action in ('native_poll', 'native_complete'):
+            elif action in ('native_poll', 'native_dispatch', 'native_validate', 'native_complete'):
                 from mop.node.host_native_owner import mailbox_exchange
                 peer = peer_credentials(writer.get_extra_info('socket'))
                 if peer[1] != self.installed.node_uid:

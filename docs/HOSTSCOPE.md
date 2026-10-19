@@ -176,6 +176,22 @@ budget/recovery proof, не actual vendor cold-start/readiness acceptance (#781)
 Новые исходники не добавлены: codec находится в уже hashed native release
 closure `host_native.py`; старые non-native phases не импортируют native codec.
 
+## Native proxy dispatch
+
+`native_poll` только доставляет запись Root mailbox: id, ticket, digest и
+исходный пятисекундный monotonic deadline операции. Это не право на HTTP.
+Перед HTTP node берёт `native_dispatch` (begin), во время HTTP и перед первыми
+байтами после TLS connect повторяет `native_validate`, после HTTP — ещё раз.
+Каждый exchange заново проверяет live retained lifetime, текущий frontend
+(OS peer плюс worker identity), ticket, digest и тот же deadline; продления нет.
+HTTP — задача dispatch owner под тем же deadline: закрытие, замена frontend,
+потерянный Root exchange или остаток бюджета отменяют её. Закрытая, истёкшая
+или заменённая запись не начинает новый HTTP. Начатый dispatch остаётся
+outcome unknown: замене не выдаётся и автоматически не повторяется.
+Заменённый frontend не может забрать ticket замены; history ограничена 256
+заменами на lifetime, дальше явный отказ. Telemetry не проходит `Work.gate`:
+истёкшая phase lease не останавливает законную lifetime telemetry (#782).
+
 ## Проверки и честная граница acceptance
 
 `mop dev test host_scope` — finite parsing/peer/path/epoch/token/refusal,

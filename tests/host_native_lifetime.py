@@ -117,16 +117,42 @@ class LifetimeTests(unittest.IsolatedAsyncioTestCase):
         # MachineClient/HttpsTransport и никогда не передаёт bearer через mailbox.
         transport = object.__new__(HttpsTransport)
         client = MachineClient(transport)
+        from types import SimpleNamespace
+        from mop.node.host_native_client import LifetimeWorker
+        from mop.node.host_native_owner import mailbox_exchange
+        from mop.node.host_scope import Scope
+        w = self.registration.work
+        scope = Scope(w.epoch, w.node_id, w.executor_epoch, w.target_id, w.incarnation_id, w.operation_id)
+        frontends = {name: LifetimeWorker(client, None, scope, self.admission.attempt_id)
+            for name in ('first-node', 'replacement-node', 'expired-phase-node')}
+        item = SimpleNamespace()
+        # Только protocol seam; real proc/socket/TTY observer ниже не подменяется.
+        async def check():
+            if mailbox.closed: raise Refused('original mailbox closed')
+        life = SimpleNamespace(item=item, mailbox=mailbox, check=check)
+        root = SimpleNamespace(_attempt=lambda *args: item, bodies={scope: SimpleNamespace(native=life, cleanup=None)})
+        for name, frontend in frontends.items():
+            async def exchange(request, process=name):
+                return await mailbox_exchange(root, request, process)
+            frontend.exchange = exchange
+        def peer(name): return name+':'+frontends[name].frontend
+        async def dispatch(name, record):
+            frontend = frontends[name]
+            frontend.current = record
+            try:
+                return await m.execute_proxy(client, record, worker=frontend)
+            finally:
+                frontend.current = None
         async def serve_once():
             record = None
             for _ in range(200):
-                record = mailbox.poll('first-node')
+                record = mailbox.poll(peer('first-node'))
                 if record is not None:
                     break
                 await asyncio.sleep(.005)
             self.assertIsNotNone(record)
-            answer = await m.execute_proxy(client, record)
-            mailbox.complete('first-node', record['id'], record['ticket'], answer)
+            answer = await dispatch('first-node', record)
+            mailbox.complete(peer('first-node'), record['id'], record['ticket'], answer)
         with patch.object(HttpsTransport, 'request', request):
             worker = asyncio.create_task(serve_once())
             bridge = await self.runtime.attach()
@@ -138,19 +164,19 @@ class LifetimeTests(unittest.IsolatedAsyncioTestCase):
                 event='PostModelSwitch', model='fixture-desired', error=None), token=self.runtime._token))
             flush = asyncio.create_task(bridge.flush())
             for _ in range(200):
-                record = mailbox.poll('first-node')
+                record = mailbox.poll(peer('first-node'))
                 if record is not None:
                     break
                 await asyncio.sleep(.005)
-            # Первый frontend потерян после dispatch: новый забирает тот же exact
-            # operation, старый ticket уже не может завершить его.
-            replacement = mailbox.poll('replacement-node')
+            # Первый frontend потерян после poll, но до HTTP: новый забирает тот
+            # же exact operation, старый ticket уже не может завершить его.
+            replacement = mailbox.poll(peer('replacement-node'))
             self.assertEqual(record['id'], replacement['id'])
             self.assertEqual(record['payload'], replacement['payload'])
             with self.assertRaises(Refused):
-                mailbox.complete('first-node', record['id'], record['ticket'], {})
-            answer = await m.execute_proxy(client, replacement)
-            mailbox.complete('replacement-node', replacement['id'], replacement['ticket'], answer)
+                mailbox.complete(peer('first-node'), record['id'], record['ticket'], {})
+            answer = await dispatch('replacement-node', replacement)
+            mailbox.complete(peer('replacement-node'), replacement['id'], replacement['ticket'], answer)
             await flush
             self.assertEqual(mailbox.model_committed.sequence, 1)
             self.assertEqual(mailbox.model_committed.event, 'PostModelSwitch')
@@ -175,13 +201,13 @@ class LifetimeTests(unittest.IsolatedAsyncioTestCase):
                     event='Stop', model=None, error=None), token=self.runtime._token))
                 flush = asyncio.create_task(bridge.flush())
                 for _ in range(200):
-                    record = mailbox.poll('expired-phase-node')
+                    record = mailbox.poll(peer('expired-phase-node'))
                     if record is not None:
                         break
                     await asyncio.sleep(.005)
                 self.assertIsNotNone(record)
-                answer = await m.execute_proxy(client, record)
-                mailbox.complete('expired-phase-node', record['id'], record['ticket'], answer)
+                answer = await dispatch('expired-phase-node', record)
+                mailbox.complete(peer('expired-phase-node'), record['id'], record['ticket'], answer)
                 await flush
             self.assertEqual(mailbox.last_observation.sequence, 2)
             self.assertEqual(mailbox.model_committed.sequence, 1)
@@ -528,6 +554,409 @@ class PopulatedStatusTests(unittest.IsolatedAsyncioTestCase):
         root._store.assert_not_called()
         self.assertIsNone(root.bodies[scope].native)
         self.assertEqual(root.attempts, {})
+
+
+# BUG #782: полученная poll-записью операция не является текущим правом на HTTP
+# после close/replace/TTL.
+# HYPOTHESIS: Root проверяется только при poll/complete, не на dispatch и во время HTTP.
+# RESULT (RED на ab834133): закрытый mailbox, отменённый request и исчезнувший
+# native всё равно дают один HTTP вызов; poll не несёт 5s deadline; старый
+# frontend забирает ticket замены; начатый dispatch снова выдаётся замене;
+# HTTP не отменяется ни Root, ни остатком бюджета; Unknown Root exchange убивает worker.
+# SOLUTION: poll только доставка. native_dispatch (begin) и native_validate —
+# свежая Root readback с exact frontend/ticket/digest/original deadline перед,
+# во время (watcher) и после HTTP, плюс перед первыми байтами после TLS. HTTP
+# — задача dispatch owner под тем же deadline; начатый dispatch только unknown.
+# Telemetry по-прежнему без Work.gate: phase lease не право lifetime.
+# STATUS: FIXED — see #782
+class ProxyDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from types import SimpleNamespace
+        from uuid import UUID
+        from host_native import model_delivery
+        from mop.common.producer import ProducerReport
+        from mop.common.telemetry import SessionScope
+        from mop.node.host_scope import Reference
+        from mop.node.host_native_client import LifetimeWorker
+        a, scope, delivery = model_delivery()
+        self.scope, self.admission = scope, a
+        self.reference = Reference(scope, uuid4().hex, str(uuid4()))
+        self.registration = Registration(a.work, delivery['bootstrap_revision'], delivery['bootstrap_digest'],
+            delivery['image_digest'], delivery['display_name'])
+        session = SessionScope(*(UUID(getattr(a.work, k)) for k in
+            ('epoch', 'target_id', 'incarnation_id', 'node_id', 'executor_epoch')), str(uuid4()), uuid4())
+        report = ProducerReport(session, UUID(self.registration.bootstrap_revision), self.registration.bootstrap_digest,
+            self.registration.image_digest, self.registration.display_name, '%1', 12345,
+            self.reference.boot_id+':12345678')
+        identity = dict(pid=report.pid, process_start=report.process_start, session_id=session.session_id,
+            tmux_pid=12346, tmux_start=12345679, socket_inode=[123, 456], tty_identity=[136, 1, 123],
+            namespaces=['mnt:[4026531841]', 'pid:[4026531836]', 'user:[4026531837]'])
+        self.box = api().NativeMailbox(self.registration, a, desired_model='fixture-desired')
+        registration = asyncio.create_task(self.box.request('register_producer', dict(report=report.wire(), identity=identity)))
+        await asyncio.sleep(0)
+        record = self.box.poll('seed')
+        self.box.complete('seed', record['id'], record['ticket'], ProducerAck(session, 1).wire())
+        await registration
+        self.row = Observation(session, 1, 'PostModelSwitch', None, 'fixture-desired', None, None, 0)
+        self.calls, self.exchanges, self.requests = [], [], []
+        self.client = MachineClient(object.__new__(HttpsTransport))
+        self.worker = LifetimeWorker(self.client, None, scope, a.attempt_id)
+        self.alive = True
+        self.checks = 0
+        class Life:
+            async def check(life):
+                self.checks += 1
+                if not self.alive:
+                    raise Refused('original native attachment is gone')
+        self.life = Life()
+        self.life.mailbox = self.box
+        item = SimpleNamespace()
+        self.life.item = item
+        self.root = SimpleNamespace(_attempt=lambda *args: item,
+            bodies={scope: SimpleNamespace(native=self.life, cleanup=None)})
+        async def exchange(value):
+            from mop.node.host_native_owner import mailbox_exchange
+            self.exchanges.append(value['action'])
+            try:
+                result = await mailbox_exchange(self.root, value, 'node-process')
+            except (Refused, api().Unavailable):
+                self.worker.closed = True
+                raise
+            if value['action'] == 'native_complete':
+                self.worker.closed = True
+            return result
+        self.worker.exchange = exchange
+        async def http(transport, *args, **kwargs):
+            return await self.http(transport, *args, **kwargs)
+        self.transport_request = http
+
+    async def asyncTearDown(self):
+        await self.worker.aclose()
+        self.box.close()
+        for request in self.requests:
+            request.cancel()
+        await asyncio.gather(*self.requests, return_exceptions=True)
+
+    async def polled(self, worker=None):
+        request = asyncio.create_task(self.box.request('ingest_telemetry', self.row.wire()))
+        self.requests.append(request)
+        await asyncio.sleep(0)
+        if worker is not None:
+            return request, self.box.poll(worker)
+        # Тот же Root exchange, что у actual worker: identity записи равна его
+        # dispatch identity, отказ ниже не маскируется чужим ticket.
+        value = await self.worker.exchange(self.worker.address('native_poll'))
+        return request, value['operation']
+
+    async def http(self, transport, method, path, payload=None, params=None):
+        self.calls.append((method, path, payload))
+        return Ack(self.row.scope.producer_epoch, self.row.sequence).wire()
+
+    async def test_closed_polled_record_cannot_call_execute_proxy_transport(self):
+        request, record = await self.polled()
+        self.box.close()
+        await asyncio.gather(request, return_exceptions=True)
+        with patch.object(HttpsTransport, 'request', self.transport_request):
+            try:
+                await api().execute_proxy(self.client, record)
+            except (Refused, api().Unavailable):
+                pass
+        self.assertEqual(len(self.calls), 0, 'closed mailbox still dispatched HTTP before completion refusal')
+
+    async def test_actual_worker_revalidates_late_poll_before_http(self):
+        request, record = await self.polled()
+        self.box.close()
+        await asyncio.gather(request, return_exceptions=True)
+        original_exchange = self.worker.exchange
+        async def exchange(value):
+            if value['action'] == 'native_poll':
+                return dict(operation=record)
+            self.worker.closed = True
+            return await original_exchange(value)
+        self.worker.exchange = exchange
+        with patch.object(HttpsTransport, 'request', self.transport_request):
+            async with asyncio.timeout(1):
+                await self.worker.run()
+        self.assertEqual(len(self.calls), 0, 'actual LifetimeWorker dispatched a closed polled record')
+
+    async def test_original_deadline_is_carried_without_renewal(self):
+        request, record = await self.polled()
+        item = self.box.operations[record['id']]
+        self.assertIn('deadline', record, 'poll drops the original five-second operation cutoff')
+        self.assertEqual(record['deadline'], item.deadline)
+        replacement = self.box.poll('replacement')
+        self.assertEqual(replacement['deadline'], item.deadline)
+        self.assertNotEqual(replacement['ticket'], record['ticket'])
+        request.cancel()
+
+    # BUG #782: expired original operation не начинает HTTP, даже если poll
+    # отдал запись до истечения, а HTTP ждал budget.
+    # HYPOTHESIS: dispatch смотрел только cached record и не сверял deadline.
+    # SOLUTION: NativeDispatch.local()/check() сверяют тот же monotonic deadline
+    # до, вокруг и после HTTP; asyncio.timeout_at бюджета — не новый 5s.
+    # STATUS: FIXED — see #782
+    async def test_expired_operation_never_starts_http(self):
+        import time
+        request, record = await self.polled()
+        # Запись уже доставлена, но Root lifetime истёк до dispatch.
+        self.box.operations[record['id']].deadline = time.monotonic()-1
+        original = self.worker.exchange
+        async def exchange(value):
+            if value['action'] == 'native_poll':
+                return dict(operation=record)
+            return await original(value)
+        self.worker.exchange = exchange
+        with patch.object(HttpsTransport, 'request', self.transport_request):
+            async with asyncio.timeout(1):
+                await self.worker.run()
+        self.assertEqual(self.calls, [], 'expired operation still reached HTTP transport')
+        self.assertIsNone(self.box.model_committed)
+        request.cancel()
+
+    async def test_stale_frontend_ticket_never_starts_http(self):
+        request, record = await self.polled()
+        frontend = self.worker.frontend
+        # Замена frontend выдала новый ticket; старая запись уже не право на HTTP.
+        replacement = self.box.poll('replacement-'+frontend)
+        self.assertNotEqual(record['ticket'], replacement['ticket'])
+        original = self.worker.exchange
+        async def exchange(value):
+            if value['action'] == 'native_poll':
+                return dict(operation=record)
+            return await original(value)
+        self.worker.exchange = exchange
+        with patch.object(HttpsTransport, 'request', self.transport_request):
+            async with asyncio.timeout(1):
+                await self.worker.run()
+        self.assertEqual(self.calls, [], 'stale frontend ticket still reached HTTP')
+        self.assertIsNone(self.box.model_committed)
+        self.box.complete('replacement-'+frontend, replacement['id'], replacement['ticket'],
+            Ack(self.row.scope.producer_epoch, self.row.sequence).wire())
+        await request
+
+    async def queued(self):
+        request = asyncio.create_task(self.box.request('ingest_telemetry', self.row.wire()))
+        self.requests.append(request)
+        await asyncio.sleep(0)
+        return request
+
+    async def run_worker(self):
+        with patch.object(HttpsTransport, 'request', self.transport_request):
+            async with asyncio.timeout(2):
+                await self.worker.run()
+
+    async def test_alive_worker_telemetry_remains_legal_after_phase_expiry(self):
+        request = await self.queued()
+        future = self.admission.work.not_after+timedelta(seconds=1)
+        class Expired(datetime):
+            @classmethod
+            def now(cls, tz=None): return future
+        with patch('mop.node.http_execution.datetime', Expired):
+            await self.run_worker()
+        await request
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.box.model_committed, self.row)
+        self.assertGreaterEqual(self.checks, 3, 'no fresh Root validation around HTTP')
+        self.assertIn('native_dispatch', self.exchanges)
+        self.assertIn('native_validate', self.exchanges)
+        # Duplicate completion не создаёт второй COMMIT/dispatch и не меняет proof.
+        self.assertEqual(self.box.last_ack, Ack(self.row.scope.producer_epoch, 1))
+
+    async def test_cancelled_original_request_prevents_late_polled_dispatch(self):
+        request, record = await self.polled()
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        exchange = self.worker.exchange
+        async def delayed(value):
+            if value['action'] == 'native_poll': return dict(operation=record)
+            return await exchange(value)
+        self.worker.exchange = delayed
+        await self.run_worker()
+        self.assertEqual(len(self.calls), 0)
+
+    async def test_disappeared_native_before_dispatch_has_no_http(self):
+        request, record = await self.polled()
+        exchange = self.worker.exchange
+        async def delayed(value):
+            if value['action'] == 'native_poll':
+                self.alive = False
+                return dict(operation=record)
+            return await exchange(value)
+        self.worker.exchange = delayed
+        await self.run_worker()
+        self.assertEqual(len(self.calls), 0)
+        self.assertIsNone(self.box.model_committed)
+        request.cancel()
+
+    async def test_inflight_native_disappearance_cancels_http_without_new_hook_traffic(self):
+        request = await self.queued()
+        cancelled = asyncio.Event()
+        async def blocked(transport, method, path, payload=None, params=None):
+            self.calls.append((method, path, payload))
+            self.alive = False
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.http = blocked
+        await self.run_worker()
+        self.assertTrue(cancelled.is_set(), 'HTTP task escaped its lifetime owner')
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(self.box.model_committed)
+        self.assertIn('unknown', self.worker.last_error)
+        request.cancel()
+
+    async def test_remaining_operation_budget_cancels_http_not_a_new_five_seconds(self):
+        import time
+        request = await self.queued()
+        operation = next(iter(self.box.operations.values()))
+        operation.deadline = time.monotonic()+.05
+        cancelled = asyncio.Event()
+        async def blocked(transport, method, path, payload=None, params=None):
+            self.calls.append((method, path, payload))
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.http = blocked
+        before = time.monotonic()
+        await self.run_worker()
+        self.assertLess(time.monotonic()-before, .5)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(self.box.model_committed)
+        request.cancel()
+
+    async def test_lost_root_readback_cancels_http_as_unknown_and_worker_survives(self):
+        # BackendClient превращает OSError/timeout Root exchange в Unknown: это
+        # не право продолжать HTTP и не причина терять frontend worker.
+        from mop.node.host_scope import Unknown
+        request = await self.queued()
+        exchange = self.worker.exchange
+        polls = 0
+        async def unreachable(value):
+            nonlocal polls
+            if value['action'] == 'native_poll':
+                polls += 1
+                if polls == 1:
+                    raise Unknown('HOST backend authority connection unavailable; no automatic retry')
+            if value['action'] == 'native_validate' and self.calls:
+                raise Unknown('HOST backend authority connection unavailable; no automatic retry')
+            return await exchange(value)
+        self.worker.exchange = unreachable
+        cancelled = asyncio.Event()
+        async def blocked(transport, method, path, payload=None, params=None):
+            self.calls.append((method, path, payload))
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.http = blocked
+        await self.run_worker()
+        self.assertTrue(cancelled.is_set(), 'HTTP kept running after its Root readback was lost')
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(self.box.model_committed)
+        results = await asyncio.gather(request, return_exceptions=True)
+        self.assertIsInstance(results[0], api().Unavailable)
+        self.assertIn('unknown', str(results[0]))
+
+    async def actual_https(self, *, close_on_connect=False):
+        import aiohttp
+        import http.server
+        import ssl
+        from _control_fixture import own_tls
+        test = self
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_POST(self):
+                self.server.calls.append(self.path)
+                row = Observation.parse(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                raw = json.dumps(Ack(row.scope.producer_epoch, row.sequence).wire()).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+        request = await self.queued()
+        original = aiohttp.TCPConnector.connect
+        async def connect(connector, *args, **kwargs):
+            connection = await original(connector, *args, **kwargs)
+            if close_on_connect:
+                test.box.close()
+            return connection
+        with own_tls(Handler) as (server, origin, cert, _):
+            server.calls = []
+            transport = HttpsTransport(origin, 'owned-disposable-node-token',
+                tls=ssl.create_default_context(cafile=str(cert)))
+            self.client = self.worker.client = MachineClient(transport)
+            try:
+                with patch.object(aiohttp.TCPConnector, 'connect', connect):
+                    async with asyncio.timeout(2): await self.worker.run()
+                return list(server.calls), await asyncio.gather(request, return_exceptions=True)
+            finally:
+                await transport.aclose()
+
+    async def test_root_closed_during_tls_connect_prevents_actual_http_write(self):
+        calls, result = await self.actual_https(close_on_connect=True)
+        self.assertEqual(calls, [], 'TLS wait used cached Root permission to send new HTTP after close')
+        self.assertIsInstance(result[0], api().Unavailable)
+        self.assertIsNone(self.box.model_committed)
+
+    async def test_alive_actual_verified_tls_dispatch_still_commits_exact_row(self):
+        calls, result = await self.actual_https()
+        self.assertEqual(calls, ['/api/v1/machine/telemetry'])
+        self.assertEqual(result, [Ack(self.row.scope.producer_epoch, 1).wire()])
+        self.assertEqual(self.box.model_committed, self.row)
+
+    async def test_frontend_shutdown_owns_and_drains_pending_http(self):
+        await self.queued()
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        async def blocked(transport, method, path, payload=None, params=None):
+            self.calls.append((method, path, payload))
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.http = blocked
+        with patch.object(HttpsTransport, 'request', self.transport_request):
+            self.worker.start()
+            async with asyncio.timeout(1): await started.wait()
+            await self.worker.aclose()
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(self.worker.task.done())
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(self.box.model_committed)
+
+    async def test_replacement_after_dispatch_is_unknown_never_reissued(self):
+        request = await self.queued()
+        cancelled = asyncio.Event()
+        async def blocked(transport, method, path, payload=None, params=None):
+            self.calls.append((method, path, payload))
+            replacement = self.box.poll('replacement')
+            self.assertIsNone(replacement, 'already dispatched operation was offered for replay')
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.http = blocked
+        await self.run_worker()
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(self.box.model_committed)
+        results = await asyncio.gather(request, return_exceptions=True)
+        self.assertIsInstance(results[0], api().Unavailable)
+        self.assertIn('unknown', str(results[0]))
+
+    async def test_replaced_frontend_cannot_reclaim_current_ticket(self):
+        request, record = await self.polled('old')
+        replacement = self.box.poll('replacement')
+        with self.assertRaisesRegex(Refused, 'retired|replaced|frontend'):
+            self.box.poll('old')
+        self.box.complete('replacement', replacement['id'], replacement['ticket'],
+            Ack(self.row.scope.producer_epoch, self.row.sequence).wire())
+        await request
+        self.assertEqual(self.box.model_committed, self.row)
 
 
 if __name__ == '__main__':

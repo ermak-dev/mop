@@ -99,7 +99,7 @@ class _Session:
         else:
             if type(request) is not dict:
                 raise Refused('finite planned request required')
-            if request.get('action') in ('native_poll', 'native_complete'):
+            if request.get('action') in ('native_poll', 'native_dispatch', 'native_validate', 'native_complete'):
                 from mop.node.host_native_lifetime import mailbox_request
                 mailbox_request(request)
             elif request.get('action') != 'phase_ack':
