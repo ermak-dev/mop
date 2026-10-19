@@ -4,6 +4,8 @@ Registration.matches остаётся exact Work. HTTPS admission и addressed l
 доказываются заново; epoch/ACK/bootstrap принадлежат lifetime, не этому виду.
 Ни poll, ни JSON caller, ни observer сами вида не создают. Root обязан передать
 настоящий MachineClient и admission обычного Machine claim; EffectGuard не заменён.
+Readiness-путь не перевыдаёт одобренные bytes: подтверждение epoch — current
+claim recheck, не второй approval fetch (#792).
 """
 import asyncio
 from dataclasses import dataclass
@@ -56,25 +58,26 @@ class CurrentLaunchAuthority:
         if not datetime.now(timezone.utc) < a.lease_until <= w.not_after:
             raise Refused('current launch admission lease expired or changed')
 
-    async def fetch(self, current):
+    async def _gated(self, current, transport):
         # current проверяет physical lifetime перед/после каждого API await,
         # включая окна смены process/session во время admission recheck.
         self.check()
+        if self.client.transport is not transport:
+            raise Refused('authenticated current launch transport changed')
+        await current()
+        self.check()
+        if self.client.transport is not transport:
+            raise Refused('authenticated current launch transport changed')
+
+    async def fetch(self, current):
+        self.check()
         client, transport = self.client, self.client.transport
-        async def gate():
-            self.check()
-            if self.client.transport is not transport:
-                raise Refused('authenticated current launch transport changed')
-            await current()
-            self.check()
-            if self.client.transport is not transport:
-                raise Refused('authenticated current launch transport changed')
         async with asyncio.timeout(5):
-            await gate()
+            await self._gated(current, transport)
             await client.recheck(self.admission)
-            await gate()
+            await self._gated(current, transport)
             value = await client.read_initial_launch(self.registration.work.wire())
-            await gate()
+            await self._gated(current, transport)
             if any(value[name] != getattr(self.registration, name) for name in
                     ('bootstrap_revision', 'bootstrap_digest', 'image_digest', 'display_name')):
                 raise Refused('current launch approval changed registration pins')
@@ -82,8 +85,23 @@ class CurrentLaunchAuthority:
             inputs.check(self.registration.work.action)
             response = _CurrentLaunchApproval(self.registration, inputs)
             await client.recheck(self.admission)
-            await gate()
+            await self._gated(current, transport)
         return response
+
+    async def recheck(self, current):
+        """Подтверждение текущего admission без перевыдачи одобренных bytes.
+
+        Producer epoch доказывается current claim: initial-launch bytes уже
+        выданы approve-путём, и readiness-путь их не читает (#792). Повторный
+        круг claim + initial-launch + claim на каждое подтверждение epoch
+        выедал production 5s на медленной машине.
+        """
+        self.check()
+        client, transport = self.client, self.client.transport
+        async with asyncio.timeout(5):
+            await self._gated(current, transport)
+            await client.recheck(self.admission)
+            await self._gated(current, transport)
 
 
 def _same_lifetime(anchor, current):
@@ -147,6 +165,15 @@ class _CurrentProducerView(BindingsResolver):
             self._failure = error
             raise
 
+    async def recheck(self, current):
+        # Потеря authority так же закрывает lifetime, как и при fetch.
+        try:
+            await self.authority.recheck(current)
+            self._check()
+        except (Refused, Unavailable, TimeoutError) as error:
+            self._failure = error
+            raise
+
     async def resolve(self, work):
         approval = await self.fetch(work)
         if (type(approval) is not _CurrentLaunchApproval
@@ -169,7 +196,9 @@ class _CurrentProducerView(BindingsResolver):
     async def producer_epoch(self, layout, identity):
         if not self._approved or layout != self._approved_layout:
             raise Refused('unapproved current producer view layout')
-        await self.fetch(self.layout.registration.work)
+        # Current claim recheck, не перевыдача одобренных initial-launch bytes:
+        # readiness тот же authority держит, а bytes уже выданы approve-путём.
+        await self.recheck(self._current)
         self._check()
         # Только lookup уже существующего epoch на исходном layout. Смена native
         # identity закрывает lifetime; новый view не получает нового ACK/epoch.
