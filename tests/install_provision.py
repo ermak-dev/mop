@@ -15,6 +15,30 @@ from _fresh_install_fixture import FreshPlanFixture, ROOT
 PYTHON = os.path.realpath(sys.executable)
 
 
+def fake_execute(calls, version=b'3.13.5\n'):
+    """Подставной executor установки: версия python, скелет venv, успех.
+
+    Venv создаётся через cwd-привязку к fd зарезервированного дерева
+    (#811), поэтому скелет пишется по `cwd`, а не по абсолютному пути.
+    """
+    def execute(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ['-m', 'venv']:
+            # Каталог шага: cwd-привязка к fd (#811) или абсолютный путь из
+            # ветки без резерва -- фикстура видит оба.
+            venv = Path(kwargs['cwd']) if kwargs.get('cwd') else Path(argv[3])
+            (venv / 'bin').mkdir(parents=True, exist_ok=True)
+            for name in ('python', 'pip'):
+                (venv / 'bin' / name).write_text('')
+                (venv / 'bin' / name).chmod(0o755)
+            (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+            (venv / 'pyvenv.cfg').chmod(0o644)
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        return subprocess.CompletedProcess(
+            argv, 0, version if 'version_info' in str(argv[-1]) else b'', b'')
+    return execute
+
+
 # HYPOTHESIS: provisioning описывает OS resources, но не имеет конечного apply.
 # SOLUTION: отдельный stdlib executor; весь preflight до первого OS изменения.
 # RESULT: owned tempdirs и fake OS executor, не установка host/PVE и не rollout.
@@ -151,10 +175,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         module = self.module()
         document = module.document(self.document())
         calls = []
-        def execute(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 0, b'3.13.5\n' if argv[-1:] and 'version_info' in argv[-1] else b'')
+        execute = fake_execute(calls)
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError):
@@ -162,7 +183,10 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         paths = document['paths']
         # #807: venv создаёт сама установка, а не отдельный ручной setup.
         self.assertTrue(Path(document['runtime']['venv']).is_dir(), 'installation owns the venv')
-        self.assertIn([PYTHON, '-m', 'venv', document['runtime']['venv']], calls)
+        # #811: venv создаётся в удержанном дереве: cwd привязан к fd резерва,
+        # а не к пути, который между preflight и этим шагом мог быть подменён.
+        created = [argv for argv in calls if argv[1:3] == ['-m', 'venv']]
+        self.assertEqual(created, [[PYTHON, '-m', 'venv', '.']])
         for role in document['identities']:
             for base in ('configuration', 'state'):
                 self.assertEqual((Path(paths[base]) / role).stat().st_mode & 0o777, 0o700)
@@ -195,10 +219,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         from mop.server.installation import provisioning_artifact
         spec = self.document()
         calls = []
-        def execute(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 0, b'3.13.5\n' if argv[-1:] and 'version_info' in argv[-1] else b'')
+        execute = fake_execute(calls)
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError):
@@ -229,8 +250,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
             with patch.object(module.os, 'geteuid', return_value=0), \
                  patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
                  patch.object(module.grp, 'getgrnam', side_effect=KeyError):
-                module.prepare(data, execute=lambda *a, **k: subprocess.CompletedProcess(
-                    a[0], 0, b'3.13.5\n' if a[0][-1:] and 'version_info' in a[0][-1] else b''))
+                module.prepare(data, execute=fake_execute([]))
         finally:
             os.umask(mask)
         self.assertEqual(parent.stat().st_mode & 0o777, 0o755)
@@ -258,72 +278,120 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
              patch.object(module.grp, 'getgrnam', side_effect=KeyError), \
              patch.object(module, '_absent', side_effect=race):
             with self.assertRaises((OSError, RuntimeError)):
-                module.prepare(document, execute=lambda *a, **k: subprocess.CompletedProcess(
-                    a[0], 0, b'3.13.5\n' if 'version_info' in a[0][-1] else b''))
+                module.prepare(document, execute=fake_execute([]))
         self.assertEqual(list(outside.iterdir()), [])
 
-    # #811: прежняя lambda получала `(argv,)` как `a`, поэтому a[-1] был
-    # списком argv, stdout пуст, system_python отказывал `found unusable`, и
-    # тест был зелёным, не доходя до `_reserve`. Здесь гейт получает свой
-    # version output, а снятая защита _reserve краснит соседнюю проверку.
+    # HYPOTHESIS: preflight `_absent` только проверяет, а venv резервируется
+    # поздно (или не резервируется вовсе): между preflight и резервом symlink
+    # предка уводит создание venv в чужое дерево (#811).
+    # SOLUTION: venv резервируется тем же dirfd-механизмом ДО apt; подменённый
+    # предок отвергается на резерве, до единого привилегированного шага.
+    # RESULT: RED на ddcc29f0 -- `_reserve` для venv не зовётся вовсе, apt уже
+    # выполнился, и дерево создано за symlink'ом.
     # STATUS: FIXED — see #811.
     def test_parent_replacement_reaches_the_reserve_gate(self):
         module = self.module()
         self.document()
-        parent = Path(self.tmp.name) / 'new-parent'
+        parent = Path(self.tmp.name) / 'venv-parent'
         outside = Path(self.tmp.name) / 'outside'
         outside.mkdir(mode=0o700)
-        for key in self.spec['paths']:
-            self.spec['paths'][key] = str(parent / key)
+        # Только venv: прочие деревья остаются в чистом каталоге, чтобы отказ
+        # пришёл именно от резерва venv, а не от соседнего дерева.
         self.spec['runtime'] = {**self.spec['runtime'], 'venv': str(parent / 'venv')}
         from mop.server.installation import specification
         document = module.document(specification(self.spec))
-        absent = module._absent
-        count = 0
+        reserved = []
+        steps = []
+        reserve = module._reserve
         def gate(argv, **kwargs):
+            steps.append(list(argv))
             # Версия системного python доходит до гейта: иначе тест умирает
             # на `found unusable` и никогда не входит в _reserve.
             return subprocess.CompletedProcess(
                 argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
-        def race(path):
-            nonlocal count
-            absent(path)
-            count += 1
-            # После preflight venv: резерв идёт до apt и обязан увидеть symlink.
-            if count == len(document['paths']) + 1:
+        def observe(path):
+            reserved.append(path)
+            if path == document['runtime']['venv']:
+                # Окно после preflight, но до первого привилегированного шага:
+                # предок venv подменяется symlink'ом.
+                os.rename(parent, Path(self.tmp.name) / 'reserved-parent')
                 parent.symlink_to(outside, target_is_directory=True)
+            return reserve(path)
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError), \
-             patch.object(module, '_absent', side_effect=race):
+             patch.object(module, '_reserve', side_effect=observe):
             with self.assertRaises((OSError, RuntimeError)):
                 module.prepare(document, execute=gate)
-        self.assertEqual(list(outside.iterdir()), [])
+        self.assertIn(document['runtime']['venv'], reserved,
+                      'the venv must be reserved through the dirfd mechanism')
+        self.assertEqual(list(outside.iterdir()), [],
+                         'the substituted ancestor received the created tree')
+        # После preflight venv до отказа не идёт ни один OS-шаг: подмена видна
+        # до привилегированной работы, а не после неё.
+        self.assertFalse([argv for argv in steps
+                          if argv[:1] in (['apt-get'], ['groupadd'], ['useradd'], ['chown'], ['usermod'])],
+                         'a privileged step ran before the venv reservation was gated')
 
-    def test_reserve_refuses_a_symlink_ancestor_and_holds_the_created_inode(self):
-        """Защита, без которой гонка выше снова получает чужие артефакты.
-
-        Тест краснеет, если `_reserve` заменить на mkdir по пути: symlink
-        принимается, а возвращённый descriptor не совпадает с inode каталога.
-        """
+    # HYPOTHESIS: после резерва путь к venv переразрешается, и подменённый во
+    # время apt каталог исполняется от root (#811).
+    # SOLUTION: исполнение привязано к fd резерва, а смена (dev, ino) --
+    # типизированный отказ без исполнения.
+    # RESULT: RED на ddcc29f0 -- подставленный bin/python исполнился от root.
+    # STATUS: FIXED — see #811.
+    def test_swap_after_reservation_is_caught_by_the_reserved_inode(self):
         module = self.module()
+        self.document()
+        base = Path(self.tmp.name) / 'base'
+        base.mkdir(mode=0o755)
         outside = Path(self.tmp.name) / 'outside'
-        outside.mkdir(mode=0o700)
-        parent = Path(self.tmp.name) / 'new-parent'
-        parent.symlink_to(outside, target_is_directory=True)
-        with self.assertRaises((OSError, RuntimeError)):
-            descriptor = module._reserve(str(parent / 'configuration'))
-            if descriptor is not None:
-                os.close(descriptor)
-        self.assertEqual(list(outside.iterdir()), [])
-        clean = Path(self.tmp.name) / 'clean-parent' / 'configuration'
-        descriptor = module._reserve(str(clean))
-        self.assertIsInstance(descriptor, int,
-                              'reserve must hand back the created directory descriptor')
-        try:
-            self.assertEqual(os.fstat(descriptor).st_ino, os.lstat(clean).st_ino)
-        finally:
-            os.close(descriptor)
+        (outside / 'venv' / 'bin').mkdir(parents=True)
+        marker = outside / 'executed-as-root'
+        (outside / 'venv' / 'bin' / 'python').write_text(
+            '#!/bin/sh\ntouch %s\nexit 0\n' % marker)
+        (outside / 'venv' / 'bin' / 'python').chmod(0o755)
+        (outside / 'venv' / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+        self.spec['runtime'] = {**self.spec['runtime'], 'venv': str(base / 'outer' / 'venv')}
+        from mop.server.installation import specification
+        document = module.document(specification(self.spec))
+        swapped = []
+        steps = []
+        def execute(argv, **kwargs):
+            steps.append(list(argv))
+            if argv[:1] == ['apt-get'] and not swapped:
+                # Окно apt: предок venv подменяется symlink'ом на дерево с
+                # подставленным интерпретатором. Установка, которая уже
+                # зарезервировала предок, оставит реальный каталог; ветка без
+                # резерва увидит только переименование/создание symlink'а.
+                swapped.append(True)
+                if (base / 'outer').is_symlink() or not (base / 'outer').exists():
+                    os.symlink(outside, base / 'outer')
+                else:
+                    os.rename(base / 'outer', base / 'outer.reserved')
+                    os.symlink(outside, base / 'outer')
+            if os.path.isabs(argv[0]) and argv[0].endswith('/bin/python') \
+                    and os.path.exists(argv[0]):
+                # Старая ветка зовёт абсолютный путь: исполняем ровно его,
+                # чтобы отказ был доказан фактом, а не рассуждением.
+                result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                        capture_output=True)
+                return subprocess.CompletedProcess(argv, result.returncode, b'', b'')
+            return subprocess.CompletedProcess(
+                argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
+        with patch.object(module.os, 'geteuid', return_value=0), \
+             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
+             patch.object(module.grp, 'getgrnam', side_effect=KeyError):
+            with self.assertRaisesRegex(RuntimeError, 'prepared tree|reserved tree|escaped'):
+                module.prepare(document, execute=execute)
+        self.assertTrue(swapped, 'the apt window never opened')
+        self.assertFalse(marker.exists(), 'the planted interpreter ran as root')
+        # Резерв сверяется ДО первого шага venv, а не после: ни создание
+        # дерева, ни pip не должны начаться в подменённом каталоге (#811).
+        # Без этой первичной проверки отказ придёт только после pip, и тест
+        # краснеет одним снятием проверки, а не только обеих сразу.
+        self.assertFalse([argv for argv in steps
+                          if argv[1:3] == ['-m', 'venv'] or argv[:1] == ['bin/python']],
+                         'venv steps ran even though the reserved path had been swapped')
 
     def test_venv_is_reserved_by_dirfd_before_any_privileged_step(self):
         module = self.module()
@@ -335,6 +403,15 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
             return reserve(path)
         def execute(argv, **kwargs):
             events.append(('execute', argv))
+            if argv[1:3] == ['-m', 'venv']:
+                venv = Path(kwargs['cwd']) if kwargs.get('cwd') else Path(argv[3])
+                (venv / 'bin').mkdir(parents=True, exist_ok=True)
+                for name in ('python', 'pip'):
+                    (venv / 'bin' / name).write_text('')
+                    (venv / 'bin' / name).chmod(0o755)
+                (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+                (venv / 'pyvenv.cfg').chmod(0o644)
+                return subprocess.CompletedProcess(argv, 0, b'', b'')
             return subprocess.CompletedProcess(
                 argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
         with patch.object(module.os, 'geteuid', return_value=0), \
@@ -364,34 +441,33 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
                 module.prepare(document, execute=lambda *a, **k: calls.append(a))
         self.assertEqual(calls, [])
 
-    def test_swap_after_reservation_is_caught_by_the_reserved_inode(self):
+    def test_reserve_refuses_a_symlink_ancestor_and_holds_the_created_inode(self):
+        """Защита, без которой гонка выше снова получает чужие артефакты.
+
+        Тест краснеет, если `_reserve` заменить на mkdir по пути: symlink
+        принимается, а возвращённый descriptor не совпадает с деревом по
+        паре (dev, ino) -- не только по номеру inode (#811).
+        """
         module = self.module()
-        self.document()
-        base = Path(self.tmp.name) / 'base'
-        base.mkdir(mode=0o1777)
-        base.chmod(0o1777)
         outside = Path(self.tmp.name) / 'outside'
-        (outside / 'venv' / 'bin').mkdir(parents=True)
-        marker = outside / 'executed-as-root'
-        (outside / 'venv' / 'bin' / 'python').write_text(
-            '#!/bin/sh\ntouch %s\nexit 0\n' % marker)
-        self.spec['runtime'] = {**self.spec['runtime'], 'venv': str(base / 'outer' / 'venv')}
-        from mop.server.installation import specification
-        document = module.document(specification(self.spec))
-        def execute(argv, **kwargs):
-            if argv[:1] == ['apt-get']:
-                # Окно apt: зарезервированный предок подменяется symlink'ом.
-                os.rename(base / 'outer', base / 'outer.reserved')
-                os.symlink(outside, base / 'outer')
-            return subprocess.CompletedProcess(
-                argv, 0, b'3.13.5\n' if 'sys.version_info' in str(argv[-1]) else b'')
-        with patch.object(module.os, 'geteuid', return_value=0), \
-             patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
-             patch.object(module.grp, 'getgrnam', side_effect=KeyError):
-            with self.assertRaises((OSError, RuntimeError)):
-                module.prepare(document, execute=execute)
-        self.assertFalse(marker.exists(), 'the planted interpreter ran as root')
-        self.assertEqual([item.name for item in (outside / 'venv').iterdir()], ['bin'])
+        outside.mkdir(mode=0o700)
+        parent = Path(self.tmp.name) / 'new-parent'
+        parent.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises((OSError, RuntimeError)):
+            descriptor = module._reserve(str(parent / 'configuration'))
+            if descriptor is not None:
+                os.close(descriptor)
+        self.assertEqual(list(outside.iterdir()), [])
+        clean = Path(self.tmp.name) / 'clean-parent' / 'configuration'
+        descriptor = module._reserve(str(clean))
+        self.assertIsInstance(descriptor, int,
+                              'reserve must hand back the created directory descriptor')
+        try:
+            held = os.fstat(descriptor)
+            named = os.lstat(clean)
+            self.assertEqual((held.st_dev, held.st_ino), (named.st_dev, named.st_ino))
+        finally:
+            os.close(descriptor)
 
     def test_service_composition_uses_purpose_bootstrap_and_native_tls_without_claiming_runtime(self):
         from mop.server import installation
@@ -442,8 +518,7 @@ class ProvisionTests(FreshPlanFixture, unittest.TestCase):
         with patch.object(module.os, 'geteuid', return_value=0), \
              patch.object(module.pwd, 'getpwnam', side_effect=KeyError), \
              patch.object(module.grp, 'getgrnam', side_effect=KeyError):
-            module.prepare(data, execute=lambda argv, **kw: (calls.append(argv) or subprocess.CompletedProcess(
-                argv, 0, b'3.13.5\n' if 'version_info' in argv[-1] else b'')))
+            module.prepare(data, execute=fake_execute(calls))
         paths, users = data['paths'], data['identities']
         private = Path(paths['configuration']) / 'credentials'
         self.assertTrue((private / 'root.key').is_file(), 'credential root custody is missing')

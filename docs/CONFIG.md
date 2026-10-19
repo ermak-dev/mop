@@ -148,13 +148,27 @@ older `python3-django` (4.2) is not a substitute. `--user` and
 The venv path is reserved with the same dirfd mechanism as the other
 installation trees, before apt and the accounts, and the venv is created only
 from that reserved directory; a symlink ancestor swapped in after the preflight
-cannot receive the created tree, and an existing `venv/bin/python` is trusted
-only for an installation-owned venv (owner and the reserved inode). The
-interpreter comes from the running installer's absolute `sys.executable`, not
-from a second `python3` lookup in PATH (#811). A failed venv/pip/ensurepip step
-carries the last meaningful stderr line into the error — index credentials are
+cannot receive the created tree. Every use of the venv interpreter — venv
+creation, pip upgrade, the server extra and the import check — runs as a
+relative `bin/python` with `cwd` pinned to the retained directory descriptor
+and the interpreter itself opened as a descriptor; the path is never
+re-resolved between the check and exec. The retained `(st_dev, st_ino)` pair is
+re-checked before and after every step, and a tree that no longer matches is a
+typed refusal that executes nothing. Removal of a freshly created incomplete
+venv is likewise driven by that descriptor, so a substituted directory is never
+deleted. The interpreter comes from the running installer's absolute
+`sys.executable`, not from a second `python3` lookup in PATH (#811).
+
+An existing venv is reused only when it is installation-owned: the owner is
+root or the installer and no group or other write bit is set on the venv root,
+`bin/`, `pyvenv.cfg` or the interpreter, and the owning group is one of the
+invoking process's own groups (an arbitrary foreign gid is refused). A failed
+venv/pip/ensurepip step carries the last meaningful stderr line into the error
+— URL userinfo, credential query values and credential path segments are
 redacted — and a freshly created incomplete venv is removed; an existing one is
-named as retained.
+named as retained. Mode normalization (directories 0755, `bin/*` 0755, other
+files 0644) applies only to a freshly created tree: a foreign executable in a
+reused venv keeps its mode (#811).
 
 Rendered controller units execute the declared interpreter directly
 (`ExecStart=<venv>/bin/python -P -m mop.server.controller ...`) and pass it to

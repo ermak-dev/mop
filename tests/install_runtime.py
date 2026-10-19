@@ -8,9 +8,11 @@ Debian 13 -- отдельно, не этот файл.
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -47,21 +49,46 @@ def installation(**overrides):
 
 
 class Executor:
-    """Подставной OS executor: версия python, venv-skeleton и успешные команды."""
-    def __init__(self, version=b'3.13.5\n'):
+    """Подставной OS executor: версия python, venv-skeleton и успешные команды.
+
+    #811: venv python больше не зовётся абсолютным путём -- argv[0] это
+    `bin/python`, а каталог приходит cwd-привязкой к fd резерва. Скелет
+    создаётся по этому cwd, поэтому фикстура видит тот же каталог, что и
+    настоящий venv. `run_real` исполняет только абсолютный `.../bin/python`:
+    ровно то, чем старая ветка запускала подменённый интерпретатор.
+    Права явные: под umask 002 свежие каталоги вышли бы group-writable и не
+    прошли бы проверку владельца, хотя дерево настоящее (#811).
+    """
+    def __init__(self, version=b'3.13.5\n', run_real=False):
         self.calls = []
+        self.options = []
         self.version = version
+        self.run_real = run_real
+
+    @staticmethod
+    def _mode(path, mode):
+        os.chmod(path, mode)
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        self.options.append(dict(kwargs))
+        # Каталог шага: cwd-привязка к fd (#811) или абсолютный путь из
+        # старой ветки -- фикстура обязана видеть оба.
+        target = Path(kwargs['cwd']) if kwargs.get('cwd') else Path(argv[3] if len(argv) > 3
+                                                                   and argv[1:3] == ['-m', 'venv']
+                                                                   else os.path.dirname(os.path.dirname(argv[0])))
         stdout = b''
-        if len(argv) >= 3 and (argv[0] == 'python3' or os.path.isabs(argv[0])) \
+        if self.run_real and os.path.isabs(argv[0]) and argv[0].endswith('/bin/python') \
+                and os.path.exists(argv[0]):
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True)
+            return subprocess.CompletedProcess(argv, result.returncode, b'', result.stderr)
+        if len(argv) >= 3 and os.path.isabs(argv[0]) \
                 and argv[1] == '-I' and 'sys.version_info' in argv[-1]:
             stdout = self.version
         elif len(argv) == 4 and argv[1] == '-m' and argv[2] == 'venv':
             # #811: umask установщика 077 виден на реальных правах; фикстура
             # повторяет его, чтобы нормализацию прав нельзя было не заметить.
-            venv = Path(argv[3])
+            venv = target
             (venv / 'bin').mkdir(parents=True, mode=0o700)
             for name in ('python', 'pip'):
                 (venv / 'bin' / name).write_text('')
@@ -70,7 +97,7 @@ class Executor:
             (venv / 'pyvenv.cfg').chmod(0o600)
         elif 'pip' in argv and any(str(item).endswith('[server]') for item in argv):
             # pip тоже наследует umask: установленные файлы выходят 0600/0700.
-            site = Path(argv[0]).parent.parent / 'lib' / 'python3.13' / 'site-packages' / 'pkg'
+            site = target / 'lib' / 'python3.13' / 'site-packages' / 'pkg'
             site.mkdir(parents=True, mode=0o700)
             (site / '__init__.py').write_text('')
             (site / '__init__.py').chmod(0o600)
@@ -79,6 +106,30 @@ class Executor:
 
     def commands(self, *prefix):
         return [argv for argv in self.calls if argv[:len(prefix)] == list(prefix)]
+
+    def pip_steps(self):
+        """Шаги venv python: (argv, options), а не абсолютный путь (#811)."""
+        return [(argv, options) for argv, options in zip(self.calls, self.options)
+                if argv[:1] == ['bin/python']]
+
+
+class OsProxy:
+    """os только для одного модуля: подменить lstat/chmod, не трогая harness."""
+    def __init__(self, **overrides):
+        self.overrides = overrides
+
+    def __getattr__(self, name):
+        return self.overrides.get(name, getattr(os, name))
+
+
+def stat_like(template, *, dev=None, ino=None):
+    """stat_result с той же формой, но заданными dev/ino."""
+    fields = list(template)
+    if dev is not None:
+        fields[2] = dev
+    if ino is not None:
+        fields[1] = ino
+    return os.stat_result(fields)
 
 
 # HYPOTHESIS: spec не объявляет runtime, поэтому установка не знает, какие
@@ -196,15 +247,15 @@ class ProvisioningRuntime(unittest.TestCase):
         self.prepare(executor)
         venv = str(Path(self.tmp.name) / 'venv')
         created = executor.commands(PYTHON, '-m', 'venv')
-        self.assertEqual(created, [[PYTHON, '-m', 'venv', venv]])
-        pip = [argv for argv in executor.calls if argv[:4] == [venv + '/bin/python', '-m', 'pip', 'install']]
+        self.assertEqual(created, [[PYTHON, '-m', 'venv', '.']])
+        pip = [argv for argv, _ in executor.pip_steps() if argv[1:4] == ['-m', 'pip', 'install']]
         self.assertTrue(pip, 'declared server extra was not installed into the venv')
         self.assertIn('--upgrade', pip[0])
         self.assertIn('pip', pip[0])
         self.assertTrue(any(argv[-1].endswith('[server]') for argv in pip),
                         'the declared server extra is missing from the install command')
-        verified = [argv for argv in executor.calls
-                    if argv[:2] == [venv + '/bin/python', '-I'] and 'import' in argv[-1]]
+        verified = [argv for argv, _ in executor.pip_steps()
+                    if argv[1:3] == ['-I', '-c'] and 'import' in argv[-1]]
         self.assertTrue(verified, 'imports are not verified in the created venv')
         for name in ('django', 'rest_framework', 'channels', 'psycopg', 'uvicorn',
                      'ldap', 'django_auth_ldap'):
@@ -255,10 +306,18 @@ class ProvisioningRuntime(unittest.TestCase):
 
 class VenvReuse(unittest.TestCase):
     def made(self, venv):
-        """Принадлежащий установке venv: каталог, pyvenv.cfg, bin/python."""
+        """Принадлежащий установке venv: каталог, pyvenv.cfg, bin/python.
+
+        Права явные: под umask 002 свежие каталоги вышли бы group-writable и
+        не прошли бы проверку владельца (#811), хотя venv настоящий.
+        """
         (venv / 'bin').mkdir(parents=True)
         (venv / 'bin/python').write_text('')
         (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+        for path in (venv, venv / 'bin'):
+            os.chmod(path, 0o755)
+        os.chmod(venv / 'bin/python', 0o755)
+        os.chmod(venv / 'pyvenv.cfg', 0o644)
 
     def test_existing_installation_owned_venv_is_reused_instead_of_recreated(self):
         from mop.server import install_runtime
@@ -270,7 +329,8 @@ class VenvReuse(unittest.TestCase):
                                         wheels=None, execute=executor, timeout=60)
             self.assertEqual(executor.commands(PYTHON, '-m', 'venv'), [],
                              'an existing venv must not be recreated')
-            self.assertTrue(executor.commands(str(venv / 'bin/python'), '-m', 'pip', 'install'))
+            self.assertTrue([argv for argv, _ in executor.pip_steps()
+                             if argv[:4] == ['bin/python', '-m', 'pip', 'install']])
 
     # HYPOTHESIS: preflight от `_absent` не резервирует venv, поэтому чужой
     # `venv/bin/python` исполняется от root (#811).
@@ -290,6 +350,66 @@ class VenvReuse(unittest.TestCase):
                 install_runtime.create_venv(venv, pip_extra='server',
                                             wheels=None, execute=executor, timeout=60)
             self.assertEqual(executor.calls, [], 'a planted interpreter must never run')
+
+    # HYPOTHESIS: reuse path исполняет `venv/bin/python` по пути, и подменённый
+    # между проверкой и первым pip каталог исполняется от root (#811).
+    # SOLUTION: interpreter открывается через fd проверенного каталога, а не
+    # разрешается заново по пути; каждый шаг идёт тем же fd/inode.
+    # RESULT: RED -- swap между _verify_venv и pip даёт attacker shell от root.
+    # STATUS: FIXED — see #811.
+    def test_reuse_never_executes_an_interpreter_swapped_after_verification(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-swap-', dir='/tmp') as directory:
+            base = Path(directory)
+            venv = base / 'venv'
+            self.made(venv)
+            outside = base / 'outside'
+            (outside / 'bin').mkdir(parents=True)
+            marker = base / 'attacker-ran'
+            (outside / 'bin' / 'python').write_text('#!/bin/sh\ntouch %s\nexit 0\n' % marker)
+            (outside / 'bin' / 'python').chmod(0o755)
+            (outside / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+            executor = Executor()
+            swapped = []
+            def execute(argv, **options):
+                if not swapped:
+                    swapped.append(True)
+                    # ровно окно между проверкой и первым pip
+                    os.rename(venv, base / 'venv.real')
+                    os.rename(outside, venv)
+                return executor(argv, **options)
+            with self.assertRaisesRegex(RuntimeError, 'reservation|inode|prepared tree|escaped'):
+                install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                            execute=execute, timeout=60)
+            self.assertFalse(marker.exists(), 'a swapped interpreter was executed')
+            # Подмена видна в том же окне, что и первый шаг: дальше не идёт
+            # ни одного шага, а сам первый исполнен через fd (реальное дерево).
+            self.assertFalse([argv for argv in executor.calls
+                              if any('[server]' in str(item) for item in argv)],
+                             'an escalation step ran after the swap was detected')
+
+    def test_every_venv_python_step_uses_the_verified_descriptor(self):
+        """pip и import check идут через тот же проверенный каталог, не по пути.
+
+        Абсолютный `str(venv / 'bin/python')` -- ровно та точка, где между
+        проверкой и exec можно подменить имя; проверка требует cwd-привязку
+        к fd и относительное имя интерпретатора (#811).
+        """
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-fd-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            self.made(venv)
+            executor = Executor()
+            install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                        execute=executor, timeout=60)
+            steps = executor.pip_steps()
+            self.assertTrue(steps, 'the venv python steps are missing')
+            for argv, options in steps:
+                self.assertEqual(argv[0], 'bin/python',
+                                 'the venv python must not be re-resolved by path')
+                self.assertNotIn(str(venv), argv[0])
+                self.assertEqual(options.get('cwd'), '/proc/self/fd/' + str(options.get('pass_fds', (0,))[0]),
+                                 'the venv step must be pinned by directory fd')
 
     def test_venv_python_symlink_outside_installation_is_refused(self):
         from mop.server import install_runtime
@@ -335,6 +455,7 @@ class FailureDiagnosis(unittest.TestCase):
             if argv[1:3] == ['-m', 'venv']:
                 (venv / 'bin').mkdir(parents=True)
                 (venv / 'bin/python').write_text('')
+                (venv / 'bin/python').chmod(0o755)
                 (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
                 return subprocess.CompletedProcess(argv, 0, b'', b'')
             if step == argv[-1] or (step == '[server]' and str(argv[-1]).endswith('[server]')):
@@ -389,12 +510,33 @@ class FailureDiagnosis(unittest.TestCase):
 
     def test_index_credentials_are_not_copied_into_the_reason(self):
         from mop.server import install_runtime
-        venv, execute = self.failing('[server]', b'ERROR: failed '
-            b'https://user:s3cret@index.example.invalid/simple\n')
-        with self.assertRaises(RuntimeError) as caught:
-            install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
-                                        execute=execute, timeout=60)
-        self.assertNotIn('s3cret', str(caught.exception))
+        cases = {
+            'userinfo': b'ERROR: failed https://user:s3cret@index.example.invalid/simple\n',
+            'query token': b'ERROR: failed https://index.example.invalid/simple?token=s3cret\n',
+            'query token pair': b'ERROR: failed https://index.example.invalid/simple?a=1&token=s3cret&b=2\n',
+            'path segment': b'ERROR: failed https://index.example.invalid/token/s3cret/simple\n',
+            'percent-encoded': b'ERROR: https://index.example.invalid/token/s3cret%2Fx/simple\n',
+            'key parameter': b'ERROR: failed https://index.example.invalid/simple?api_key=s3cret\n',
+        }
+        for label, stderr in cases.items():
+            with self.subTest(label=label):
+                venv, execute = self.failing('[server]', stderr)
+                with self.assertRaises(RuntimeError) as caught:
+                    install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                                execute=execute, timeout=60)
+                message = str(caught.exception)
+                self.assertNotIn('s3cret', message)
+                self.assertNotIn('s3cret%2Fx', message)
+                # Соседние query-параметры и хост не исчезают: отчёт остаётся
+                # оператору полезным.
+                self.assertIn('index.example.invalid', message)
+
+    def test_redaction_keeps_ordinary_urls_and_names(self):
+        from mop.server import install_runtime
+        plain = 'ERROR: no matching distribution for https://index.example.invalid/simple'
+        self.assertEqual(install_runtime._redacted(plain), plain)
+        # Слово «token» вне credential-позиции не съедает соседний текст.
+        self.assertIn('tokenizer', install_runtime._redacted('ERROR: tokenizer package missing'))
 
     def test_existing_venv_is_named_retained_on_failure(self):
         from mop.server import install_runtime
@@ -451,6 +593,229 @@ class RenderedUnits(unittest.TestCase):
                                      if not key.startswith(('MOP_', 'DJANGO_'))})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('setup', result.stdout)
+
+
+# HYPOTHESIS: `_remove_incomplete` получает owned=None на ветке существующего
+# пустого каталога и rmtree идёт по пути: подменённый каталог удаляется (#811).
+# SOLUTION: без удержанного fd удаление запрещено; удаление -- по резерву.
+# RESULT: RED -- подставленное дерево исчезало после провала pip.
+# STATUS: FIXED — see #811.
+class IncompleteRemoval(unittest.TestCase):
+    def test_a_substituted_directory_is_never_removed(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-remove-', dir='/tmp') as directory:
+            base = Path(directory)
+            venv = base / 'venv'
+            venv.mkdir()
+            venv.chmod(0o755)
+            replacement = base / 'replacement'
+            replacement.mkdir()
+            (replacement / 'keep.txt').write_text('not installation data')
+            def execute(argv, **kwargs):
+                if argv[1:3] == ['-m', 'venv']:
+                    # скелет: и абсолютный путь (старая ветка), и cwd-fd (новая)
+                    target = Path(kwargs['cwd']) if argv[3] == '.' else Path(argv[3])
+                    (target / 'bin').mkdir(parents=True, exist_ok=True)
+                    (target / 'bin' / 'python').write_text('')
+                    (target / 'bin' / 'python').chmod(0o755)
+                    (target / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+                    return subprocess.CompletedProcess(argv, 0, b'', b'')
+                if 'pip' in argv and any('[server]' in str(item) for item in argv):
+                    # окно между веткой пустого каталога и провалом pip
+                    os.rename(venv, base / 'original')
+                    os.rename(replacement, venv)
+                    return subprocess.CompletedProcess(argv, 1, b'', b'ERROR: boom\n')
+                return subprocess.CompletedProcess(argv, 0, b'', b'')
+            with self.assertRaises(RuntimeError) as caught:
+                install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                            execute=execute, timeout=60)
+            self.assertIn('boom', str(caught.exception))
+            self.assertTrue((venv / 'keep.txt').is_file(),
+                            'removal followed the path into a substituted directory')
+
+    def test_remove_incomplete_refuses_without_a_reservation(self):
+        """Без резерва удалять нечего доказывать: путь -- не доказательство."""
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-remove-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            venv.mkdir()
+            (venv / 'keep.txt').write_text('foreign')
+            self.assertFalse(install_runtime._remove_incomplete(venv, None))
+            self.assertTrue((venv / 'keep.txt').is_file())
+
+    def test_remove_incomplete_removes_only_the_reserved_inode(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-remove-', dir='/tmp') as directory:
+            base = Path(directory)
+            venv = base / 'venv'
+            descriptor = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.mkdir('venv', 0o700, dir_fd=descriptor)
+                reserved = os.open('venv', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                   dir_fd=descriptor)
+                try:
+                    (venv / 'partial.txt').write_text('partial')
+                    self.assertTrue(install_runtime._remove_incomplete(venv, reserved))
+                    self.assertFalse(venv.exists())
+                    # Тот же вызов с чужим путём: подменённый каталог остаётся.
+                    other = base / 'other'
+                    other.mkdir()
+                    (other / 'keep.txt').write_text('foreign')
+                    self.assertFalse(install_runtime._remove_incomplete(other, reserved))
+                    self.assertTrue((other / 'keep.txt').is_file())
+                finally:
+                    os.close(reserved)
+            finally:
+                os.close(descriptor)
+
+
+# HYPOTHESIS: `_owned` смотрел только на 0o002 и собственника: root-owned файл
+# с группой атакующего и mode 0775, group-writable pyvenv.cfg и
+# world-writable bin/ принимались, и групповой писатель исполнялся от root.
+# SOLUTION: запрет записи группы/остальных на объекте и чужая группа -- отказ;
+# проверяются venv root, bin/, pyvenv.cfg и интерпретатор.
+# RESULT: RED -- все четыре случая принимались.
+# STATUS: FIXED — see #811.
+class Ownership(unittest.TestCase):
+    def test_group_and_world_writable_objects_are_refused(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-mode-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            VenvReuse().made(venv)
+            cases = (
+                ('bin/python group-writable', venv / 'bin' / 'python', 0o775),
+                ('pyvenv.cfg group-writable', venv / 'pyvenv.cfg', 0o664),
+                ('bin world-writable', venv / 'bin', 0o777),
+                ('venv root group-writable', venv, 0o775),
+            )
+            for label, path, mode in cases:
+                with self.subTest(label=label):
+                    original = os.lstat(path).st_mode & 0o777
+                    os.chmod(path, mode)
+                    try:
+                        with self.assertRaisesRegex(RuntimeError, 'not installation-owned'):
+                            install_runtime.create_venv(venv, pip_extra='server',
+                                                        wheels=None, source=ROOT,
+                                                        execute=Executor(), timeout=60)
+                    finally:
+                        os.chmod(path, original)
+
+    def test_a_file_of_an_arbitrary_foreign_group_is_refused(self):
+        from mop.server import install_runtime
+        info = types.SimpleNamespace(st_uid=0, st_gid=424242, st_mode=stat.S_IFREG | 0o755)
+        self.assertFalse(install_runtime._owned(info),
+                         'an arbitrary gid outside the invoking groups is foreign')
+        trusted = types.SimpleNamespace(st_uid=0, st_gid=os.getegid(),
+                                        st_mode=stat.S_IFREG | 0o755)
+        self.assertTrue(install_runtime._owned(trusted))
+
+    def test_group_writable_pyvenv_cfg_and_bin_redden_the_reuse_path(self):
+        """Тот же отказ доходит и до create_venv, не только до _verify_venv."""
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-mode-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            VenvReuse().made(venv)
+            os.chmod(venv / 'pyvenv.cfg', 0o664)
+            executor = Executor()
+            with self.assertRaisesRegex(RuntimeError, 'not installation-owned'):
+                install_runtime.create_venv(venv, pip_extra='server', wheels=None,
+                                            source=ROOT, execute=executor, timeout=60)
+            self.assertEqual(executor.calls, [])
+
+
+# HYPOTHESIS: сравнение деревьев шло по st_ino без st_dev: каталог на другом
+# устройстве с тем же номером inode считался тем же самым (#811).
+# SOLUTION: везде пара (st_dev, st_ino).
+# RESULT: RED -- подменённый st_dev проходил все три проверки.
+# STATUS: FIXED — see #811.
+class TreeIdentity(unittest.TestCase):
+    def test_a_different_device_with_the_same_inode_is_not_the_same_tree(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-dev-', dir='/tmp') as directory:
+            base = Path(directory)
+            venv = base / 'venv'
+            venv.mkdir()
+            held = os.stat(venv)
+            other_device = stat_like(held, dev=held.st_dev + 1, ino=held.st_ino)
+            self.assertNotEqual(install_runtime._identity(other_device),
+                                install_runtime._identity(held))
+            descriptor = os.open(str(venv), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                swap = {os.lstat: lambda path: other_device}
+                with patch.object(install_runtime, 'os', OsProxy(lstat=swap[os.lstat])):
+                    with self.assertRaisesRegex(RuntimeError, 'prepared tree'):
+                        install_runtime._check_reservation(descriptor, venv)
+                    self.assertFalse(install_runtime._remove_incomplete(venv, descriptor))
+                self.assertTrue(venv.is_dir(), 'a same-inode other-device tree was deleted')
+            finally:
+                os.close(descriptor)
+
+    def test_same_device_and_inode_still_matches(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-dev-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            venv.mkdir()
+            descriptor = os.open(str(venv), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                self.assertTrue(install_runtime._same_tree(descriptor, venv))
+                install_runtime._check_reservation(descriptor, venv)
+            finally:
+                os.close(descriptor)
+
+
+# HYPOTHESIS: `_normalize_modes` мог бросить PermissionError, а ловился только
+# RuntimeError: частичный venv оставался без имени и причины; и он переписывал
+# права всех bin/* и прочих файлов, включая чужие исполняемые (#811).
+# SOLUTION: реальный класс ошибки доходит до причины и обрабатывается как
+# провал шага; нормализуются только файлы свежесозданного дерева.
+# RESULT: RED -- PermissionError выходил мимо; чужой mode 0700 становился 0755.
+# STATUS: FIXED — see #811.
+class ModeNormalization(unittest.TestCase):
+    def test_permission_failure_is_named_and_the_partial_venv_handled(self):
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-perm-', dir='/tmp') as directory:
+            base = Path(directory)
+            venv = base / 'venv'
+            def execute(argv, **kwargs):
+                if argv[1:3] == ['-m', 'venv']:
+                    (venv / 'bin').mkdir(parents=True)
+                    (venv / 'bin/python').write_text('')
+                    (venv / 'bin/python').chmod(0o755)
+                    (venv / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+                    return subprocess.CompletedProcess(argv, 0, b'', b'')
+                return subprocess.CompletedProcess(argv, 0, b'', b'')
+            # Отказ правки прав -- обе формы: path-chmod и fd-fchmod, чтобы
+            # проверка была красной именно из-за необработанного класса.
+            denied = self._denied()
+            with patch.object(install_runtime, 'os', OsProxy(chmod=denied, fchmod=denied)):
+                with self.assertRaises(RuntimeError) as caught:
+                    install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                                execute=execute, timeout=60)
+            message = str(caught.exception)
+            self.assertIn('PermissionError', message)
+            self.assertIn('permission denied', message.lower())
+            self.assertIn('removed incomplete venv', message)
+            self.assertFalse(venv.exists())
+
+    def test_existing_reused_venv_is_never_renormalized(self):
+        """Чужой исполняемый файл в переиспользованном venv не переписывается."""
+        from mop.server import install_runtime
+        with tempfile.TemporaryDirectory(prefix='mfi-keep-', dir='/tmp') as directory:
+            venv = Path(directory) / 'venv'
+            VenvReuse().made(venv)
+            foreign = venv / 'bin' / 'foreign-tool'
+            foreign.write_text('#!/bin/sh\n')
+            foreign.chmod(0o700)
+            install_runtime.create_venv(venv, pip_extra='server', source=ROOT,
+                                        execute=Executor(), timeout=60)
+            self.assertEqual(foreign.stat().st_mode & 0o777, 0o700,
+                             'a foreign executable in a reused venv was rewritten')
+
+    @staticmethod
+    def _denied():
+        def deny(*args, **kwargs):
+            raise PermissionError(13, 'Permission denied')
+        return deny
 
 
 if __name__ == '__main__':
