@@ -13,6 +13,13 @@ STATUS: FIXED — see #643 (node view, не production composition).
 #733: doubles обновлены на finite initial-launch readiness schema без role bytes.
 Actual server/TLS/PG17 purpose contract проверяет _current_view_purpose_cases;
 post-launch identity теперь unbound, readiness effect guard по-прежнему обязателен.
+
+#792: измерено на owned PG17/TLS fixture. proof() до фикса: 9 HTTPS-запросов
+(claim + initial-launch + claim трижды, 4.98s) и 4.997s из production 5s;
+snapshot'ы — 0.0009s. После фикса: 3 claim recheck, 0.63s. Причина — повторный
+полный approval fetch на каждое подтверждение producer epoch. Фикс не кеширует
+authority и не снимает ни один claim/fence: recheck проходит тот же server
+claim с restore fence, assignment/cas и revoke-able launch grant.
 """
 import asyncio
 from contextlib import asynccontextmanager
@@ -190,6 +197,24 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows, [], 'views must not fabricate hook readiness')
         with self.assertRaises(Refused):
             await view.proof(self.initial)
+
+    async def test_epoch_confirmation_rechecks_the_claim_without_reissuing_approved_bytes(self):
+        # HYPOTHESIS (#792): proof() проходит полный approval fetch (claim +
+        # initial-launch + claim) на каждое подтверждение producer epoch.
+        # На медленной машине три таких круга не влезают в production 5s,
+        # хотя физические snapshots стоят доли миллисекунды.
+        # SOLUTION: подтверждение epoch делает только current-claim recheck,
+        # не перевыдавая уже одобренные initial-launch bytes.
+        # RESULT: RED — proof() вызывает initial-launch трижды.
+        await self.activate()
+        view = await self.view()
+        self.calls.clear()
+        proof = await view.proof(self.current)
+        self.assertEqual(proof.registration, self.current_registration)
+        self.assertNotIn('initial-launch', self.calls,
+                         'epoch confirmation must not reissue approved initial-launch bytes')
+        self.assertGreaterEqual(self.calls.count('claim'), 1,
+                                'epoch confirmation must recheck the current admission')
 
     async def test_every_immutable_binding_is_exact_before_any_current_api_call(self):
         await self.activate()
