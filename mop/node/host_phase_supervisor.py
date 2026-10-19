@@ -78,7 +78,6 @@ class Body:
     completed: list = field(default_factory=list)
     attempts: list = field(default_factory=list)
     cleanup: object = None
-    physical_start: object = None
     connection_error: str | None = None
     cleanup_connection: object = None
 
@@ -332,9 +331,6 @@ class PhaseOwner(Supervisor):
 
     def _phase_cleanup_task(self, body):
         if body.cleanup is None:
-            # Захватываем original action до yield: physical cleanup может уже
-            # завершиться и убрать active entry, но его outcome ещё нужен фазе.
-            body.physical_start = self.active.get(body.scope)
             body.cleanup = asyncio.create_task(self._cleanup_owned(body))
         return body.cleanup
 
@@ -342,10 +338,9 @@ class PhaseOwner(Supervisor):
         await asyncio.shield(self._phase_cleanup_task(body))
 
     async def _cleanup_owned(self, body):
-        start = body.physical_start or self.active.get(body.scope)
+        start = self._starts.get(body.scope)
         retired = None
         if start is not None:
-            body.physical_start = start
             if start.request.action != 'start' or start.request.scope != body.scope:
                 raise Unknown('planned cleanup lost its original physical start')
             snapshot = await asyncio.shield(start.task)
@@ -359,6 +354,10 @@ class PhaseOwner(Supervisor):
                 if retired is None or retired.reference != body.reference or retired.populated:
                     raise Unknown('planned original physical retirement outcome unknown')
         if body.reference is not None:
+            observation = self.active.get(body.scope)
+            if observation is not None and observation is not start:
+                # Join уже начатого inspect, не его успех и не его reference.
+                await asyncio.wait({observation.task})
             if retired is None:
                 facts = await self.adapter.retire(body.reference)
                 if facts.verify(self.installed, body.scope, body.reference).populated:
