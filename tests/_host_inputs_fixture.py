@@ -242,6 +242,104 @@ class ActualPrivateInputTests(unittest.TestCase):
     # SOLUTION: exact saved receipt и private capture; original inode pinned.
     # RESULT: 27 actual UID проверок прошли на Python 3.12, root/node/body раздельны.
     # STATUS: FIXED — see #759.
+    # BUG #765: stagefailure до token не должен оставлять orphan private inode.
+    # HYPOTHESIS: writer владеет receipt до write, но stage не компенсирует сбой.
+    # SOLUTION: saved exact receipt + pre-dispatch compensation, close только FD.
+    # STATUS: FIXED — see #765
+    def test_actual_node_uid_partial_staging_compensates_all_creation_boundaries(self):
+        def produce():
+            import asyncio
+            self.owner.close()
+            evidence = []
+            for boundary in ('directory-fsync', 'partial-write', 'record', 'final-record', 'anchor', 'cancel', 'close', 'close-handoff', 'open'):
+                directory = self.private/boundary
+                directory.mkdir(mode=0o700)
+                with self.f.NodeWriter(directory, node_uid=NODE) as writer:
+                    write, opening, sync, create = os.write, os.open, os.fsync, self.f._Directory.create
+                    hit = []
+                    def writing(fd, raw):
+                        if boundary == 'partial-write':
+                            if not hit:
+                                hit.append(boundary)
+                                return write(fd, raw[:23])
+                            raise OSError('controlled partial write')
+                        return write(fd, raw)
+                    def open_file(name, flags, *args, **kw):
+                        if str(name).endswith('.json') and kw.get('dir_fd') == writer.directory.fd and not hit:
+                            if boundary == 'open' and flags & os.O_EXCL or boundary == 'anchor' and not flags & os.O_EXCL:
+                                hit.append(boundary)
+                                raise OSError('controlled creation/anchor failure')
+                        return opening(name, flags, *args, **kw)
+                    def creating(directory, name, raw, *, gid, mode, record):
+                        records = []
+                        def recording(physical):
+                            records.append(physical)
+                            if boundary == 'record' and len(records) == 1 or boundary == 'final-record' and len(records) == 2:
+                                hit.append(boundary)
+                                raise Refused('controlled record failure')
+                            return record(physical)
+                        return create(directory, name, raw, gid=gid, mode=mode, record=recording)
+                    def syncing(fd):
+                        if fd == writer.directory.fd and boundary in ('directory-fsync', 'cancel', 'close', 'close-handoff') and not hit:
+                            hit.append(boundary)
+                            if boundary in ('close', 'close-handoff'): writer.close()
+                            if boundary == 'close-handoff': return sync(fd)
+                            if boundary == 'cancel': raise asyncio.CancelledError()
+                            raise OSError('controlled directory fsync')
+                        return sync(fd)
+                    try:
+                        with patch('os.write', side_effect=writing), patch('os.open', side_effect=open_file), \
+                                patch('os.fsync', side_effect=syncing), patch.object(self.f._Directory, 'create', creating):
+                            writer.stage(self.a, self.s, self.value)
+                    except (Refused, asyncio.CancelledError): pass
+                    else: raise AssertionError('partial staging fault did not fail: '+boundary)
+                    assert hit == [boundary], 'wrong actual staging boundary: '+boundary
+                    assert not writer.retained and not data_entries(directory), 'partial stage orphan: '+boundary
+                    if boundary in ('close', 'close-handoff'): assert writer.directory.fd is None
+                    evidence.append(boundary)
+            return evidence
+        result = as_uid(NODE, produce)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uid'], NODE)
+        self.assertEqual(len(result['value']), 9)
+
+    def test_actual_node_uid_partial_compensation_capture_preserves_foreign_inode(self):
+        def produce():
+            from dataclasses import replace
+            self.owner.close()
+            with self.f.NodeWriter(self.ingress, node_uid=NODE) as writer:
+                sync, rename, foreign = os.fsync, os.rename, []
+                def failing(fd):
+                    if fd == writer.directory.fd: raise OSError('controlled partial staging fsync')
+                    return sync(fd)
+                def race(src, dst, **kw):
+                    if kw.get('src_dir_fd') == writer.directory.fd and not foreign:
+                        path = self.ingress/src
+                        rename(path, self.ingress/'displaced-partial-owned')
+                        path.write_bytes(b'foreign-partial-capture-preserved')
+                        path.chmod(0o600)
+                        foreign.append(path.stat().st_ino)
+                    return rename(src, dst, **kw)
+                try:
+                    with patch('os.fsync', side_effect=failing), patch('os.rename', side_effect=race):
+                        writer.stage(self.a, self.s, self.value)
+                except Refused: pass
+                else: raise AssertionError('partial foreign capture accepted')
+                assert foreign and len(writer.retained) == 1
+                source = writer.retained[0]
+                for forged in (source.descriptor, replace(source.receipt)):
+                    try: writer.cleanup(forged)
+                    except Refused: pass
+                    else: raise AssertionError('forged partial stage owner accepted')
+                writer.close()
+                copies = [p for p in self.ingress.rglob('*') if p.is_file() and p.stat().st_ino == foreign[0]]
+                assert copies and all(p.read_bytes() == b'foreign-partial-capture-preserved' for p in copies)
+                assert (self.ingress/'displaced-partial-owned').exists()
+            return True
+        result = as_uid(NODE, produce)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uid'], NODE)
+
     def test_actual_node_uid_stage_cleanup_requires_same_receipt_and_exact_inode(self):
         def produce():
             from dataclasses import replace
