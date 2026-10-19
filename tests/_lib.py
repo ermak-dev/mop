@@ -27,14 +27,141 @@ import types
 # проверок) не удалял никто: прогон на теле папета оставлял 276 каталогов и
 # 376 МБ и за несколько прогонов заполнял tmpfs. Здесь -- один корень на
 # процесс проверки: в него ведут tempfile.tempdir и TMPDIR (его наследуют
-# дети -- командлеты, которых зовут проверки), и при выходе процесса он
-# удаляется целиком. Вызовы mkdtemp в файлах проверок не трогаются. Корень
-# живёт до конца процесса, так что проверка, заглядывающая в каталог после
-# ребёнка, его видит.
+# дети -- командлеты, которых зовут проверки). Корень удаляется при выходе
+# только без незавершённых process leases (#776). Durable lease внутри дерева
+# виден также cleanup предка в другом интерпретаторе; exit owner сам по себе
+# не освобождает ни HOME, ни ancestor. Обычные mkdtemp не меняются.
+# Корень body, созданный прямо в каталоге lease (TMPDIR от
+# OwnedProcessDirectory), — часть этого каталога (#787): exit body не
+# доказывает, что его detached потомки ушли из HOME. Его удаляет только
+# владелец lease, целиком и после receipt quiescence своего subreaper-а.
+PROCESS_LEASE_NAME = '.mop-owned-process.json'
 RUN_ROOT = tempfile.mkdtemp(prefix="mop-test-run-")
 tempfile.tempdir = RUN_ROOT
 os.environ["TMPDIR"] = RUN_ROOT
-atexit.register(shutil.rmtree, RUN_ROOT, ignore_errors=True)
+
+
+def _enclosing_lease(root):
+    """Lease каталога, в котором создан root, или None.
+
+    Решение принимается при создании корня: owner пишет lease до старта
+    body. Непроверяемое отсутствие lease не даёт права на rmtree."""
+    lease = os.path.join(os.path.dirname(root), PROCESS_LEASE_NAME)
+    try:
+        os.lstat(lease)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass
+    return lease
+
+
+ENCLOSING_LEASE = _enclosing_lease(RUN_ROOT)
+
+
+def _cleanup_run_root():
+    if ENCLOSING_LEASE is not None:
+        # Lifetime корня принадлежит владельцу lease: удаление делегировано
+        # ему после доказанной quiescence, retained lease держит HOME.
+        return
+
+    def unreadable(error):
+        # Невозможность проверить leases не даёт разрешения на rmtree.
+        raise error
+
+    pending = [directory for directory, _, files in
+               os.walk(RUN_ROOT, followlinks=False, onerror=unreadable)
+               if PROCESS_LEASE_NAME in files]
+    if pending:
+        print('test run cleanup refused: retained owned process directories: ' + json.dumps(pending),
+              file=sys.stderr, flush=True)
+        return
+    shutil.rmtree(RUN_ROOT, ignore_errors=True)
+
+
+atexit.register(_cleanup_run_root)
+
+
+class OwnedProcessDirectory:
+    """Каталог, чья lease снимается лишь после process.close/quiescence.
+
+    Владение ровно своим mkdtemp, не произвольным путём вызывающего. Receipt
+    проверяет process owner; этот lifetime не сигналит PID и не удаляет DB.
+    Каталог — TMPDIR body: его RUN_ROOT и HOME удаляются только здесь (#787).
+    """
+    def __init__(self, script, *, parent=None):
+        self.path = tempfile.mkdtemp(prefix='mp-', dir=parent)
+        self.process = None
+        self.metadata = {'script': os.fspath(script), 'owner': None, 'state': 'pending'}
+        self._record()
+
+    def _record(self):
+        path = os.path.join(self.path, PROCESS_LEASE_NAME)
+        with open(path + '.tmp', 'w') as stream:
+            json.dump(self.metadata, stream)
+        os.replace(path + '.tmp', path)
+
+    def start(self, factory, *, cwd, env):
+        # Оба entrypoint (pytest fixture и direct HOME slot) запускают body
+        # только под lease. Унаследованный TMPDIR — предок, не объект rmtree.
+        try:
+            process = factory(self.metadata['script'], cwd=cwd, env={**env, 'TMPDIR': self.path})
+        except BaseException as error:
+            self.retain(error)
+            raise
+        try:
+            self.bind(process)
+        except BaseException as error:
+            # До handoff полученный process есть только здесь (#788): caller
+            # не получит его ни в active scheduler-а, ни в finally fixture.
+            self._finalize_unbound(process, error)
+            raise
+        return process
+
+    def bind(self, process):
+        self.process = process
+        self.metadata['owner'] = dict(process.handle.row)
+        self._record()
+
+    def _finalize_unbound(self, process, error):
+        """Закрыть не переданный caller-у process; ошибка старта остаётся.
+
+        Каталог удаляется только после receipt, как в close. Отказ drain
+        оставляет retained lease и дописан к исходной ошибке, не заменяя её.
+        """
+        self.process = process
+        try:
+            process.close()
+        except BaseException as refusal:
+            error.add_note(f'owned process finalization refused: {refusal}')
+            try:
+                self.retain(error, cleanup=refusal)
+            except Exception as failure:
+                # Pending lease из __init__ по-прежнему держит каталог.
+                error.add_note(f'retained process lease was not recorded: {failure}')
+            if not isinstance(refusal, Exception):
+                raise  # Прерывание сильнее отчёта; ошибка старта — его context.
+            return
+        try:
+            shutil.rmtree(self.path)
+        except OSError as failure:
+            error.add_note(f'owned process directory was not removed: {failure}')
+
+    def retain(self, error, cleanup=None):
+        self.metadata.update(state='retained', error=str(error))
+        if cleanup is not None:
+            self.metadata['cleanup'] = str(cleanup)
+        self._record()
+
+    def close(self):
+        try:
+            self.process.close()
+        except BaseException as error:
+            self.retain(error)
+            raise
+        # Успех owner.close — единственный путь освобождения lease. Pending
+        # marker удаляется вместе с нашим каталогом, не раньше quiescence.
+        shutil.rmtree(self.path)
 
 
 # ─── счётчик ─────────────────────────────────────────────────────────────

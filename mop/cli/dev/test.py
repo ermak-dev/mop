@@ -4,17 +4,15 @@ Every file of tests/ (a helper named _*.py is not a check), or only the
 named ones: `mop dev test cli spec`. The checks of the working copy you run
 it in; outside one, of the mop that runs it.
 
-  --strict   MOP_TESTS_STRICT=1, as CI: a check that would skip for a missing
-             library fails instead
-  -v         a line per file as it finishes, not only on a terminal
+  --strict   as MOP_TESTS_STRICT=1 in CI: every skipped check or test fails
+  -v         verbose pytest progress, not only on a terminal
 
-Prints the output of every file that failed and one line of totals; exit 1
-when anything failed.
+Uses the declared test extra. Prints each failure before the next file and
+pytest's summary; any test or collection failure exits nonzero.
 """
 import os
 import subprocess
 import sys
-import time
 
 from mop.common import config
 from mop.cli import lib
@@ -83,23 +81,21 @@ def main(argv):
         files = plan(names, os.listdir(os.path.join(top, TESTS)))
     except ValueError as e:
         lib.usage(f"{e}\n\n{__doc__}")
-    env = dict(os.environ, **({"MOP_TESTS_STRICT": "1"} if strict else {}))
-    p = lib.Progress("tests", verbose)
-    results = []
-    for i, f in enumerate(files, 1):
-        p.step(f"{f} ({i}/{len(files)})")
-        t0 = time.time()
-        r = subprocess.run([sys.executable, os.path.join(TESTS, f)], cwd=top, env=env,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        results.append((f, r.returncode, r.stdout, time.time() - t0))
-        if verbose:
-            p.log([f"{'ok' if r.returncode == 0 else 'FAILED'}  {TESTS}/{f}  "
-                   f"{time.time() - t0:.1f}s"])
-        if r.returncode:
-            p.clear()
-            details, _ = summary([results[-1]])
-            print("\n".join(details[:-1]), flush=True)
-    p.clear()
-    lines, ok = summary(results)
-    print(lines[-1], flush=True)
-    return 0 if ok else 1
+    # Плагин живёт рядом с checks, не в runtime-пакете клиента/контроллера.
+    # Один session на весь план: discovery, verdict и exit code принадлежат pytest.
+    previous = list(sys.path)
+    try:
+        sys.path.insert(0, os.path.join(top, TESTS))
+        try:
+            from _pytest_runtime import load_pytest, pytest_environment
+            pytest = load_pytest()
+        except ImportError as error:
+            raise RuntimeError(f'mop dev test requires the declared test extra: {error}') from None
+        options = ['-c', os.path.join(top, 'pyproject.toml'), '-p', '_pytest_plugin']
+        if strict:
+            options.append('--mop-strict')
+        options.append('-v' if verbose else '-q')
+        with pytest_environment():
+            return int(pytest.main(options + [os.path.join(top, TESTS, f) for f in files]))
+    finally:
+        sys.path[:] = previous

@@ -8,6 +8,10 @@ SOLUTION: четыре worker-а владеют Popen + communicate, отмен�
 RESULT: fake воспроизвёл peak=24/draining=1 до правки; после неё peak<=4,
 параллельный drain, все 24 пары (дом, файл) сохранены. Это не замер ускорения.
 STATUS: FIXED — see #673
+
+#769: doubles здесь описывают четыре слота и порядок результатов; kernel
+ownership, detached потомки, PID reuse и actual reap — в pytest_ownership.py.
+Отмена теперь cooperative: slot закрывает owner и joins reader до возврата.
 """
 import os
 import threading
@@ -16,10 +20,19 @@ import signal
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+import shutil
 
 import hermetic
 from _lib import Checks
+
+
+class SyntheticOwner:
+    # Только double планировщика; настоящие identity/receipt проверяет kernel
+    # probe в pytest_ownership. Lease получает те же поля, что у pytest double.
+    handle = SimpleNamespace(row={'pid': 1, 'start': 'synthetic',
+                                 'group': 1, 'namespace': 'synthetic'})
 
 
 class Verdicts:
@@ -36,15 +49,21 @@ def check_bounded_runs(c):
     launches = []
     names = [f'/source/tests/case_{n}.py' for n in range(12)]
 
-    class Process:
+    class Process(SyntheticOwner):
         returncode = 0
 
-        def __init__(self, argv, **kwargs):
+        def __init__(self, script, **kwargs):
             nonlocal active, peak
             with lock:
                 active += 1
                 peak = max(peak, active)
-                launches.append((argv, kwargs))
+                launches.append(([script], kwargs))
+
+        def close(self):
+            pass
+
+        def cancel(self):
+            raise AssertionError('a drained slot must not be cancelled')
 
         def communicate(self):
             nonlocal active, draining, peak_draining
@@ -62,12 +81,12 @@ def check_bounded_runs(c):
             patch.object(hermetic, 'hostile_home', return_value=('/hostile', {'MOP_SSH_PORT': '2222'})), \
             patch.object(hermetic, 'hostile_repo', return_value='/copy'), \
             patch.object(hermetic, 'STRICT', True), \
-            patch.object(hermetic.subprocess, 'Popen', Process):
+            patch.object(hermetic, 'OwnedProcess', Process):
         hermetic.check_runs(verdicts)
     c.check(f'bounded hermetic launches at most four children, observed {peak}', 1 < peak <= 4)
     c.check(f'communicate drains concurrent children, observed {peak_draining}', peak_draining > 1)
     expected = {(root, os.path.basename(name)) for root in (hermetic.ROOT, '/copy') for name in names}
-    actual = [(kw['cwd'], os.path.basename(argv[1])) for argv, kw in launches]
+    actual = [(kw['cwd'], os.path.basename(argv[-1])) for argv, kw in launches]
     c.check('every file runs exactly once in both homes', len(actual) == len(expected) == 24
             and set(actual) == expected)
     c.check('strict mode reaches every child', all(kw['env'].get('MOP_TESTS_STRICT') == '1'
@@ -81,22 +100,30 @@ def check_bounded_runs(c):
 
 def check_failures(c):
     trace = 'Traceback: original failure\n' + '\n'.join(f'frame {n}' for n in range(20))
+    unstarted = []
 
-    class Process:
+    class Process(SyntheticOwner):
         returncode = 7
 
-        def __init__(self, argv, **kwargs):
-            if argv[1].endswith('missing.py'):
+        def __init__(self, script, **kwargs):
+            if script.endswith('missing.py'):
+                unstarted.append(kwargs['env']['TMPDIR'])
                 raise OSError('start refused: original reason')
 
         def communicate(self):
             return trace, None
 
+        def close(self):
+            pass
+
+        def cancel(self):
+            pass
+
     verdicts = Verdicts()
     with patch.object(hermetic, 'files', return_value=['/tests/missing.py', '/tests/bad.py']), \
             patch.object(hermetic, 'hostile_home', return_value=('/hostile', {})), \
             patch.object(hermetic, 'hostile_repo', return_value='/copy'), \
-            patch.object(hermetic.subprocess, 'Popen', Process):
+            patch.object(hermetic, 'OwnedProcess', Process):
         hermetic.check_runs(verdicts)
     c.check('start failures and nonzero exits fail each case in both homes',
             len(verdicts.rows) == 4 and not any(ok for _, ok in verdicts.rows))
@@ -106,6 +133,11 @@ def check_failures(c):
     c.check('start failure preserves its exception traceback and reason', all(
         'Traceback (most recent call last)' in what and 'start refused: original reason' in what
         for what, _ in verdicts.rows if 'missing.py' in what))
+    # Double точно не запускал процесс. Его retained leases убирает только
+    # проверка; настоящий startup refusal не получает такого разрешения.
+    for path in unstarted:
+        c.check('startup refusal retains its unproven owned directory', Path(path).exists())
+        shutil.rmtree(path)
 
 
 def check_cancellation(c):
@@ -114,16 +146,23 @@ def check_cancellation(c):
     lock = threading.Lock()
     started, drained, killed = [], [], []
 
-    class Process:
+    class Process(SyntheticOwner):
         returncode = -signal.SIGKILL
 
-        def __init__(self, argv, **kwargs):
+        def __init__(self, script, **kwargs):
             with lock:
                 self.pid = 10000 + len(started)
                 started.append(self.pid)
                 if len(started) == 4:
                     ready.set()
-            c.check('owned child starts in a new session', kwargs.get('start_new_session') is True)
+
+        def cancel(self):
+            with lock:
+                killed.append(self.pid)
+            released.set()
+
+        def close(self):
+            pass
 
         def communicate(self):
             if not released.wait(5):
@@ -139,31 +178,24 @@ def check_cancellation(c):
                 raise RuntimeError('bounded workers did not start')
             raise KeyboardInterrupt('caller cancellation')
 
-    def killpg(pid, sig):
-        with lock:
-            killed.append((pid, sig))
-        released.set()
-
     cases = [('clean', f'/case_{n}.py', '/', {}) for n in range(24)]
     interrupted = False
-    with patch.object(hermetic.subprocess, 'Popen', Process), \
-            patch.object(hermetic, 'ThreadPoolExecutor', InterruptedPool), \
-            patch.object(hermetic.os, 'killpg', killpg):
+    with patch.object(hermetic, 'OwnedProcess', Process), \
+            patch.object(hermetic, 'ThreadPoolExecutor', InterruptedPool):
         try:
             hermetic.run_cases(cases)
         except KeyboardInterrupt as exc:
             interrupted = str(exc) == 'caller cancellation'
     c.check('caller cancellation remains visible', interrupted)
     c.check('cancellation prevents queued cases from launching', len(started) == 4)
-    c.check('cancellation kills only owned groups and reaps every child',
-            {pid for pid, sig in killed if sig == signal.SIGKILL} == set(started)
-            and sorted(drained) == sorted(started))
+    c.check('cancellation reaches only owned supervisors and joins every reader',
+            set(killed) == set(started) and sorted(drained) == sorted(started))
 
 
 def check_communication_failure(c):
     calls, killed = [], []
 
-    class Process:
+    class Process(SyntheticOwner):
         pid = 12345
 
         def __init__(self, *args, **kwargs):
@@ -175,15 +207,18 @@ def check_communication_failure(c):
                 raise RuntimeError('reader failure')
             return '', None
 
+        def close(self):
+            killed.append(self.pid)
+            self.communicate()
+
     raised = False
-    with patch.object(hermetic.subprocess, 'Popen', Process), \
-            patch.object(hermetic.os, 'killpg', side_effect=lambda pid, sig: killed.append((pid, sig))):
+    with patch.object(hermetic, 'OwnedProcess', Process):
         try:
             hermetic.run_cases([('clean', '/test.py', '/', {})])
         except RuntimeError as exc:
             raised = str(exc) == 'reader failure'
-    c.check('reader failure propagates after owned kill and reap', raised and len(calls) == 2
-            and killed == [(12345, signal.SIGKILL)])
+    c.check('reader failure propagates after owned cancel and join', raised and len(calls) == 2
+            and killed == [12345])
 
 
 def check_real_pipes(c):
@@ -230,8 +265,35 @@ def check_real_cancellation(c):
                 hermetic.run_cases(cases)
             except KeyboardInterrupt as exc:
                 interrupted = str(exc) == 'real cancellation'
-    c.check('real cancellation kills and reaps exactly its four owned children',
-            interrupted and len(owned) == 4 and all(p.returncode == -signal.SIGKILL for p in owned))
+    c.check('real cancellation stops and reaps exactly its four owned supervisors',
+            interrupted and len(owned) == 4 and all(p.returncode is not None and p.returncode != 0
+                and p.poll() == p.returncode for p in owned))
+
+
+# HYPOTHESIS (#692): прямой python check.py в HOME matrix обходит strict
+# adapter, и unittest.skipTest остаётся зелёным только в этих подпрогонах.
+# SOLUTION: тот же stdlib bridge, без изменения полного matrix или bound=4.
+# RESULT: RED — exit 0 с одним skip; GREEN — exit 1 и исходный ID/reason,
+# прежние real PIPE/cancellation и deep-TMPDIR probes также проходят.
+# STATUS: FIXED — see #692
+
+def check_strict_unittest_subruns_692(c):
+    with tempfile.TemporaryDirectory() as root:
+        script = Path(root) / 'skip_probe.py'
+        script.write_text('import unittest\nclass Probe(unittest.TestCase):\n'
+                          '    @unittest.skip("owned matrix skip reason")\n'
+                          '    def test_boundary(self): pass\n'
+                          'if __name__ == "__main__": unittest.main()\n')
+        for strict in (False, True):
+            rows = hermetic.run_cases([('clean', str(script), root,
+                                        hermetic.child_env({}, strict=strict))])
+            c.expect(f'#692 HOME matrix rejects unittest skips exactly in strict={strict}',
+                     [code for _, _, code, _ in rows], [int(strict)])
+            if strict:
+                c.check('#692 HOME matrix retains the skipped test identity and reason',
+                        'Probe.test_boundary' in rows[0][3] and
+                        'owned matrix skip reason' in rows[0][3] and
+                        'strict mode rejects skipped test' in rows[0][3], rows[0][3])
 
 
 # HYPOTHESIS: вложенный _lib.RUN_ROOT удлиняет state/service.sock сверх
@@ -273,6 +335,7 @@ def main():
     check_communication_failure(c)
     check_real_pipes(c)
     check_real_cancellation(c)
+    check_strict_unittest_subruns_692(c)
     check_installer_deep_tmpdir_677(c)
     return c.report('hermetic_runs')
 

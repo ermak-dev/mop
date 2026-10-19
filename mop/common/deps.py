@@ -34,6 +34,12 @@ SERVER = (
     "whitenoise==6.12.0",
 )
 
+# Только harness: не попадают в клиент, сервер или тело без extra test.
+TEST = (
+    "pytest==8.4.2",
+    "pytest-django==4.11.1",
+)
+
 PIP = (
     "nats-py",        # шина
     "aiohttp",        # её WebSocket-транспорт: wss через TLS-прокси (#97)

@@ -50,12 +50,12 @@ import site
 import subprocess
 import sys
 import tempfile
-import signal
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 import _lib  # noqa: F401,E402 -- первым: временный корень процесса раньше HOME (#338)
+from _pytest_process import OwnedProcess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
@@ -256,23 +256,19 @@ def run_cases(cases):
     lock = threading.Lock()
     stopping = threading.Event()
     active = set()
-
-    def kill(p):
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # Уже завершился, но communicate всё равно обязан его собрать.
+    cleanup_errors = []
 
     def run(case):
         label, f, root, env = case
         with lock:
             if stopping.is_set():
                 return None
+            directory = _lib.OwnedProcessDirectory(f, parent=env.get('TMPDIR'))
             try:
-                p = subprocess.Popen([sys.executable, f], env=env, cwd=root,
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     text=True, start_new_session=True)
+                p = directory.start(OwnedProcess, env=env, cwd=root)
             except OSError:
+                # Полученный до отказа bind process start уже финализировал
+                # (#788): verdict без active не оставляет его без владельца.
                 return label, f, -1, traceback.format_exc()
             active.add(p)
         try:
@@ -280,12 +276,17 @@ def run_cases(cases):
             return label, f, p.returncode, text
         except BaseException:
             stopping.set()
-            kill(p)
-            p.communicate()
             raise
         finally:
-            with lock:
-                active.remove(p)
+            try:
+                directory.close()
+            except Exception as error:
+                with lock:
+                    cleanup_errors.append(error)
+                raise
+            finally:
+                with lock:
+                    active.remove(p)
 
     pool = ThreadPoolExecutor(max_workers=RUN_WORKERS)
     try:
@@ -296,9 +297,14 @@ def run_cases(cases):
             with lock:
                 stopping.set()
                 for p in active:
-                    kill(p)
+                    try:
+                        p.cancel()
+                    except Exception as error:
+                        cleanup_errors.append(error)
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
+            if cleanup_errors:
+                raise ExceptionGroup('owned HOME worker cleanup refused', cleanup_errors)
 
 
 def check_runs(c):

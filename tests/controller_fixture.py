@@ -509,23 +509,34 @@ test:py3.12:
 
     def test_runner_wires_owned_management_without_replacing_the_runtime_backend(self):
         import hermetic
-        from django.test.runner import DiscoverRunner
         from _controller_fixture import main, OwnedTestDatabase
+        import _pytest_django
         observed = []
-        def run_tests(runner, labels):
+        def run_tests(labels):
             from django.conf import settings
             from django.db import connection
-            creation = connection.creation
-            owner = creation._create_test_db.__self__
-            self.assertIsInstance(owner, OwnedTestDatabase)
-            self.assertIs(creation._destroy_test_db.__self__, owner)
-            self.assertEqual(settings.DATABASES['default']['ENGINE'], 'mop.server.controller.postgresql')
-            self.assertEqual(settings.CONTROLLER_DB_TIMEOUT, 5)
-            self.assertEqual(settings.CONTROLLER_TRANSACTION_TIMEOUT, 10)
-            observed.append(owner.name)
+            from contextlib import nullcontext
+            from types import SimpleNamespace
+            self.assertEqual(labels, ['_controller_cases'])
+            fixture = _pytest_django._owned_django_management.__wrapped__(
+                SimpleNamespace(unblock=nullcontext))
+            try:
+                owner = next(fixture)
+                creation = connection.creation
+                self.assertIsInstance(owner, OwnedTestDatabase)
+                self.assertIs(creation._create_test_db.__self__, owner)
+                with patch.object(owner, 'destroy') as destroy:
+                    creation._destroy_test_db(owner.name, 0)
+                    destroy.assert_called_once_with(owner.name, 0)
+                self.assertEqual(settings.DATABASES['default']['ENGINE'], 'mop.server.controller.postgresql')
+                self.assertEqual(settings.CONTROLLER_DB_TIMEOUT, 5)
+                self.assertEqual(settings.CONTROLLER_TRANSACTION_TIMEOUT, 10)
+                observed.append(owner.name)
+            finally:
+                fixture.close()
             return 0
         with patch.dict(hermetic.FIXTURE_ENV, {'MOP_TEST_POSTGRES_HOST': 'fixture-only'}), \
-                patch.object(DiscoverRunner, 'run_tests', new=run_tests):
+                patch.object(_pytest_django, 'run_labels', side_effect=run_tests):
             self.assertEqual(main(['_controller_cases']), 0)
         self.assertEqual(len(observed), 1)
 

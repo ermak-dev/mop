@@ -1,0 +1,504 @@
+"""Контракты перехода на pytest без потери прежних проверок (#692).
+
+HYPOTHESIS: командлет сам исполняет каждый файл и не отдаёт pytest ни
+collection, ни результаты; Django entrypoints повторяют DiscoverRunner.
+SPEC: один pytest session на выбранные файлы, исходные имена checks и
+Django test ID сохранены; strict отказывает на любом пропуске.
+SOLUTION: pytest владеет verdict/collection; legacy main guards изолированы,
+Django cases используют native collection и общую owned pytest-django fixture.
+RESULT: RED — обход pytest, потерянные system checks и зелёный cleanup failure;
+GREEN — 24 focused cases и исходные 5 UID checks на Python 3.12/PostgreSQL 17,
+полный исходный Django ID union проверен collect-only; SQL budgets неизменны.
+Переходный этап: legacy assertion bodies и HOME matrix scheduler сохранены.
+STATUS: FIXED — see #692
+"""
+import os
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+import hermetic
+from _lib import run_command
+from _controller_fixture import main
+from mop.cli.dev import test as command
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class PytestCommand(unittest.TestCase):
+    def invoke(self, args, code=0):
+        calls = []
+        pytest = SimpleNamespace(main=lambda argv: calls.append(argv) or code)
+        with patch.dict(sys.modules, pytest=pytest), \
+                patch.object(command, 'root', return_value=str(ROOT)), \
+                patch.object(command.os, 'listdir', return_value=['first.py', 'second.py', '_helper.py']), \
+                patch.object(command.subprocess, 'run', side_effect=AssertionError(
+                    'per-file execution still bypasses pytest')):
+            out, err, result = run_command(command.main, args)
+        self.assertEqual(len(calls), 1, 'the entire selection must share one pytest session')
+        return calls[0], result, out + err
+
+    def test_one_pytest_session_receives_exact_selected_check_names(self):
+        argv, result, _ = self.invoke(['first', 'tests/second.py', 'first'])
+        self.assertEqual(result, 0)
+        self.assertEqual(argv[-2:], [str(ROOT / 'tests/first.py'), str(ROOT / 'tests/second.py')])
+        self.assertIn('_pytest_plugin', argv)
+
+    def test_strict_and_verbose_are_pytest_options_not_child_runner_state(self):
+        argv, result, _ = self.invoke(['first', '--strict', '-v'], code=1)
+        self.assertEqual(result, 1)
+        self.assertIn('--mop-strict', argv)
+        self.assertIn('-v', argv)
+
+    def test_empty_selection_keeps_the_complete_existing_check_set(self):
+        argv, _, _ = self.invoke([])
+        self.assertEqual(argv[-2:], [str(ROOT / 'tests/first.py'), str(ROOT / 'tests/second.py')])
+
+    def test_pytest_collection_failure_cannot_be_reported_as_success(self):
+        _, result, _ = self.invoke(['first'], code=5)
+        self.assertNotEqual(result, 0)
+
+    def test_pytest_loads_the_packaging_dependency_before_the_check_namespace(self):
+        import importlib.util
+        # Имя существующего check packaging.py нельзя отдавать зависимости
+        # pytest packaging.version: это уже дало настоящий import failure PG17.
+        previous = sys.modules.get('packaging')
+        with patch.dict(sys.modules):
+            for name in tuple(sys.modules):
+                if name == 'packaging' or name.startswith('packaging.'):
+                    del sys.modules[name]
+            calls = []
+            def session(argv):
+                module = sys.modules.get('packaging')
+                self.assertIsNotNone(module, 'pytest dependencies must load before tests/ enters sys.path')
+                self.assertTrue(hasattr(module, '__path__'), 'the check packaging.py shadowed the dependency')
+                calls.append(argv)
+                return 0
+            with patch.dict(sys.modules, pytest=SimpleNamespace(main=session)), \
+                    patch.object(command, 'root', return_value=str(ROOT)):
+                _, _, result = run_command(command.main, ['pytest_harness'])
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 1)
+        self.assertIs(sys.modules.get('packaging'), previous)
+
+    def test_real_pytest_plan_runs_existing_entrypoints_without_losing_their_main_guards(self):
+        # Узкий plan: никаких длинных controller/hermetic повторных прогонов.
+        names = ['tests_lib', 'test_output', 'controller_fixture', 'hermetic_runs', 'ci', 'cli', 'packaging']
+        with patch.object(command, 'root', return_value=str(ROOT)):
+            out, err, result = run_command(command.main, [*names, '--strict'])
+        self.assertEqual(result, 0, out + err)
+        self.assertIn(f'{len(names)} passed', out)
+
+    def test_real_wrapper_stays_hermetic_in_clean_and_hostile_home(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='mop-pytest-clean-') as clean:
+            hostile, values = hermetic.hostile_home()
+            copy = hermetic.hostile_repo(values)
+            for root, home, environment in ((str(ROOT), clean, {}), (copy, hostile, values)):
+                with self.subTest(hostile=root == copy), \
+                        patch.dict(os.environ, {**environment, 'HOME': home}), \
+                        patch.object(command, 'root', return_value=root):
+                    out, err, result = run_command(command.main, ['config', 'tests_lib', '--strict'])
+                    self.assertEqual(result, 0, out + err)
+                    self.assertIn('2 passed', out)
+
+    # HYPOTHESIS: configured label-run скрывает старый unittest main guard.
+    # RED: прямой запуск отдавал dotted label в unittest.loader._FailedTest.
+    # SOLUTION: тот же shared bootstrap, что у остальных Django entrypoints.
+    # RESULT: GREEN — native inventory проходит без унаследованных settings.
+    # STATUS: FIXED — see #692
+    def test_direct_entrypoint_bootstraps_the_native_inventory_without_inherited_settings(self):
+        import subprocess
+        label = 'pytest_harness.NativeInventory.test_every_existing_django_entrypoint_collects_its_original_id_union_without_running_it'
+        env = hermetic.child_env({})
+        env.pop('DJANGO_SETTINGS_MODULE', None)
+        env.pop('MOP_CONTROLLER_BOOTSTRAP', None)
+        result = subprocess.run([sys.executable, str(ROOT / 'tests/pytest_harness.py'), label],
+            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('::test_every_existing_django_entrypoint_collects_its_original_id_union_without_running_it PASSED', result.stdout)
+        self.assertIn('1 passed', result.stdout)
+
+    def test_django_entrypoints_no_longer_construct_their_own_test_runner(self):
+        source = (ROOT / 'tests/_controller_fixture.py').read_text()
+        self.assertNotIn('class DiagnosticRunner', source,
+                         'Django entries must share the pytest-django fixture')
+        self.assertNotIn('runner.run_tests(', source,
+                         'native pytest collection must own Django execution')
+
+    def test_pytest_dependencies_are_declared_separately_from_runtime(self):
+        scope = {}
+        exec((ROOT / 'mop/common/deps.py').read_text(), scope)
+        declared = scope.get('TEST', ())
+        self.assertTrue(any(value.startswith('pytest==') for value in declared),
+                        'pytest must be a pinned declared test dependency')
+        self.assertTrue(any(value.startswith('pytest-django==') for value in declared),
+                        'pytest-django must be a pinned declared test dependency')
+        self.assertFalse(any(value.startswith(('pytest==', 'pytest-django=='))
+                             for value in scope['PIP'] + scope['SERVER']))
+
+
+class NativeInventory(unittest.TestCase):
+    def inventory(self):
+        from types import ModuleType
+        module = ModuleType('_pytest_692_inventory')
+        module.Example = type('Example', (unittest.TestCase,), {
+            '__module__': module.__name__,
+            'test_first': lambda self: None,
+            'test_second': lambda self: None,
+        })
+        return module
+
+    def test_shared_database_fixture_retains_django_system_checks_after_database_setup(self):
+        import inspect
+        from contextlib import nullcontext
+        import _pytest_django
+        fixture = _pytest_django.django_db_setup.__wrapped__
+        upstream = object()
+        arguments = {'_owned_django_management': None, 'django_db_setup': upstream}
+        if 'django_db_blocker' in inspect.signature(fixture).parameters:
+            arguments['django_db_blocker'] = SimpleNamespace(unblock=nullcontext)
+        with patch('django.core.management.call_command') as checks:
+            self.assertIs(fixture(**arguments), upstream)
+        checks.assert_called_once_with('check', verbosity=0, databases=['default'])
+
+    def test_every_existing_django_entrypoint_collects_its_original_id_union_without_running_it(self):
+        import ast
+        import _pytest_django
+        labels = []
+        for path in sorted((ROOT / 'tests').glob('*.py')):
+            if path.name.startswith('_'):
+                continue
+            tree = ast.parse(path.read_text())
+            if not any(isinstance(node, ast.ImportFrom) and node.module == '_controller_fixture'
+                       and any(alias.name == 'main' for alias in node.names) for node in tree.body):
+                continue
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == 'main' and node.args):
+                    continue
+                for value in ast.walk(node.args[0]):
+                    if isinstance(value, ast.List):
+                        labels.extend(ast.literal_eval(value))
+        labels = list(dict.fromkeys(labels))
+        self.assertIn('_controller_cases', labels)
+        self.assertIn('_credential_cases', labels)
+        expected = _pytest_django.cases(labels)
+        collected = []
+
+        class Inventory:
+            def pytest_collection_finish(self, session):
+                collected.extend(_pytest_django.item_id(item) for item in session.items)
+
+        original = _pytest_django.pytest.main
+        with patch.object(_pytest_django.pytest, 'main', side_effect=lambda args:
+                original([*args, '--collect-only'], plugins=[Inventory()])):
+            out, err, result = run_command(_pytest_django.run_labels, labels)
+        self.assertEqual(result, 0, out + err)
+        self.assertEqual(collected, list(expected), 'the full original Django ID union must survive collection')
+
+    def test_overlapping_labels_keep_the_exact_original_unittest_id_union(self):
+        from _pytest_django import cases
+        module = self.inventory()
+        with patch.dict(sys.modules, {module.__name__: module}):
+            selected = cases([module.__name__, module.__name__ + '.Example',
+                              module.__name__ + '.Example.test_first'])
+        self.assertEqual(list(selected), [module.__name__ + '.Example.test_first',
+                                         module.__name__ + '.Example.test_second'])
+
+    def test_native_collection_rejects_a_lost_id_instead_of_deselecting_it(self):
+        import _pytest_django
+        from unittest.mock import Mock
+        module = self.inventory()
+        with patch.dict(sys.modules, {module.__name__: module}):
+            expected = _pytest_django.cases([module.__name__])
+        config = SimpleNamespace(_mop_cases=expected, hook=Mock())
+        items = [SimpleNamespace(cls=module.Example, name='test_first')]
+        with self.assertRaisesRegex(_pytest_django.pytest.UsageError,
+                                    'Django collection lost test IDs: .*Example.test_second'):
+            _pytest_django.pytest_collection_modifyitems(None, config, items)
+
+    def test_native_collection_orders_and_deduplicates_the_same_exact_ids(self):
+        import _pytest_django
+        from unittest.mock import Mock
+        module = self.inventory()
+        with patch.dict(sys.modules, {module.__name__: module}):
+            expected = _pytest_django.cases([module.__name__])
+        config = SimpleNamespace(_mop_cases=expected, hook=Mock())
+        first = SimpleNamespace(cls=module.Example, name='test_first')
+        second = SimpleNamespace(cls=module.Example, name='test_second')
+        duplicate = SimpleNamespace(cls=module.Example, name='test_first')
+        extra = SimpleNamespace(cls=module.Example, name='test_unrequested')
+        items = [second, first, duplicate, extra]
+        _pytest_django.pytest_collection_modifyitems(None, config, items)
+        self.assertEqual(items, [first, second])
+        config.hook.pytest_deselected.assert_called_once_with(items=[duplicate, extra])
+
+    def test_strict_native_test_and_collection_skips_become_failures_with_reasons(self):
+        import _pytest_plugin
+        for strict in (False, True):
+            with self.subTest(strict=strict), patch.object(hermetic, 'STRICT', strict):
+                report = SimpleNamespace(skipped=True, outcome='skipped', nodeid='owned::boundary',
+                                         longreprtext='owned skip reason', longrepr='owned skip reason')
+                hook = _pytest_plugin.pytest_runtest_makereport(
+                    SimpleNamespace(nodeid=report.nodeid), None)
+                next(hook)
+                with self.assertRaises(StopIteration):
+                    hook.send(SimpleNamespace(get_result=lambda: report))
+                self.assertEqual(report.outcome, 'failed' if strict else 'skipped')
+                self.assertIn('owned skip reason', report.longrepr)
+                report.outcome = 'skipped'
+                _pytest_plugin.pytest_collectreport(report)
+                self.assertEqual(report.outcome, 'failed' if strict else 'skipped')
+                self.assertIn('owned skip reason', report.longrepr)
+
+
+class FreshPolicyProcess(unittest.TestCase):
+    def run_fresh(self, argv, directory, *, strict):
+        import subprocess
+        env = hermetic.child_env({'PYTHONPATH': os.pathsep.join(
+            (str(directory / 'tests'), str(ROOT), str(ROOT / 'tests')))}, strict=strict)
+        result = subprocess.run(argv, cwd=directory, env=env, capture_output=True,
+                                text=True, timeout=90)
+        self.assertNotIn('setup_test_environment() was already called', result.stdout + result.stderr)
+        return result
+
+    def run_cli(self, directory, *, strict, names=('boundary',)):
+        # Настоящий process exit командлета, не объект report/замоканный pytest.
+        # Меняем только координату синтетического plan; сам runner неизменён.
+        driver = ('import sys, hermetic; from mop.cli.dev import test as command; '
+                  'command.root = lambda: sys.argv[1]; '
+                  'raise SystemExit(command.main(sys.argv[2:]))')
+        return self.run_fresh([sys.executable, '-c', driver, str(directory),
+                              *names, *(['--strict'] if strict else [])],
+                             directory, strict=False)
+
+    def policy_root(self, directory):
+        root = Path(directory)
+        (root / 'tests').mkdir()
+        (root / 'pyproject.toml').write_text('[tool.pytest.ini_options]\npython_files = ["*.py"]\n')
+        return root
+
+
+class FreshNativePolicy(FreshPolicyProcess):
+    # BUG: strict report был FAILED, но wasxfail оставлял настоящий exit 0.
+    # HYPOTHESIS: expected-outcome classification надо снять целиком, включая
+    # XPASS; оригинальный unittest exception нельзя терять в pytest XFailed.
+    # SOLUTION: strict удаляет wasxfail после upstream hooks и направляет
+    # unittest expected failure в addFailure с исходным exception/traceback.
+    # RESULT: RED — controller/outer CLI [0, 0] для xfail/expectedFailure/XPASS;
+    # GREEN — [1, 1], прежние nonstrict outcomes, 25 harness и 5 UID checks.
+    # STATUS: FIXED — see #767
+    def invoke(self, body, *, strict=True, outer=False):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='mop-native-policy-') as directory:
+            root = self.policy_root(directory)
+            (root / 'tests/_boundary.py').write_text('import unittest, pytest\n' + body)
+            argv = [sys.executable, str(ROOT / 'tests/controller.py'), '_boundary.Boundary']
+            if outer:
+                (root / 'tests/boundary.py').write_text(
+                    'import subprocess\nraise SystemExit(subprocess.call(' + repr(argv) + '))\n')
+                return self.run_cli(root, strict=strict)
+            return self.run_fresh(argv, root, strict=strict)
+
+    def assert_rejected(self, body, *reasons, code=1):
+        results = [self.invoke(body, outer=outer) for outer in (False, True)]
+        evidence = '\n'.join(f'{mode} exit={result.returncode}\n{result.stdout}{result.stderr}'
+                             for mode, result in zip(('controller child', 'outer CLI'), results))
+        self.assertEqual([result.returncode for result in results], [code, code], evidence)
+        for result in results:
+            for reason in reasons:
+                self.assertIn(reason, result.stdout + result.stderr)
+
+    def test_strict_native_pytest_xfail_has_nonzero_child_and_outer_exit(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @pytest.mark.xfail(reason="owned xfail reason")\n'
+            '    def test_required(self): self.fail("owned failing call was executed")\n',
+            'Boundary::test_required', 'owned xfail reason', 'owned failing call was executed')
+
+    def test_strict_native_unittest_expected_failure_keeps_original_reason_and_exits_one(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @unittest.expectedFailure\n'
+            '    def test_required(self): self.fail("owned expected-failure reason")\n',
+            'Boundary::test_required', 'owned expected-failure reason')
+
+    def test_strict_native_pytest_xpass_has_nonzero_child_and_outer_exit(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @pytest.mark.xfail(reason="owned xpass reason")\n'
+            '    def test_required(self): pass\n', 'Boundary::test_required', 'owned xpass reason')
+
+    def test_strict_native_unittest_unexpected_success_stays_red(self):
+        self.assert_rejected('class Boundary(unittest.TestCase):\n'
+            '    @unittest.expectedFailure\n'
+            '    def test_required(self): pass\n', 'Boundary::test_required', 'Unexpected success')
+
+    def test_strict_native_skip_setup_and_import_failures_stay_red(self):
+        for body, reason in (
+                ('class Boundary(unittest.TestCase):\n'
+                 '    @unittest.skip("owned skip reason")\n'
+                 '    def test_required(self): pass\n', 'owned skip reason'),
+                ('class Boundary(unittest.TestCase):\n'
+                 '    @classmethod\n'
+                 '    def setUpClass(cls): raise RuntimeError("owned setup failure")\n'
+                 '    def test_required(self): pass\n', 'owned setup failure')):
+            with self.subTest(reason=reason):
+                self.assert_rejected(body, 'Boundary::test_required', reason)
+        self.assert_rejected('raise ImportError("owned import failure")\n', 'owned import failure')
+
+    def test_nonstrict_native_expected_outcomes_keep_standard_exit_and_classification(self):
+        for decorator, body, expected, status in (
+                ('pytest.mark.xfail(reason="owned reason")', 'self.fail("owned failure")', 0, '1 xfailed'),
+                ('unittest.expectedFailure', 'self.fail("owned failure")', 0, '1 xfailed'),
+                ('pytest.mark.xfail(reason="owned reason")', 'pass', 0, '1 xpassed'),
+                ('pytest.mark.xfail(reason="owned reason", strict=True)', 'pass', 1, '1 failed'),
+                ('unittest.expectedFailure', 'pass', 1, '1 failed'),
+                ('unittest.skip("owned reason")', 'pass', 0, '1 skipped')):
+            with self.subTest(decorator=decorator, body=body):
+                result = self.invoke('class Boundary(unittest.TestCase):\n'
+                    f'    @{decorator}\n    def test_required(self): {body}\n', strict=False)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, expected, output)
+                self.assertIn(status, output)
+
+    def test_inactive_xfail_marker_is_still_a_mandatory_passing_test(self):
+        result = self.invoke('class Boundary(unittest.TestCase):\n'
+            '    @pytest.mark.xfail(False, reason="inactive expectation")\n'
+            '    def test_required(self): pass\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 passed', result.stdout)
+
+
+class FreshLegacyPolicy(FreshPolicyProcess):
+    # BUG: addSkip перехвачен, но legacy expectedFailure давал exit 0/1 passed.
+    # HYPOTHESIS: strict должен передать исходный expected-failure exception в
+    # обычный unittest failure; правка native wasxfail не влияет на bridge.
+    # SOLUTION: strict callback сохраняет expectedFailures и передаёт исходный
+    # exception в addFailure; nonstrict и штатный unexpected success неизменны.
+    # RESULT: RED — legacy child/outer CLI [0, 0] и скрытая причина до following;
+    # GREEN — [1, 1] с исходным assertion, 31 harness и 5 UID checks на 3.12/PG17.
+    # STATUS: FIXED — see #768
+    expected_failure = ('class Boundary(unittest.TestCase):\n'
+        '    @unittest.expectedFailure\n'
+        '    def test_required(self): self.fail("owned legacy expected-failure reason")\n')
+
+    def invoke(self, body, *, strict, outer, following=False):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='mop-legacy-policy-') as directory:
+            root = self.policy_root(directory)
+            boundary = root / 'tests/boundary.py'
+            boundary.write_text('import unittest\n' + body +
+                '\nif __name__ == "__main__": unittest.main()\n')
+            if outer:
+                names = ['boundary']
+                if following:
+                    (root / 'tests/following.py').write_text(
+                        'raise AssertionError("owned following-file marker")\n')
+                    names.append('following')
+                return self.run_cli(root, strict=strict, names=names)
+            return self.run_fresh([sys.executable, str(ROOT / 'tests/_pytest_legacy.py'),
+                                   str(boundary)], root, strict=strict)
+
+    def assert_policy(self, body, *, strict, code, reasons=(), child_code=None):
+        results = [self.invoke(body, strict=strict, outer=outer) for outer in (False, True)]
+        evidence = '\n'.join(f'{mode} exit={result.returncode}\n{result.stdout}{result.stderr}'
+                             for mode, result in zip(('legacy child', 'outer CLI'), results))
+        self.assertEqual([result.returncode for result in results],
+                         [code if child_code is None else child_code, code], evidence)
+        for result in results:
+            for reason in reasons:
+                self.assertIn(reason, result.stdout + result.stderr)
+        return results
+
+    def test_strict_legacy_expected_failure_preserves_assertion_and_both_real_exits_are_one(self):
+        self.assert_policy(self.expected_failure, strict=True, code=1,
+            reasons=('Boundary.test_required', 'AssertionError: owned legacy expected-failure reason'))
+
+    def test_strict_legacy_expected_failure_is_visible_before_the_following_file(self):
+        result = self.invoke(self.expected_failure, strict=True, outer=True, following=True)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn('Boundary.test_required', output)
+        self.assertIn('owned legacy expected-failure reason', output)
+        self.assertLess(output.index('owned legacy expected-failure reason'),
+                        output.index('owned following-file marker'))
+        self.assertIn('2 failed', output)
+
+    def test_nonstrict_legacy_expected_failure_still_uses_unittest_semantics(self):
+        child, outer = self.assert_policy(self.expected_failure, strict=False, code=0)
+        self.assertIn('OK (expected failures=1)', child.stdout + child.stderr)
+        self.assertIn('1 passed', outer.stdout + outer.stderr)
+
+    def test_legacy_unexpected_success_stays_red_in_both_modes(self):
+        body = ('class Boundary(unittest.TestCase):\n'
+            '    @unittest.expectedFailure\n'
+            '    def test_required(self): pass\n')
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                self.assert_policy(body, strict=strict, code=1,
+                    reasons=('Boundary.test_required', 'UNEXPECTED SUCCESS'))
+
+    def test_legacy_skip_keeps_strict_failure_and_nonstrict_skip(self):
+        body = ('class Boundary(unittest.TestCase):\n'
+            '    @unittest.skip("owned legacy skip reason")\n'
+            '    def test_required(self): pass\n')
+        self.assert_policy(body, strict=True, code=1,
+            reasons=('Boundary.test_required', 'owned legacy skip reason'))
+        child, _ = self.assert_policy(body, strict=False, code=0)
+        self.assertIn('OK (skipped=1)', child.stdout + child.stderr)
+
+    def test_legacy_ordinary_assertion_setup_and_import_failures_stay_red(self):
+        # HYPOTHESIS (wrong): unittest всегда возвращает 1 при setUpClass error.
+        # RESULT: fresh Python 3.12.15 вернул 5 (testsRun == 0), outer CLI — 1.
+        # Сохраняем именно штатные коды; это не повод менять bridge/stdlib.
+        for body, reason, child_code in (
+                ('class Boundary(unittest.TestCase):\n'
+                 '    def test_required(self): self.fail("owned legacy assertion failure")\n',
+                 'owned legacy assertion failure', 1),
+                ('class Boundary(unittest.TestCase):\n'
+                 '    @classmethod\n'
+                 '    def setUpClass(cls): raise RuntimeError("owned legacy setup failure")\n'
+                 '    def test_required(self): pass\n', 'owned legacy setup failure', 5),
+                ('raise ImportError("owned legacy import failure")\n', 'owned legacy import failure', 1)):
+            for strict in (False, True):
+                with self.subTest(reason=reason, strict=strict):
+                    self.assert_policy(body, strict=strict, code=1,
+                                       child_code=child_code, reasons=(reason,))
+
+
+class ProcessOwnership(unittest.TestCase):
+    # Здесь контракт pytest fixture; настоящие группы/detach/reap проверяет
+    # pytest_ownership, а не fake PID, который раньше принимали за эксперимент.
+    def fixture(self, process):
+        import _pytest_plugin
+        process.handle.row = {'pid': 1, 'start': 'synthetic', 'group': 1, 'namespace': 'synthetic'}
+        request = SimpleNamespace(node=SimpleNamespace(path=ROOT / 'tests/state.py'))
+        with patch.object(_pytest_plugin, 'OwnedProcess', return_value=process) as start:
+            fixture = _pytest_plugin.owned_legacy_process.__wrapped__(request)
+            self.assertIs(next(fixture), process)
+        return fixture, Path(start.call_args.kwargs['env']['TMPDIR'])
+
+    def test_successful_child_cannot_leave_an_owned_process_group_or_temp_root(self):
+        from unittest.mock import Mock
+        process = Mock()
+        fixture, directory = self.fixture(process)
+        process.close.side_effect = lambda: self.assertTrue(directory.exists(), 'HOME removed before join')
+        fixture.close()
+        process.close.assert_called_once_with()
+        self.assertFalse(directory.exists())
+
+    def test_cancelled_reader_kills_only_its_group_reaps_and_removes_its_temp_root(self):
+        from unittest.mock import Mock
+        process = Mock()
+        fixture, directory = self.fixture(process)
+        process.close.side_effect = lambda: self.assertTrue(directory.exists(), 'HOME removed before cancel/join')
+        with self.assertRaisesRegex(KeyboardInterrupt, 'owned cancellation'):
+            fixture.throw(KeyboardInterrupt('owned cancellation'))
+        process.close.assert_called_once_with()
+        self.assertFalse(directory.exists())
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:] or ['pytest_harness']))

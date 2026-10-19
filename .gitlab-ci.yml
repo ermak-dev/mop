@@ -73,8 +73,8 @@ stages: [test, deploy]
         # Один набор wheels для runner и чистых client venv: декларации
         # остаются в package metadata, но дочерние проверки не зависят от
         # повторной сетевой установки тех же библиотек в каждом новом HOME.
-        pip wheel -q --disable-pip-version-check --wheel-dir /opt/mop-wheels '.[server]' jinja2 'setuptools>=64'
-        pip install -q --root-user-action=ignore --disable-pip-version-check --no-index --find-links /opt/mop-wheels 'mop[server]' jinja2
+        pip wheel -q --disable-pip-version-check --wheel-dir /opt/mop-wheels '.[server,test]' jinja2 'setuptools>=64'
+        pip install -q --root-user-action=ignore --disable-pip-version-check --no-index --find-links /opt/mop-wheels 'mop[server,test]' jinja2
         export PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/mop-wheels
         # Только новая owned Docker fixture: отдельный uid и Unix executor.
         python3 tests/_build_uid_fixture.py

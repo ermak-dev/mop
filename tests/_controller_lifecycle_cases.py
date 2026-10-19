@@ -32,6 +32,8 @@ class OwnedLifecycle(TransactionTestCase):
         import uuid
         from mop.server.controller.postgresql.base import DatabaseWrapper
         from _controller_fixture import OwnedTestDatabase, maintenance_cursor
+        self.assertIsInstance(getattr(connection.creation._create_test_db, '__self__', None),
+                              OwnedTestDatabase, 'the session must use the shared owned DB fixture')
         name = 'test_mop_' + uuid.uuid4().hex
         config = copy.deepcopy(connection.settings_dict)
         config['TEST']['NAME'] = name
@@ -69,8 +71,10 @@ class OwnedLifecycle(TransactionTestCase):
             '_controller_lifecycle_cases.cleanup_failure_suite'], env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn('Ran 1 test', result.stdout)
-        self.assertIn('OK', result.stdout)
+        # #692: pytest сохраняет passing call и отдельно красит teardown.
+        self.assertIn('::hold_own_connection PASSED', result.stdout)
+        self.assertIn('1 passed', result.stdout)
+        self.assertIn('1 error', result.stdout)
         self.assertIn('owned test database is not quiescent', result.stdout)
         self.assertIn('test database management failure:', result.stdout)
         self.assertNotIn('TransportDeadlineExceeded', result.stdout)

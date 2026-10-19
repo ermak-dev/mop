@@ -213,11 +213,9 @@ def restore_snapshot(creation, data, original):
         creation.connection.check_constraints(table_names={model._meta.db_table for model in batches})
 
 
-def main(labels=None):
-    host = hermetic.FIXTURE_ENV.get('MOP_TEST_POSTGRES_HOST')
-    if not host:
-        hermetic.skip('controller PostgreSQL', 'isolated fixture requires MOP_TEST_POSTGRES_HOST')
-        return 0
+@contextmanager
+def controller_environment(host):
+    """Единственный bootstrap session; только синтетические test inputs."""
     with tempfile.TemporaryDirectory(prefix='mop-controller-test-') as directory:
         path = Path(directory)
         for name in ('root.key', 'django.key'):
@@ -235,61 +233,18 @@ def main(labels=None):
         os.environ['MOP_CONTROLLER_BOOTSTRAP'] = str(path / 'bootstrap.json')
         from mop.server.controller.runtime import configure
         configure()
-        from django.test.runner import DiscoverRunner
         from django.conf import settings
-        # hermetic гоняет clean/hostile одновременно: у каждого своя БД.
-        name = 'test_mop_' + uuid.uuid4().hex
-        settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = name
-        class DiagnosticRunner(DiscoverRunner):
-            def teardown_databases(self, old_config, **kwargs):
-                import psycopg
-                import time
-                from unittest.mock import patch
-                from django.db import connections
-                config = dict(connections['default'].settings_dict)
-                original_execute = psycopg.Cursor.execute
-                def diagnostic_execute(cursor, query, *args, **kw):
-                    if query != 'DROP DATABASE "' + name + '"':
-                        return original_execute(cursor, query, *args, **kw)
-                    # До execute: после fencing libpq уже не отдаёт backend_pid.
-                    pid = cursor.connection.info.backend_pid
-                    started = time.monotonic()
-                    try:
-                        return original_execute(cursor, query, *args, **kw)
-                    except Exception:
-                        elapsed = round(time.monotonic() - started, 3)
-                        try:
-                            rows = _drop_backend_state(config, pid)
-                        except Exception as diagnostic:
-                            # Не маскировать исходный DROP failure диагностикой
-                            # и не печатать сырой driver error с connect inputs.
-                            print('test database teardown diagnostic unavailable:', type(diagnostic).__name__, flush=True)
-                        else:
-                            print('test database teardown diagnostic:', json.dumps({
-                                'database': name, 'drop_pid': pid, 'elapsed': elapsed,
-                                'activity': rows}), flush=True)
-                        raise
-                # До отказа нет SQL/thread observer: не добавляем сетевых
-                # ожиданий перед DROP и не заявляем server quiescence.
-                with patch.object(psycopg.Cursor, 'execute', diagnostic_execute):
-                    return super().teardown_databases(old_config, **kwargs)
-        class ResultCapturingRunner(DiagnosticRunner):
-            # run_tests возвращает ЦЕЛОЕ (failures+errors+unexpectedSuccesses),
-            # объекта результата в нём нет. Пропуски видит только сам runner:
-            # перехватываем run_suite, чтобы strict-режим (#674) снова считал их.
-            def run_suite(self, suite, **kwargs):
-                self.captured_result = super().run_suite(suite, **kwargs)
-                return self.captured_result
-        runner = ResultCapturingRunner(verbosity=2, interactive=False)
-        from django.db import connection
-        from unittest.mock import patch
-        creation = connection.creation
-        original = creation.deserialize_db_from_string
-        owned = OwnedTestDatabase(creation, name)
-        with patch.object(creation, '_create_test_db', new=owned.create), \
-                patch.object(creation, '_destroy_test_db', new=owned.destroy), \
-                patch.object(creation, 'deserialize_db_from_string',
-                             new=lambda data: restore_snapshot(creation, data, original)):
-            suite_result = runner.run_tests(labels or ['_controller_cases'])
-            skipped = getattr(getattr(runner, 'captured_result', None), 'skipped', ()) or ()
-            return run_exit_code(suite_result, strict=hermetic.STRICT, skipped=len(skipped))
+        # Каждый owned subprocess (в том числе clean/hostile) имеет свою БД.
+        settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = 'test_mop_' + uuid.uuid4().hex
+        yield
+
+
+def main(labels=None):
+    host = hermetic.FIXTURE_ENV.get('MOP_TEST_POSTGRES_HOST')
+    if not host:
+        hermetic.skip('controller PostgreSQL', 'isolated fixture requires MOP_TEST_POSTGRES_HOST')
+        return 0
+    from _pytest_django import run_labels
+    with controller_environment(host):
+        result = run_labels(labels or ['_controller_cases'])
+    return run_exit_code(int(result != 0), strict=hermetic.STRICT, skipped=0)
