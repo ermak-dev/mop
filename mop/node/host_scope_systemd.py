@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import stat
 import time
 
@@ -369,6 +370,102 @@ def _paths(value):
     return tuple(sorted(v.removeprefix('-') for v in value.split()))
 
 
+class _NativeSocket:
+    """Original no-follow inode pin и peer без registry/key или protocol payload.
+
+    PrivateUsers=no и отсутствие PID namespace в installed unit дают общий
+    PID/user domain с root. Mount namespace иной (ProtectSystem/PrivateTmp):
+    сверяем тот же fixed inode через pinned /proc/native/root, не setns и не
+    предположение о равенстве mount namespaces. Никакого caller path.
+    """
+    def __init__(self, installed, reference, native):
+        self.installed, self.reference, self.native = installed, reference, native
+        self.body = installed.body(reference.scope)
+        self.home = self.runtime = self.socket = None
+        self.failed = False
+        try:
+            self.home = open_directory(self.body, owner=installed.body_uid, private=True)
+            self.runtime = os.open('r', os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC, dir_fd=self.home)
+            for fd in (self.home, self.runtime):
+                info = os.fstat(fd)
+                if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (installed.body_uid, installed.body_gid, 0o700):
+                    raise Refused('native socket requires exact private installed body directories')
+            self.socket = os.open('session.sock', os.O_PATH|os.O_NOFOLLOW|os.O_CLOEXEC, dir_fd=self.runtime)
+            self.identities = tuple(self._identity(os.fstat(fd)) for fd in (self.home, self.runtime, self.socket))
+            self.check()
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _identity(info):
+        return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink
+
+    @property
+    def inode(self):
+        return list(self.identities[2][:2])
+
+    def check(self):
+        from mop.node.host_backend import Process
+        if self.failed:
+            raise Refused('original native socket proof invalidated; replacement forbidden')
+        home = open_directory(self.body, owner=self.installed.body_uid, private=True)
+        try:
+            observed = (os.fstat(home), os.stat('r', dir_fd=home, follow_symlinks=False),
+                        os.stat('session.sock', dir_fd=self.runtime, follow_symlinks=False))
+            if tuple(self._identity(info) for info in observed) != self.identities:
+                raise Refused('original native socket or private directory inode changed')
+            info = os.fstat(self.socket)
+            if (self._identity(info) != self.identities[2] or not stat.S_ISSOCK(info.st_mode)
+                    or info.st_uid != self.installed.body_uid or info.st_gid != self.installed.body_gid
+                    or info.st_mode & 0o077 or info.st_nlink != 1):
+                raise Refused('native socket type/private installed ownership changed')
+            proc = open_directory(Path('/proc')/str(self.native.pid))
+            view = None
+            try:
+                if read_at(proc, 'cgroup', limit=4096) != '0::'+self.reference.scope.cgroup:
+                    raise Refused('native socket peer left exact retained cgroup')
+                # Единственный deliberate proc magic-link: root этого exact PID.
+                view = os.open('root', os.O_PATH|os.O_DIRECTORY|os.O_CLOEXEC, dir_fd=proc)
+                for part in (self.body/'r').parts[1:]:
+                    child = os.open(part, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC, dir_fd=view)
+                    os.close(view)
+                    view = child
+                if (self._identity(os.fstat(view)) != self.identities[1]
+                        or self._identity(os.stat('session.sock', dir_fd=view, follow_symlinks=False)) != self.identities[2]):
+                    raise Refused('native mount view differs from fixed root socket inode')
+            finally:
+                if view is not None: os.close(view)
+                os.close(proc)
+            if Process.read(self.native.pid) != self.native:
+                raise Refused('native socket peer PID/start/boot changed')
+        finally:
+            os.close(home)
+
+    async def observe(self):
+        from mop.node.host_scope_supervisor import peer_credentials
+        self.check()
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        peer.setblocking(False)
+        try:
+            # Только credential handshake: нет native key, request или bearer.
+            # Dirfd anchor не позволяет path walk уйти через replaced runtime.
+            async with asyncio.timeout(.25):
+                await asyncio.get_running_loop().sock_connect(peer, '/proc/self/fd/'+str(self.runtime)+'/session.sock')
+            self.check()
+            if peer_credentials(peer) != (self.native.pid, self.installed.body_uid, self.installed.body_gid):
+                raise Refused('native socket peer differs from exact retained native PID/UID/GID')
+        finally:
+            peer.close()
+
+    def close(self):
+        for name in ('socket', 'runtime', 'home'):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+
+
 class SystemdCgroupAdapter:
     """Production binding требует actual root/systemd/unified writable cgroup2.
 
@@ -381,6 +478,7 @@ class SystemdCgroupAdapter:
         self.installed = installed
         self._phase_limits = {}
         self._phase_cgroups = {}
+        self._native_sockets = {}
         self.command = BoundedCommand()
         self._runner_identity = installed_file(installed.runner)
         for path in TOOLS:
@@ -507,10 +605,38 @@ class SystemdCgroupAdapter:
         from mop.common.producer import ProducerReport
         if type(report) is not ProducerReport:
             raise Refused('typed installed body native report required')
-        result = await self.native_launch(reference, dict(pid=report.pid, process_start=report.process_start,
-            session_id=report.scope.session_id, tmux_pid=identity['tmux_pid'], tmux_start=identity['tmux_start']), tools, pins)
-        result['socket_inode'] = identity['socket_inode']
-        return result
+        from mop.node.host_backend import Process
+        boot, ticks = report.process_start.split(':')
+        native = Process(report.pid, int(ticks), boot)
+        claimed = identity['socket_inode']
+        if type(claimed) is not list or len(claimed) != 2 or any(type(v) is not int or v < 0 for v in claimed):
+            raise Refused('exact body-observed socket inode required')
+        launched = dict(pid=report.pid, process_start=report.process_start,
+            session_id=report.scope.session_id, tmux_pid=identity['tmux_pid'], tmux_start=identity['tmux_start'])
+        pinned = self._native_sockets.get(reference)
+        try:
+            if pinned is not None:
+                if pinned.native != native:
+                    raise Refused('original native socket cannot attach a replacement process')
+                pinned.check()
+            result = await self.native_launch(reference, launched, tools, pins)
+            if pinned is None:
+                pinned = _NativeSocket(self.installed, reference, native)
+                self._native_sockets[reference] = pinned
+            if claimed != pinned.inode:
+                raise Refused('body-observed socket inode differs from independent root observation')
+            await pinned.observe()
+            if await self.native_launch(reference, launched, tools, pins) != result:
+                raise Refused('native process proof changed around socket observation')
+            await pinned.observe()
+            result['socket_inode'] = pinned.inode
+            return result
+        except BaseException as error:
+            if pinned is not None:
+                pinned.failed = True
+            if isinstance(error, OSError):
+                raise Unknown('fixed native socket evidence unavailable: '+type(error).__name__) from error
+            raise
 
     async def native_launch(self, reference, launched, tools, pins):
         """До registry/ACK удерживаем только реальные процессы; это не producer proof."""
@@ -518,6 +644,12 @@ class SystemdCgroupAdapter:
         from datetime import datetime, timezone
         from mop.node.host_backend import Process
         runner = await self.runner_process(reference)
+        # Installed PrivateUsers=no, без PrivatePIDs/RootDirectory/RootImage:
+        # SO_PEERCRED и body proc PID/UID читаются в том же domain, не переводятся
+        # по body JSON. Иные domains не поддерживаются этим installed contract.
+        for namespace in ('pid', 'user'):
+            if os.readlink('/proc/'+str(runner.pid)+'/ns/'+namespace) != os.readlink('/proc/self/ns/'+namespace):
+                raise Refused('installed body PID/user domain differs from root supervisor')
         boot, ticks = launched['process_start'].split(':')
         native = Process(launched['pid'], int(ticks), boot)
         tmux = Process(launched['tmux_pid'], int(launched['tmux_start']), reference.boot_id)
@@ -976,3 +1108,5 @@ class SystemdCgroupAdapter:
         finally:
             for pinned in getattr(self, '_phase_cgroups', {}).values(): os.close(pinned.fd)
             self._phase_cgroups = {}
+            for pinned in self._native_sockets.values(): pinned.close()
+            self._native_sockets = {}

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import select
 import socket
 import sys
 import time
@@ -99,10 +100,29 @@ os.close(ready_read)
 # Consumer имеет право менять собственный cwd; retirement не зависит от
 # повторного launch admission этой директории (#725).
 body.chmod(0o755)
+# Только owned non-native fixture socket: Root проверяет настоящий body UID,
+# отдельный systemd mount namespace и kernel peer/cgroup, не vendor startup.
+runtime = body/'r'
+runtime.mkdir(mode=0o700)
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(str(runtime/'session.sock'))
+os.chmod(runtime/'session.sock', 0o600)
+listener.listen(16)
 record = dict(pid=os.getpid(), starter=starter, sid=os.getsid(0), uid=os.getuid(), gid=os.getgid(),
               cgroup=Path('/proc/self/cgroup').read_text().strip(), checks=checks,
               opaque_names=[dict(pid=os.getpid(), name=names[0].hex()),
                             dict(pid=opaque_child, name=names[1].hex())])
 (body/'descendant.json').write_text(json.dumps(record))
 while True:
-    time.sleep(1)
+    if select.select([listener], [], [], .02)[0]:
+        connection, _ = listener.accept()
+        connection.close()
+    if (body/'socket-replace').exists():
+        (body/'socket-replace').unlink()
+        (runtime/'session.sock').unlink()
+        listener.close()
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(runtime/'session.sock'))
+        os.chmod(runtime/'session.sock', 0o600)
+        listener.listen(16)
+        (body/'socket-replaced').write_text('same fixture PID, new kernel inode')
