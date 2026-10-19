@@ -67,6 +67,7 @@ LAYERS = {
     "mop.cli.driver.clone-work": NODE, "mop.cli.driver.hold-probe": NODE,
     "mop.cli.driver.scope-probe": NODE,  # Частная OS fixture, не controller/pool API.
     "mop.cli.driver.phase-input-probe": NODE,  # #746: частная fixture конечного транспорта.
+    "mop.cli.driver.planned-phase-probe": NODE,  # #752: actual root/node/body private fixture.
 }
 # Что вправе лежать в корне пакета, кроме каталогов слоёв.
 ROOT_PARTS = ("session", "usage", "driver", "cli")

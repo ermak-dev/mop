@@ -211,6 +211,90 @@ class NodeWriterTests(unittest.TestCase):
     def write(self, a=None, s=None, value=None):
         return self.writer.write(a or self.a, s or self.s, self.value if value is None else value)
 
+    # BUG #759 / HYPOTHESIS: descriptor не является physical cleanup authority.
+    # SOLUTION: exact saved receipt, pinned original inode и private capture;
+    # foreign capture сохраняется без overwrite, close закрывает только FD.
+    # Отказ нового anchor проверяется отдельно: creator FD закрывается даже
+    # тогда, когда callback записи physical facts бросил исключение в finally.
+    # RESULT: 25 narrow проверок прошли; actual UID fixture — 27 проверок.
+    # STATUS: FIXED — see #759.
+    def test_node_stage_owner_cleans_only_its_exact_inode_and_releases_slot(self):
+        stage = getattr(self.writer, 'stage', None)
+        self.assertTrue(callable(stage), 'retained node staging receipt is missing')
+        owned = stage(self.a, self.s, self.value)
+        path = self.path/owned.descriptor.filename
+        self.assertTrue(path.exists())
+        for forged in (owned.descriptor, replace(owned)):
+            with self.assertRaises(Refused): self.writer.cleanup(forged)
+            self.assertTrue(path.exists())
+        self.assertTrue(self.writer.cleanup(owned))
+        self.assertFalse(path.exists())
+        self.assertEqual(self.writer.retained, ())
+
+    def test_node_stage_pin_failure_closes_creator_fd_without_deleting_retained_input(self):
+        # HYPOTHESIS: отказ нового inode anchor не должен прервать finally close.
+        original, created = os.open, []
+        def opening(name, flags, *args, **kw):
+            if str(name).endswith('.json') and kw.get('dir_fd') == self.writer.directory.fd:
+                if flags & os.O_EXCL:
+                    fd = original(name, flags, *args, **kw)
+                    created.append(fd)
+                    return fd
+                raise OSError('controlled staging anchor failure')
+            return original(name, flags, *args, **kw)
+        with patch('os.open', side_effect=opening), self.assertRaises(Refused):
+            self.writer.stage(self.a, self.s, self.value)
+        self.assertEqual(len(created), 1)
+        self.addCleanup(lambda: os.close(created[0]) if leaked else None)
+        try:
+            os.fstat(created[0])
+            leaked = True
+        except OSError:
+            leaked = False
+        self.assertFalse(leaked, 'staging pin failure leaked original creation FD')
+        self.assertEqual(len(self.writer.retained), 1)
+        self.assertTrue((self.path/self.writer.retained[0].descriptor.filename).exists())
+
+    def test_node_stage_cleanup_never_unlinks_a_foreign_replacement_or_close_deletes(self):
+        stage = getattr(self.writer, 'stage', None)
+        self.assertTrue(callable(stage), 'retained node staging receipt is missing')
+        owned = stage(self.a, self.s, self.value)
+        path = self.path/owned.descriptor.filename
+        path.rename(self.path/'displaced-owned')
+        path.write_bytes(b'foreign-private-input')
+        path.chmod(0o600)
+        before = path.stat().st_ino
+        with self.assertRaises(Refused): self.writer.cleanup(owned)
+        self.assertEqual(path.stat().st_ino, before)
+        self.assertEqual(path.read_bytes(), b'foreign-private-input')
+        self.assertEqual(len(self.writer.retained), 1)
+        self.writer.close()
+        self.assertTrue((self.path/'displaced-owned').exists())
+        self.assertEqual(path.stat().st_ino, before)
+
+    def test_node_cleanup_capture_race_preserves_foreign_inode_and_retained_owner(self):
+        stage = getattr(self.writer, 'stage', None)
+        self.assertTrue(callable(stage), 'retained node staging receipt is missing')
+        owned = stage(self.a, self.s, self.value)
+        path = self.path/owned.descriptor.filename
+        rename = os.rename
+        foreign = None
+        def race(src, dst, **kw):
+            nonlocal foreign
+            if src == path.name and kw.get('src_dir_fd') == self.writer.directory.fd:
+                rename(path, self.path/'displaced-owned')
+                path.write_bytes(b'foreign-capture-race')
+                path.chmod(0o600)
+                foreign = path.stat().st_ino
+            return rename(src, dst, **kw)
+        with patch('os.rename', side_effect=race), self.assertRaises(Refused):
+            self.writer.cleanup(owned)
+        self.assertIsNotNone(foreign, 'cleanup did not use an owned capture boundary')
+        copies = [p for p in self.path.rglob('*') if p.is_file() and p.stat().st_ino == foreign]
+        self.assertTrue(copies, 'cleanup deleted a foreign captured inode')
+        self.assertTrue(all(p.read_bytes() == b'foreign-capture-race' for p in copies))
+        self.assertEqual(len(self.writer.retained), 1)
+
     def test_node_creates_private_exclusive_derived_file_and_same_repeat_is_read_only(self):
         descriptor = self.write()
         path = self.path/descriptor.filename

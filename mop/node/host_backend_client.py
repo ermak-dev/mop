@@ -87,6 +87,63 @@ class _Session:
     async def confirm(self, *, epoch, executor_epoch, empty):
         return await self._request('backend_confirm', epoch, executor_epoch, empty)
 
+    async def planned(self, request, *, guard=None):
+        """Только finite phase exchange поверх уже pinned root authority session."""
+        from mop.node.host_scope import encode
+        from mop.node.host_phases import Submission, address
+        from mop.node.http_execution import EffectGuard
+        self.check(self.authority)
+        if type(request) is Submission:
+            raw = request.encode()
+        else:
+            if type(request) is not dict:
+                raise Refused('finite planned request required')
+            if request.get('action') != 'phase_ack':
+                address(request)
+            raw = encode(request)
+        async with asyncio.timeout(self.client.timeout):
+            self.writer.write(raw+b'\n')
+            await self.writer.drain()
+            value = decode(await read_frame(self.reader))
+            self.check(self.authority)
+            if value.get('status') == 'challenge':
+                exact(value, ('schema_version', 'status', 'challenge', 'effect', 'sequence', 'attempt_id'))
+                from mop.node.host_scope import canonical
+                if type(value['schema_version']) is not int or value['schema_version'] != 1:
+                    raise Refused('unsupported planned checkpoint challenge schema')
+                canonical(value['challenge'])
+                if (type(guard) is not EffectGuard or guard.admission is None
+                        or guard.admission.attempt_id != value['attempt_id']
+                        or request.get('action') != 'phase_checkpoint'
+                        or value['attempt_id'] != request['attempt_id']):
+                    raise Refused('planned checkpoint requires its actual Runtime Admission guard')
+                from mop.node.host_phases import CHECKPOINTS
+                plan = CHECKPOINTS[guard.admission.work.action]
+                if (type(value['sequence']) is not int or not 0 <= value['sequence'] < len(plan)
+                        or plan[value['sequence']] != value['effect']):
+                    raise Refused('planned checkpoint effect/sequence changed')
+                await guard()
+                guard.check()
+                self.check(self.authority)
+                self.writer.write(encode(dict(schema_version=1, action='checkpoint_response',
+                    attempt_id=value['attempt_id'], challenge=value['challenge']))+b'\n')
+                await self.writer.drain()
+                value = decode(await read_frame(self.reader))
+                self.check(self.authority)
+        self.writer.write(encode(dict(schema_version=1, action='phase_response_ack'))+b'\n')
+        await self.writer.drain()
+        exact(value, ('schema_version', 'status', 'phase', 'error'))
+        if type(value['schema_version']) is not int or value['schema_version'] != 1:
+            raise Refused('invalid planned HOST response schema')
+        if value['status'] in ('refused', 'unknown'):
+            error = value['error']
+            if type(error) is not str or not 0 < len(error) <= 1024 or not error.isprintable():
+                raise Refused('invalid planned HOST refusal')
+            raise (Refused if value['status'] == 'refused' else Unknown)(error)
+        if value['status'] != 'ok' or value['error'] is not None or type(value['phase']) is not dict:
+            raise Refused('invalid planned HOST response status')
+        return value['phase']
+
     async def _request(self, action, epoch=None, executor_epoch=None, empty=None):
         if self.authority is not None:
             self.check(self.authority)

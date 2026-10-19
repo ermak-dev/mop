@@ -6,7 +6,8 @@
 """
 import asyncio
 import ctypes
-from dataclasses import replace
+import errno
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -248,6 +249,47 @@ def properties(installed, scope):
     }
 
 
+def removed_cgroup_empty(before, after, fdpath, scope):
+    """cgroup-v2 rmdir разрешён ядром лишь пустому subtree; не name absence.
+
+    Kernfs сохраняет nlink=2: нужен exact d_path deleted именно pinned fd.
+    Root ранее проверил cgroup-v2 mount, invocation и stable directory inode.
+    """
+    return (stat.S_ISDIR(before.st_mode) and stat.S_ISDIR(after.st_mode)
+        and (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+        and fdpath == '/sys/fs/cgroup'+scope.cgroup+' (deleted)')
+
+
+@dataclass(frozen=True)
+class _PinnedCgroup:
+    facts: Facts
+    fd: int
+    identity: object
+
+
+@dataclass(frozen=True)
+class _CleanupScope:
+    original: Scope
+
+    @property
+    def unit(self): return self.original.unit.replace('mop-host-', 'mop-clean-', 1)
+    @property
+    def cgroup(self): return '/mop.slice/mop-host.slice/'+self.unit
+    @property
+    def launch_id(self): return self.original.launch_id
+
+
+def cleanup_argv(installed, scope, limits):
+    props = properties(installed, scope)
+    props.update(RuntimeMaxSec='8s', TimeoutStopSec='2s')
+    if limits is not None:
+        props.update(limits.properties())
+        props['TasksMax'] = str(limits.tasks_max)
+    return (TOOLS[0], '--quiet', '--unit='+_CleanupScope(scope).unit,
+        *('--property='+key+'='+value for key, value in props.items()),
+        '--', str(installed.runner), '--cleanup', scope.unit)
+
+
 def launch_argv(installed, scope):
     return (TOOLS[0], '--quiet', '--unit='+scope.unit,
             *('--property='+k+'='+v for k, v in properties(installed, scope).items()),
@@ -337,6 +379,8 @@ class SystemdCgroupAdapter:
         if type(installed) is not Installed or os.geteuid() != 0:
             raise Refused('installed root HOST supervisor required')
         self.installed = installed
+        self._phase_limits = {}
+        self._phase_cgroups = {}
         self.command = BoundedCommand()
         self._runner_identity = installed_file(installed.runner)
         for path in TOOLS:
@@ -383,6 +427,152 @@ class SystemdCgroupAdapter:
         finally:
             os.close(parent)
 
+    def configure_phase(self, scope, limits):
+        from mop.node.host_phase_manifest import ResourceLimits
+        if type(scope) is not Scope or type(limits) is not ResourceLimits or scope in self._phase_limits:
+            raise Refused('one installed resource projection per new HOST scope required')
+        self._phase_limits[scope] = limits
+
+    def retain_phase_cgroup(self, facts):
+        reference = facts.verify(self.installed, facts.scope).reference
+        owned = getattr(self, '_phase_cgroups', None)
+        if owned is None or reference in owned:
+            raise Refused('one retained cgroup descriptor per physical phase start required')
+        fd = self._cgroup(facts.scope)
+        try:
+            owned[reference] = _PinnedCgroup(facts, fd, os.fstat(fd))
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _properties(self, scope):
+        result = properties(self.installed, scope)
+        limits = getattr(self, '_phase_limits', {}).get(scope)
+        if limits is not None:
+            result['TasksMax'] = str(limits.tasks_max)
+        return result
+
+    async def resource_readback(self, scope):
+        limits = getattr(self, '_phase_limits', {}).get(scope)
+        if limits is None:
+            raise Refused('HOST scope has no retained installed capacity projection')
+        names = ('MemoryMax', 'TasksMax', 'CPUWeight', 'CPUQuotaPerSecUSec', 'CPUQuotaPeriodUSec')
+        values = parse_properties(await self.command.run(TOOLS[1], 'show', '--all', '--no-pager',
+            '--property='+','.join(names), '--', scope.unit), names)
+        from mop.node.host_phase_manifest import duration_usec
+        if (values['MemoryMax'] != str(limits.memory_max) or values['TasksMax'] != str(limits.tasks_max)
+                or values['CPUWeight'] != str(limits.cpu_weight)
+                or duration_usec(values['CPUQuotaPerSecUSec']) != limits.cpu_quota_usec
+                or duration_usec(values['CPUQuotaPeriodUSec']) != 100000):
+            raise Refused('actual HOST manager resource limits differ from installed capacity')
+        fd = self._cgroup(scope)
+        try:
+            if (read_at(fd, 'memory.max') != str(limits.memory_max)
+                    or read_at(fd, 'pids.max') != str(limits.tasks_max)
+                    or read_at(fd, 'cpu.weight') != str(limits.cpu_weight)
+                    or read_at(fd, 'cpu.max') != str(max(1000, limits.cpu_quota_usec//10))+' 100000'):
+                raise Refused('actual HOST kernel resource limits differ from installed capacity')
+        finally:
+            os.close(fd)
+        return limits
+
+    async def runner_process(self, reference, *, singleton=False):
+        from mop.node.host_backend import Process
+        facts = await self.inspect(reference.scope)
+        if facts is None:
+            raise Unknown('planned HOST runner has no physical unit')
+        facts.verify(self.installed, reference.scope, reference)
+        result = await self._unit(reference.scope)
+        if result is None or result[0]['InvocationID'] != reference.invocation_id:
+            raise Refused('planned runner invocation changed')
+        pid = int(result[0]['MainPID'])
+        if pid <= 0:
+            raise Unknown('planned runner has no live MainPID')
+        process = Process.read(pid)
+        if process.boot_id != reference.boot_id:
+            raise Refused('planned runner boot changed')
+        fd = self._cgroup(reference.scope)
+        try:
+            members = read_at(fd, 'cgroup.procs').splitlines()
+            if str(pid) not in members or singleton and members != [str(pid)]:
+                raise Unknown('planned phase helpers are not quiescent in the exact cgroup')
+        finally:
+            os.close(fd)
+        if Process.read(pid) != process:
+            raise Unknown('planned runner MainPID/start changed')
+        return process
+
+    async def cleanup_workspace(self, reference, connection, python):
+        # Никакого root walk/rmtree. Fixed cleanup runner ждёт root на том же socket.
+        from mop.node.host_backend import Process
+        from mop.node.host_scope import decode, encode, invocation
+        from mop.node.host_scope_supervisor import peer_credentials, read_frame
+        from mop.node.host_phases import require_frame
+        scope, cleanup = reference.scope, _CleanupScope(reference.scope)
+        limits = getattr(self, '_phase_limits', {}).get(scope)
+        if limits is None:
+            raise Refused('cleanup-only broker requires retained installed resource limits')
+        self._phase_limits[cleanup] = limits
+        if await self._unit(cleanup) is not None:
+            raise Unknown('cleanup-only unit collision; no foreign adoption or stop')
+        self._runner()
+        writer, fd = None, None
+        try:
+            async with asyncio.timeout(10.):
+                await self.command.run(*cleanup_argv(self.installed, scope, limits))
+                reader, writer, peer = await asyncio.shield(connection)
+                observed = await self._unit(cleanup)
+                if observed is None:
+                    raise Unknown('cleanup-only unit vanished before physical ownership proof')
+                values, executable, argv = observed
+                invocation(values['InvocationID'])
+                process = Process.read(peer[0])
+                if (peer[1:] != (self.installed.body_uid, self.installed.body_gid)
+                        or int(values['MainPID']) != process.pid or process.boot_id != reference.boot_id
+                        or values['ActiveState'] != 'active' or values['SubState'] != 'running'
+                        or executable != str(self.installed.runner)
+                        or argv != (str(self.installed.runner), '--cleanup', scope.unit)):
+                    raise Refused('cleanup-only actual MainPID/invocation/boot/executable changed')
+                proc = open_directory(Path('/proc')/str(process.pid))
+                try:
+                    if (os.readlink('exe', dir_fd=proc) != str(python)
+                            or read_bytes_at(proc, 'cmdline', limit=4096).split(b'\0') != [
+                                b'/usr/bin/python3', b'-ISB', os.fsencode(self.installed.runner), b'--cleanup', scope.unit.encode(), b'']):
+                        raise Refused('cleanup-only actual fixed interpreter/argv changed')
+                finally: os.close(proc)
+                bounds = parse_properties(await self.command.run(TOOLS[1], 'show', '--no-pager',
+                    '--property=RuntimeMaxUSec,TimeoutStopUSec', '--', cleanup.unit), ('RuntimeMaxUSec', 'TimeoutStopUSec'))
+                from mop.node.host_phase_manifest import duration_usec
+                if duration_usec(bounds['RuntimeMaxUSec']) != 8000000 or duration_usec(bounds['TimeoutStopUSec']) != 2000000:
+                    raise Refused('cleanup-only actual runtime bounds changed')
+                await self.resource_readback(cleanup)
+                fd = self._cgroup(cleanup)
+                identity = os.fstat(fd)
+                self._members(fd, cleanup)
+                if read_at(fd, 'cgroup.procs').splitlines() != [str(process.pid)]:
+                    raise Refused('cleanup-only cgroup is not the exact singleton MainPID')
+                writer.write(encode(dict(schema_version=1, action='cleanup_approved', scope=scope.wire()))+b'\n')
+                await writer.drain()
+                require_frame(decode(await read_frame(reader)), dict(schema_version=1, action='cleanup_done', scope=scope.wire()))
+                if peer_credentials(writer.get_extra_info('socket')) != peer or Process.read(peer[0]) != process:
+                    raise Refused('cleanup-only peer/start changed before retirement')
+                kill = os.open('cgroup.kill', os.O_WRONLY|os.O_NOFOLLOW|os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    if os.write(kill, b'1') != 1: raise Unknown('cleanup-only cgroup kill incomplete')
+                finally: os.close(kill)
+                while True:
+                    try:
+                        if not self._populated(fd): return
+                    except OSError as error:
+                        if (error.errno in (errno.ENOENT, errno.ENODEV) and removed_cgroup_empty(identity,
+                                os.fstat(fd), os.readlink('/proc/self/fd/'+str(fd)), cleanup)):
+                            return
+                        raise
+                    await asyncio.sleep(.02)
+        finally:
+            if fd is not None: os.close(fd)
+            if writer is not None: writer.close()
+
     async def _unit(self, scope):
         load = parse_properties(await self.command.run(TOOLS[1], 'show', '--no-pager',
             '--property=LoadState', '--', scope.unit), {'LoadState'})
@@ -390,7 +580,7 @@ class SystemdCgroupAdapter:
             return None
         if load['LoadState'] != 'loaded':
             raise Refused('HOST unit is not loaded; collision refused')
-        names = set(properties(self.installed, scope)) | EXTRA_PROPERTIES
+        names = set(self._properties(scope)) | EXTRA_PROPERTIES
         raw = await self.command.run(TOOLS[1], 'show', '--all', '--no-pager',
                                      '--property='+','.join(sorted(names)), '--', scope.unit)
         values = parse_properties(raw, names)
@@ -403,7 +593,7 @@ class SystemdCgroupAdapter:
                 or values['DynamicUser'] != 'no' or values['PrivateUsers'] != 'no'
                 or any(values[key] != '' for key in EMPTY_PROPERTIES)):
             raise Refused('HOST unit actual installed ownership mismatch')
-        for key, expected in properties(self.installed, scope).items():
+        for key, expected in self._properties(scope).items():
             actual = values[key]
             if key in ('InaccessiblePaths', 'ReadWritePaths'):
                 equal = _paths(actual) == _paths(expected)
@@ -595,19 +785,43 @@ class SystemdCgroupAdapter:
                 continue
             raise Refused('system manager environment is not consumer-only')
         # Не передаём environment root-процесса: BoundedCommand задаёт свой.
-        await self.command.run(*launch_argv(self.installed, scope))
+        limits = getattr(self, '_phase_limits', {}).get(scope)
+        if limits is None:
+            await self.command.run(*launch_argv(self.installed, scope))
+        else:
+            props = self._properties(scope)
+            props.update(limits.properties())
+            await self.command.run(TOOLS[0], '--quiet', '--unit='+scope.unit,
+                *('--property='+k+'='+v for k, v in props.items()),
+                '--', str(self.installed.runner), '--scope', scope.unit)
         facts = await self._inspect(scope, launched=True)
         if facts is None:
             raise StartUnknown('HOST launch acknowledged without inspectable containment')
+        if limits is not None:
+            self.retain_phase_cgroup(facts)
         return facts
 
     async def retire(self, reference):
         scope = reference.scope
-        facts = await self.inspect(scope)
+        pinned = getattr(self, '_phase_cgroups', {}).get(reference)
+        if pinned is not None and removed_cgroup_empty(pinned.identity, os.fstat(pinned.fd),
+                os.readlink('/proc/self/fd/'+str(pinned.fd)), scope):
+            pinned.facts.verify(self.installed, scope, reference)
+            return replace(pinned.facts, populated=False)
+        try:
+            facts = await self.inspect(scope)
+        except (Refused, Unknown):
+            if pinned is not None and removed_cgroup_empty(pinned.identity, os.fstat(pinned.fd),
+                    os.readlink('/proc/self/fd/'+str(pinned.fd)), scope):
+                return replace(pinned.facts, populated=False)
+            raise
         if facts is None:
+            if pinned is not None and removed_cgroup_empty(pinned.identity, os.fstat(pinned.fd),
+                    os.readlink('/proc/self/fd/'+str(pinned.fd)), scope):
+                return replace(pinned.facts, populated=False)
             raise Unknown('HOST unit absent; retirement unknown')
         facts.verify(self.installed, scope, reference)
-        fd = self._cgroup(scope)
+        fd = os.dup(pinned.fd) if pinned is not None else self._cgroup(scope)
         try:
             identity = os.fstat(fd)
             again = await self.inspect(scope)
@@ -637,10 +851,26 @@ class SystemdCgroupAdapter:
             # Empty kernel subtree доказан на том же pinned inode. Unit не stop/reset:
             # так ни GC, ни name collision не становятся чужим destructive effect.
             return replace(facts, populated=False)
+        except (Refused, Unknown):
+            if pinned is not None and removed_cgroup_empty(pinned.identity, os.fstat(fd),
+                    os.readlink('/proc/self/fd/'+str(fd)), scope):
+                return replace(pinned.facts, populated=False)
+            raise
         except OSError as error:
+            # MainPID killed -> manager GC может удалить уже пустой cgroup до
+            # следующего open. Только unlink именно pinned directory inode —
+            # kernel empty proof; отсутствие name/reference этим не становится.
+            if (error.errno in (errno.ENOENT, errno.ENODEV)
+                    and removed_cgroup_empty(identity, os.fstat(fd),
+                        os.readlink('/proc/self/fd/'+str(fd)), scope)):
+                return replace(facts, populated=False)
             raise Unknown('HOST cgroup retirement unavailable: '+type(error).__name__) from error
         finally:
             os.close(fd)
 
     async def aclose(self):
-        await self.command.aclose()
+        try:
+            await self.command.aclose()
+        finally:
+            for pinned in getattr(self, '_phase_cgroups', {}).values(): os.close(pinned.fd)
+            self._phase_cgroups = {}
