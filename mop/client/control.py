@@ -314,7 +314,7 @@ class PreparedCommand:
         _identity(self.epoch)
         _key(self.request_id)
         admission_deadline(self.not_after)
-        _require(self.action in ("restart", "send", "wipe", "stop", "delete") and type(self.fresh) is bool and
+        _require(self.action in ("restart", "send", "dispatch", "wipe", "stop", "delete") and type(self.fresh) is bool and
                  type(self.notify_when_idle) is bool and self.priority in ("now", "next", "later") and
                  type(self.wait_seconds) is int and 0 <= self.wait_seconds <= 60)
         if self.action in ("restart", "wipe", "stop", "delete"):
@@ -330,7 +330,7 @@ class PreparedCommand:
     def body(self) -> bytes:
         if self.action == "restart":
             params = {"fresh": self.fresh}
-        elif self.action == "send":
+        elif self.action in ("send", "dispatch"):
             params = {"message": self.message, "priority": self.priority,
                       "wait_seconds": self.wait_seconds, "notify_when_idle": self.notify_when_idle}
         else:
@@ -338,7 +338,7 @@ class PreparedCommand:
         data = {"schema_version": 1, "epoch": self.epoch, "request_id": self.request_id,
                 "incarnation": self.target.incarnation, "expected_revision": self.target.revision,
                 "not_after": self.not_after, "params": params}
-        if self.action == "send":
+        if self.action in ("send", "dispatch"):
             data["target_id"] = self.target.id
         return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
@@ -890,6 +890,13 @@ class Client:
                                not_after, message=message, priority=priority,
                                wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
 
+    def prepare_dispatch(self, target: Target, *, epoch: str, not_after: str, message: str,
+                         request_id: str | None = None, priority: str = "next", wait_seconds: int = 0,
+                         notify_when_idle: bool = False) -> PreparedCommand:
+        return PreparedCommand("dispatch", target, epoch, new_request_id(request_id),
+                               not_after, message=message, priority=priority,
+                               wait_seconds=wait_seconds, notify_when_idle=notify_when_idle)
+
     def prepare_wipe(self, target: Target, *, epoch: str, not_after: str,
                      request_id: str | None = None) -> PreparedCommand:
         return PreparedCommand("wipe", target, epoch, new_request_id(request_id), not_after)
@@ -1024,7 +1031,7 @@ class Client:
                     "wipe": f"/api/v1/puppets/{command.target.id}/commands/wipe",
                     "stop": f"/api/v1/puppets/{command.target.id}/commands/stop-job",
                     "delete": f"/api/v1/puppets/{command.target.id}/commands/delete",
-                    "send": "/api/v1/messages"}[command.action]
+                    "send": "/api/v1/messages", "dispatch": "/api/v1/dispatches"}[command.action]
         # Слишком большой локальный ввод — ещё не неизвестный admission.
         body = command.body
         _require(len(body) <= self._limits.max_request_bytes)

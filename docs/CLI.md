@@ -10,11 +10,11 @@ The #623/#642 migration is incomplete. The dispatcher uses only explicit transie
 
 Put `--api-origin` and `--api-ca` before the command, or supply transient `MOP_API_ORIGIN`, `MOP_API_CA` and `MOP_API_TOKEN`. Command data cannot retarget the selected credential. Legacy `--server` does not authorize remote control.
 
-Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
+Bound consumers: `mop add`, `mop addresses`, `mop build`, `mop delete`, `mop detail`, `mop diagnose`, `mop dispatch`, `mop health`, `mop landing`, `mop list`, `mop node drain`, `mop node up`, `mop operation`, `mop profile`, `mop project list`, `mop restart`, `mop send`, `mop stat`, `mop stop`, `mop wipe`. `mop diagnose` is offline context validation only.
 
 The restart wire adapter requires the published restart backend and its physical binding. This combined backend graph still needs restart/build operation-model integration; no native restart effect is claimed here. Fresh restart and privileged takeover remain unsupported.
 
-Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop dispatch`, `mop driver build`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
+Not bound (exit 2 before any network mutation): `mop agents`, `mop attach`, `mop code`, `mop driver build`, `mop login`, `mop master`, `mop mcp`, `mop model`, `mop models`, `mop node`, `mop node forget`, `mop project add`, `mop project delete`, `mop project limit`, `mop recycle`, `mop secret file`, `mop secret var`, `mop server disk`, `mop server doctor`, `mop server gc`, `mop server proxykey`, `mop server sweep`, `mop server user`, `mop server user add`, `mop server user delete`, `mop server user import`, `mop server user passwd`, `mop session history`, `mop session terminal`, `mop tail`, `mop update`.
 
 `mop mcp --check` can read the authenticated identity. The normal MCP runtime is unsupported until server action permissions and the private endpoint/inbox lifecycle are bound. A User is not live presence; private attach never falls back to SSH.
 
@@ -160,6 +160,29 @@ is information, exit code 0. A malformed context refuses with exit code 1.
 Select --api-origin and optional --api-ca, or transient MOP_API_ORIGIN,
 MOP_API_CA and MOP_API_TOKEN. No connection.json, .env or git config is read;
 the token is never shown.
+```
+
+#### mop dispatch
+
+```text
+mop dispatch <id> <text|-> [--epoch <id> --incarnation <id> --expected-revision N] [--request-id id] [--wait seconds]
+
+Submit one task to an explicit puppet assignment UUID through /api/v1/dispatches.
+Dispatch is a separate server-authorized operation, not a send alias: the server
+checks dispatch permission, assignment ownership and the recipient's approved
+receiving policy. This command does not select a free target or take over work.
+
+Without a full binding, authorized detail supplies the epoch, incarnation and
+desired revision. The request key and UTC --not-after (default two minutes) are
+fixed before context/detail I/O. MCP requires the complete explicit binding.
+Text '-' reads bounded stdin, at most 16384 UTF-8 bytes, nonempty and without NUL.
+--priority now|next|later defaults to next; --wait-seconds N (0..60) is a server
+command field, not evidence of idle state. --wait seconds observes the operation
+with bounded GET requests. accepted/unknown/outstanding operations exit 3, not
+delivered. A lost response recovers by the same request-id and epoch, never
+resubmission. Local names/sockets, force, reply-to and idle notifications are unsupported.
+There is no NATS, SSH, local state or credential-store fallback. The HTTPS
+origin/CA and transient Django token follow mop health.
 ```
 
 #### mop health

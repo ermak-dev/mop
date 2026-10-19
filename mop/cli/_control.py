@@ -35,7 +35,7 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete', 'add', 'send', 'landing'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add', 'send', 'dispatch', 'landing'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -43,7 +43,6 @@ GAPS = {
     'agents': 'live address aggregation and private endpoint inbox binding',
     'update': 'update admission',
     'recycle': 'recycle admission',
-    'dispatch': 'dispatch admission and scoped target selection',
     'model': 'session model action', 'models': 'inference model query',
     'attach': 'private terminal physical resolver/capability discovery',
     'session terminal': 'private terminal physical resolver/capability discovery',
@@ -395,7 +394,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
             p.add_argument('--cursor')
             p.add_argument('--page-size', type=int, default=100)
             args = p.parse_args(argv)
-        elif words == 'send':
+        elif words in ('send', 'dispatch'):
             # Эти опции требуют иной authority/holder lifecycle, не скрытого
             # перевода на bus или UDS. Отказ даже до чтения private stdin.
             unsupported = {'--list', '--local', '--mode', '--force', '--notify-when-idle', '--reply-to'}
@@ -501,7 +500,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
         if hasattr(args, 'wait') and args.wait is not None:
             if not 0 < args.wait <= api.Limits().wait_timeout:
                 raise api.ClientError('wait must be within the client wait limit')
-        if words == 'send':
+        if words in ('send', 'dispatch'):
             if args.message == '-':
                 try:
                     # TextIO может декодировать несколько bytes на символ. После
@@ -511,7 +510,7 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                     raise api.ClientError('message stdin is unavailable or invalid UTF-8') from None
             args.message = api.message_text(args.message)
             if args.explicit_binding:
-                prepare = api.PreparedCommand('send', target, args.epoch, args.request_id,
+                prepare = api.PreparedCommand(words, target, args.epoch, args.request_id,
                     args.not_after, message=args.message, priority=args.priority, wait_seconds=args.wait_seconds)
         if words == 'diagnose' and missing(origin):
             # Как empty у прежней сводки (#536): not-ready -- информация, не отказ.
@@ -525,13 +524,13 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                   'network_observed': False}, credential=selected.token)
             return 0
         client = api.Client(selected, limits=_LIMITS.get() or api.Limits(), before_request=_BEFORE_REQUEST.get())
-        if words in ('restart', 'wipe', 'stop', 'delete', 'send') and not args.explicit_binding:
+        if words in ('restart', 'wipe', 'stop', 'delete', 'send', 'dispatch') and not args.explicit_binding:
             view = client.read_puppet(args.puppet_id)
             params = dict(message=args.message, priority=args.priority,
-                          wait_seconds=args.wait_seconds) if words == 'send' else {}
+                          wait_seconds=args.wait_seconds) if words in ('send', 'dispatch') else {}
             prepare = {'restart': client.prepare_restart, 'wipe': client.prepare_wipe,
                        'stop': client.prepare_stop, 'delete': client.prepare_delete,
-                       'send': client.prepare_send}[words](view.target, epoch=view.epoch,
+                       'send': client.prepare_send, 'dispatch': client.prepare_dispatch}[words](view.target, epoch=view.epoch,
                            not_after=args.not_after, request_id=args.request_id, **params)
         if words == 'health':
             emit({'schema_version': 1, **asdict(client.health())}, credential=selected.token)
