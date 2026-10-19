@@ -908,6 +908,186 @@ class FreshOwnerDeath(unittest.TestCase):
             if result is not None:
                 self.remove_probe_root(result, child)
 
+    # BUG: lease persistence в bind() падает уже после настоящего старта, и
+    # полученный process остаётся без владельца: supervisor и body живы после
+    # exit драйвера, его pidfd/control/stdout открыты.
+    # HYPOTHESIS: start() записывает retention и raise, не закрывая process;
+    # scheduler возвращает startup verdict до регистрации в active, а fixture
+    # не доходит до своего finally: handoff ещё не состоялся.
+    # SOLUTION: start() сам финализирует полученный, но не переданный process,
+    # сохраняя исходную startup error; quiescence receipt освобождает пути, а
+    # отказ drain удерживает lease и дописывает cleanup, не заменяя ошибку.
+    # RESULT: RED на трёх сценариях — process_closed=false, pidfd/control/stdout
+    # открыты, supervisor и body в S после exit драйвера. GREEN Python 3.12/PG17:
+    # closed, FD закрыты, owner reaped, body reaped и пути удалены; при смерти
+    # owner до receipt — body S, lease retained, HOME/TMPDIR/RUN_ROOT живы;
+    # чужая группа и каталог целы. 18 focused + 5 UID checks.
+    # STATUS: FIXED — see #788
+    def test_bind_failure_finalizes_the_started_home_slot_process(self):
+        self.test_bind_failure_finalizes_the_started_fixture_process(home_slot=True)
+
+    def test_bind_failure_with_dead_owner_retains_home_slot_directories(self):
+        self.test_bind_failure_finalizes_the_started_fixture_process(home_slot=True, owner_dies=True)
+
+    def test_bind_failure_finalizes_the_started_fixture_process(self, *, home_slot=False, owner_dies=False):
+        import textwrap
+        result = child = None
+        injected = 'injected lease persistence failure after actual start'
+        try:
+            with tempfile.TemporaryDirectory(prefix='mop-788-bind-') as directory, probe_children() as register:
+                root = Path(directory)
+                foreign = root / 'unrelated-directory'
+                foreign.mkdir()
+                (foreign / 'sentinel').write_text('not owned by the failed handoff')
+                driver, child_record, owner_record, result_record = self.prepare(root, close_streams=True)
+                registered = root / 'registered'
+                driver.write_text(textwrap.dedent(f'''
+                    import json, os, pathlib, signal, sys, time, traceback
+                    sys.path.insert(0, {hermetic.TESTS!r})
+                    import hermetic, _lib
+                    from mop.cli.dev import test as command
+                    command.root = lambda: {str(root)!r}
+                    record = _lib.OwnedProcessDirectory._record
+                    directories, injected = [], {{}}
+
+                    def links():
+                        # Только FD этого драйвера: номер мог быть переиспользован.
+                        table = {{}}
+                        for name in os.listdir('/proc/self/fd'):
+                            try:
+                                table[int(name)] = os.readlink('/proc/self/fd/' + name)
+                            except OSError:
+                                pass
+                        return table
+
+                    def refuse_bind_once(directory):
+                        if directory not in directories:
+                            directories.append(directory)
+                        if directory.process is None or injected:
+                            return record(directory)
+                        process = directory.process
+                        expires = time.monotonic() + 10
+                        while not pathlib.Path({str(child_record)!r}).exists():
+                            if time.monotonic() >= expires:
+                                raise AssertionError('bind body did not start')
+                            time.sleep(.01)
+                        fds = {{'pidfd': process.handle.fd, 'control': process.channel.fileno(),
+                                'stdout': process.process.stdout.fileno()}}
+                        table = links()
+                        injected.update(fds=fds, links={{name: table[fd] for name, fd in fds.items()}},
+                                        owner=dict(process.handle.row))
+                        path = pathlib.Path({str(owner_record)!r})
+                        path.with_suffix('.tmp').write_text(json.dumps(injected['owner']))
+                        path.with_suffix('.tmp').replace(path)
+                        # Probe регистрирует owner и body по pidfd до финализации.
+                        expires = time.monotonic() + 10
+                        while not pathlib.Path({str(registered)!r}).exists():
+                            if time.monotonic() >= expires:
+                                raise AssertionError('probe did not register the started process')
+                            time.sleep(.01)
+                        if {owner_dies!r}:
+                            signal.pidfd_send_signal(process.handle.fd, signal.SIGKILL)
+                        raise OSError({injected!r})
+
+                    _lib.OwnedProcessDirectory._record = refuse_bind_once
+                    rows = caught = None
+                    try:
+                        if {home_slot!r}:
+                            rows = hermetic.run_cases([('clean', {str(root / 'tests/boundary.py')!r},
+                                                        {str(root)!r}, hermetic.child_env({{}}))])
+                            code = int(any(row[2] for row in rows))
+                        else:
+                            code = command.main(['boundary', '--strict'])
+                    except BaseException as error:
+                        caught = error
+                        traceback.print_exception(error)
+                        code = 1
+                    directory = directories[0]
+                    process = directory.process
+                    table = links()
+                    lease = pathlib.Path(directory.path, _lib.PROCESS_LEASE_NAME)
+                    child = json.loads(pathlib.Path({str(child_record)!r}).read_text())
+                    pathlib.Path({str(result_record)!r}).write_text(json.dumps({{
+                        'code': code, 'caught': repr(caught) if caught is not None else None,
+                        'verdict': rows[0][2] if rows else None, 'verdict_text': rows[0][3] if rows else None,
+                        'process_closed': process.closed, 'stdout_closed': process.process.stdout.closed,
+                        'open_fds': sorted(name for name, link in injected['links'].items()
+                                           if table.get(injected['fds'][name]) == link),
+                        'open_pidfds': sorted(fd for fd, link in table.items() if link == 'anon_inode:[pidfd]'),
+                        'owner_exit': process.returncode,
+                        'lease': json.loads(lease.read_text()) if lease.exists() else None,
+                        'tmpdir': directory.path, 'home': child['home'], 'run_root': _lib.RUN_ROOT,
+                        'home_before_exit': pathlib.Path(child['home']).exists(),
+                        'tmpdir_before_exit': pathlib.Path(directory.path).exists(),
+                    }}))
+                    raise SystemExit(code)
+                '''))
+                unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                outsider = register(unrelated.pid)
+                process = self.launch(driver, root)
+                child = self.wait_record(child_record, process)
+                body = register(child['pid'])
+                owner = self.wait_record(owner_record, process)
+                supervisor = register(owner['pid'])
+                self.assertEqual({key: supervisor[key] for key in ('pid', 'start', 'group', 'namespace')},
+                                 {key: owner[key] for key in ('pid', 'start', 'group', 'namespace')})
+                registered.touch()
+                try:
+                    output = process.communicate(timeout=30)[0]
+                finally:
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGINT)
+                        process.communicate(timeout=15)
+                result = json.loads(result_record.read_text())
+                states = {name: (Path(f"/proc/{row['pid']}/stat").read_text().rsplit(')', 1)[1].split()[0]
+                                 if identity(row['pid']) == row else None)
+                          for name, row in (('owner', supervisor), ('body', body))}
+                paths = {name: Path(result[name]).exists() for name in ('home', 'tmpdir', 'run_root')}
+                self.evidence('#788 ' + ('direct HOME slot' if home_slot else 'fixture') +
+                    (' dead-owner' if owner_dies else '') + ' bind failure after actual start: ' + json.dumps({
+                    **result, 'outer_exit': process.returncode, 'owner': supervisor, 'body': body,
+                    'states_after_exit': states, 'paths_after_exit': paths,
+                    'unrelated_group_survived': identity(unrelated.pid) == outsider}))
+                self.assertEqual(process.returncode, 1, output)
+                if home_slot:
+                    self.assertEqual(result['verdict'], -1, result)
+                    self.assertIn(injected, result['verdict_text'])
+                    self.assertIn('Traceback (most recent call last)', result['verdict_text'])
+                else:
+                    self.assertIn(injected, output)
+                self.assertTrue(result['process_closed'], 'bind failure lost the only owner of the started process')
+                self.assertTrue(result['stdout_closed'])
+                self.assertEqual(result['open_fds'], [], 'pidfd/control/stdout of the started process stayed open')
+                self.assertEqual(result['open_pidfds'], [])
+                self.assertIsNotNone(result['owner_exit'], 'the started supervisor was not joined')
+                self.assertIsNone(states['owner'], 'the started supervisor outlived the driver')
+                self.assertIsNone(identity(owner['pid']))
+                if owner_dies:
+                    # Owner умер до receipt: потомков не убиваем, каталоги и
+                    # lease удерживаются после выхода настоящего интерпретатора.
+                    self.assertEqual(identity(child['pid']), body)
+                    self.assertNotIn(states['body'], ('Z', 'X', None))
+                    self.assertIn('quiescence receipt', result['verdict_text'])
+                    self.assertEqual(paths, {'home': True, 'tmpdir': True, 'run_root': True})
+                    self.assertEqual(result['lease']['state'], 'retained')
+                    self.assertEqual(result['lease']['error'], injected)
+                    self.assertEqual(result['lease']['owner'], owner)
+                    self.assertIn('quiescence receipt', result['lease']['cleanup'])
+                    self.assertIn('retained owned process directories', output)
+                else:
+                    self.assertIsNone(states['body'], 'the started body outlived the driver')
+                    self.assertIsNone(identity(child['pid']))
+                    # Quiescence доказана receipt-ом: owned пути удалены.
+                    self.assertIsNone(result['lease'])
+                    self.assertEqual(paths, {'home': False, 'tmpdir': False, 'run_root': False})
+                self.assertEqual(identity(unrelated.pid), outsider)
+                self.assertEqual((foreign / 'sentinel').read_text(), 'not owned by the failed handoff')
+        finally:
+            if result is not None:
+                self.remove_probe_root(result, child)
+
     def remove_probe_root(self, result, child):
         import _lib
         self.assertIsNone(identity(child['pid']), 'retained directories cannot be removed while body exists')

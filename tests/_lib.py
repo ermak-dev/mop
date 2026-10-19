@@ -106,19 +106,51 @@ class OwnedProcessDirectory:
         # только под lease. Унаследованный TMPDIR — предок, не объект rmtree.
         try:
             process = factory(self.metadata['script'], cwd=cwd, env={**env, 'TMPDIR': self.path})
-            self.bind(process)
-            return process
         except BaseException as error:
             self.retain(error)
             raise
+        try:
+            self.bind(process)
+        except BaseException as error:
+            # До handoff полученный process есть только здесь (#788): caller
+            # не получит его ни в active scheduler-а, ни в finally fixture.
+            self._finalize_unbound(process, error)
+            raise
+        return process
 
     def bind(self, process):
         self.process = process
         self.metadata['owner'] = dict(process.handle.row)
         self._record()
 
-    def retain(self, error):
+    def _finalize_unbound(self, process, error):
+        """Закрыть не переданный caller-у process; ошибка старта остаётся.
+
+        Каталог удаляется только после receipt, как в close. Отказ drain
+        оставляет retained lease и дописан к исходной ошибке, не заменяя её.
+        """
+        self.process = process
+        try:
+            process.close()
+        except BaseException as refusal:
+            error.add_note(f'owned process finalization refused: {refusal}')
+            try:
+                self.retain(error, cleanup=refusal)
+            except Exception as failure:
+                # Pending lease из __init__ по-прежнему держит каталог.
+                error.add_note(f'retained process lease was not recorded: {failure}')
+            if not isinstance(refusal, Exception):
+                raise  # Прерывание сильнее отчёта; ошибка старта — его context.
+            return
+        try:
+            shutil.rmtree(self.path)
+        except OSError as failure:
+            error.add_note(f'owned process directory was not removed: {failure}')
+
+    def retain(self, error, cleanup=None):
         self.metadata.update(state='retained', error=str(error))
+        if cleanup is not None:
+            self.metadata['cleanup'] = str(cleanup)
         self._record()
 
     def close(self):

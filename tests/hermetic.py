@@ -267,6 +267,8 @@ def run_cases(cases):
             try:
                 p = directory.start(OwnedProcess, env=env, cwd=root)
             except OSError:
+                # Полученный до отказа bind process start уже финализировал
+                # (#788): verdict без active не оставляет его без владельца.
                 return label, f, -1, traceback.format_exc()
             active.add(p)
         try:
