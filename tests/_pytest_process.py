@@ -282,25 +282,38 @@ class OwnedProcess:
 
     def close(self):
         if not self.closed:
-            if self.output is None:
-                self.cancel()
-                self.communicate()
             try:
-                self.channel.setblocking(False)
-                receipt = json.loads(self.channel.recv(4096))
-                expected = {key: self.handle.row[key] for key in IDENTITY_FIELDS}
-                if (receipt.get('quiescent') is not True or receipt.get('owner') != expected
-                        or not isinstance(receipt.get('errors'), list)):
-                    raise ValueError('invalid owner/quiescence evidence')
-                if receipt['errors']:
-                    self.cleanup_error = RuntimeError('owned process cleanup refused: ' + '; '.join(receipt['errors']))
-            except (OSError, ValueError, TypeError, AttributeError) as error:
-                self.cleanup_error = RuntimeError(f'owned process cleanup refused: missing or invalid quiescence receipt; '
-                    f'owner={self.handle.row}, exit={self.returncode}: {error}')
+                if self.output is None:
+                    self.cancel()
+                    self.communicate()
+                if self.cleanup_error is not None:
+                    raise self.cleanup_error
+                try:
+                    self.channel.setblocking(False)
+                    receipt = json.loads(self.channel.recv(4096))
+                    expected = {key: self.handle.row[key] for key in IDENTITY_FIELDS}
+                    if (receipt.get('quiescent') is not True or receipt.get('owner') != expected
+                            or not isinstance(receipt.get('errors'), list)):
+                        raise ValueError('invalid owner/quiescence evidence')
+                    if receipt['errors']:
+                        self.cleanup_error = RuntimeError('owned process cleanup refused: ' + '; '.join(receipt['errors']))
+                except (OSError, ValueError, TypeError, AttributeError) as error:
+                    self.cleanup_error = RuntimeError(f'owned process cleanup refused: missing or invalid quiescence receipt; '
+                        f'owner={self.handle.row}, exit={self.returncode}: {error}')
+            except BaseException as error:
+                if self.cleanup_error is None:
+                    self.cleanup_error = error
             finally:
                 with self.lock:
-                    self.channel.close()
-                    self.handle.close()
+                    # Закрытие локальных FD не доказывает quiescence потомков.
+                    # Каждый finalizer выполняется и после ошибки drain; первый
+                    # отказ остаётся результатом всех последующих close.
+                    for resource in (self.process.stdout, self.channel, self.handle):
+                        try:
+                            resource.close()
+                        except BaseException as error:
+                            if self.cleanup_error is None:
+                                self.cleanup_error = error
                     self.closed = True
         if self.cleanup_error is not None:
             raise self.cleanup_error

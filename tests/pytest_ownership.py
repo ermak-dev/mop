@@ -649,6 +649,132 @@ class FreshOwnerDeath(unittest.TestCase):
             if result is not None:
                 self.remove_probe_root(result, child)
 
+    # BUG: один close теряет pidfd/control при bounded drain exception.
+    # HYPOTHESIS: communicate стоит до finalization; closed-FD flag сам по
+    # себе не доказывает quiescence и не должен освобождать retained lease.
+    # SOLUTION: cancel/drain входят в общий finally всех локальных ресурсов;
+    # исходный отказ сохранён отдельно от closed и повторно выбрасывается.
+    # RESULT: до правки первый close оставлял pidfd/control открытыми; теперь
+    # все три FD дают EBADF, repeat сохраняет исходную ошибку и lease, а HOME,
+    # TMPDIR и RUN_ROOT существуют после выхода настоящего интерпретатора.
+    # STATUS: FIXED — see #780
+    def test_one_direct_close_finalizes_fds_but_repeat_preserves_refusal_after_outer_exit(self):
+        import errno
+        import textwrap
+        result = child = None
+        try:
+            with tempfile.TemporaryDirectory(prefix='mop-780-close-') as directory, probe_children() as register:
+                root = Path(directory)
+                foreign = root / 'unrelated-directory'
+                foreign.mkdir()
+                (foreign / 'sentinel').write_text('not owned by close')
+                driver, child_record, owner_record, result_record = self.prepare(root, close_streams=False)
+                driver.write_text(textwrap.dedent(f'''
+                    import errno, json, os, pathlib, signal, sys, time
+                    sys.path.insert(0, {hermetic.TESTS!r})
+                    import hermetic, _lib, _pytest_process as lifecycle
+                    directory = _lib.OwnedProcessDirectory({str(root / 'tests/boundary.py')!r})
+                    process = directory.start(lifecycle.OwnedProcess, cwd={str(root)!r}, env=hermetic.child_env({{}}))
+                    expires = time.monotonic() + 10
+                    while not pathlib.Path({str(child_record)!r}).exists():
+                        if time.monotonic() >= expires: raise AssertionError('direct close body did not start')
+                        time.sleep(.01)
+                    child = json.loads(pathlib.Path({str(child_record)!r}).read_text())
+                    owner = dict(process.handle.row)
+                    pathlib.Path({str(owner_record)!r}).write_text(json.dumps(owner))
+                    if lifecycle.snapshot(owner['pid']) != owner: raise AssertionError('probe owner identity changed')
+                    fds = {{'pidfd': process.handle.fd, 'control': process.channel.fileno(),
+                            'stdout': process.process.stdout.fileno()}}
+                    signal.pidfd_send_signal(process.handle.fd, signal.SIGKILL)
+                    started = time.monotonic()
+                    first_error = None
+                    try:
+                        directory.close()
+                    except BaseException as error:
+                        first_error = error
+                    # Первая запись сделана до любого repeat close: это именно
+                    # прямой close, а не communicate + fixture-finalizer.
+                    opened, closed_errno = [], {{}}
+                    for name, fd in fds.items():
+                        try: os.fstat(fd)
+                        except OSError as error: closed_errno[name] = error.errno
+                        else: opened.append(name)
+                    lease = pathlib.Path(directory.path, _lib.PROCESS_LEASE_NAME)
+                    first = {{'open_fds': opened, 'closed_errno': closed_errno,
+                        'stdout_closed': process.process.stdout.closed, 'process_closed': process.closed,
+                        'owner_exit': process.returncode, 'owner_reaped': lifecycle.snapshot(owner['pid']) is None,
+                        'error': str(first_error), 'error_type': type(first_error).__name__,
+                        'lease': json.loads(lease.read_text()) if lease.exists() else None}}
+                    second_error = None
+                    try:
+                        directory.close()
+                    except BaseException as error:
+                        second_error = error
+                    pathlib.Path({str(result_record)!r}).write_text(json.dumps({{
+                        'first': first, 'second_error': str(second_error),
+                        'same_error': second_error is first_error,
+                        'lease_after_repeat': json.loads(lease.read_text()) if lease.exists() else None,
+                        'elapsed': time.monotonic() - started, 'home': child['home'],
+                        'tmpdir': directory.path, 'run_root': _lib.RUN_ROOT,
+                        'home_before_exit': pathlib.Path(child['home']).exists(),
+                        'tmpdir_before_exit': pathlib.Path(directory.path).exists(),
+                    }}))
+                    raise SystemExit(1 if first_error is not None else 0)
+                '''))
+                unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                outsider = register(unrelated.pid)
+                process = self.launch(driver, root)
+                child = self.wait_record(child_record, process)
+                body = register(child['pid'])
+                owner = self.wait_record(owner_record, process)
+                try:
+                    output = process.communicate(timeout=15)[0]
+                    result = json.loads(result_record.read_text())
+                    first = result['first']
+                    state = Path(f"/proc/{child['pid']}/stat").read_text().rsplit(')', 1)[1].split()[0]
+                    self.evidence('#780 direct close and actual outer exit: ' + json.dumps({
+                        **result, 'outer_exit': process.returncode, 'owner': owner, 'body': body,
+                        'body_state': state, 'same_body_alive': identity(child['pid']) == body,
+                        'home_after_exit': Path(result['home']).exists(),
+                        'tmpdir_after_exit': Path(result['tmpdir']).exists(),
+                        'run_root_after_exit': Path(result['run_root']).exists(),
+                        'unrelated_group_survived': identity(unrelated.pid) == outsider}))
+                    self.assertEqual(process.returncode, 1, output)
+                    self.assertEqual(first['error_type'], 'RuntimeError')
+                    self.assertIn('cleanup deadline exceeded', first['error'])
+                    self.assertIn('quiescence receipt', first['error'])
+                    self.assertEqual(first['owner_exit'], -signal.SIGKILL)
+                    self.assertTrue(first['owner_reaped'])
+                    self.assertIsNone(identity(owner['pid']))
+                    self.assertEqual(identity(child['pid']), body)
+                    self.assertNotIn(state, ('Z', 'X'))
+                    self.assertEqual(first['open_fds'], [], 'one direct close must finalize every local FD before repeat')
+                    self.assertEqual(first['closed_errno'], dict.fromkeys(('pidfd', 'control', 'stdout'), errno.EBADF))
+                    self.assertTrue(first['stdout_closed'])
+                    self.assertTrue(first['process_closed'])
+                    self.assertTrue(result['same_error'], 'repeat close must raise the original refusal, not release its lease')
+                    self.assertEqual(result['second_error'], first['error'])
+                    self.assertEqual(result['lease_after_repeat'], first['lease'])
+                    self.assertEqual(first['lease']['state'], 'retained')
+                    self.assertEqual(first['lease']['owner'], owner)
+                    self.assertEqual(first['lease']['error'], first['error'])
+                    self.assertTrue(result['home_before_exit'])
+                    self.assertTrue(result['tmpdir_before_exit'])
+                    for name in ('home', 'tmpdir', 'run_root'):
+                        self.assertTrue(Path(result[name]).exists(), (name, result))
+                    self.assertIn('retained owned process directories', output)
+                    self.assertEqual(identity(unrelated.pid), outsider)
+                    self.assertEqual((foreign / 'sentinel').read_text(), 'not owned by close')
+                finally:
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGINT)
+                        process.communicate(timeout=15)
+        finally:
+            if result is not None:
+                self.remove_probe_root(result, child)
+
     def remove_probe_root(self, result, child):
         import _lib
         self.assertIsNone(identity(child['pid']), 'retained directories cannot be removed while body exists')
