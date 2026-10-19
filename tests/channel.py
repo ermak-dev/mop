@@ -21,7 +21,17 @@
 (решение по #785, отчёт /tmp/mop-623-task-specs/785-native-wire-contract-report.md):
 `accepted` не выдаётся за доставку, `delivered` не выводится ни из тишины, ни из
 записи, ни из простоя. Ни один старый сценарий не удалён молча: superseded-строки
-называют проверку-замену, unsupported-строки -- точный текст отказа.
+называют проверку-замену, unsupported-строки -- точный текст отказа. Замена не
+всегда равна или сильнее прежней проверки: две вакуумные проверки #793 усилены
+в #799, а опции без именованной замены перечислены в заметке #799 ниже.
+
+#799, неблокирующие замечания review к #793 (комментарий, без замены):
+  * dispatch/agents/report/deliveries/slash идут общим role-route и по тексту
+    неотличимы от произвольного неизвестного слова;
+  * `#793 lost admission is recovered by request id` повторяет уже проверенный
+    exit-3 (на #793 это были строки 405-406);
+  * без именованной замены удалены `--quiet`, bare `--wait`, текст #481 warning,
+    абзац инструкции #250 и строка profile/session в `--check`.
 
 HYPOTHESIS (#148): маршрутизация трёх путей и поиск своей сессии жили во
 фронтенде MCP, а MAX_WAIT, обрезка ожидания и тексты «NOT DELIVERED — » и
@@ -493,10 +503,18 @@ def check_canonical_send_793(c):
     # Приоритет и границы ожидания -- поля команды, не догадки клиента.
     out, err, code, fixture = canonical(SEND_ARGS + ["--priority", "later"], [accepted()])
     c.expect("#793 priority travels", posted(fixture)["params"]["priority"], "later")
-    c.expect("#793 wait_seconds travels", canonical(
-        SEND_ARGS + ["--wait-seconds", "60"], [accepted()])[2], 3)
-    c.expect("#793 wait_seconds 0 is a valid command field", canonical(
-        SEND_ARGS + ["--wait-seconds", "0"], [accepted()])[2], 3)
+    # HYPOTHESIS (#799): проверка 'wait_seconds travels' оценивала только
+    # canonical(...)[2], то есть код выхода; отправленное тело не читалось
+    # вовсе, и PreparedCommand, теряющий wait_seconds (или explicit-binding
+    # путь, не передающий поле), проходил все проверки функции.
+    # SOLUTION: утверждать и исход, и params.wait_seconds отправленного POST.
+    # RESULT: мутация без wait_seconds в теле -> FAIL; STATUS: FIXED — see #799
+    out, err, code, fixture = canonical(SEND_ARGS + ["--wait-seconds", "60"], [accepted()])
+    c.expect("#793 wait_seconds travels",
+             (code, posted(fixture)["params"]["wait_seconds"]), (3, 60))
+    out, err, code, fixture = canonical(SEND_ARGS + ["--wait-seconds", "0"], [accepted()])
+    c.expect("#793 wait_seconds 0 is a valid command field",
+             (code, posted(fixture)["params"]["wait_seconds"]), (3, 0))
     for value in ("-1", "61"):
         out, err, code, fixture = canonical(SEND_ARGS + ["--wait-seconds", value], [])
         c.expect("#793 wait_seconds out of range is refused before I/O",
@@ -985,11 +1003,17 @@ def check_body_binding_585(c):
              bus.inbox(f"anton%2Eermak.{local}"))
 
     # #793: процесс MCP инбокса не держит -- ни своего, ни чужого.
-    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    with open(os.path.join(here, "mop", "cli", "service", "mcp.py")) as f:
-        text = f.read()
-    c.check("#793 the MCP service builds no process inbox",
-            "MY_INBOX" not in text and "master_id" not in text, text)
+    # HYPOTHESIS (#799): проверка читала шим mop/cli/service/mcp.py (две
+    # строки, делегирующие в _control.invoke), поэтому регрессия, вернувшая
+    # MY_INBOX или master_id в реализацию _mcp.py, проходила незамеченной.
+    # SOLUTION: читать реализующие модули -- _mcp.py и _control.py.
+    # RESULT: MY_INBOX в _mcp.py -> FAIL; STATUS: FIXED — see #799
+    for module in (_mcp, _control):
+        path = module.__file__
+        with open(path) as f:
+            text = f.read()
+        c.check(f"#793 the MCP implementation {os.path.basename(path)} builds no process inbox",
+                "MY_INBOX" not in text and "master_id" not in text, text)
     c.expect("#793 the private inbox is an explicit unavailable contract",
              _mcp.PRIVATE_INBOX, PRIVATE_INBOX)
     return True
@@ -1113,10 +1137,17 @@ def check_private_inbox_793(c):
             "private inbox unavailable (#649)" in _mcp.INSTRUCTIONS,
             _mcp.INSTRUCTIONS)
     # Легаси-поверхности не возвращены и не подделаны: их нет вовсе.
-    from mop.cli.service import mcp as mcp_service
-    for name in ("send", "dispatch", "watch_inbox", "on_inbox", "on_bus_error",
-                 "refused_inbox", "master_id", "is_master", "me", "_roster", "instructions"):
-        c.expect(f"#793 mcp.{name} is gone, not faked", hasattr(mcp_service, name), False)
+    # HYPOTHESIS (#799): проверялся шим mop/cli/service/mcp.py, который лишь
+    # зовёт _control.invoke('mcp', argv); возвращённый в реализацию
+    # MY_INBOX/master_id/send шим не показывал, и регрессия проходила.
+    # SOLUTION: утверждать отсутствие имён в _mcp.py и _control.py -- там,
+    # где MCP действительно реализован. RESULT: MY_INBOX в _mcp.py -> FAIL;
+    # STATUS: FIXED — see #799
+    for module in (_mcp, _control):
+        for name in ("send", "dispatch", "watch_inbox", "on_inbox", "on_bus_error",
+                     "refused_inbox", "master_id", "is_master", "me", "_roster", "instructions"):
+            c.expect(f"#793 {module.__name__}.{name} is gone, not faked",
+                     hasattr(module, name), False)
 
     for command, text in (
             (["master"], REFUSAL_ROLE_WS),
