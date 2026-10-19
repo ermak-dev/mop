@@ -4,129 +4,130 @@
 HYPOTHESIS (#459): add/update/restart держали orchestration в командлетах,
 send_to_puppet -- копией тела в client/channel.py и ops.py; веб (#456) зовёт
 ops, а CLI -- свой путь: два пути расходятся.
-SOLUTION: командлеты строят контекст (#457) и параметры на входе, зовут
-mop/common/ops.py (#458) и рисуют результат; channel.send_to_puppet --
-тонкая обёртка ops.send_to_puppet с bus.request транспортом. Пользовательский
-контракт не меняется: те же тексты, коды и решения на тех же ответах.
-STATUS: FIXED — see #459
+SOLUTION (#793): свойства #459 переведены на канонический путь #642.
+add/restart/update -- тонкие командлеты над одним transient HTTPS consumer
+`_control.invoke` (та же поверхность, что у tests/control_consumers.py):
+командлет не собирает ни политику, ни ветку, ни bus/ops-оркестрацию.
+channel.send_to_puppet по-прежнему тонкая обёртка ops.send_to_puppet с
+bus.request транспортом. Update admission в этом релизе не связан -- явный
+unsupported с точным отказом (см. отчёт #793). Пользовательский контракт не
+меняется: те же тексты, коды и решения на тех же ответах.
+STATUS: FIXED — see #793
 """
+import contextlib
+import json
 import os
-import uuid
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched  # noqa: E402
-os.environ.setdefault("MOP_SERVER_LAN", "127.0.0.1")  # lib.cluster требует
+from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import bus  # noqa: E402
-from mop.common import ops  # noqa: E402
+from _control_fixture import (DEFINITION, EPOCH, Fixture, KEY, NODE,  # noqa: E402
+                              PROJECT, Response, TOKEN, create_operation)
+from mop import cli  # noqa: E402
+from mop.cli import _control  # noqa: E402
 from mop.cli.core import _common  # noqa: E402
-from mop.cli import lib  # noqa: E402
+from mop.cli.core import add as cli_add  # noqa: E402
+from mop.client import control as api  # noqa: E402
+from mop.common import bus, context, ops, puppets  # noqa: E402
+
+API = "https://controller.example"
+CREATE = [PROJECT, "--node-id", NODE, "--definition-id", DEFINITION,
+          "--epoch", EPOCH, "--request-id", KEY, "--not-after",
+          "2026-10-16T10:05:00Z"]
 
 
-class Calls:
-    """Заглушка ops-операции: записывает вызов с ролью -- именем
-    атрибута ops, которым его зовёт командлет (ops.add -> «add»)."""
+@contextlib.contextmanager
+def no_legacy(reads):
+    """Legacy-оркестрация #459 под отказом: канонический путь её не зовёт."""
+    def refuse(*a, **k):
+        raise AssertionError("legacy orchestration reached on the canonical path")
+    with patched(ops, add=refuse, update=refuse, restart=refuse), \
+            patched(puppets, recycle=refuse), \
+            patched(context, here=refuse), \
+            patched(_common, workspace_text=lambda o: reads.append(o) or
+                    ("text", {"source": "origin"})):
+        yield
 
-    def __init__(self, verdict, role):
-        self.seen = []
-        self.verdict = verdict
-        self.role = role
 
-    def __call__(self, *args, **kwargs):
-        self.seen.append((self.role, args, kwargs))
-        return self.verdict
+def probe(argv, *responses, words="add"):
+    """Командлет на каноническом шве -> (fixture, out, err, code, reads)."""
+    fx = Fixture(*responses)
+    reads = []
+    with patched(api, _DeadlineHTTPSConnection=fx.factory), \
+            _control.use(api.ServerContext(API, TOKEN)), no_legacy(reads):
+        out, err, code = run_command(cli.main, [words, *argv])
+    return fx, out, err, code, reads
 
 
-class Progress:
-    def step(self, text):
-        pass
-
-    def clear(self):
-        pass
+def body_of(fx):
+    return json.loads(fx.calls[-1][2])
 
 
 def main():
     c = Checks()
 
-    # ── add: командлет зовёт ops.add, не свой цикл ──────────────────────
-    from mop.cli.core import add as cli_add
-    verdict = ops.outcome(ops.REGISTERED, "pu-mop-9", marker="m1")
-    calls = Calls(verdict, "add")
-    INCARNATION = "%s" % uuid.uuid5(uuid.NAMESPACE_DNS, "cli-ops-459")
-    with patched(_common, workspace_text=lambda o: ("text", {"source": "origin"}),
-                 sent_line=lambda s: ""), \
-            patched(lib, project_ready=lambda p: True, note=lambda *a: None), \
-            patched(cli_add.roles, protocol=lambda reply: True), \
-            patched(bus, login=lambda: "ermak"), \
-            patched(bus, call_cluster=lambda verb, **kw: {
-                "name": "pu-mop-9", "bootstrap_marker": "m1",
-                "ok": True, "soul": "puppet", "soul_digest": "a" * 64,
-                "soul_inc": INCARNATION,
-                "alloc": {"ClientStatus": "running",
-                          "TaskStates": {"claude": {"State": "running"}}},
-                "result": {"sent": "m1", "played": True, "ok": True}}), \
-            patched(ops, add=calls):
-        code = cli_add._add("git@h:g/mop.git", "mop", False, Progress(), "puppet")
+    # ── add: командлет зовёт общий HTTPS handler, не свой цикл ──────────
+    # HYPOTHESIS: add собирал контекст и оркестрацию сам.
+    # SOLUTION: тело командлета -- один вызов _control.invoke('add', argv);
+    # аргументы едут без изменений, как у control_consumers.
+    routed = []
+    def handler(surface, argv):
+        routed.append((surface, list(argv)))
+        return 0
+    with patched(_control, invoke=handler), no_legacy([]):
+        code = cli_add.main(CREATE)
     c.check("#459 add calls the shared operation",
-            calls.seen and calls.seen[0][0] == "add", calls.seen)
-    if calls.seen:
-        args, kwargs = calls.seen[0][1], calls.seen[0][2]
-        ws = args[2] if len(args) > 2 else kwargs.get("workspace")
-        c.check("#459 add passes the workspace pair explicitly",
-                ws == ("text", {"source": "origin"}), (args, kwargs))
-        c.check("#459 add passes the branch from the context",
-                "branch" in kwargs or len(args) >= 3, (args, kwargs))
-    c.check("#459 add returns 0 on registered", code == 0, code)
+            routed == [("add", CREATE)], routed)
+    c.check("#459 add returns the shared operation's exit code", code == 0, code)
+
+    # Провод: DRF create-puppet payload -- явные node/definition и ключ.
+    fx, out, err, code, reads = probe(CREATE, Response(202, create_operation("succeeded")))
+    add = body_of(fx)
+    c.check("#459 add passes the workspace pair explicitly",
+            add["params"] == {"node_id": NODE, "definition_id": DEFINITION}
+            and "workspace" not in add and reads == [], (add, reads))
+    c.check("#459 add passes the branch from the context",
+            fx.calls[0][1] == "/api/v1/projects/" + PROJECT + "/commands/create-puppet"
+            and "branch" not in add and "origin" not in add,
+            (fx.calls[0][1], sorted(add)))
+    c.check("#459 add returns 0 on registered", code == 0, (code, err))
 
     # Отказ общей операции -- отказ командлета с тем же текстом.
-    calls = Calls(ops.outcome(ops.REFUSED, "pu-mop-9", error="no space on node"), "add")
-    said = []
-    with patched(_common, workspace_text=lambda o: ("", None),
-                 sent_line=lambda s: ""), \
-            patched(lib, project_ready=lambda p: True, note=lambda *a: None,
-                    fail=said.append), \
-            patched(cli_add.roles, protocol=lambda reply: True), \
-            patched(bus, login=lambda: "ermak"), \
-            patched(bus, call_cluster=lambda verb, **kw: {
-                "name": "pu-mop-9", "bootstrap_marker": "m2",
-                "ok": True, "soul": "puppet", "soul_digest": "a" * 64,
-                "soul_inc": INCARNATION,
-                "alloc": {"ClientStatus": "running",
-                          "TaskStates": {"claude": {"State": "running"}}},
-                "result": {"sent": "m2", "played": True, "ok": True}}), \
-            patched(ops, add=calls):
-        code = cli_add._add("git@h:g/mop.git", "mop", False, Progress(), "puppet")
+    fx, out, err, code, reads = probe(
+        CREATE, Response(403, {"schema_version": 1, "error": {
+            "code": "permission_denied", "message": "no space on node",
+            "retryable": False}}))
     c.check("#459 a refused shared operation fails the commandlet",
-            code != 0 and said and "no space" in said[0], (code, said))
+            code == 1 and out == "" and "no space on node" in err
+            and "permission_denied" in err, (code, out, err))
 
-    # ── update: командлет зовёт ops.update ──────────────────────────────
-    from mop.cli.core import update as cli_update
-    calls = Calls(ops.outcome(ops.ACCEPTED, "pu-mop-9"), "update")
-    with patched(_common, workspace_text=lambda o: ("t", None),
-                 sent_line=lambda s: ""), \
-            patched(lib, note=lambda *a: None), \
-            patched(bus, call_cluster=lambda verb, **kw: {"meta": {"origin": "o"},
-                                                          "bootstrap_marker": None,
-                                                          "replaced": None}), \
-            patched(bus, login=lambda: "ermak"), \
-            patched(ops, update=calls):
-        code = cli_update.main(["pu-mop-9"])
+    # ── update: admission не связан -- явный отказ, не общий цикл ───────
+    # HYPOTHESIS: update читал политику и звал ops.update.
+    # SOLUTION (#793): один канонический отказ до сети и до чтения политики.
+    fx, out, err, code, reads = probe(["pu-mop-9"], words="update")
     c.check("#459 update calls the shared operation",
-            calls.seen and calls.seen[0][0] == "update", calls.seen)
+            code == 2 and out == "" and fx.calls == [] and reads == []
+            and err == "unsupported: update admission is not bound in this release\n",
+            (code, out, err, fx.calls, reads))
+    with patched_env(MOP_SOUL_DIR="/role-bundle", MOP_PUPPET="pu-alpha-1"):
+        fx, out, err, code, reads = probe(["pu-mop-9"], words="update")
+    c.check("#459 the granted update takes the same canonical refusal",
+            code == 2 and fx.calls == [] and reads == []
+            and err == "unsupported: update admission is not bound in this release\n",
+            (code, err, fx.calls, reads))
 
-    # #642: restart — тот же HTTPS handler, не прежний клиентский workflow.
+    # ── restart: тот же HTTPS handler, не прежний клиентский workflow ───
     # Полный wire/unknown/CAS проверяется отдельно в control_consumers.
     from mop.cli.core import restart as cli_restart
-    from mop.cli import _control
+    args = ['9db85243-4ae1-4511-8acc-bf6c8140cf2c']
     routed = []
     def https(surface, argv):
         routed.append((surface, argv))
         return 3
-    def no_old_restart(*args, **kwargs):
+    def no_old_restart(*a, **k):
         raise AssertionError('restart reached legacy client orchestration')
-    args = ['9db85243-4ae1-4511-8acc-bf6c8140cf2c']
     with patched(_control, invoke=https), patched(ops, restart=no_old_restart):
         code = cli_restart.main(args)
     c.expect('#642 restart passes unchanged args to the HTTPS handler', routed, [('restart', args)])
