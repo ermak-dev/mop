@@ -241,6 +241,20 @@ class Admission:
     lease_until: datetime
 
 
+@dataclass(frozen=True)
+class CommittedResult:
+    """Точный валидированный ACK machine result, не renewed execution право."""
+    admission: Admission
+    receipt_id: str
+    revision: int
+    outcome: str
+    evidence: str
+
+    def wire(self):
+        return dict(receipt_id=self.receipt_id, attempt_id=self.admission.attempt_id,
+                    revision=str(self.revision), outcome=self.outcome, evidence=self.evidence)
+
+
 class MachineClient:
     def __init__(self, transport: JsonTransport):
         self.transport = transport
@@ -389,7 +403,7 @@ class MachineClient:
         if current != admission:
             raise Refused('admission changed before effect')
 
-    async def result(self, admission, outcome, evidence, *, ready_evidence=None):
+    async def result(self, admission, outcome, evidence, *, receipt_id=None, ready_evidence=None):
         if outcome not in ('succeeded', 'failed', 'unknown') or evidence not in EVIDENCE:
             raise Refused('finite result required')
         extra = {}
@@ -403,7 +417,8 @@ class MachineClient:
                     or ready_evidence.request.lease_until != admission.lease_until):
                 raise Refused('exact successful readiness admission evidence required')
             extra['ready_evidence'] = ready_evidence.wire()
-        receipt_id = str(uuid4())
+        # Retained physical receipt позволяет повторить лишь SQL ACK, не эффект.
+        receipt_id = str(uuid4()) if receipt_id is None else uuid(receipt_id)
         value = await self.transport.request('POST', 'work/result', dict(schema_version=1,
             attempt_id=admission.attempt_id, expected_revision=str(admission.revision),
             receipt_id=receipt_id, outcome=outcome, evidence=evidence, **extra))
@@ -412,6 +427,7 @@ class MachineClient:
                 or value['outcome'] != outcome or value['evidence'] != evidence
                 or counter(value['revision']) <= admission.revision):
             raise Refused('receipt does not confirm result')
+        return CommittedResult(admission, receipt_id, counter(value['revision']), outcome, evidence)
 
     async def facts(self, node_id, kind, limit=100):
         if kind not in FACT_FIELDS or type(limit) is not int or not 1 <= limit <= 100:
@@ -446,6 +462,9 @@ class MachineClient:
 class EffectGuard:
     authorize: Callable[[], Awaitable[None]]
     check: Callable[[], None]
+    # Старые effects сохраняют двухаргументный guard; planned broker требует
+    # именно этот объект claim, без восстановления из Work/private client attrs.
+    admission: Admission | None = None
 
     async def __call__(self):
         await self.authorize()
@@ -556,7 +575,7 @@ class Runtime:
                 local_check()
                 await self.client.recheck(admission)
                 local_check()
-            guard = EffectGuard(authorize, local_check)
+            guard = EffectGuard(authorize, local_check, admission)
             try:
                 outcome, evidence = await self.executor.execute(work, guard)
             except (Refused, Unavailable) as error:
@@ -567,7 +586,14 @@ class Runtime:
             except Exception as error:
                 self.last_error = 'executor adapter failed: ' + type(error).__name__
                 outcome, evidence = 'unknown', 'connection-lost'
-            await self.client.result(admission, outcome, evidence)
+            result_identity = getattr(self.executor, 'result_identity', None)
+            result_options = {}
+            if outcome == 'succeeded' and result_identity is not None:
+                result_options['receipt_id'] = uuid(result_identity(admission))
+            committed = await self.client.result(admission, outcome, evidence, **result_options)
+            acknowledge = getattr(self.executor, 'acknowledge', None)
+            if acknowledge is not None:
+                await acknowledge(committed)
             if outcome != 'unknown':
                 self._targets.discard(work.target_id)
         except (Refused, Unavailable) as error:

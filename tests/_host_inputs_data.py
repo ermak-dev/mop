@@ -32,6 +32,11 @@ def selected(action='prepare_body'):
     if action != 'prepare_body':
         delivery['consumers'] = []
     if action == 'bootstrap_body':
-        delivery['bootstrap'] = dict(tasks=base64.b64encode(b'- command: never-root-executed\n').decode(),
-                                     variables=base64.b64encode(b'opaque: project-yaml\n').decode())
+        # #751: retained digest -- checksum всего canonical envelope, не
+        # фиктивный pin и не SHA(tasks||variables). Root по-прежнему opaque.
+        from mop.common.bootstrap_envelope import bounded_content, encode
+        raw = encode(bounded_content(b'- command: never-root-executed\n', b'opaque: project-yaml\n',
+            'fixture', 'e'*40, ()))
+        delivery['bootstrap_digest'] = hashlib.sha256(raw).hexdigest()
+        delivery['bootstrap'] = dict(envelope=base64.b64encode(raw).decode())
     return admission, scope, delivery

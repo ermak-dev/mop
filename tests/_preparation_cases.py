@@ -153,6 +153,52 @@ class PreparationCases(PreparationFixture):
         self.assertNotEqual(changed.content_version_id, revision.content_version_id)
         self.assertEqual(self.api.approve(self.actor, revision.id), approval)
 
+    # HYPOTHESIS #751: launch port возвращает сокращённый DTO вместо exact
+    # retained bytes; body не может сверить выбранный digest. Provider read
+    # уже владеет pre/post gates, третья authority-петля не нужна (#732).
+    # RED: PG17 — public canonical read вернул RevisionContent, не bytes.
+    # SOLUTION: общий codec, exact raw read port; retained owner даёт два gates.
+    # RESULT: PG17 — прежние bytes/digest, gate/provider/gate и metadata guards
+    # проверены настоящим AEAD provider вне SQL transaction.
+    # STATUS: FIXED — see #751.
+    def test_initial_launch_canonical_read_port_preserves_retained_bytes_and_provider_fences(self):
+        import base64
+        import hashlib
+        import json
+        revision = self.publish()
+        expected = json.dumps(dict(format=1, tasks=base64.b64encode(b'- debug: msg=hello\r\n').decode(),
+            variables=base64.b64encode(b'answer: 42\n').decode(), provenance='git:example.invalid/alpha',
+            commit='a'*40, secret_refs=[]), sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
+        self.assertEqual(revision.digest, hashlib.sha256(expected).hexdigest())
+        events = []
+        class Authority:
+            def check(inner, actor, scope):
+                self.api._human(actor, scope.project_id, owner_id=scope.owner_id)
+                self.assertEqual(scope.subject_id, revision.id)
+                events.append('gate')
+        class Provider:
+            def decrypt(inner, envelope, context):
+                self.assertFalse(connection.in_atomic_block)
+                events.append('provider')
+                return self.provider.decrypt(envelope, context)
+        api = self.s.Preparation(provider=Provider(), authorizer=auth.Access())
+        value = api.read_initial_launch(self.actor, revision.id, authority=Authority())
+        self.assertIs(type(value), bytes, 'public canonical read must return exact retained bytes')
+        self.assertEqual(value, expected)
+        self.assertEqual(events, ['gate', 'provider', 'gate'])
+        from mop.common import bootstrap_envelope as codec
+        from mop.server.preparation.values import RevisionContent
+        content = codec.decode(value, revision.digest)
+        self.assertIs(type(content), RevisionContent)
+        self.assertEqual(codec.encode(content), value)
+        row = m.BootstrapRevision.objects.get(pk=revision.id)
+        for field, changed in (('provenance', 'other'), ('commit', 'b'*40), ('task_size', 0), ('vars_size', 0)):
+            previous = getattr(row, field)
+            setattr(row, field, changed)
+            with self.subTest(field=field), self.assertRaises(PermissionError):
+                api._decode(row, value)
+            setattr(row, field, previous)
+
     def test_restart_readback_and_bytes_from_an_independent_process(self):
         import json
         from pathlib import Path

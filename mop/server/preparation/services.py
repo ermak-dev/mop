@@ -5,11 +5,9 @@ adapter. Он обязан проверить полный pinned proof и assig
 Ни grant actor, ни operation id, ни RunBinding из JSON сами не дают authority.
 Worker, Ansible, node delivery, reconciliation и публичные endpoints здесь нет.
 """
-import base64
 from datetime import timedelta
 from functools import wraps
 import hashlib
-import json
 import re
 from typing import Protocol
 import uuid
@@ -17,13 +15,15 @@ import uuid
 from django.db import DatabaseError, transaction
 from django.utils import timezone
 
+from mop.common.bootstrap_envelope import BootstrapError, bounded_content, decode, encode
+
 from ..access.context import ActorContext, ActorKind
 from ..access.delegation import ApprovedPolicy, PolicyBinding
 from ..catalog.models import Project
 from ..secrets.services import (RetainedSecrets, RetentionScope, outside_transaction,
                                 Conflict as SecretConflict, Refused as SecretRefused)
 from . import models as m
-from .values import (RunBinding, RevisionInfo, RevisionContent, ApprovalInfo,
+from .values import (RunBinding, RevisionInfo, ApprovalInfo,
                      RunInfo, StepInfo, Readback)
 
 
@@ -99,28 +99,6 @@ def step_info(row):
 def exact_uuid(*values):
     if any(type(value) is not uuid.UUID for value in values):
         raise ValueError('complete UUID identity required')
-
-
-def bounded_content(tasks, variables, provenance, commit, refs):
-    if type(tasks) is not bytes or len(tasks) > 262144 or type(variables) is not bytes or len(variables) > 131072:
-        raise ValueError('bootstrap tasks or vars exceed byte bounds')
-    if (type(provenance) is not str or not 1 <= len(provenance) <= 1024
-            or any(ord(c) < 32 for c in provenance) or re.search(r'://[^/]*@', provenance)
-            or type(commit) is not str or not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', commit)):
-        raise ValueError('bounded provenance and exact commit required')
-    if type(refs) is not tuple or len(refs) > 32:
-        raise ValueError('bounded unique secret references required')
-    exact_uuid(*refs)
-    if len(set(refs)) != len(refs):
-        raise ValueError('bounded unique secret references required')
-    return RevisionContent(tasks, variables, provenance, commit, tuple(sorted(refs, key=str)))
-
-
-def encode(content):
-    return json.dumps({'format': 1, 'tasks': base64.b64encode(content.tasks).decode(),
-        'variables': base64.b64encode(content.variables).decode(), 'provenance': content.provenance,
-        'commit': content.commit, 'secret_refs': [str(value) for value in content.secret_refs]},
-        sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
 
 
 class _RevisionAuthority:
@@ -245,18 +223,11 @@ class Preparation:
             return revision_info(row)
 
     def _decode(self, row, raw):
-        if hashlib.sha256(raw).hexdigest() != row.digest:
-            raise PermissionError('bootstrap retained digest mismatch')
         try:
-            data = json.loads(raw)
-            if data['format'] != 1:
-                raise ValueError()
-            result = bounded_content(base64.b64decode(data['tasks'], validate=True),
-                base64.b64decode(data['variables'], validate=True), data['provenance'], data['commit'],
-                tuple(uuid.UUID(value) for value in data['secret_refs']))
-        except (ValueError, KeyError, TypeError):
-            raise PermissionError('bootstrap retained content is invalid') from None
-        if (encode(result) != raw or result.provenance != row.provenance or result.commit != row.commit
+            result = decode(raw, row.digest)
+        except BootstrapError as error:
+            raise PermissionError(str(error)) from None
+        if (result.provenance != row.provenance or result.commit != row.commit
                 or len(result.tasks) != row.task_size or len(result.variables) != row.vars_size
                 or result.secret_refs != self._refs(row)):
             raise PermissionError('bootstrap retained metadata mismatch')
@@ -274,15 +245,17 @@ class Preparation:
 
     @storage_boundary
     def read_initial_launch(self, actor, revision_id, *, authority):
-        """Точный approved bootstrap для claimed bootstrap_body, без owner credential."""
+        """Публичный canonical read port: exact retained bytes claimed bootstrap_body.
+
+        RetainedSecrets владеет pre/post-provider authority; metadata проверяет
+        Preparation, body использует тот же pure codec. Никакого owner credential.
+        """
         outside_transaction()
         row = m.BootstrapRevision.objects.get(pk=revision_id)
-        from mop.server.secrets.services import RetainedSecrets
         reader = RetainedSecrets(provider=self.secrets.provider, authority=authority)
         value = reader.read(actor, self._scope(row), row.content_version_id)
-        result = self._decode(row, value)
-        authority.check(actor, self._scope(row))
-        return result
+        self._decode(row, value)
+        return value
 
     @storage_boundary
     def approve(self, actor, revision_id):

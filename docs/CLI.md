@@ -1026,6 +1026,18 @@ This checks private transport, not machine authorization, the root backend,
 a phase runner/broker, native execution, readiness, installation or rollout.
 ```
 
+#### mop driver planned-phase-probe
+
+```text
+mop driver planned-phase-probe: exercise three planned host phases in an owned fixture
+
+Builds a new Python 3.12/PostgreSQL 17 private systemd container, with actual
+root/node/body UIDs, controlled Git HTTPS/SSH remotes and approved Ansible tasks.
+No host mounts, host services, installation inputs, pool, deployment or native
+execution. Uses the explicit source closure and removes only its owned resources.
+Requires an existing Docker installation. A blocked fixture is not acceptance.
+```
+
 #### mop driver purge-clone
 
 ```text
