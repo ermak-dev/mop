@@ -205,7 +205,9 @@ class CurrentViewsTests(unittest.IsolatedAsyncioTestCase):
         # хотя физические snapshots стоят доли миллисекунды.
         # SOLUTION: подтверждение epoch делает только current-claim recheck,
         # не перевыдавая уже одобренные initial-launch bytes.
-        # RESULT: RED — proof() вызывает initial-launch трижды.
+        # RESULT: RED — proof() вызывает initial-launch трижды; GREEN — только
+        # claim, proof() 0.626 s / 3 запроса вместо 4.997 s / 9.
+        # STATUS: FIXED — see #792
         await self.activate()
         view = await self.view()
         self.calls.clear()
