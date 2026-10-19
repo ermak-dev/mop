@@ -223,6 +223,72 @@ class PrivateInputs(unittest.TestCase):
             os.utime(boot, (1, 2)); os.utime(secret, (1, 2))
             self.assertEqual(BodyFiles(boot, secret).read(), [{'one': 1}, {'two': 2}])
 
+    def test_identical_metadata_signature_does_not_prove_the_same_file(self):
+        """Снимок метаданных -- не доказательство того же inode (#794).
+
+        HYPOTHESIS: ФС вправе переиспользовать освобождённый inode и отдать
+        совпадающие mtime/ctime (грубая гранулярность, как у 128-байтного
+        ext4), и тогда замена с тем же содержимым неотличима от исходного
+        файла по сигнатуре. Инъекция ровно этого состояния: сохранённый
+        снимок совпадает с текущим, хотя first-read inode уже другой.
+        SOLUTION: первый прочитанный leaf удерживается O_PATH anchor, и
+        последующее чтение сверяет pathname-inode с anchor через fstat.
+        RESULT: RED до anchor (ClientError not raised -- в точности CI-отказ);
+        на ext4 с 128-байтными inode замена принималась 5000/5000, после
+        anchor -- 0/5000.
+        STATUS: FIXED — see #794
+        """
+        from mop.client.body_management import BodyFiles
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)/'private'; parent.mkdir(mode=0o700)
+            boot, secret = parent/'boot', parent/'secret'
+            publish(boot, {'one': 1}); publish(secret, {'two': 2})
+            files = BodyFiles(boot, secret)
+            try:
+                self.assertEqual(files.read(), [{'one': 1}, {'two': 2}])
+                secret.unlink(); publish(secret, {'two': 2})
+                info = secret.stat()
+                files.identities[secret.name] = (info.st_dev, info.st_ino, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns, info.st_uid, info.st_mode, info.st_nlink)
+                with self.assertRaises(api.ClientError): files.read()
+            finally:
+                files.close()
+
+    def test_first_read_leaf_anchors_are_retained_until_close(self):
+        """Удержание anchor: два leaf-fd после первого чтения, ноль после close."""
+        from mop.client.body_management import BodyFiles
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)/'private'; parent.mkdir(mode=0o700)
+            boot, secret = parent/'boot', parent/'secret'
+            publish(boot, {'one': 1}); publish(secret, {'two': 2})
+            baseline = len(os.listdir('/proc/self/fd'))
+            files = BodyFiles(boot, secret)
+            try:
+                self.assertEqual(files.read(), [{'one': 1}, {'two': 2}])
+                self.assertEqual(len(os.listdir('/proc/self/fd')), baseline+2,
+                    'each first-read leaf inode must stay anchored')
+            finally:
+                files.close()
+            self.assertEqual(len(os.listdir('/proc/self/fd')), baseline)
+            files.close()
+
+    def test_refused_handoff_close_releases_leaf_anchors(self):
+        """Отказ handoff не оставляет anchor fds после close (#794)."""
+        from mop.client.body_management import BodyManagement
+        from mop.cli._mcp import Management
+        with own_tls(TLSCatalogue) as (_, origin, cert, directory):
+            boot, secret = Path(directory)/'boot', Path(directory)/'secret'
+            publish(boot, bootstrap(origin, cert.read_text()))
+            publish(secret, dict(context(), installation_id='foreign-install'))
+            baseline = len(os.listdir('/proc/self/fd'))
+            manager = BodyManagement(boot, secret, expiry(), Management)
+            try:
+                self.assertEqual(manager.tools(), [])
+                self.assertEqual(manager.state, 'failed')
+            finally:
+                manager.close()
+            self.assertEqual(len(os.listdir('/proc/self/fd')), baseline)
+
     def test_private_single_link_bounded_no_follow_identity_files(self):
         from mop.client.body_management import BodyFiles
         for defect in ('mode', 'directory_mode', 'hardlink', 'symlink', 'fifo', 'oversize',
@@ -232,22 +298,25 @@ class PrivateInputs(unittest.TestCase):
                 boot, secret = parent/'boot', parent/'secret'
                 publish(boot, {'one': 1}); publish(secret, {'two': 2})
                 files = BodyFiles(boot, secret)
-                if defect == 'mode': secret.chmod(0o644)
-                elif defect == 'directory_mode': parent.chmod(0o755)
-                elif defect == 'hardlink': os.link(secret, parent/'alias')
-                elif defect == 'symlink':
-                    secret.unlink(); secret.symlink_to(boot)
-                elif defect == 'fifo':
-                    secret.unlink(); os.mkfifo(secret, 0o600)
-                elif defect == 'oversize': secret.write_bytes(b'x'*16385)
-                elif defect == 'duplicate': secret.write_text('{"one":1,"one":2}')
-                elif defect in ('replacement', 'disappearance'):
-                    files.read(); secret.unlink()
-                    if defect == 'replacement': publish(secret, {'two': 2})
-                elif defect == 'directory_symlink':
-                    alias = Path(directory)/'alias'; alias.symlink_to(parent, target_is_directory=True)
-                    files = BodyFiles(alias/'boot', alias/'secret')
-                with self.assertRaises(api.ClientError): files.read()
+                try:
+                    if defect == 'mode': secret.chmod(0o644)
+                    elif defect == 'directory_mode': parent.chmod(0o755)
+                    elif defect == 'hardlink': os.link(secret, parent/'alias')
+                    elif defect == 'symlink':
+                        secret.unlink(); secret.symlink_to(boot)
+                    elif defect == 'fifo':
+                        secret.unlink(); os.mkfifo(secret, 0o600)
+                    elif defect == 'oversize': secret.write_bytes(b'x'*16385)
+                    elif defect == 'duplicate': secret.write_text('{"one":1,"one":2}')
+                    elif defect in ('replacement', 'disappearance'):
+                        files.read(); secret.unlink()
+                        if defect == 'replacement': publish(secret, {'two': 2})
+                    elif defect == 'directory_symlink':
+                        alias = Path(directory)/'alias'; alias.symlink_to(parent, target_is_directory=True)
+                        files.close(); files = BodyFiles(alias/'boot', alias/'secret')
+                    with self.assertRaises(api.ClientError): files.read()
+                finally:
+                    files.close()
 
     def test_foreign_runtime_binding_transport_or_catalogue_never_authorizes(self):
         from mop.client.body_management import BodyManagement

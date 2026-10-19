@@ -37,6 +37,11 @@ class BodyFiles:
 
     Каждый компонент открывается без follow. Каталог и опубликованные файлы
     закрепляются inode/dev identity; исчезновение/замена не означает rebind.
+    Снимок метаданных сам по себе замену не доказывает (#794): ФС вправе
+    переиспользовать освобождённый inode с той же гранулярностью меток
+    времени. Поэтому inode первого прочитанного leaf удерживается O_PATH
+    anchor: пока fd жив, номер не освобождается, и pathname-inode сверяется
+    с anchor на каждом последующем чтении.
     """
     def __init__(self, bootstrap, context):
         paths = tuple(Path(value) for value in (bootstrap, context))
@@ -44,6 +49,39 @@ class BodyFiles:
                 or paths[0].parent != paths[1].parent or paths[0] == paths[1]):
             raise api.ClientError('body files must be distinct absolute siblings')
         self.paths, self.directory, self.identities = paths, None, {}
+        self.anchors = {}
+
+    def _anchor(self, fd, name, leaf):
+        """Удержать inode первого leaf; anchor обязан быть тем же файлом."""
+        anchor = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        try:
+            pinned = os.fstat(anchor)
+            if (pinned.st_dev, pinned.st_ino) != (leaf.st_dev, leaf.st_ino):
+                raise ValueError()
+        except BaseException:
+            os.close(anchor)
+            raise
+        self.anchors[name] = anchor
+
+    def _anchored(self, name, info):
+        """Тот же inode, что удержан первым чтением? -> bool."""
+        anchor = self.anchors.get(name)
+        if anchor is None:
+            return True
+        pinned = os.fstat(anchor)
+        return (pinned.st_dev, pinned.st_ino) == (info.st_dev, info.st_ino)
+
+    def close(self):
+        """Освободить anchors детерминированно: fd живёт не дольше handoff."""
+        anchors, self.anchors = getattr(self, 'anchors', None), {}
+        for fd in (anchors or {}).values():
+            os.close(fd)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _parent(self):
         fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -88,12 +126,15 @@ class BodyFiles:
                             info.st_uid, info.st_mode, info.st_nlink)
                     identity = signature(after)
                     if (signature(before) != identity or len(raw) > maximum or len(raw) != after.st_size
+                            or not self._anchored(path.name, after)
                             or path.name in self.identities and self.identities[path.name] != identity):
                         raise ValueError()
                     value = json.loads(raw.decode('utf-8'), object_pairs_hook=_pairs,
                         parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
                     if type(value) is not dict:
                         raise ValueError()
+                    if path.name not in self.anchors:
+                        self._anchor(fd, path.name, after)
                     self.identities[path.name] = identity
                     result.append(value)
                 finally:
@@ -224,6 +265,7 @@ class BodyManagement:
     def close(self):
         self.stopping.set()
         self._fail()
+        self.files.close()
         self.bootstrap = self.context = None
 
 
