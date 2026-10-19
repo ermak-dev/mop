@@ -43,6 +43,15 @@ class Latest:
     received_at: object
 
 
+@dataclass(frozen=True)
+class ConfirmedModel:
+    receipt_id: int
+    confirmed_sequence: int
+    observed_sequence: int
+    observation_revision: int
+    model: str
+
+
 class Telemetry:
     def __init__(self, *, sessions: SessionAuthority | None = None,
                  attribution: TurnAttribution | None = None, history: PrivateHistoryReader | None = None,
@@ -183,6 +192,31 @@ class Telemetry:
                 # Одна pinned ссылка на текущий ход сверх bounded истории.
                 old = old.exclude(pk=row.turn_source_id)
             old.delete()
+
+    def ready_model(self, scope, desired_model):
+        """SQL-only owner port: вызывающий уже держит текущий Assignment lock.
+
+        Не использует _observation: отсутствие hooks не создаёт пустой receipt.
+        Историческая incomplete не мешает новому настоящему switch доказать current.
+        """
+        if (not transaction.get_connection().in_atomic_block or type(scope) is not SessionScope
+                or not text(desired_model)):
+            raise ValueError('transactional current scope and desired model required')
+        row = m.SessionObservation.objects.filter(assignment_id=scope.target_id,
+            incarnation_id=scope.incarnation_id, node_id=scope.node_id, epoch=scope.epoch,
+            executor_epoch=scope.executor_epoch, producer_epoch=scope.producer_epoch,
+            session_id=scope.session_id).first()
+        now = timezone.now()
+        if (row is None or not row.model_proven or row.confirmed_model != desired_model
+                or row.model_received_at is None or row.model_received_at > now
+                or now-row.model_received_at > timedelta(seconds=self.freshness_seconds)):
+            raise Conflict('fresh causally confirmed desired model is unavailable')
+        switch = m.ModelObservation.objects.filter(observation=row, sequence=row.confirmed_sequence,
+            kind='PostModelSwitch', model=desired_model).first()
+        receipt = m.TelemetryReceipt.objects.filter(observation=row, sequence=row.confirmed_sequence).first()
+        if switch is None or receipt is None:
+            raise Conflict('committed model switch and telemetry receipt are unavailable')
+        return ConfirmedModel(receipt.pk, row.confirmed_sequence, row.sequence, row.revision, row.confirmed_model)
 
     def latest(self, actor, scope):
         with transaction.atomic():

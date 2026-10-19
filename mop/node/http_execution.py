@@ -176,7 +176,8 @@ class HttpsTransport:
         if self._closed:
             raise Unavailable('HTTP client closed')
         allowed = {('GET','work'), ('POST','work/claim'), ('POST','work/result'),
-                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'), ('POST','management-context'),
+                   ('GET','work/input'), ('POST','work/launch'), ('POST','work/initial-launch'),
+                   ('POST','work/ready-receipt'), ('POST','management-context'),
                    ('GET','executor'), ('POST','executor/restarted'), ('GET','executor/host'), ('POST','executor/host/bind'),
                    ('GET','facts'), ('POST','telemetry'), ('POST','session-producers')}
         if (method, path) not in allowed:
@@ -256,6 +257,19 @@ class MachineClient:
         value = await self.transport.request('POST', 'work/initial-launch', payload=work.wire())
         try:
             return parse_delivery(value, work.wire())
+        except ValueError as error:
+            raise Refused(str(error)) from error
+
+    async def read_ready_receipt(self, metadata):
+        """Read-only exact claimed/process query; настоящий committed receipt, не hint."""
+        from mop.common.readiness import ReadyRequest, ReadyEvidence
+        try:
+            request = ReadyRequest.parse(metadata)
+        except ValueError as error:
+            raise Refused(str(error)) from error
+        value = await self.transport.request('POST', 'work/ready-receipt', payload=request.wire())
+        try:
+            return ReadyEvidence.parse(value, request)
         except ValueError as error:
             raise Refused(str(error)) from error
 
@@ -375,13 +389,24 @@ class MachineClient:
         if current != admission:
             raise Refused('admission changed before effect')
 
-    async def result(self, admission, outcome, evidence):
+    async def result(self, admission, outcome, evidence, *, ready_evidence=None):
         if outcome not in ('succeeded', 'failed', 'unknown') or evidence not in EVIDENCE:
             raise Refused('finite result required')
+        extra = {}
+        if ready_evidence is not None:
+            from mop.common.readiness import ReadyEvidence
+            if (type(ready_evidence) is not ReadyEvidence or outcome != 'succeeded' or evidence != 'ready'
+                    or admission.work.action != 'confirm_ready' or ready_evidence.request.work != admission.work.wire()
+                    or str(ready_evidence.request.attempt_id) != admission.attempt_id
+                    or str(ready_evidence.request.request_id) != admission.request_id
+                    or ready_evidence.request.revision != admission.revision
+                    or ready_evidence.request.lease_until != admission.lease_until):
+                raise Refused('exact successful readiness admission evidence required')
+            extra['ready_evidence'] = ready_evidence.wire()
         receipt_id = str(uuid4())
         value = await self.transport.request('POST', 'work/result', dict(schema_version=1,
             attempt_id=admission.attempt_id, expected_revision=str(admission.revision),
-            receipt_id=receipt_id, outcome=outcome, evidence=evidence))
+            receipt_id=receipt_id, outcome=outcome, evidence=evidence, **extra))
         exact(value, ('schema_version', 'receipt_id', 'attempt_id', 'revision', 'outcome', 'evidence'))
         if (value['receipt_id'] != receipt_id or value['attempt_id'] != admission.attempt_id
                 or value['outcome'] != outcome or value['evidence'] != evidence

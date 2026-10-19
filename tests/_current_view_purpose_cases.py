@@ -46,7 +46,7 @@ class CurrentViewPurpose(TransactionTestCase):
     fixture = Producers.fixture
     url = Producers.url
 
-    def check_current(self, exercise):
+    def check_current(self, exercise, *, ready_count=0):
         self.fixture()
 
         def counts():
@@ -134,7 +134,7 @@ class CurrentViewPurpose(TransactionTestCase):
                         await exercise(machine, runtime, current_registration, admission, calls, payload)
                         self.assertEqual(producer.acknowledgement, ack)
                         self.assertEqual(runtime._proof, native_proof)
-                        self.assertEqual(await asyncio.to_thread(counts), before)
+                        self.assertEqual(await asyncio.to_thread(counts), (before[0], before[1], ready_count))
                         self.assertNotIn('work/launch', calls)
                         self.assertNotIn('session-producers', calls)
                 finally:

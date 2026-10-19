@@ -69,7 +69,9 @@ class AgentRBACProvisioning(TransactionTestCase):
             if action == 'native_exec':
                 create_fixture.native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence=evidence)
+                outcome='succeeded', evidence=evidence, ready_evidence=(
+                    create_fixture.ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if action == 'confirm_ready' else None))
         self.ops.activations.activator = create_fixture.CreateActivation.activator(self)
         self.assertIsNotNone(self.ops.activations.run(row.id))
         row.refresh_from_db()
@@ -275,7 +277,9 @@ class AgentRBACProvisioning(TransactionTestCase):
             if action == 'native_exec':
                 create_fixture.native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence=evidence)
+                outcome='succeeded', evidence=evidence, ready_evidence=(
+                    create_fixture.ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if action == 'confirm_ready' else None))
         grant_id = row.restartbinding.grant_id
         self.assertIsNotNone(CurrentBindings().activation(grant_id))
         AgentRBACProfiles().revoke(self.actor, self.rbac.id)
@@ -503,7 +507,9 @@ class AgentRBACProvisioning(TransactionTestCase):
             if action == 'native_exec':
                 create_fixture.native_ack(self, work, self.machine_key)
             execution.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence=evidence)
+                outcome='succeeded', evidence=evidence, ready_evidence=(
+                    create_fixture.ready_evidence(self, execution, actor, work, attempt, self.machine_key)
+                    if action == 'confirm_ready' else None))
         from mop.server.access.models import Grant
         return row, Grant.objects.get(pk=row.restartbinding.grant_id)
 

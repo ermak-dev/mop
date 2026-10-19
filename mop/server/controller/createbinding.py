@@ -189,6 +189,20 @@ class LaunchSupport:
             raise Denied('pinned initial launch selection or node image changed')
         return selected
 
+    def ready_pins(self, target, operation):
+        """SQL-only immutable metadata; provider и active management здесь не нужны."""
+        from mop.common.initialcreate import layout_metadata
+        from mop.server.sessions.models import IncarnationLaunch
+        selected = self.selection(target, operation)
+        launch = IncarnationLaunch.objects.select_related('image_revision__policy',
+            'incarnation__assignment').get(incarnation_id=target.incarnation_id)
+        policy = launch.image_revision.policy
+        return dict(desired_model=selected.desired_model, bootstrap_revision=str(launch.bootstrap_revision),
+            bootstrap_digest=launch.bootstrap_digest, image_digest=launch.image_digest, **layout_metadata(
+                display_name=launch.incarnation.assignment.display_name, image_revision=str(launch.image_revision_id),
+                image_digest=launch.image_digest, image_policy=dict(policy_id=str(policy.pk),
+                    cpu=policy.cpu, memory_mb=policy.memory_mb, disk_mb=policy.disk_mb)))
+
     def require_planned(self, target, operation):
         from mop.server.operations.models import ScheduledPuppet
         from mop.server.operations.service import Refused

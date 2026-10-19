@@ -84,7 +84,7 @@ class ActivatedBody(TransactionTestCase):
             self.assertEqual(native.rpc(3, 'tools/list')['tools'], [])
             self.assertEqual(https.calls, [])
             observed = Observation(SessionScope.parse(self.scope), 1, 'PostModelSwitch', None,
-                'fixture-native-model', None, None, 0)
+                'fixture-model', None, None, 0)
             response = Client(HTTP_AUTHORIZATION='Token '+self._executor_key).post('/api/v1/machine/telemetry',
                 observed.wire(), content_type='application/json', secure=True)
             self.assertEqual(response.status_code, 200, response.content)
@@ -93,7 +93,8 @@ class ActivatedBody(TransactionTestCase):
             self.assertEqual(work.action, 'confirm_ready')
             attempt = service.claim(actor, work, request_id=uuid4())
             service.result(actor, attempt.id, expected_revision=attempt.revision, receipt_id=uuid4(),
-                outcome='succeeded', evidence='ready')
+                outcome='succeeded', evidence='ready', ready_evidence=
+                    create.ready_evidence(self, service, actor, work, attempt, self._executor_key, ingest=False))
 
             async def accepted(client, server):
                 refused = await asyncio.to_thread(self.post)

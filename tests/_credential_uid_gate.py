@@ -284,29 +284,86 @@ class InstalledCredentialUids(unittest.TestCase):
         # libpq не должен искать client certificate в private HOME runner-а;
         # собственный traversable HOME fixture не содержит TLS client keys.
         env['HOME'] = str(base)
+        # #754: диагностируем настоящий installed seed, не заменяя ORM/runtime.
+        # stdout — только private JSON с token; ни timeout, ни ошибка его не выводят.
         code = '''
-import json
-from mop.server.controller.runtime import configure, close_pools
-configure()
-from mop.server.installation import prepare_database
-prepare_database()
-from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Permission
-from mop.server.access import models as m, services as access
-from mop.server.catalog.models import Project
-user = get_user_model().objects.create_user('installed-credential-user', password='fixture-only-password')
-source = m.IdentitySource.objects.create(name='local', kind='local', priority=0)
-m.LoginIdentity.objects.create(user=user, source=source, external_subject=user.username)
-project = Project.objects.create(name='installed-project', origin='https://example.invalid/installed.git')
-m.ProjectMembership.objects.create(user=user, source=source, project=project)
-user.user_permissions.add(Permission.objects.get(content_type__app_label='secrets', codename='manage_project_secret'))
-print(json.dumps({'token': access.issue_token(user.pk), 'project': str(project.pk)}))
-close_pools()
+import json, sys, time, traceback
+from contextlib import contextmanager
+from pathlib import Path
+started = time.monotonic()
+def diagnostic(phase, event, **metadata):
+    print(json.dumps(dict(phase=phase, event=event, elapsed=round(time.monotonic()-started, 3),
+                          **metadata)), file=sys.stderr, flush=True)
+@contextmanager
+def phase(name):
+    diagnostic(name, 'start')
+    try:
+        yield
+    except BaseException as error:
+        cause = error
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        diagnostic(name, 'error', error_type=type(error).__name__,
+                   sqlstate=getattr(cause, 'sqlstate', None))
+        raise
+    else:
+        diagnostic(name, 'done')
+def stacks(signum, frame):
+    diagnostic('threads', 'snapshot', stacks=[[
+        [Path(item.filename).name, item.name, item.lineno]
+        for item in traceback.extract_stack(current)] for current in sys._current_frames().values()])
+import signal
+signal.signal(signal.SIGUSR1, stacks)
+with phase('import-runtime'):
+    from mop.server.controller import runtime
+with phase('configure'):
+    runtime.configure()
+original_maintenance, original_close = runtime.maintenance, runtime.close_pools
+def close_pools():
+    with phase('close-pools'):
+        original_close()
+def maintenance(action, **kwargs):
+    with phase('maintenance-' + action):
+        return original_maintenance(action, **kwargs)
+runtime.maintenance, runtime.close_pools = maintenance, close_pools
+try:
+    with phase('prepare-database'):
+        from mop.server.installation import prepare_database
+        prepare_database()
+    with phase('import-models'):
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+        from mop.server.access import models as m, services as access
+        from mop.server.catalog.models import Project
+    with phase('create-user'):
+        user = get_user_model().objects.create_user('installed-credential-user', password='fixture-only-password')
+    with phase('create-identity'):
+        source = m.IdentitySource.objects.create(name='local', kind='local', priority=0)
+        m.LoginIdentity.objects.create(user=user, source=source, external_subject=user.username)
+    with phase('create-project'):
+        project = Project.objects.create(name='installed-project', origin='https://example.invalid/installed.git')
+        m.ProjectMembership.objects.create(user=user, source=source, project=project)
+    with phase('add-permission'):
+        user.user_permissions.add(Permission.objects.get(content_type__app_label='secrets', codename='manage_project_secret'))
+    with phase('issue-token'):
+        auth = {'token': access.issue_token(user.pk), 'project': str(project.pk)}
+finally:
+    close_pools()
+print(json.dumps(auth))
 '''
-        seed = subprocess.run([sys.executable, '-I', '-c', code], cwd=base,
-            env={**env, 'MOP_CONTROLLER_BOOTSTRAP': str(maintenance)}, capture_output=True, text=True, timeout=90)
-        self.assertEqual(seed.returncode, 0, seed.stderr)
-        auth = json.loads(seed.stdout)
+        from _credential_uid_seed import run_seed
+        def owned_activity():
+            # Только sessions нашей свежесозданной БД, никогда SQL/DSN/чужие queries.
+            # Observer тоже ограничен transport/connect 5 s и SQL/lock 1 s;
+            # отдельное read-only соединение не меняет provisioning authority.
+            from mop.server.controller.postgresql.base import BoundedConnection
+            observer_parameters = {**parameters, 'options': '-c default_transaction_read_only=on '
+                '-c statement_timeout=1000 -c lock_timeout=1000', 'connect_timeout': 5}
+            with BoundedConnection.connect(**observer_parameters, autocommit=True) as observer:
+                return observer.execute('SELECT pid, state, wait_event_type, wait_event, '
+                    'pg_blocking_pids(pid) FROM pg_stat_activity WHERE datname = %s', (self.dbname,)).fetchall()
+        auth = run_seed([sys.executable, '-I', '-c', code], cwd=base,
+            env={**env, 'MOP_CONTROLLER_BOOTSTRAP': str(maintenance)}, activity=owned_activity)
         private = Path(paths['configuration']) / 'credentials'
         spec_file = private / 'spec.json'
         from mop.server.install_provision import document
@@ -391,7 +448,8 @@ assert not any(n.startswith(('django', 'mop.server', 'nacl')) for n in sys.modul
             self.assertFalse(socket_path.exists(), 'owned socket not cleaned on SIGTERM')
             for secret in (self.passwords['credential'].encode(), auth['token'].encode(), root, signing,
                            b'installed-private-644'):
-                self.assertNotIn(secret, output + error + frontend.stdout + frontend.stderr)
+                self.assertFalse(secret in output + error + frontend.stdout + frontend.stderr,
+                                 'credential daemon/frontend output exposed private material')
         with FreshPostgreSQL.connect(self, 'maintenance') as db:
             self.assertTrue(installation.verify_database(self.spec, db)['verified'])
             self.assertEqual(db.execute('SELECT count(*) FROM secrets_secret').fetchone(), (2,))
