@@ -22,17 +22,22 @@ from urllib.parse import urlsplit
 OWNER_LABEL = "mop.chatprobe.owner"
 FIXTURE_UID = 26430
 SOURCES = ("mop/client/chatprobe.py", "mop/client/chatprobe_isolation.py")
+INBOX_SOURCES = ('mop/__init__.py', 'mop/client/__init__.py', 'mop/common/__init__.py',
+    'mop/session.py', 'mop/common/endpoint.py', 'mop/common/deps.py',
+    'mop/client/control.py', 'mop/client/action_catalogue.py', 'mop/client/local_bridge.py',
+    'mop/client/private_inbox.py', 'mop/client/inboxprobe.py')
 NAMESPACES = ("pid", "mnt", "net", "cgroup", "ipc")
 RUNTIME_FIELDS = ("uid", "euid", "groups", "cap_eff", "no_new_privs", "namespaces", "interfaces",
                   "proc_private", "cgroup_readonly", "cgroup_root", "run_sockets_absent",
                   "external_network_unreachable")
 
 
-def fixture_sources(tracked):
-    """Даже tracked .env/settings/session.py не входят в build context."""
-    if not set(SOURCES) <= set(tracked):
-        raise ValueError("isolated probe requires both tracked fixture modules")
-    return SOURCES
+def fixture_sources(tracked, *, private_inbox=False):
+    """Конечный source closure; ни .env, ни config host-а не копируются."""
+    selected = SOURCES + (INBOX_SOURCES if private_inbox else ())
+    if not set(selected) <= set(tracked):
+        raise ValueError('isolated probe requires its complete tracked source closure')
+    return selected
 
 
 def local_docker_endpoint(endpoint):
@@ -200,10 +205,14 @@ def _copy_regular(source, target, native=False):
         os.close(fd)
 
 
-def _dockerfile(uid, owner):
+def _dockerfile(uid, owner, private_inbox=False):
     """Только публичные зависимости; runtime сеть выключена отдельной create."""
+    inbox = '''COPY source /opt/probe/source
+RUN python3 -I -c "import runpy,subprocess,sys; d=runpy.run_path('/opt/probe/source/mop/common/deps.py'); subprocess.run([sys.executable,'-m','pip','install',next(x for x in d['PIP'] if x.split('=')[0]=='aiohttp')],check=True)"
+''' if private_inbox else ''
     return f'''FROM python:3.12-slim-bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends tmux git ca-certificates libstdc++6 libgcc-s1 tini && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tmux git openssl ca-certificates libstdc++6 libgcc-s1 tini && rm -rf /var/lib/apt/lists/*
+{inbox}
 RUN groupadd -g {uid} fixture && useradd -u {uid} -g {uid} -M -d /tmp/fixture-home fixture && mkdir /evidence && chown {uid}:{uid} /evidence
 COPY claude /usr/local/bin/claude
 COPY chatprobe.py chatprobe_isolation.py host-namespaces.json /opt/probe/
@@ -214,7 +223,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/python3", "-I", "/opt/probe/c
 '''
 
 
-def run(root, timeout, managed, mcp_activation=False):
+def run(root, timeout, managed, mcp_activation=False, private_inbox=False, native_binary=None):
     """Владение по nonce+image+id, копия отчёта private, cleanup не по имени."""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -271,7 +280,7 @@ def run(root, timeout, managed, mcp_activation=False):
                 return info
             try:
                 call(["version", "--format", "{{.Server.Version}}"], seconds=10)
-                native = shutil.which("claude")
+                native = native_binary if private_inbox and native_binary is not None else shutil.which("claude")
                 if not native:
                     raise RuntimeError("isolated normal probe requires an installed native Claude binary")
                 # Новый context не включает даже исходный корень и его ignored файлы.
@@ -281,16 +290,24 @@ def run(root, timeout, managed, mcp_activation=False):
                 tracked = subprocess.run(["git", "-C", str(top), "ls-files", "-z"],
                     env={"PATH": os.defpath, "HOME": str(build), "GIT_CONFIG_NOSYSTEM": "1",
                          "GIT_CONFIG_GLOBAL": "/dev/null"}, cwd="/", capture_output=True, check=True, timeout=10)
-                selected = fixture_sources(tracked.stdout.decode().split("\0"))
+                selected = fixture_sources(tracked.stdout.decode().split("\0"), private_inbox=private_inbox)
                 if p.managed_paths():
                     raise RuntimeError("host managed settings appeared; fixture snapshot refused")
-                manifest = {path: _copy_regular(top / path, context / Path(path).name) for path in selected}
+                manifest = {}
+                for path in selected:
+                    target = context / Path(path).name if path in SOURCES else context/'source'/path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    manifest[path] = _copy_regular(top/path, target)
+                    if private_inbox and path in SOURCES:
+                        package_target = context/'source'/path
+                        package_target.parent.mkdir(parents=True, exist_ok=True)
+                        _copy_regular(top/path, package_target)
                 manifest["native"] = _copy_regular(native, context / "claude", native=True)
                 report["snapshot"] = manifest
                 metadata = dict(namespaces=_namespaces(), host_uid=os.getuid(), uid=uid, timeout=timeout,
-                                mcp_activation=bool(mcp_activation))
+                                mcp_activation=bool(mcp_activation), private_inbox=bool(private_inbox))
                 (context / "host-namespaces.json").write_text(json.dumps(metadata))
-                (context / "Dockerfile").write_text(_dockerfile(uid, owner))
+                (context / "Dockerfile").write_text(_dockerfile(uid, owner, private_inbox))
                 # Последняя policy проверка до передачи даже безопасного snapshot daemon-у.
                 if p.managed_paths():
                     raise RuntimeError("host managed settings appeared; fixture build refused")
@@ -406,8 +423,11 @@ def _container_main():
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
     metadata = json.loads(Path("/opt/probe/host-namespaces.json").read_text())
-    report = probe._run_fixture("/evidence/native", metadata["timeout"], model_hooks=True, _normal=True,
-                                mcp_activation=metadata.get("mcp_activation") is True)
+    private_inbox = metadata.get('private_inbox') is True
+    if private_inbox:
+        sys.path.insert(0, '/opt/probe/source')
+    report = probe._run_fixture("/evidence/native", metadata["timeout"], model_hooks=not private_inbox, _normal=True,
+                                mcp_activation=metadata.get("mcp_activation") is True, private_inbox=private_inbox)
     return 1 if report["errors"] else 0
 
 

@@ -23,6 +23,7 @@ from mop.client import control as api
 _CONTEXT = ContextVar('mop_https_context', default=None)
 _LIMITS = ContextVar('mop_https_limits', default=None)
 _BEFORE_REQUEST = ContextVar('mop_https_before_request', default=None)
+_INBOX = ContextVar('mop_trusted_private_inbox', default=None)
 
 # Конечный inventory #624/642; unsupported не означает accepted/no-op.
 SURFACES = dict.fromkeys((
@@ -35,7 +36,7 @@ SURFACES = dict.fromkeys((
     'server user passwd', 'server user import', 'login', 'mcp'), 'unsupported')
 SURFACES.update(dict.fromkeys(('health', 'profile', 'diagnose', 'project list', 'node drain',
                               'node up', 'operation', 'addresses', 'stat', 'build', 'list', 'detail', 'restart',
-                              'wipe', 'stop', 'delete', 'add', 'send', 'landing'), 'bound'))
+                              'wipe', 'stop', 'delete', 'add', 'send', 'landing', 'report', 'delivery'), 'bound'))
 
 # Владельцы незаконченных bindings: #625 lifecycle, #626 projections,
 # #628 physical stream, #648 builds, #649 inbox, #656 usage.
@@ -135,16 +136,22 @@ def route(modname, argv):
 
 
 @contextmanager
-def use(context, *, limits=None, before_request=None):
+def use(context, *, limits=None, before_request=None, inbox=None):
     """Внутрипроцессный context для MCP/tests; не хранится и не сериализуется."""
     if type(context) is not api.ServerContext:
         raise api.ClientError('explicit HTTPS server context required')
+    if inbox is not None:
+        from mop.client.private_inbox import InboxOwner
+        if type(inbox) is not InboxOwner or inbox.context != context:
+            raise api.ClientError('trusted inbox context differs from command context')
     token = _CONTEXT.set(context)
     budget = _LIMITS.set(limits)
     guard = _BEFORE_REQUEST.set(before_request)
+    receiver = _INBOX.set(inbox)
     try:
         yield
     finally:
+        _INBOX.reset(receiver)
         _BEFORE_REQUEST.reset(guard)
         _LIMITS.reset(budget)
         _CONTEXT.reset(token)
@@ -183,6 +190,9 @@ def plain(value):
         return [plain(item) for item in value]
     if isinstance(value, datetime):
         return value.isoformat()
+    from uuid import UUID
+    if isinstance(value, UUID):
+        return str(value)
     return value
 
 
@@ -376,6 +386,38 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                         args.expected_revision, args.owner_id)
                 elif args.owner_id is not None:
                     raise api.ClientError('landing mutation derives the actual human actor, not an owner-id argument')
+        elif words == 'report':
+            p.add_argument('address')
+            p.add_argument('text')
+            p.add_argument('--epoch', required=True)
+            p.add_argument('--message-id')
+            p.add_argument('--operation-request-id')
+            p.add_argument('--not-after')
+            p.add_argument('--priority', choices=('next', 'now'), default='next')
+            p.add_argument('--notify-when-idle', action='store_true')
+            args = p.parse_args(argv)
+            # Все флаги разобраны до private stdin; UUID фиксирован до любого I/O.
+            args.message_id = api.new_request_id(args.message_id)
+            args.not_after = args.not_after or (datetime.now(timezone.utc)+timedelta(minutes=1)).isoformat()
+            if args.text == '-':
+                try:
+                    stream = getattr(sys.stdin, 'buffer', None)
+                    args.text = (stream.read(65537).decode('utf-8') if stream is not None
+                        else sys.stdin.read(65537))
+                except (OSError, UnicodeError):
+                    raise api.ClientError('report stdin is unavailable or invalid UTF-8') from None
+            prepare = api.ReportIntent(args.epoch, args.address, args.message_id, args.text,
+                args.not_after, args.operation_request_id, args.priority, args.notify_when_idle)
+        elif words == 'delivery':
+            p.add_argument('delivery_id', nargs='?', type=_resource_id)
+            p.add_argument('--message-id')
+            p.add_argument('--epoch')
+            args = p.parse_args(argv)
+            if args.delivery_id is not None:
+                if args.message_id is not None or args.epoch is not None:
+                    raise api.ClientError('provide delivery id or epoch/message-id, not both')
+            else:
+                api._key(args.message_id); api._key(args.epoch)
         elif words == 'addresses':
             p.add_argument('project_id')
             p.add_argument('--limit', type=int, default=100)
@@ -560,6 +602,30 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                 except api.UnknownLanding as error:
                     return _landing_recovery(client, error.intent, selected.token)
                 emit(value.envelope(), credential=selected.token)
+        elif words == 'report':
+            inbox = _INBOX.get()
+            holder = inbox.holder() if inbox is not None else None
+            if inbox is not None and holder is None:
+                raise api.ClientError('private inbox holder is not bound to current conversation')
+            try:
+                result = client.report(prepare, holder=holder)
+            except api.UnknownReport:
+                try:
+                    result = client.recover_report(prepare)
+                except api.ClientError as failure:
+                    lookup_failure = failure
+                    raise api.UnknownReport(prepare) from None
+            if result is None:
+                raise api.UnknownReport(prepare)
+            emit({'schema_version': 1, 'delivery': plain(result)}, credential=selected.token)
+            return 0 if result.state == 'accepted' else 3
+        elif words == 'delivery':
+            result = (client.delivery(args.delivery_id) if args.delivery_id is not None else
+                client.lookup_delivery(epoch=args.epoch, message_id=args.message_id))
+            emit({'schema_version': 1, 'delivery': plain(result),
+                **({'outcome': 'unknown', 'epoch': args.epoch, 'message_id': args.message_id} if result is None else {})},
+                credential=selected.token)
+            return 0 if result is not None and result.state == 'accepted' else 3
         elif words == 'addresses':
             emit({'schema_version': 1, 'addresses': plain(client.addresses(args.project_id, limit=args.limit).items)},
                  credential=selected.token)
@@ -602,6 +668,12 @@ def invoke(words, argv, *, origin=None, ca_file=None):
                 operation = client.wait_operation(operation.id, timeout=args.wait, initial=operation)
             return _render_operation(operation, credential=selected.token)
         return 0
+    except api.UnknownReport as error:
+        print('report unknown; message_id=' + error.message_id + '; epoch=' + error.intent.epoch +
+              '; recover by the original key only; do not repost', file=sys.stderr)
+        if lookup_failure is not None:
+            print('lookup failed: ' + _failure(lookup_failure, selected.token), file=sys.stderr)
+        return 3
     except api.UnknownSubmission as error:
         print('submission unknown; request_id=' + error.request_id + '; epoch=' + error.command.epoch +
               '; recover with operation lookup; do not repeat the effect', file=sys.stderr)

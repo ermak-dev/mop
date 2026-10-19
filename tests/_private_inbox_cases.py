@@ -944,3 +944,111 @@ class PrivateInboxCases(EndpointCredentialFixture):
                 for secret in (marker,self.auth.value,self.values['text']):
                     self.assertFalse(any(secret in record for record in records),'listener logged private input')
         async_to_sync(run)()
+
+    def test_actual_client_localbridge_pg17_https_wss_and_duplicate_receiver(self):
+        # HYPOTHESIS #773: shared WS wire один не связывает реальный LocalBridge.
+        # Launcher здесь владеет Unix fixture в этом процессе; это не native CLI.
+        # SOLUTION: actual HTTPS/WSS InboxOwner, один bridge и #772 key-only GET.
+        # RESULT: PG17 lost-POST recovery/acceptance/idle/revoke зелёные; native
+        # callback proof проверяется отдельно и не подменяется этим Unix peer.
+        # STATUS: FIXED — see #773
+        import uvicorn
+        from mop.client import control as api
+        from mop.client.private_inbox import InboxOwner
+        from datetime import timedelta
+        from django.utils import timezone
+        from django.contrib.auth import get_user_model
+        from _own_session_fixture import own_session
+        from mop.server.controller.runtime import serve
+        cert, key = Path(self.directory.name)/'client.crt', Path(self.directory.name)/'client.key'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-keyout',str(key),'-out',str(cert),'-subj','/CN=localhost',
+            '-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],check=True,
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        async def run():
+            async with self.root() as (app, daemon):
+                listener=socket.socket(); listener.bind(('127.0.0.1',0)); listener.setblocking(False)
+                port=listener.getsockname()[1]
+                with patch('mop.server.controller.runtime.validate_asgi_startup'), patch('uvicorn.run') as launch:
+                    serve('127.0.0.1',port,hostnames=('localhost','127.0.0.1'),tls_cert=str(cert),tls_key=str(key))
+                class LoseReportResponse:
+                    posts=0
+                    async def __call__(inner, scope, receive, send):
+                        lose=scope['type']=='http' and scope['path']=='/api/v1/reports'
+                        if lose: inner.posts+=1
+                        async def response(event):
+                            if lose and event['type']=='http.response.body':
+                                # COMMIT уже произошёл; настоящий TLS transport
+                                # оборвётся с неполным Content-Length, не fake GET.
+                                raise ConnectionError('fixture intentionally lost committed report response')
+                            await send(event)
+                        await app(scope,receive,response)
+                lossy=LoseReportResponse()
+                server=uvicorn.Server(uvicorn.Config(lossy,**launch.call_args.kwargs))
+                task=asyncio.create_task(server.serve(sockets=[listener]))
+                native_path=Path(self.directory.name)/'native.sock'
+                received=[]
+                async def native(reader, writer):
+                    try:
+                        line=await reader.readline()
+                        if not line: return
+                        frame=json.loads(line)
+                        received.append(frame)
+                        _, callback=await asyncio.open_unix_connection(frame['from'][4:])
+                        evidence=(dict(action='peer_message_status',status='delivered') if frame['type']=='user'
+                            else dict(action='peer_idle_notice',state='idle'))
+                        callback.write((json.dumps(dict(msgV=1,type='control',orig_msg_id=frame['msg_id'],**evidence))+'\n').encode())
+                        await callback.drain(); callback.close(); await callback.wait_closed()
+                    finally:
+                        writer.close(); await writer.wait_closed()
+                native_server=await asyncio.start_unix_server(native,path=str(native_path))
+                native_path.chmod(0o600)
+                own=own_session(native_path,self.endpoint.external_session_id)
+                context=api.ServerContext(f'https://localhost:{port}',self.auth.value,str(cert))
+                owner=InboxOwner(context,own,client_id=str(self.client.pk),project_id=str(self.project.pk),
+                    display_name='not-an-identity',current=lambda: True)
+                duplicate=InboxOwner(context,own,client_id=str(self.client.pk),project_id=str(self.project.pk),
+                    display_name='not-an-identity',current=lambda: True)
+                try:
+                    for _ in range(100):
+                        if server.started: break
+                        await asyncio.sleep(.02)
+                    await owner.start()
+                    self.assertIsNotNone(owner.holder())
+                    with self.assertRaises(api.ClientError):
+                        await duplicate.start()
+                    self.assertIsNone(duplicate.holder())
+                    sender=api.Client(api.ServerContext(context.origin,self.sender_auth.value,str(cert)))
+                    intent=sender.prepare_report(epoch=str(self.installation.epoch),address=self.endpoint.address,
+                        text='client-pg-private-marker',not_after=(timezone.now()+timedelta(minutes=1)).isoformat(),
+                        operation_request_id=str(uuid4()),notify_when_idle=True)
+                    with self.assertRaises(api.UnknownReport) as lost:
+                        await asyncio.to_thread(sender.report,intent)
+                    self.assertEqual(lost.exception.message_id,intent.message_id)
+                    result=await asyncio.to_thread(sender.recover_report,intent)
+                    self.assertIsNotNone(result)
+                    self.assertIn(result.state,('queued','attempting','accepted'))
+                    absent=sender.prepare_report(epoch=intent.epoch,address=intent.address,text='not posted',
+                        not_after=intent.not_after)
+                    self.assertIsNone(await asyncio.to_thread(sender.recover_report,absent))
+                    self.assertEqual(lossy.posts,1,'lost POST and 404 must never cause automatic repost')
+                    for _ in range(200):
+                        result=await asyncio.to_thread(sender.delivery,str(result.id))
+                        if result.idle: break
+                        await asyncio.sleep(.02)
+                    self.assertEqual((result.state,result.idle),('accepted',True))
+                    self.assertEqual([frame['type'] for frame in received],['user','control'])
+                    self.assertEqual(received[0]['msg_id'],intent.message_id)
+                    self.assertEqual(received[0]['session_id'],own.external_session_id)
+                    # Отзыв актуального Actor закрывает holder независимо от новых delivery.
+                    await app.runtime.database(lambda: get_user_model().objects.filter(pk=self.user.pk).update(is_active=False))
+                    await asyncio.wait_for(owner.wait_closed(),5)
+                    self.assertIsNone(owner.holder())
+                    self.assertFalse(owner.tasks)
+                finally:
+                    await duplicate.aclose(); await owner.aclose()
+                    native_server.close(); await native_server.wait_closed()
+                    server.should_exit=True
+                    await asyncio.wait_for(task,7)
+                    listener.close()
+        async_to_sync(run)()

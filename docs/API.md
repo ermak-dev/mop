@@ -1396,8 +1396,9 @@ with the exact own CLI socket, process and external conversation ID; remote JSON
 cannot supply them. The bridge checks canonical private UDS ownership and kernel
 peer PID/UID, never scans neighboring sockets or reads primary/legacy state files.
 It sends bounded native `msgV:1` user frames with the admitted message ID and a
-private ephemeral callback socket. Only a matching `message_accepted` callback
-confirms application acceptance; an explicit `message_refused` means unavailable.
+private ephemeral callback socket. Only a matching native `peer_message_status`
+with `status=delivered` confirms application acceptance; matched
+`denied|expired|refused|dropped` means unavailable. `held` is not acceptance.
 Successful socket writes without that evidence are unknown. `notify_when_idle`
 uses a distinct control message ID and matching `peer_idle_notice`; terminal
 input/keystrokes are never queued or replayed. The launch adapter must replace
@@ -1405,15 +1406,59 @@ this binding on external conversation changes even when PID/path remain the
 same; a socket alone cannot attest to a conversation ID. Same-UID OS processes
 are not a sandbox.
 
-These core use cases and an actual isolated Unix peer are implemented/tested by
-#649. Production Channels/WS authentication, broker routing and connection loop
-binding remain #628; native CLI launch/conversation lifecycle and MCP wiring remain
-#642; protected cipher deployment remains #669/#644. The DRF root deliberately
-leaves the cipher and grant resolver unbound until that composition supplies
-them, refusing private content admission instead of giving web/gateway a root
-key. The isolated fixture explicitly binds the real AEAD provider and current
-Access/delegation authority. No old pool or native vendor CLI acceptance is
-implied by that fixture.
+`mop.client.private_inbox.InboxOwner` (#773) is an internal, one-shot composition
+port requiring an exact typed `OwnSession`, explicit API context, existing client
+and project IDs, and a synchronous trusted current-conversation guard. No CLI,
+MCP JSON, environment value, registry scan, socket or PID flag supplies this
+proof. The owner verifies current human authority, native readiness and the
+#763 `peer_ready → bound → bound_received` handshake before exposing a transient
+holder. Holder headers may be borrowed only by that exact API context while the
+physical conversation remains current. Trusted composition may inject that same
+owner into several `Management(..., inbox=owner)` instances: tool calls borrow
+headers through the existing commandlet dispatcher without creating another
+receiver or owning its teardown. The port must match the exact credential,
+client and project scope. `private_status()` reports its current state rather
+than caching initialization availability; loss refuses a holder-aware report
+instead of silently downgrading it. No public stdio launcher supplies this port
+or publishes dynamic receiver availability yet. Agent report senders use their
+own Actor and do not register a human receiver or acquire that holder.
+
+The WSS client imports declared `aiohttp` lazily, verifies TLS, disables ambient
+proxies/cookies/compression and refuses redirects. One reader, one native attempt,
+at most 16 writer admissions and 64 lifetime correlations are owned and drained.
+The prewrite permit is obtained immediately before the native user write; the
+bridge repeats physical checks after that wait. Native evidence has a five-second
+absolute budget; WS controls have two-second budgets. Native idle is sent only
+after matched acceptance and a corresponding committed server receipt. At the
+lifetime cap a bounded idle drain closes the connection generation without
+retiring an unchanged conversation or evicting uncertain identities. A closed
+owner cannot start again. Trusted composition may construct a fresh owner after
+fresh native proof; no frame, uncertain write or pending queue is replayed.
+Conversation change, native loss, authority closure or EOF clears the holder and
+closes the owned tasks, bridge callback, WSS and HTTPS resources. Cleanup failures
+remain explicit; cancellation is not assumed to prove quiescence.
+
+The finite `Client` methods cover endpoint registration/presence/renew/retire,
+report intent/submission, result-by-ID and sender-key recovery. The existing REST
+ACK consumer remains available, but InboxOwner uses only WSS evidence/receipts
+and never races it with a REST ACK. `mop report` and `mop delivery` use the same
+commandlet declarations and dispatcher as MCP. Message identity is fixed before
+I/O and differs from optional operation correlation. Queued/attempting admission
+is pending, not delivered. A lost POST recovers by the #772 GET key only; a 404
+is still unknown and never causes an automatic repost. Sender-key recovery does
+not need private text. The old assignment-target `send` and its 16,384-byte text
+limit are unchanged; private text has its independent 65,536-byte UTF-8 bound.
+
+No production human launcher is invented here; `_mcp.PRIVATE_INBOX` remains false
+by default and body standby/native startup are unchanged. Managed-root unit 3
+and trusted production launcher composition remain availability blockers. Real
+PG17/verified HTTPS/WSS integration with a controlled Unix peer is distinct from
+native evidence. `mop dev inbox-probe` runs the actual owned native 2.1.302 in the
+existing offline nonroot Docker fixture, with an explicit hashed source closure,
+fixture-owned physical proof and no real config/credentials. Its controlled WSS
+receipt is not PostgreSQL COMMIT evidence. A provider response, UI display or
+socket write never substitutes for a missing native callback: the observed
+native application outcome remains unknown when that callback is absent.
 
 ## Sync/async and resource lifecycle
 

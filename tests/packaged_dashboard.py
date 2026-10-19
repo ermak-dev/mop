@@ -378,9 +378,34 @@ class PackagedDashboard(unittest.TestCase):
         home = fresh_venv(tempfile.mkdtemp(prefix='mop-627-client-'))
         python = home / 'bin' / 'python'
         install(python, self.wheelhouse, 'mop')
-        probe = ("import importlib.util; import mop.cli; "
-                 "assert importlib.util.find_spec('django') is None; "
-                 "assert importlib.util.find_spec('channels') is None; print('client-clean')")
+        # #773: свежий wheel обязан везти тот же конечный client/commandlet
+        # closure, не находить новый receiver через PYTHONPATH рабочей копии.
+        with zipfile.ZipFile(next(self.wheelhouse.glob('mop-*.whl'))) as wheel:
+            for name in ('mop/client/private_inbox.py', 'mop/client/control.py',
+                         'mop/client/local_bridge.py', 'mop/common/endpoint.py',
+                         'mop/cli/core/report.py', 'mop/cli/core/delivery.py',
+                         'mop/cli/_control.py', 'mop/cli/_mcp.py'):
+                self.assertEqual(wheel.read(name), (ROOT / name).read_bytes(), name)
+        probe = r'''
+import importlib.util, subprocess, sys
+import mop.cli
+from mop.cli import _mcp
+from mop.client import private_inbox
+assert 'aiohttp' not in sys.modules, 'WSS dependency must remain lazy'
+assert importlib.util.find_spec('django') is None
+assert importlib.util.find_spec('channels') is None
+commands = _mcp.commandlets()
+assert commands['report'][2]['actions'] == ['execution.deliver_report']
+assert commands['delivery'][2]['actions'] == ['execution.view_delivery']
+assert not _mcp.PRIVATE_INBOX['available']
+result = subprocess.run([sys.executable, '-I', '-m', 'mop.cli', 'report',
+    'private:00000000-0000-0000-0000-000000000001', '-', '--epoch',
+    '00000000-0000-0000-0000-000000000002', '--socket', '/must-not-probe'],
+    input='', capture_output=True, text=True, timeout=5)
+assert result.returncode == 1, (result.stdout, result.stderr)
+assert result.stderr.strip() == 'invalid command arguments', (result.stdout, result.stderr)
+print('client-clean')
+'''
         result = subprocess.run([str(python), '-I', '-c', probe], env=venv_env(),
                                 capture_output=True, text=True, cwd=tempfile.gettempdir())
         self.assertEqual(result.returncode, 0, result.stderr)

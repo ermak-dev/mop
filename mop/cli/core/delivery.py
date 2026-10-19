@@ -1,0 +1,16 @@
+"""mop delivery [delivery-id | --epoch UUID --message-id UUID]: read a private delivery receipt
+
+Returns committed controller state, not a WebSocket write acknowledgement.
+Queued, attempting and unknown states do not prove native application acceptance.
+Idle is a separate matched native observation. Access uses the current Actor.
+"""
+from mop.cli import _control
+
+MCP = {"annotations": "readonly", "actions": ["execution.view_delivery"], "args": [
+    {"name": "delivery_id", "type": "string", "help": "controller delivery UUID, exclusive with sender key"},
+    {"name": "epoch", "type": "string", "flag": "--epoch", "help": "original controller epoch for key-only recovery"},
+    {"name": "message_id", "type": "string", "flag": "--message-id", "help": "original report UUID; lookup only, never a repost"}]}
+
+
+def main(argv):
+    return _control.invoke('delivery', argv)

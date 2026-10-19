@@ -1,7 +1,8 @@
 """Management-only stdio #642: декларации командлетов, не второй pool adapter.
 
-Private inbox #649 намеренно отсутствует. Контекст только transient HTTPS;
-ни discovery, ни исполнение не импортируют прежнюю шину или role bundle.
+Private inbox #649 выключен без явного trusted owner port. Контекст только
+transient HTTPS; ни discovery, ни исполнение не импортируют прежнюю шину или
+role bundle. MCP не запускает receiver и не владеет его lifetime.
 """
 import functools
 import threading
@@ -12,8 +13,9 @@ from . import _control
 
 PRIVATE_INBOX = {'available': False, 'reason': 'not_bound', 'issue': 649}
 INSTRUCTIONS = ('Authenticated management tools only. Actions are advisory and refreshed before each call; '
-    'the server authorizes actual resources. private inbox unavailable (#649): no agents, report, idle '
-    'notifications, endpoint registration or native delivery acceptance is provided.')
+    'the server authorizes actual resources. Private report submission and receipt queries are finite tools; '
+    'queued submissions are not native acceptance. Receiver/holder inbox unavailable by default (#649): '
+    'no agents roster, endpoint registration or native receiver is provided by this stdio server.')
 
 
 def loud(fn):
@@ -78,7 +80,15 @@ def arguments(declaration, values):
 
 
 class Management:
-    def __init__(self, context, scope, *, limits=None, validate=None, guard=None, on_failure=None):
+    def __init__(self, context, scope, *, limits=None, validate=None, guard=None, on_failure=None, inbox=None):
+        # Только trusted composition передаёт уже существующего owner. Ни MCP
+        # creation, ни tool call не запускают receiver и не владеют его teardown.
+        if inbox is not None:
+            from mop.client.private_inbox import InboxOwner
+            if (type(inbox) is not InboxOwner or inbox.context != context or
+                    scope.project_id != inbox.project_id or scope.client_id != inbox.client_id):
+                raise api.ClientError('trusted inbox differs from management context or scope')
+        self.inbox = inbox
         self.context, self.scope = context, scope
         self.limits = limits or api.Limits()
         self.validate, self.guard, self.on_failure = validate, guard, on_failure
@@ -86,10 +96,19 @@ class Management:
         self.commands = commandlets()
         self.lock = threading.RLock()
         initial = self.client.capabilities(scope)
+        if inbox is not None and initial.identity.kind != 'human':
+            raise api.ClientError('Agent management cannot borrow a human private inbox')
         if self.validate is not None:
             self.validate(initial)
         self.binding = (initial.epoch, initial.identity.user_id, initial.identity.kind,
             initial.identity.human_owner_id, initial.identity.node_id, initial.identity.grant_id)
+
+    def private_status(self):
+        """Конечный snapshot текущего port, не initialization capability cache."""
+        if (self.inbox is not None and self.inbox.epoch == self.binding[0]
+                and self.inbox.holder() is not None):
+            return {'available': True, 'reason': 'bound', 'issue': 649}
+        return dict(PRIVATE_INBOX)
 
     def refresh(self):
         try:
@@ -144,7 +163,7 @@ class Management:
                 raise api.ClientError('tool epoch differs from discovery context')
             if self.guard is not None:
                 self.guard()
-            with _control.use(self.context, limits=self.limits, before_request=self.guard):
+            with _control.use(self.context, limits=self.limits, before_request=self.guard, inbox=self.inbox):
                 text, status = _control.tool_call(words, declaration, values, with_status=True)
             text = text.replace(self.context.token, '[redacted]')
             # accepted/pending и unknown остаются честным operation результатом,
