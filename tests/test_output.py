@@ -32,20 +32,18 @@ class FailureOutput(unittest.TestCase):
     # STATUS: FIXED — see #672, #692
     def invoke(self, names, execute, output, verbose=False):
         import _pytest_plugin
-        original = subprocess.Popen
-
         class Process:
             def __init__(self, result):
-                self.pid = 43212
                 self.returncode, self.output = result.returncode, result.stdout
 
             def communicate(self):
                 return self.output, None
 
-        def launch(argv, **kwargs):
-            if len(argv) > 1 and Path(argv[1]).name == '_pytest_legacy.py':
-                return Process(execute(['tests/' + Path(argv[-1]).name], **kwargs))
-            return original(argv, **kwargs)
+            def close(self):
+                pass
+
+        def launch(script, **kwargs):
+            return Process(execute(['tests/' + Path(script).name], **kwargs))
 
         with tempfile.TemporaryDirectory(prefix='mop-output-') as directory:
             root = Path(directory)
@@ -54,8 +52,7 @@ class FailureOutput(unittest.TestCase):
             for name in names:
                 (root / 'tests' / (name + '.py')).write_text('# isolated fixture\n')
             with patch.object(runner, 'root', return_value=str(root)), \
-                    patch.object(_pytest_plugin.subprocess, 'Popen', side_effect=launch), \
-                    patch.object(_pytest_plugin.os, 'killpg'):
+                    patch.object(_pytest_plugin, 'OwnedProcess', side_effect=launch):
                 _, _, result = run_command(runner.main,
                     [*names, *(['-v'] if verbose else [])], out=output)
         return result
